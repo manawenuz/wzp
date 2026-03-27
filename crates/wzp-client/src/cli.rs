@@ -261,7 +261,7 @@ async fn run_file_mode(
         };
 
         let mut encoder = CallEncoder::new(&config);
-        let total_frames = pcm_frames.len() as u64;
+        let _total_frames = pcm_frames.len() as u64;
         let frame_duration = tokio::time::Duration::from_millis(20);
 
         let mut total_source = 0u64;
