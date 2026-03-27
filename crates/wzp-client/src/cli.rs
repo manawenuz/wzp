@@ -256,13 +256,14 @@ async fn run_file_mode(
 
     // --- Recv task: decode and write to file ---
     let recv_transport = transport.clone();
+    let record_path = record_file.clone();
     let recv_handle = tokio::spawn(async move {
-        let record_path = match record_file {
+        let record_path = match record_path {
             Some(p) => p,
             None => {
-                // No recording, just wait
+                // No recording, just wait for send to finish or Ctrl+C
                 tokio::signal::ctrl_c().await.ok();
-                return;
+                return Vec::new();
             }
         };
 
@@ -271,64 +272,80 @@ async fn run_file_mode(
         let mut all_pcm: Vec<i16> = Vec::new();
         let mut frames_received = 0u64;
 
-        info!(file = %record_path, "recording received audio");
+        info!(file = %record_path, "recording received audio (Ctrl+C to stop and save)");
 
         loop {
-            match recv_transport.recv_media().await {
-                Ok(Some(pkt)) => {
-                    decoder.ingest(pkt);
-                    while let Some(n) = decoder.decode_next(&mut pcm_buf) {
-                        all_pcm.extend_from_slice(&pcm_buf[..n]);
-                        frames_received += 1;
-                        if frames_received % 250 == 0 {
-                            info!(
-                                frames = frames_received,
-                                samples = all_pcm.len(),
-                                "recv progress"
-                            );
+            tokio::select! {
+                result = recv_transport.recv_media() => {
+                    match result {
+                        Ok(Some(pkt)) => {
+                            decoder.ingest(pkt);
+                            while let Some(n) = decoder.decode_next(&mut pcm_buf) {
+                                all_pcm.extend_from_slice(&pcm_buf[..n]);
+                                frames_received += 1;
+                                if frames_received % 250 == 0 {
+                                    info!(
+                                        frames = frames_received,
+                                        samples = all_pcm.len(),
+                                        "recv progress"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            info!("connection closed by remote");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("recv error: {e}");
+                            break;
                         }
                     }
                 }
-                Ok(None) => {
-                    info!("connection closed by remote");
-                    break;
-                }
-                Err(e) => {
-                    error!("recv error: {e}");
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl+C received, saving recording...");
                     break;
                 }
             }
         }
 
-        // Write raw PCM to file
+        all_pcm
+    });
+
+    // Wait for send to finish (or ctrl+c in recv)
+    let _ = send_handle.await;
+
+    // If send finished but recv is still going, give it a moment then stop
+    let all_pcm = if record_file.is_some() {
+        // Wait a bit for remaining packets after sender finishes
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // The recv task will be aborted when we drop it, but first
+        // let's signal it by closing transport
+        transport.close().await?;
+        recv_handle.await.unwrap_or_default()
+    } else {
+        recv_handle.await.unwrap_or_default()
+    };
+
+    // Write recorded audio to file
+    if let Some(ref path) = record_file {
         if !all_pcm.is_empty() {
-            let bytes: Vec<u8> = all_pcm
-                .iter()
-                .flat_map(|s| s.to_le_bytes())
-                .collect();
-            if let Err(e) = std::fs::write(&record_path, &bytes) {
-                error!(file = %record_path, "write error: {e}");
-            } else {
-                let duration_secs = all_pcm.len() as f64 / 48_000.0;
-                info!(
-                    file = %record_path,
-                    frames = frames_received,
-                    samples = all_pcm.len(),
-                    duration_secs = format!("{:.1}", duration_secs),
-                    bytes = bytes.len(),
-                    "recording saved"
-                );
-                info!("play with: ffplay -f s16le -ar 48000 -ac 1 {record_path}");
-            }
+            let bytes: Vec<u8> = all_pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+            std::fs::write(path, &bytes)?;
+            let duration_secs = all_pcm.len() as f64 / 48_000.0;
+            info!(
+                file = %path,
+                samples = all_pcm.len(),
+                duration = format!("{:.1}s", duration_secs),
+                bytes = bytes.len(),
+                "recording saved"
+            );
+            info!("play with: ffplay -f s16le -ar 48000 -ac 1 {path}");
         } else {
             info!("no audio received, nothing to write");
         }
-    });
+    }
 
-    // Wait for both tasks
-    let _ = tokio::join!(send_handle, recv_handle);
-
-    transport.close().await?;
     Ok(())
 }
 

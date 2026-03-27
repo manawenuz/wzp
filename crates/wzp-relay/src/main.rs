@@ -290,16 +290,23 @@ async fn main() -> anyhow::Result<()> {
                     info!(%remote_addr, "session ended");
                 }
                 None => {
-                    // No remote relay configured — just receive and log (sink mode)
-                    warn!("no remote relay configured, running in sink mode");
+                    // No remote relay — echo mode: send packets back to the sender.
+                    // This lets two clients on the same relay talk to each other,
+                    // or a single client hear its own audio looped back.
+                    info!("no remote relay configured, running in echo mode");
+                    let mut echo_count = 0u64;
                     loop {
                         match client_transport.recv_media().await {
                             Ok(Some(packet)) => {
-                                tracing::trace!(
-                                    seq = packet.header.seq,
-                                    block = packet.header.fec_block,
-                                    "received media packet (sink)"
-                                );
+                                // Echo the packet back to the sender
+                                if let Err(e) = client_transport.send_media(&packet).await {
+                                    error!("echo send error: {e}");
+                                    break;
+                                }
+                                echo_count += 1;
+                                if echo_count % 250 == 0 {
+                                    info!(echoed = echo_count, "echo mode stats");
+                                }
                             }
                             Ok(None) => {
                                 info!(%remote_addr, "connection closed");
