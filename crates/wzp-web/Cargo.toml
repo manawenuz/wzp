@@ -1,0 +1,27 @@
+[package]
+name = "wzp-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WarzonePhone web bridge — browser audio via WebSocket to wzp relay"
+
+[dependencies]
+wzp-proto = { workspace = true }
+wzp-codec = { workspace = true }
+wzp-fec = { workspace = true }
+wzp-crypto = { workspace = true }
+wzp-transport = { workspace = true }
+wzp-client = { path = "../wzp-client" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs"] }
+futures = "0.3"
+
+[[bin]]
+name = "wzp-web"
+path = "src/main.rs"

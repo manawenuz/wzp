@@ -8,6 +8,7 @@ members = [
     "crates/wzp-transport",
     "crates/wzp-relay",
     "crates/wzp-client",
+    "crates/wzp-web",
 ]
 
 [workspace.package]

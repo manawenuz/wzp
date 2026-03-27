@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WarzonePhone</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  .container { text-align: center; max-width: 400px; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #00d4ff; }
+  .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 2rem; }
+  #callBtn { background: #00d4ff; color: #1a1a2e; border: none; padding: 1rem 3rem; font-size: 1.2rem; border-radius: 50px; cursor: pointer; transition: all 0.2s; }
+  #callBtn:hover { background: #00b8d4; transform: scale(1.05); }
+  #callBtn.active { background: #ff4444; color: white; }
+  #callBtn:disabled { background: #444; color: #888; cursor: not-allowed; }
+  .status { margin-top: 1.5rem; font-size: 0.9rem; color: #888; min-height: 1.5rem; }
+  .stats { margin-top: 1rem; font-size: 0.8rem; color: #666; font-family: monospace; }
+  .level { margin-top: 1rem; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+  .level-bar { height: 100%; background: #00d4ff; width: 0%; transition: width 50ms; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>WarzonePhone</h1>
+  <p class="subtitle">Lossy VoIP Protocol</p>
+  <button id="callBtn" onclick="toggleCall()">Connect</button>
+  <div class="level"><div class="level-bar" id="levelBar"></div></div>
+  <div class="status" id="status"></div>
+  <div class="stats" id="stats"></div>
+</div>
+
+<script>
+const SAMPLE_RATE = 48000;
+const FRAME_SIZE = 960; // 20ms at 48kHz
+
+let ws = null;
+let audioCtx = null;
+let mediaStream = null;
+let scriptNode = null;
+let active = false;
+let framesSent = 0;
+let framesRecv = 0;
+let startTime = 0;
+
+// Playback buffer
+let playbackQueue = [];
+let isPlaying = false;
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+function setStats(msg) { document.getElementById('stats').textContent = msg; }
+
+function toggleCall() {
+  if (active) { stopCall(); }
+  else { startCall(); }
+}
+
+async function startCall() {
+  const btn = document.getElementById('callBtn');
+  btn.disabled = true;
+  setStatus('Requesting microphone...');
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+  } catch(e) {
+    setStatus('Mic access denied: ' + e.message);
+    btn.disabled = false;
+    return;
+  }
+
+  // Connect WebSocket
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = proto + '//' + location.host + '/ws';
+  setStatus('Connecting to relay...');
+
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('Connected — speaking...');
+    btn.textContent = 'Disconnect';
+    btn.classList.add('active');
+    btn.disabled = false;
+    active = true;
+    framesSent = 0;
+    framesRecv = 0;
+    startTime = Date.now();
+    startAudioCapture();
+    startStatsUpdate();
+  };
+
+  ws.onmessage = (event) => {
+    // Received PCM audio from server (s16le bytes)
+    const pcmData = new Int16Array(event.data);
+    framesRecv++;
+    playAudio(pcmData);
+  };
+
+  ws.onclose = () => {
+    setStatus('Disconnected');
+    stopCall();
+  };
+
+  ws.onerror = (e) => {
+    setStatus('Connection error');
+    stopCall();
+  };
+}
+
+function stopCall() {
+  active = false;
+  const btn = document.getElementById('callBtn');
+  btn.textContent = 'Connect';
+  btn.classList.remove('active');
+  btn.disabled = false;
+
+  if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  if (ws) { ws.close(); ws = null; }
+  playbackQueue = [];
+  setStatus('');
+  setStats('');
+}
+
+function startAudioCapture() {
+  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  const source = audioCtx.createMediaStreamSource(mediaStream);
+
+  // ScriptProcessorNode for capturing raw PCM
+  // (AudioWorklet would be better but this is simpler for a prototype)
+  scriptNode = audioCtx.createScriptProcessor(FRAME_SIZE, 1, 1);
+
+  scriptNode.onaudioprocess = (e) => {
+    if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const input = e.inputBuffer.getChannelData(0); // Float32 [-1, 1]
+
+    // Convert float32 to int16
+    const pcm = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
+    }
+
+    // Update level meter
+    let maxVal = 0;
+    for (let i = 0; i < pcm.length; i++) maxVal = Math.max(maxVal, Math.abs(pcm[i]));
+    document.getElementById('levelBar').style.width = (maxVal / 32768 * 100) + '%';
+
+    // Send as binary
+    ws.send(pcm.buffer);
+    framesSent++;
+  };
+
+  source.connect(scriptNode);
+  scriptNode.connect(audioCtx.destination); // needed for scriptProcessor to work
+}
+
+function playAudio(pcmInt16) {
+  if (!audioCtx) return;
+
+  // Convert int16 to float32
+  const floatData = new Float32Array(pcmInt16.length);
+  for (let i = 0; i < pcmInt16.length; i++) {
+    floatData[i] = pcmInt16[i] / 32768.0;
+  }
+
+  const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
+  buffer.getChannelData(0).set(floatData);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+
+  // Schedule playback with small buffer to reduce latency
+  const playTime = audioCtx.currentTime + 0.06; // 60ms buffer
+  source.start(playTime);
+}
+
+function startStatsUpdate() {
+  const interval = setInterval(() => {
+    if (!active) { clearInterval(interval); return; }
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    setStats(`${elapsed}s | sent: ${framesSent} | recv: ${framesRecv} | loss: ${framesSent > 0 ? ((1 - framesRecv/framesSent) * 100).toFixed(1) : 0}%`);
+  }, 1000);
+}
+</script>
+</body>
+</html>
