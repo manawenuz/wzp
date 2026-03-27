@@ -11,7 +11,7 @@ set -euo pipefail
 SSH_KEY_NAME="wz"
 SSH_KEY_PATH="/Users/manwe/CascadeProjects/wzp"
 SERVER_NAME="wzp-builder-$(date +%s)"
-SERVER_TYPE="cx23"
+SERVER_TYPE="cx33"
 IMAGE="ubuntu-24.04"
 REMOTE_USER="root"
 OUTPUT_DIR="target/linux-x86_64"
@@ -56,7 +56,7 @@ done
 
 # 3. Install build dependencies
 echo "[3/7] Installing build dependencies..."
-$SSH "apt-get update -qq && apt-get install -y -qq build-essential cmake pkg-config libasound2-dev curl git > /dev/null 2>&1"
+$SSH "apt-get update -qq && apt-get install -y -qq build-essential cmake pkg-config curl git > /dev/null 2>&1"
 
 # 4. Install Rust
 echo "[4/7] Installing Rust..."

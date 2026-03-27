@@ -18,7 +18,11 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 anyhow = "1"
-cpal = "0.15"
+cpal = { version = "0.15", optional = true }
+
+[features]
+default = []
+audio = ["cpal"]
 
 [[bin]]
 name = "wzp-client"

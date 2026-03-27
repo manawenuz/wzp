@@ -6,11 +6,13 @@
 //!
 //! Targets: Android (JNI), Windows desktop, macOS/Linux (testing)
 
+#[cfg(feature = "audio")]
 pub mod audio_io;
 pub mod bench;
 pub mod call;
 pub mod handshake;
 
+#[cfg(feature = "audio")]
 pub use audio_io::{AudioCapture, AudioPlayback};
 pub use call::{CallConfig, CallDecoder, CallEncoder};
 pub use handshake::perform_handshake;

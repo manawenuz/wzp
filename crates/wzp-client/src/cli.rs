@@ -134,7 +134,14 @@ async fn main() -> anyhow::Result<()> {
     let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
     if cli.live {
-        run_live(transport).await
+        #[cfg(feature = "audio")]
+        {
+            return run_live(transport).await;
+        }
+        #[cfg(not(feature = "audio"))]
+        {
+            anyhow::bail!("--live requires the 'audio' feature (build with: cargo build --features audio)");
+        }
     } else if cli.send_tone_secs.is_some() || cli.record_file.is_some() {
         run_file_mode(transport, cli.send_tone_secs, cli.record_file).await
     } else {
@@ -326,6 +333,7 @@ async fn run_file_mode(
 }
 
 /// Live mode: capture from mic, encode, send; receive, decode, play.
+#[cfg(feature = "audio")]
 async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
     use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 
