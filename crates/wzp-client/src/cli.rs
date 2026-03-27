@@ -325,16 +325,19 @@ async fn run_file_mode(
                 result = recv_transport.recv_media() => {
                     match result {
                         Ok(Some(pkt)) => {
+                            let is_repair = pkt.header.is_repair;
                             decoder.ingest(pkt);
-                            while let Some(n) = decoder.decode_next(&mut pcm_buf) {
-                                all_pcm.extend_from_slice(&pcm_buf[..n]);
-                                frames_received += 1;
-                                if frames_received % 250 == 0 {
-                                    info!(
-                                        frames = frames_received,
-                                        samples = all_pcm.len(),
-                                        "recv progress"
-                                    );
+                            if !is_repair {
+                                if let Some(n) = decoder.decode_next(&mut pcm_buf) {
+                                    all_pcm.extend_from_slice(&pcm_buf[..n]);
+                                    frames_received += 1;
+                                    if frames_received % 250 == 0 {
+                                        info!(
+                                            frames = frames_received,
+                                            samples = all_pcm.len(),
+                                            "recv progress"
+                                        );
+                                    }
                                 }
                             }
                         }
