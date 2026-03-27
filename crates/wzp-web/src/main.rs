@@ -32,6 +32,9 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
 
     let mut port: u16 = 8080;
     let mut relay_addr: SocketAddr = "127.0.0.1:4433".parse()?;

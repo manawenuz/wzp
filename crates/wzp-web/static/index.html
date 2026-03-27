@@ -173,35 +173,45 @@ function startAudioCapture() {
   scriptNode.connect(audioCtx.destination);
 }
 
-let nextPlayTime = 0;
+// Ring buffer playback using AudioWorklet-style approach
+let playbackBuffer = [];
+let playbackNode = null;
+
+function initPlayback() {
+  if (playbackNode) return;
+  // Use a ScriptProcessorNode as a pull-based audio sink.
+  // It asks for audio every ~21ms (1024 samples at 48kHz).
+  // We feed it from our ring buffer of received frames.
+  playbackNode = audioCtx.createScriptProcessor(1024, 1, 1);
+  playbackNode.onaudioprocess = (e) => {
+    const output = e.outputBuffer.getChannelData(0);
+    // Pull from buffer — drop old frames if we're behind
+    while (playbackBuffer.length > 10) {
+      playbackBuffer.shift(); // drop oldest, keeps latency bounded
+    }
+    if (playbackBuffer.length > 0) {
+      const frame = playbackBuffer.shift();
+      // frame is 960 samples, output is 1024 — copy what we can
+      const len = Math.min(frame.length, output.length);
+      for (let i = 0; i < len; i++) output[i] = frame[i];
+      for (let i = len; i < output.length; i++) output[i] = 0;
+    } else {
+      // Underrun — silence
+      for (let i = 0; i < output.length; i++) output[i] = 0;
+    }
+  };
+  playbackNode.connect(audioCtx.destination);
+}
 
 function playAudio(pcmInt16) {
   if (!audioCtx) return;
+  initPlayback();
 
   const floatData = new Float32Array(pcmInt16.length);
   for (let i = 0; i < pcmInt16.length; i++) {
     floatData[i] = pcmInt16[i] / 32768.0;
   }
-
-  const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
-  buffer.getChannelData(0).set(floatData);
-
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioCtx.destination);
-
-  const now = audioCtx.currentTime;
-  const MAX_LATENCY = 0.3; // 300ms max buffer — reset if we drift beyond this
-
-  if (nextPlayTime < now) {
-    // Fell behind — reset
-    nextPlayTime = now + 0.04;
-  } else if (nextPlayTime > now + MAX_LATENCY) {
-    // Too far ahead — skip to reduce latency
-    nextPlayTime = now + 0.04;
-  }
-  source.start(nextPlayTime);
-  nextPlayTime += buffer.duration;
+  playbackBuffer.push(floatData);
 }
 
 function startStatsUpdate() {

@@ -12,7 +12,7 @@ SSH_KEY_NAME="wz"
 SSH_KEY_PATH="/Users/manwe/CascadeProjects/wzp"
 SERVER_NAME="wzp-builder-$(date +%s)"
 SERVER_TYPE="cx33"
-IMAGE="ubuntu-24.04"
+IMAGE="debian-12"
 REMOTE_USER="root"
 OUTPUT_DIR="target/linux-x86_64"
 
