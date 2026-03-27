@@ -13,8 +13,7 @@ tracing = { workspace = true }
 # Opus bindings
 audiopus = { workspace = true }
 
-# TODO: Add codec2-sys when implementing Codec2 support
-# codec2-sys = "0.1"
-# rubato = "0.15"  # resampling
+# Pure-Rust Codec2 implementation
+codec2 = { workspace = true }
 
 [dev-dependencies]

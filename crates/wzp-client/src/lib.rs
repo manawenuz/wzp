@@ -6,6 +6,11 @@
 //!
 //! Targets: Android (JNI), Windows desktop, macOS/Linux (testing)
 
+pub mod audio_io;
+pub mod bench;
 pub mod call;
+pub mod handshake;
 
+pub use audio_io::{AudioCapture, AudioPlayback};
 pub use call::{CallConfig, CallDecoder, CallEncoder};
+pub use handshake::perform_handshake;

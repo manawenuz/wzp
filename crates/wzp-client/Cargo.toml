@@ -18,9 +18,19 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 anyhow = "1"
+cpal = "0.15"
 
 [[bin]]
 name = "wzp-client"
 path = "src/cli.rs"
 
+[[bin]]
+name = "wzp-bench"
+path = "src/bench_cli.rs"
+
 [dev-dependencies]
+tokio = { workspace = true }
+wzp-relay = { path = "../wzp-relay" }
+wzp-crypto = { workspace = true }
+wzp-proto = { workspace = true }
+async-trait = { workspace = true }

@@ -160,8 +160,8 @@ pub struct CallDecoder {
     fec_dec: RaptorQFecDecoder,
     /// Jitter buffer.
     jitter: JitterBuffer,
-    /// Quality controller.
-    quality: AdaptiveQualityController,
+    /// Quality controller (used when ingesting quality reports).
+    pub quality: AdaptiveQualityController,
     /// Current profile.
     profile: QualityProfile,
 }
@@ -208,8 +208,14 @@ impl CallDecoder {
                 }
             }
             PlayoutResult::Missing { seq } => {
-                debug!(seq, "packet loss, generating PLC");
-                self.audio_dec.decode_lost(pcm).ok()
+                // Only generate PLC if there are still packets buffered ahead.
+                // Otherwise we've drained everything — return None to stop.
+                if self.jitter.depth() > 0 {
+                    debug!(seq, "packet loss, generating PLC");
+                    self.audio_dec.decode_lost(pcm).ok()
+                } else {
+                    None
+                }
             }
             PlayoutResult::NotReady => None,
         }
