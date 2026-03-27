@@ -190,11 +190,15 @@ function playAudio(pcmInt16) {
   source.buffer = buffer;
   source.connect(audioCtx.destination);
 
-  // Schedule seamlessly: each buffer starts exactly where the last one ended
   const now = audioCtx.currentTime;
+  const MAX_LATENCY = 0.3; // 300ms max buffer — reset if we drift beyond this
+
   if (nextPlayTime < now) {
-    // Fell behind — reset with small lookahead
-    nextPlayTime = now + 0.04; // 40ms initial buffer
+    // Fell behind — reset
+    nextPlayTime = now + 0.04;
+  } else if (nextPlayTime > now + MAX_LATENCY) {
+    // Too far ahead — skip to reduce latency
+    nextPlayTime = now + 0.04;
   }
   source.start(nextPlayTime);
   nextPlayTime += buffer.duration;
