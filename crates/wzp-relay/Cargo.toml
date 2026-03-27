@@ -21,6 +21,7 @@ serde = { workspace = true }
 toml = "0.8"
 anyhow = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+quinn = { workspace = true }
 
 [[bin]]
 name = "wzp-relay"

@@ -155,8 +155,10 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
         Err(e) => { error!("create endpoint: {e}"); return; }
     };
 
+    // Pass room name as QUIC SNI so the relay knows which room to join
+    let sni = if room.is_empty() { "default" } else { &room };
     let connection =
-        match wzp_transport::connect(&endpoint, relay_addr, "localhost", client_config).await {
+        match wzp_transport::connect(&endpoint, relay_addr, sni, client_config).await {
             Ok(c) => c,
             Err(e) => { error!("connect to relay: {e}"); return; }
         };

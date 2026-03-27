@@ -10,6 +10,7 @@
 pub mod config;
 pub mod handshake;
 pub mod pipeline;
+pub mod room;
 pub mod session_mgr;
 
 pub use config::RelayConfig;
