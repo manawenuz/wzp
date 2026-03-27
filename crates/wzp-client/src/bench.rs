@@ -136,8 +136,13 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
     let profile = QualityProfile::GOOD; // 5 frames/block, 0.2 ratio
     let frames_per_block = profile.frames_per_block as usize;
     let num_blocks = 100;
-    // Use a higher FEC ratio for the bench so recovery is possible at higher loss
-    let fec_ratio = if loss_pct > 20.0 { 1.0 } else { 0.5 };
+    // Scale FEC ratio to survive the requested loss rate.
+    // At X% loss, we keep (1-X/100) of packets. We need at least
+    // frames_per_block packets to recover, so total packets needed =
+    // frames_per_block / (1 - loss/100). Ratio = (total - source) / source.
+    let keep_fraction = 1.0 - (loss_pct / 100.0).min(0.95);
+    let total_needed = (frames_per_block as f32 / keep_fraction).ceil();
+    let fec_ratio = ((total_needed / frames_per_block as f32) - 1.0).max(0.2);
 
     let start = Instant::now();
 
