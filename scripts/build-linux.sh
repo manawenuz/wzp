@@ -56,7 +56,7 @@ done
 
 # 3. Install build dependencies
 echo "[3/7] Installing build dependencies..."
-$SSH "apt-get update -qq && apt-get install -y -qq build-essential cmake pkg-config curl git > /dev/null 2>&1"
+$SSH "apt-get update -qq && apt-get install -y -qq build-essential cmake pkg-config libasound2-dev curl git > /dev/null 2>&1"
 
 # 4. Install Rust
 echo "[4/7] Installing Rust..."
@@ -74,22 +74,37 @@ tar czf /tmp/wzp-src.tar.gz \
 $SCP /tmp/wzp-src.tar.gz "$REMOTE_USER@$SERVER_IP:/root/wzp-src.tar.gz"
 $SSH "mkdir -p /root/warzonePhone && tar xzf /root/wzp-src.tar.gz -C /root/warzonePhone"
 
-# 6. Build release binaries
-echo "[6/7] Building release binaries (this takes a few minutes)..."
-$SSH "source ~/.cargo/env && cd /root/warzonePhone && cargo build --release --bin wzp-relay --bin wzp-client --bin wzp-bench 2>&1" | tail -5
+# 6. Build release binaries (headless + audio variants)
+echo "[6/8] Building all binaries..."
+$SSH "source ~/.cargo/env && cd /root/warzonePhone && cargo build --release --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web 2>&1" | tail -3
 
-# 7. Download binaries
-echo "[7/7] Downloading binaries..."
-mkdir -p "$OUTPUT_DIR"
+echo "[7/8] Building audio-enabled client..."
+$SSH "source ~/.cargo/env && cd /root/warzonePhone && cargo build --release --bin wzp-client --features audio 2>&1" | tail -3
+$SSH "cp /root/warzonePhone/target/release/wzp-client /root/warzonePhone/target/release/wzp-client-audio"
+$SSH "source ~/.cargo/env && cd /root/warzonePhone && cargo build --release --bin wzp-client 2>&1" | tail -1
+
+# 8. Download binaries + static files
+echo "[8/8] Downloading binaries..."
+mkdir -p "$OUTPUT_DIR/static"
 $SCP "$REMOTE_USER@$SERVER_IP:/root/warzonePhone/target/release/wzp-relay" "$OUTPUT_DIR/wzp-relay"
 $SCP "$REMOTE_USER@$SERVER_IP:/root/warzonePhone/target/release/wzp-client" "$OUTPUT_DIR/wzp-client"
+$SCP "$REMOTE_USER@$SERVER_IP:/root/warzonePhone/target/release/wzp-client-audio" "$OUTPUT_DIR/wzp-client-audio"
 $SCP "$REMOTE_USER@$SERVER_IP:/root/warzonePhone/target/release/wzp-bench" "$OUTPUT_DIR/wzp-bench"
+$SCP "$REMOTE_USER@$SERVER_IP:/root/warzonePhone/target/release/wzp-web" "$OUTPUT_DIR/wzp-web"
+$SCP "$REMOTE_USER@$SERVER_IP:/root/warzonePhone/crates/wzp-web/static/index.html" "$OUTPUT_DIR/static/index.html"
 
 # Show results (server is deleted by EXIT trap)
 echo ""
 echo "=== Build Complete ==="
 ls -lh "$OUTPUT_DIR"/wzp-*
 echo ""
+echo "Binaries:"
+echo "  wzp-relay        — relay daemon"
+echo "  wzp-client       — headless client (--send-tone, --record)"
+echo "  wzp-client-audio — client with mic/speakers (needs libasound2)"
+echo "  wzp-web          — web bridge (serve with static/ folder)"
+echo "  wzp-bench        — benchmarks"
+echo "  static/          — web UI files"
+echo ""
 echo "Deploy with:"
-echo "  scp $OUTPUT_DIR/wzp-relay $OUTPUT_DIR/wzp-bench user@relay-server:~/"
-echo "  scp $OUTPUT_DIR/wzp-client $OUTPUT_DIR/wzp-bench user@destination:~/"
+echo "  scp $OUTPUT_DIR/wzp-* user@server:~/wzp/"
