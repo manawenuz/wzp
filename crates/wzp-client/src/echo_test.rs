@@ -6,11 +6,8 @@
 
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use tracing::{debug, info, warn};
+use tracing::info;
 
-use wzp_proto::packet::{MediaHeader, MediaPacket};
-use wzp_proto::traits::{AudioDecoder, AudioEncoder, FecDecoder, FecEncoder};
 use wzp_proto::MediaTransport;
 
 use crate::call::{CallConfig, CallDecoder, CallEncoder};

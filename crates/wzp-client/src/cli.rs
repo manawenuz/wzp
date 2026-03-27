@@ -37,6 +37,7 @@ struct CliArgs {
     relay_addr: SocketAddr,
     live: bool,
     send_tone_secs: Option<u32>,
+    send_file: Option<String>,
     record_file: Option<String>,
     echo_test_secs: Option<u32>,
 }
@@ -45,6 +46,7 @@ fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let mut live = false;
     let mut send_tone_secs = None;
+    let mut send_file = None;
     let mut record_file = None;
     let mut echo_test_secs = None;
     let mut relay_str = None;
@@ -60,6 +62,14 @@ fn parse_args() -> CliArgs {
                         .expect("--send-tone requires seconds")
                         .parse()
                         .expect("--send-tone value must be a number"),
+                );
+            }
+            "--send-file" => {
+                i += 1;
+                send_file = Some(
+                    args.get(i)
+                        .expect("--send-file requires a filename")
+                        .to_string(),
                 );
             }
             "--record" => {
@@ -85,6 +95,7 @@ fn parse_args() -> CliArgs {
                 eprintln!("Options:");
                 eprintln!("  --live                 Live mic/speaker mode");
                 eprintln!("  --send-tone <secs>     Send a 440Hz test tone for N seconds");
+                eprintln!("  --send-file <file>     Send a raw PCM file (48kHz mono s16le)");
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
@@ -113,6 +124,7 @@ fn parse_args() -> CliArgs {
         relay_addr,
         live,
         send_tone_secs,
+        send_file,
         record_file,
         echo_test_secs,
     }
@@ -160,8 +172,8 @@ async fn main() -> anyhow::Result<()> {
         wzp_client::echo_test::print_report(&result);
         transport.close().await?;
         Ok(())
-    } else if cli.send_tone_secs.is_some() || cli.record_file.is_some() {
-        run_file_mode(transport, cli.send_tone_secs, cli.record_file).await
+    } else if cli.send_tone_secs.is_some() || cli.send_file.is_some() || cli.record_file.is_some() {
+        run_file_mode(transport, cli.send_tone_secs, cli.send_file, cli.record_file).await
     } else {
         run_silence(transport).await
     }
@@ -210,37 +222,53 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
     Ok(())
 }
 
-/// File/tone mode: send a test tone and/or record received audio.
+/// File/tone mode: send a test tone or audio file, and/or record received audio.
 async fn run_file_mode(
     transport: Arc<wzp_transport::QuinnTransport>,
     send_tone_secs: Option<u32>,
+    send_file: Option<String>,
     record_file: Option<String>,
 ) -> anyhow::Result<()> {
     let config = CallConfig::default();
 
-    // --- Send task: generate tone and send ---
+    // --- Send task: generate tone or play file ---
     let send_transport = transport.clone();
     let send_handle = tokio::spawn(async move {
-        let secs = match send_tone_secs {
-            Some(s) => s,
-            None => {
-                // No sending, just wait
-                tokio::signal::ctrl_c().await.ok();
-                return;
-            }
+        // Load PCM frames from file or generate tone
+        let pcm_frames: Vec<Vec<i16>> = if let Some(ref path) = send_file {
+            // Read raw PCM file (48kHz mono s16le)
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => { error!("read {path}: {e}"); return; }
+            };
+            let samples: Vec<i16> = bytes.chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let duration = samples.len() as f64 / 48_000.0;
+            info!(file = %path, duration = format!("{:.1}s", duration), "sending audio file");
+            samples.chunks(FRAME_SAMPLES)
+                .filter(|c| c.len() == FRAME_SAMPLES)
+                .map(|c| c.to_vec())
+                .collect()
+        } else if let Some(secs) = send_tone_secs {
+            let total = (secs as u64) * 50;
+            info!(seconds = secs, frames = total, "sending 440Hz tone");
+            (0..total).map(|i| generate_sine_frame(440.0, 48_000, i)).collect()
+        } else {
+            // No sending, just wait
+            tokio::signal::ctrl_c().await.ok();
+            return;
         };
 
         let mut encoder = CallEncoder::new(&config);
-        let total_frames = (secs as u64) * 50; // 50 frames/sec at 20ms
+        let total_frames = pcm_frames.len() as u64;
         let frame_duration = tokio::time::Duration::from_millis(20);
 
         let mut total_source = 0u64;
         let mut total_repair = 0u64;
 
-        info!(seconds = secs, frames = total_frames, "sending 440Hz tone");
-
-        for frame_idx in 0..total_frames {
-            let pcm = generate_sine_frame(440.0, 48_000, frame_idx);
+        for (frame_idx, pcm) in pcm_frames.iter().enumerate() {
+            let frame_idx = frame_idx as u64;
             let packets = match encoder.encode_frame(&pcm) {
                 Ok(p) => p,
                 Err(e) => {
