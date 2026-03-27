@@ -200,6 +200,9 @@ struct WaitingClient {
 async fn main() -> anyhow::Result<()> {
     let config = parse_args();
     tracing_subscriber::fmt().init();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
 
     info!(addr = %config.listen_addr, "WarzonePhone relay starting");
     if let Some(remote) = config.remote_relay {
