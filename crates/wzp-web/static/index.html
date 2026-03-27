@@ -173,31 +173,33 @@ function startAudioCapture() {
   scriptNode.connect(audioCtx.destination);
 }
 
-// Ring buffer playback using AudioWorklet-style approach
-let playbackBuffer = [];
+// Pull-based playback with sample-accurate ring buffer
+let playSamples = new Float32Array(0); // accumulated float samples
 let playbackNode = null;
+const MAX_BUFFERED_SAMPLES = SAMPLE_RATE / 5; // 200ms max (~9600 samples)
 
 function initPlayback() {
   if (playbackNode) return;
-  // Use a ScriptProcessorNode as a pull-based audio sink.
-  // It asks for audio every ~21ms (1024 samples at 48kHz).
-  // We feed it from our ring buffer of received frames.
   playbackNode = audioCtx.createScriptProcessor(1024, 1, 1);
   playbackNode.onaudioprocess = (e) => {
     const output = e.outputBuffer.getChannelData(0);
-    // Pull from buffer — drop old frames if we're behind
-    while (playbackBuffer.length > 10) {
-      playbackBuffer.shift(); // drop oldest, keeps latency bounded
+    const need = output.length; // 1024
+
+    // Drop excess to cap latency
+    if (playSamples.length > MAX_BUFFERED_SAMPLES) {
+      playSamples = playSamples.slice(playSamples.length - MAX_BUFFERED_SAMPLES);
     }
-    if (playbackBuffer.length > 0) {
-      const frame = playbackBuffer.shift();
-      // frame is 960 samples, output is 1024 — copy what we can
-      const len = Math.min(frame.length, output.length);
-      for (let i = 0; i < len; i++) output[i] = frame[i];
-      for (let i = len; i < output.length; i++) output[i] = 0;
+
+    if (playSamples.length >= need) {
+      output.set(playSamples.subarray(0, need));
+      playSamples = playSamples.slice(need);
+    } else if (playSamples.length > 0) {
+      // Partial — play what we have, pad with silence
+      output.set(playSamples.subarray(0, playSamples.length));
+      for (let i = playSamples.length; i < need; i++) output[i] = 0;
+      playSamples = new Float32Array(0);
     } else {
-      // Underrun — silence
-      for (let i = 0; i < output.length; i++) output[i] = 0;
+      for (let i = 0; i < need; i++) output[i] = 0;
     }
   };
   playbackNode.connect(audioCtx.destination);
@@ -211,7 +213,12 @@ function playAudio(pcmInt16) {
   for (let i = 0; i < pcmInt16.length; i++) {
     floatData[i] = pcmInt16[i] / 32768.0;
   }
-  playbackBuffer.push(floatData);
+
+  // Append to sample buffer
+  const combined = new Float32Array(playSamples.length + floatData.length);
+  combined.set(playSamples);
+  combined.set(floatData, playSamples.length);
+  playSamples = combined;
 }
 
 function startStatsUpdate() {
