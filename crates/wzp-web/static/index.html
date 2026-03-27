@@ -7,15 +7,19 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-  .container { text-align: center; max-width: 400px; padding: 2rem; }
+  .container { text-align: center; max-width: 420px; padding: 2rem; }
   h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #00d4ff; }
-  .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 2rem; }
+  .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  .room-input { margin-bottom: 1.5rem; }
+  .room-input input { background: #2a2a4a; border: 1px solid #444; color: #e0e0e0; padding: 0.6rem 1rem; font-size: 1rem; border-radius: 8px; width: 200px; text-align: center; }
+  .room-input input:focus { outline: none; border-color: #00d4ff; }
+  .room-input label { display: block; color: #888; font-size: 0.8rem; margin-bottom: 0.4rem; }
   #callBtn { background: #00d4ff; color: #1a1a2e; border: none; padding: 1rem 3rem; font-size: 1.2rem; border-radius: 50px; cursor: pointer; transition: all 0.2s; }
   #callBtn:hover { background: #00b8d4; transform: scale(1.05); }
   #callBtn.active { background: #ff4444; color: white; }
-  #callBtn:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #callBtn:disabled { background: #444; color: #888; cursor: not-allowed; transform: none; }
   .status { margin-top: 1.5rem; font-size: 0.9rem; color: #888; min-height: 1.5rem; }
-  .stats { margin-top: 1rem; font-size: 0.8rem; color: #666; font-family: monospace; }
+  .stats { margin-top: 0.5rem; font-size: 0.75rem; color: #555; font-family: monospace; }
   .level { margin-top: 1rem; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
   .level-bar { height: 100%; background: #00d4ff; width: 0%; transition: width 50ms; }
 </style>
@@ -24,6 +28,10 @@
 <div class="container">
   <h1>WarzonePhone</h1>
   <p class="subtitle">Lossy VoIP Protocol</p>
+  <div class="room-input">
+    <label for="room">Room</label>
+    <input type="text" id="room" placeholder="enter room name" value="">
+  </div>
   <button id="callBtn" onclick="toggleCall()">Connect</button>
   <div class="level"><div class="level-bar" id="levelBar"></div></div>
   <div class="status" id="status"></div>
@@ -32,31 +40,42 @@
 
 <script>
 const SAMPLE_RATE = 48000;
-const FRAME_SIZE = 960; // 20ms at 48kHz
+const FRAME_SIZE = 960;
 
 let ws = null;
 let audioCtx = null;
 let mediaStream = null;
-let scriptNode = null;
+let captureNode = null;
+let playbackNode = null;
 let active = false;
 let framesSent = 0;
 let framesRecv = 0;
 let startTime = 0;
+let statsInterval = null;
 
-// Playback buffer
-let playbackQueue = [];
-let isPlaying = false;
+// Use room from URL path or input field
+function getRoom() {
+  // Check URL: /roomname or /#roomname
+  const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  if (path && path !== 'index.html') return path;
+  const hash = location.hash.replace('#', '');
+  if (hash) return hash;
+  return document.getElementById('room').value.trim() || 'default';
+}
 
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
 function setStats(msg) { document.getElementById('stats').textContent = msg; }
 
 function toggleCall() {
-  if (active) { stopCall(); }
-  else { startCall(); }
+  if (active) stopCall();
+  else startCall();
 }
 
 async function startCall() {
   const btn = document.getElementById('callBtn');
+  const room = getRoom();
+  if (!room) { setStatus('Enter a room name'); return; }
+
   btn.disabled = true;
   setStatus('Requesting microphone...');
 
@@ -70,16 +89,18 @@ async function startCall() {
     return;
   }
 
-  // Connect WebSocket
+  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+
+  // Connect WebSocket with room name
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = proto + '//' + location.host + '/ws';
-  setStatus('Connecting to relay...');
+  const wsUrl = proto + '//' + location.host + '/ws/' + encodeURIComponent(room);
+  setStatus('Connecting to room: ' + room + '...');
 
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
-    setStatus('Connected — speaking...');
+  ws.onopen = async () => {
+    setStatus('Connected to room: ' + room);
     btn.textContent = 'Disconnect';
     btn.classList.add('active');
     btn.disabled = false;
@@ -87,12 +108,12 @@ async function startCall() {
     framesSent = 0;
     framesRecv = 0;
     startTime = Date.now();
-    startAudioCapture();
+    await startAudioCapture();
+    await startAudioPlayback();
     startStatsUpdate();
   };
 
   ws.onmessage = (event) => {
-    // Received PCM audio from server (s16le bytes)
     const pcmData = new Int16Array(event.data);
     framesRecv++;
     playAudio(pcmData);
@@ -100,20 +121,17 @@ async function startCall() {
 
   ws.onclose = () => {
     if (active) {
-      setStatus('Disconnected — reconnecting...');
-      setTimeout(() => { if (active) { stopCall(); startCall(); } }, 1000);
+      setStatus('Disconnected — reconnecting to ' + room + '...');
+      setTimeout(() => { if (active) { cleanupAudio(); startCall(); } }, 1000);
     } else {
       setStatus('Disconnected');
     }
   };
 
-  ws.onerror = (e) => {
+  ws.onerror = () => {
     if (active) {
-      setStatus('Connection error — reconnecting...');
-      setTimeout(() => { if (active) { stopCall(); startCall(); } }, 1000);
-    } else {
-      setStatus('Connection error');
-      stopCall();
+      setStatus('Error — reconnecting...');
+      setTimeout(() => { if (active) { cleanupAudio(); startCall(); } }, 1000);
     }
   };
 }
@@ -124,65 +142,77 @@ function stopCall() {
   btn.textContent = 'Connect';
   btn.classList.remove('active');
   btn.disabled = false;
-
-  if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
-  if (audioCtx) { audioCtx.close(); audioCtx = null; }
-  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  cleanupAudio();
   if (ws) { ws.close(); ws = null; }
-  playbackQueue = [];
+  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
   setStatus('');
   setStats('');
 }
 
-function startAudioCapture() {
-  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-  console.log('AudioContext sampleRate:', audioCtx.sampleRate);
-  setStatus('Connected — mic active (sample rate: ' + audioCtx.sampleRate + 'Hz)');
-  const source = audioCtx.createMediaStreamSource(mediaStream);
-
-  // ScriptProcessorNode requires power-of-2 buffer. We use 1024 and
-  // accumulate samples, sending exactly FRAME_SIZE (960) chunks.
-  const CAPTURE_BUF = 1024;
-  scriptNode = audioCtx.createScriptProcessor(CAPTURE_BUF, 1, 1);
-
-  let accumulator = new Float32Array(0);
-
-  scriptNode.onaudioprocess = (e) => {
-    if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-    const input = e.inputBuffer.getChannelData(0);
-
-    // Append to accumulator
-    const newAcc = new Float32Array(accumulator.length + input.length);
-    newAcc.set(accumulator);
-    newAcc.set(input, accumulator.length);
-    accumulator = newAcc;
-
-    // Send complete FRAME_SIZE chunks
-    while (accumulator.length >= FRAME_SIZE) {
-      const frame = accumulator.slice(0, FRAME_SIZE);
-      accumulator = accumulator.slice(FRAME_SIZE);
-
-      const pcm = new Int16Array(FRAME_SIZE);
-      for (let i = 0; i < FRAME_SIZE; i++) {
-        pcm[i] = Math.max(-32768, Math.min(32767, Math.round(frame[i] * 32767)));
-      }
-
-      // Update level meter
-      let maxVal = 0;
-      for (let i = 0; i < pcm.length; i++) maxVal = Math.max(maxVal, Math.abs(pcm[i]));
-      document.getElementById('levelBar').style.width = (maxVal / 32768 * 100) + '%';
-
-      ws.send(pcm.buffer);
-      framesSent++;
-    }
-  };
-
-  source.connect(scriptNode);
-  scriptNode.connect(audioCtx.destination);
+function cleanupAudio() {
+  if (captureNode) { captureNode.disconnect(); captureNode = null; }
+  if (playbackNode) { playbackNode.disconnect(); playbackNode = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
 }
 
-// Scheduled playback with aggressive drift correction
+async function startAudioCapture() {
+  const source = audioCtx.createMediaStreamSource(mediaStream);
+
+  try {
+    await audioCtx.audioWorklet.addModule('audio-processor.js');
+    captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+    captureNode.port.onmessage = (e) => {
+      if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
+      // e.data is an ArrayBuffer of Int16 PCM
+      ws.send(e.data);
+      framesSent++;
+
+      // Level meter from the PCM data
+      const pcm = new Int16Array(e.data);
+      let max = 0;
+      for (let i = 0; i < pcm.length; i += 16) max = Math.max(max, Math.abs(pcm[i]));
+      document.getElementById('levelBar').style.width = (max / 32768 * 100) + '%';
+    };
+    source.connect(captureNode);
+    captureNode.connect(audioCtx.destination); // needed to keep worklet alive
+  } catch(e) {
+    // Fallback to ScriptProcessor if AudioWorklet not supported
+    console.warn('AudioWorklet not available, using ScriptProcessor fallback:', e);
+    captureNode = audioCtx.createScriptProcessor(1024, 1, 1);
+    let acc = new Float32Array(0);
+    captureNode.onaudioprocess = (ev) => {
+      if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
+      const input = ev.inputBuffer.getChannelData(0);
+      const n = new Float32Array(acc.length + input.length);
+      n.set(acc); n.set(input, acc.length); acc = n;
+      while (acc.length >= FRAME_SIZE) {
+        const frame = acc.slice(0, FRAME_SIZE); acc = acc.slice(FRAME_SIZE);
+        const pcm = new Int16Array(FRAME_SIZE);
+        for (let i = 0; i < FRAME_SIZE; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(frame[i] * 32767)));
+        let max = 0;
+        for (let i = 0; i < pcm.length; i += 16) max = Math.max(max, Math.abs(pcm[i]));
+        document.getElementById('levelBar').style.width = (max / 32768 * 100) + '%';
+        ws.send(pcm.buffer);
+        framesSent++;
+      }
+    };
+    source.connect(captureNode);
+    captureNode.connect(audioCtx.destination);
+  }
+}
+
+async function startAudioPlayback() {
+  try {
+    await audioCtx.audioWorklet.addModule('playback-processor.js');
+    playbackNode = new AudioWorkletNode(audioCtx, 'playback-processor');
+    playbackNode.connect(audioCtx.destination);
+  } catch(e) {
+    console.warn('AudioWorklet playback not available, using scheduled fallback');
+    playbackNode = null; // will use createBufferSource fallback
+  }
+}
+
 let nextPlayTime = 0;
 
 function playAudio(pcmInt16) {
@@ -193,35 +223,40 @@ function playAudio(pcmInt16) {
     floatData[i] = pcmInt16[i] / 32768.0;
   }
 
-  const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
-  buffer.getChannelData(0).set(floatData);
-
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioCtx.destination);
-
-  const now = audioCtx.currentTime;
-
-  const drift = nextPlayTime - now;
-  if (drift < 0) {
-    // Fell behind — catch up
-    nextPlayTime = now + 0.02;
-  } else if (drift > 1.0) {
-    // More than 1 second ahead — hard reset (real drift)
-    console.log('drift reset:', drift.toFixed(3) + 's');
-    nextPlayTime = now + 0.02;
+  if (playbackNode && playbackNode.port) {
+    // AudioWorklet path — send float samples to the worklet
+    playbackNode.port.postMessage(floatData.buffer, [floatData.buffer]);
+  } else {
+    // Fallback: scheduled BufferSource
+    const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
+    buffer.getChannelData(0).set(floatData);
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    if (nextPlayTime < now || nextPlayTime > now + 1.0) {
+      nextPlayTime = now + 0.02;
+    }
+    source.start(nextPlayTime);
+    nextPlayTime += buffer.duration;
   }
-  source.start(nextPlayTime);
-  nextPlayTime += buffer.duration;
 }
 
 function startStatsUpdate() {
-  const interval = setInterval(() => {
-    if (!active) { clearInterval(interval); return; }
+  statsInterval = setInterval(() => {
+    if (!active) { clearInterval(statsInterval); return; }
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    setStats(`${elapsed}s | sent: ${framesSent} | recv: ${framesRecv} | loss: ${framesSent > 0 ? ((1 - framesRecv/framesSent) * 100).toFixed(1) : 0}%`);
+    setStats(elapsed + 's | sent: ' + framesSent + ' | recv: ' + framesRecv);
   }, 1000);
 }
+
+// Set room from URL on load
+window.addEventListener('load', () => {
+  const room = getRoom();
+  if (room && room !== 'default') {
+    document.getElementById('room').value = room;
+  }
+});
 </script>
 </body>
 </html>
