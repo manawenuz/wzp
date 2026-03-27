@@ -1,0 +1,15 @@
+[package]
+name = "wzp-fec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WarzonePhone FEC layer — RaptorQ fountain codes with interleaving"
+
+[dependencies]
+wzp-proto = { workspace = true }
+raptorq = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

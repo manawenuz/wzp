@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wzp-proto",
+    "crates/wzp-codec",
+    "crates/wzp-fec",
+    "crates/wzp-crypto",
+    "crates/wzp-transport",
+    "crates/wzp-relay",
+    "crates/wzp-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Shared
+bytes = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+
+# Transport
+quinn = "0.11"
+
+# FEC
+raptorq = "2"
+
+# Codec
+audiopus = "0.3.0-rc.0"
+
+# Crypto
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+# Workspace crates
+wzp-proto = { path = "crates/wzp-proto" }
+wzp-codec = { path = "crates/wzp-codec" }
+wzp-fec = { path = "crates/wzp-fec" }
+wzp-crypto = { path = "crates/wzp-crypto" }
+wzp-transport = { path = "crates/wzp-transport" }

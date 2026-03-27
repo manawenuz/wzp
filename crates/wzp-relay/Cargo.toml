@@ -1,0 +1,19 @@
+[package]
+name = "wzp-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WarzonePhone relay daemon — ties codec, FEC, crypto, and transport together"
+
+[dependencies]
+wzp-proto = { workspace = true }
+wzp-codec = { workspace = true }
+wzp-fec = { workspace = true }
+wzp-crypto = { workspace = true }
+wzp-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
