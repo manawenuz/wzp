@@ -129,33 +129,46 @@ function startAudioCapture() {
   audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
   const source = audioCtx.createMediaStreamSource(mediaStream);
 
-  // ScriptProcessorNode for capturing raw PCM
-  // (AudioWorklet would be better but this is simpler for a prototype)
-  scriptNode = audioCtx.createScriptProcessor(FRAME_SIZE, 1, 1);
+  // ScriptProcessorNode requires power-of-2 buffer. We use 1024 and
+  // accumulate samples, sending exactly FRAME_SIZE (960) chunks.
+  const CAPTURE_BUF = 1024;
+  scriptNode = audioCtx.createScriptProcessor(CAPTURE_BUF, 1, 1);
+
+  let accumulator = new Float32Array(0);
 
   scriptNode.onaudioprocess = (e) => {
     if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-    const input = e.inputBuffer.getChannelData(0); // Float32 [-1, 1]
+    const input = e.inputBuffer.getChannelData(0);
 
-    // Convert float32 to int16
-    const pcm = new Int16Array(input.length);
-    for (let i = 0; i < input.length; i++) {
-      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
+    // Append to accumulator
+    const newAcc = new Float32Array(accumulator.length + input.length);
+    newAcc.set(accumulator);
+    newAcc.set(input, accumulator.length);
+    accumulator = newAcc;
+
+    // Send complete FRAME_SIZE chunks
+    while (accumulator.length >= FRAME_SIZE) {
+      const frame = accumulator.slice(0, FRAME_SIZE);
+      accumulator = accumulator.slice(FRAME_SIZE);
+
+      const pcm = new Int16Array(FRAME_SIZE);
+      for (let i = 0; i < FRAME_SIZE; i++) {
+        pcm[i] = Math.max(-32768, Math.min(32767, Math.round(frame[i] * 32767)));
+      }
+
+      // Update level meter
+      let maxVal = 0;
+      for (let i = 0; i < pcm.length; i++) maxVal = Math.max(maxVal, Math.abs(pcm[i]));
+      document.getElementById('levelBar').style.width = (maxVal / 32768 * 100) + '%';
+
+      ws.send(pcm.buffer);
+      framesSent++;
     }
-
-    // Update level meter
-    let maxVal = 0;
-    for (let i = 0; i < pcm.length; i++) maxVal = Math.max(maxVal, Math.abs(pcm[i]));
-    document.getElementById('levelBar').style.width = (maxVal / 32768 * 100) + '%';
-
-    // Send as binary
-    ws.send(pcm.buffer);
-    framesSent++;
   };
 
   source.connect(scriptNode);
-  scriptNode.connect(audioCtx.destination); // needed for scriptProcessor to work
+  scriptNode.connect(audioCtx.destination);
 }
 
 function playAudio(pcmInt16) {
