@@ -313,18 +313,18 @@ pub fn bench_full_pipeline() -> PipelineResult {
     }
     let total_encode_pipeline = enc_start.elapsed();
 
-    // Decode pipeline: ingest all packets, then try to decode
+    // Decode pipeline: ingest all packets, then decode one frame per source frame.
+    // We call decode_next once per ingested source frame, matching the real-time
+    // cadence (one decode per frame period).
     let dec_start = Instant::now();
     let mut dec_pcm = vec![0i16; frame_samples];
     for packets in &all_packets {
         for pkt in packets {
             decoder.ingest(pkt.clone());
         }
-        // Attempt to decode after each frame's packets are ingested
+        // Attempt to decode one frame per ingested source frame
         let _ = decoder.decode_next(&mut dec_pcm);
     }
-    // Drain any remaining frames
-    while decoder.decode_next(&mut dec_pcm).is_some() {}
     let total_decode_pipeline = dec_start.elapsed();
 
     let total_time = total_encode_pipeline + total_decode_pipeline;
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn pipeline_runs() {
         let result = bench_full_pipeline();
-        assert_eq!(result.frames, 200);
+        assert_eq!(result.frames, 50);
         assert!(result.wire_bytes_out > 0);
     }
 }

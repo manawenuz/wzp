@@ -54,7 +54,7 @@ fn parse_args() -> RelayConfig {
                 eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --listen <addr>  Listen address (default: 0.0.0.0:4433)");
+                eprintln!("  --listen <addr>  Listen address (default: 0.0.0.0:4433, use [::]:4433 for IPv6)");
                 eprintln!("  --remote <addr>  Remote relay address for forwarding");
                 std::process::exit(0);
             }

@@ -31,7 +31,13 @@ async fn main() -> anyhow::Result<()> {
     info!(%relay_addr, live, "WarzonePhone client connecting");
 
     let client_config = wzp_transport::client_config();
-    let endpoint = wzp_transport::create_endpoint("0.0.0.0:0".parse()?, None)?;
+    // Use same address family as the relay address to avoid IPv4/IPv6 mismatch.
+    let bind_addr = if relay_addr.is_ipv6() {
+        "[::]:0".parse()?
+    } else {
+        "0.0.0.0:0".parse()?
+    };
+    let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
     let connection =
         wzp_transport::connect(&endpoint, relay_addr, "localhost", client_config).await?;
 
