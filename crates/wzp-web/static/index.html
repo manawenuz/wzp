@@ -127,6 +127,8 @@ function stopCall() {
 
 function startAudioCapture() {
   audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  console.log('AudioContext sampleRate:', audioCtx.sampleRate);
+  setStatus('Connected — mic active (sample rate: ' + audioCtx.sampleRate + 'Hz)');
   const source = audioCtx.createMediaStreamSource(mediaStream);
 
   // ScriptProcessorNode requires power-of-2 buffer. We use 1024 and
@@ -171,10 +173,11 @@ function startAudioCapture() {
   scriptNode.connect(audioCtx.destination);
 }
 
+let nextPlayTime = 0;
+
 function playAudio(pcmInt16) {
   if (!audioCtx) return;
 
-  // Convert int16 to float32
   const floatData = new Float32Array(pcmInt16.length);
   for (let i = 0; i < pcmInt16.length; i++) {
     floatData[i] = pcmInt16[i] / 32768.0;
@@ -187,9 +190,14 @@ function playAudio(pcmInt16) {
   source.buffer = buffer;
   source.connect(audioCtx.destination);
 
-  // Schedule playback with small buffer to reduce latency
-  const playTime = audioCtx.currentTime + 0.06; // 60ms buffer
-  source.start(playTime);
+  // Schedule seamlessly: each buffer starts exactly where the last one ended
+  const now = audioCtx.currentTime;
+  if (nextPlayTime < now) {
+    // Fell behind — reset with small lookahead
+    nextPlayTime = now + 0.04; // 40ms initial buffer
+  }
+  source.start(nextPlayTime);
+  nextPlayTime += buffer.duration;
 }
 
 function startStatsUpdate() {
