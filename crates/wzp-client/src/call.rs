@@ -225,6 +225,11 @@ impl CallDecoder {
     pub fn profile(&self) -> QualityProfile {
         self.profile
     }
+
+    /// Get jitter buffer statistics.
+    pub fn jitter_stats(&self) -> wzp_proto::jitter::JitterStats {
+        self.jitter.stats().clone()
+    }
 }
 
 #[cfg(test)]

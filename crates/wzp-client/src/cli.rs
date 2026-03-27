@@ -38,6 +38,7 @@ struct CliArgs {
     live: bool,
     send_tone_secs: Option<u32>,
     record_file: Option<String>,
+    echo_test_secs: Option<u32>,
 }
 
 fn parse_args() -> CliArgs {
@@ -45,6 +46,7 @@ fn parse_args() -> CliArgs {
     let mut live = false;
     let mut send_tone_secs = None;
     let mut record_file = None;
+    let mut echo_test_secs = None;
     let mut relay_str = None;
 
     let mut i = 1;
@@ -68,6 +70,15 @@ fn parse_args() -> CliArgs {
                         .to_string(),
                 );
             }
+            "--echo-test" => {
+                i += 1;
+                echo_test_secs = Some(
+                    args.get(i)
+                        .expect("--echo-test requires seconds")
+                        .parse()
+                        .expect("--echo-test value must be a number"),
+                );
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
                 eprintln!();
@@ -75,7 +86,8 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --live                 Live mic/speaker mode");
                 eprintln!("  --send-tone <secs>     Send a 440Hz test tone for N seconds");
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
-                eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ac 1 file.raw)");
+                eprintln!("  --echo-test <secs>     Run automated echo quality test");
+                eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
                 eprintln!();
                 eprintln!("Default relay: 127.0.0.1:4433");
                 std::process::exit(0);
@@ -102,6 +114,7 @@ fn parse_args() -> CliArgs {
         live,
         send_tone_secs,
         record_file,
+        echo_test_secs,
     }
 }
 
@@ -142,6 +155,11 @@ async fn main() -> anyhow::Result<()> {
         {
             anyhow::bail!("--live requires the 'audio' feature (build with: cargo build --features audio)");
         }
+    } else if let Some(secs) = cli.echo_test_secs {
+        let result = wzp_client::echo_test::run_echo_test(&*transport, secs, 5.0).await?;
+        wzp_client::echo_test::print_report(&result);
+        transport.close().await?;
+        Ok(())
     } else if cli.send_tone_secs.is_some() || cli.record_file.is_some() {
         run_file_mode(transport, cli.send_tone_secs, cli.record_file).await
     } else {
