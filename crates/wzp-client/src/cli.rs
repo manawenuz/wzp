@@ -394,13 +394,19 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
         loop {
             match recv_transport.recv_media().await {
                 Ok(Some(pkt)) => {
+                    let is_repair = pkt.header.is_repair;
                     decoder.ingest(pkt);
-                    while let Some(_n) = decoder.decode_next(&mut pcm_buf) {
-                        playback.write_frame(&pcm_buf);
+                    // Only decode for source packets (1 source = 1 audio frame).
+                    // Repair packets feed the FEC decoder but don't produce audio.
+                    if !is_repair {
+                        if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
+                            playback.write_frame(&pcm_buf);
+                        }
                     }
                 }
                 Ok(None) => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                    info!("connection closed");
+                    break;
                 }
                 Err(e) => {
                     error!("recv error: {e}");

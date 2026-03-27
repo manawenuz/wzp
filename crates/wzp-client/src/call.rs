@@ -30,9 +30,9 @@ impl Default for CallConfig {
     fn default() -> Self {
         Self {
             profile: QualityProfile::GOOD,
-            jitter_target: 50,
+            jitter_target: 10,
             jitter_max: 250,
-            jitter_min: 25,
+            jitter_min: 3, // 60ms — low latency start, still smooths jitter
         }
     }
 }
