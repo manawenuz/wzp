@@ -1,11 +1,11 @@
 //! WarzonePhone Client Library
 //!
-//! Client-side pipeline:
-//! mic → encode → FEC → encrypt → send / recv → decrypt → FEC decode → decode → speaker
+//! End-to-end voice call pipeline:
+//! - **Send**: mic → encode (Opus/Codec2) → FEC → encrypt → QUIC DATAGRAM
+//! - **Recv**: QUIC DATAGRAM → decrypt → FEC decode → jitter buffer → decode → speaker
 //!
-//! Targets:
-//! - Android (via JNI/uniffi)
-//! - Windows desktop
-//! - macOS/Linux (testing)
-//!
-//! Built after the 5 agent crates (proto, codec, fec, crypto, transport) are complete.
+//! Targets: Android (JNI), Windows desktop, macOS/Linux (testing)
+
+pub mod call;
+
+pub use call::{CallConfig, CallDecoder, CallEncoder};

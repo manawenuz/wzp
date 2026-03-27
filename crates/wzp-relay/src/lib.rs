@@ -1,6 +1,16 @@
 //! WarzonePhone Relay Daemon
 //!
 //! Integration crate that wires together all layers into a relay pipeline:
-//! recv → decrypt → FEC decode → jitter → FEC encode → encrypt → send
+//! recv → FEC decode → jitter buffer → FEC encode → send
 //!
-//! Built after the 5 agent crates (proto, codec, fec, crypto, transport) are complete.
+//! The relay forwards media between two QUIC endpoints without decoding audio.
+//! It operates on FEC-protected packets, managing loss recovery and adaptive
+//! quality transitions.
+
+pub mod config;
+pub mod pipeline;
+pub mod session_mgr;
+
+pub use config::RelayConfig;
+pub use pipeline::{PipelineConfig, PipelineStats, RelayPipeline};
+pub use session_mgr::{RelaySession, SessionId, SessionManager};

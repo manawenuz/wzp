@@ -15,5 +15,14 @@ wzp-transport = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+toml = "0.8"
+anyhow = "1"
+
+[[bin]]
+name = "wzp-relay"
+path = "src/main.rs"
 
 [dev-dependencies]

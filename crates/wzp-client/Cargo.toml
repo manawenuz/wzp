@@ -14,5 +14,13 @@ wzp-crypto = { workspace = true }
 wzp-transport = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+anyhow = "1"
+
+[[bin]]
+name = "wzp-client"
+path = "src/cli.rs"
 
 [dev-dependencies]
