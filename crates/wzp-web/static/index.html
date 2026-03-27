@@ -173,52 +173,32 @@ function startAudioCapture() {
   scriptNode.connect(audioCtx.destination);
 }
 
-// Pull-based playback with sample-accurate ring buffer
-let playSamples = new Float32Array(0); // accumulated float samples
-let playbackNode = null;
-const MAX_BUFFERED_SAMPLES = SAMPLE_RATE / 5; // 200ms max (~9600 samples)
-
-function initPlayback() {
-  if (playbackNode) return;
-  playbackNode = audioCtx.createScriptProcessor(1024, 1, 1);
-  playbackNode.onaudioprocess = (e) => {
-    const output = e.outputBuffer.getChannelData(0);
-    const need = output.length; // 1024
-
-    // Drop excess to cap latency
-    if (playSamples.length > MAX_BUFFERED_SAMPLES) {
-      playSamples = playSamples.slice(playSamples.length - MAX_BUFFERED_SAMPLES);
-    }
-
-    if (playSamples.length >= need) {
-      output.set(playSamples.subarray(0, need));
-      playSamples = playSamples.slice(need);
-    } else if (playSamples.length > 0) {
-      // Partial — play what we have, pad with silence
-      output.set(playSamples.subarray(0, playSamples.length));
-      for (let i = playSamples.length; i < need; i++) output[i] = 0;
-      playSamples = new Float32Array(0);
-    } else {
-      for (let i = 0; i < need; i++) output[i] = 0;
-    }
-  };
-  playbackNode.connect(audioCtx.destination);
-}
+// Scheduled playback with aggressive drift correction
+let nextPlayTime = 0;
 
 function playAudio(pcmInt16) {
   if (!audioCtx) return;
-  initPlayback();
 
   const floatData = new Float32Array(pcmInt16.length);
   for (let i = 0; i < pcmInt16.length; i++) {
     floatData[i] = pcmInt16[i] / 32768.0;
   }
 
-  // Append to sample buffer
-  const combined = new Float32Array(playSamples.length + floatData.length);
-  combined.set(playSamples);
-  combined.set(floatData, playSamples.length);
-  playSamples = combined;
+  const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
+  buffer.getChannelData(0).set(floatData);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+
+  if (nextPlayTime < now || nextPlayTime > now + 0.2) {
+    // Behind or drifted too far ahead — snap to now + 40ms
+    nextPlayTime = now + 0.04;
+  }
+  source.start(nextPlayTime);
+  nextPlayTime += buffer.duration;
 }
 
 function startStatsUpdate() {
