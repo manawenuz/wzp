@@ -99,13 +99,22 @@ async function startCall() {
   };
 
   ws.onclose = () => {
-    setStatus('Disconnected');
-    stopCall();
+    if (active) {
+      setStatus('Disconnected — reconnecting...');
+      setTimeout(() => { if (active) { stopCall(); startCall(); } }, 1000);
+    } else {
+      setStatus('Disconnected');
+    }
   };
 
   ws.onerror = (e) => {
-    setStatus('Connection error');
-    stopCall();
+    if (active) {
+      setStatus('Connection error — reconnecting...');
+      setTimeout(() => { if (active) { stopCall(); startCall(); } }, 1000);
+    } else {
+      setStatus('Connection error');
+      stopCall();
+    }
   };
 }
 

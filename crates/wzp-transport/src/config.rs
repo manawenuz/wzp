@@ -139,6 +139,7 @@ mod tests {
 
     #[test]
     fn server_config_creates_without_error() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let (cfg, cert_der) = server_config();
         assert!(!cert_der.is_empty());
         // Verify the config was created (no panic)
@@ -147,6 +148,7 @@ mod tests {
 
     #[test]
     fn client_config_creates_without_error() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let cfg = client_config();
         drop(cfg);
     }
