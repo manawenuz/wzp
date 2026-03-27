@@ -3,7 +3,7 @@
 //! Serves a web page for browser-based voice calls and bridges
 //! WebSocket audio to the wzp relay protocol.
 //!
-//! Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433]
+//! Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433] [--tls]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut port: u16 = 8080;
     let mut relay_addr: SocketAddr = "127.0.0.1:4433".parse()?;
+    let mut use_tls = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -48,12 +49,17 @@ async fn main() -> anyhow::Result<()> {
                 i += 1;
                 relay_addr = args[i].parse().expect("invalid relay address");
             }
+            "--tls" => {
+                use_tls = true;
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433]");
+                eprintln!("Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433] [--tls]");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --port <port>     HTTP/WebSocket port (default: 8080)");
                 eprintln!("  --relay <addr>    WZP relay address (default: 127.0.0.1:4433)");
+                eprintln!("  --tls             Enable HTTPS with self-signed certificate");
+                eprintln!("                    (required for mic access on Android/remote browsers)");
                 std::process::exit(0);
             }
             _ => {}
@@ -63,13 +69,11 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState { relay_addr };
 
-    // Determine static file path (relative to binary or cargo manifest)
     let static_dir = if std::path::Path::new("crates/wzp-web/static").exists() {
         "crates/wzp-web/static"
     } else if std::path::Path::new("static").exists() {
         "static"
     } else {
-        // Fallback: look relative to executable
         "static"
     };
 
@@ -79,11 +83,40 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listen: SocketAddr = format!("0.0.0.0:{port}").parse()?;
-    info!(%listen, %relay_addr, "WarzonePhone web bridge starting");
-    info!("Open http://localhost:{port} in your browser");
 
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    axum::serve(listener, app).await?;
+    if use_tls {
+        // Generate self-signed cert
+        let cert_key = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "wzp".to_string(),
+        ])?;
+        let cert_der = rustls_pki_types::CertificateDer::from(cert_key.cert);
+        let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert_key.key_pair.serialize_der())
+            .map_err(|e| anyhow::anyhow!("key error: {e}"))?;
+
+        let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)?;
+        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config));
+
+        info!(%listen, %relay_addr, "WarzonePhone web bridge starting (HTTPS)");
+        info!("Open https://localhost:{port} in your browser");
+        info!("NOTE: Accept the self-signed certificate warning in your browser");
+
+        axum_server::bind_rustls(listen, tls_config)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        info!(%listen, %relay_addr, "WarzonePhone web bridge starting (HTTP)");
+        info!("Open http://localhost:{port} in your browser");
+        info!("NOTE: Use --tls for mic access on Android/remote browsers");
+
+        let listener = tokio::net::TcpListener::bind(listen).await?;
+        axum::serve(listener, app).await?;
+    }
+
     Ok(())
 }
 
@@ -97,7 +130,6 @@ async fn ws_handler(
 async fn handle_ws(socket: WebSocket, state: AppState) {
     info!("WebSocket client connected");
 
-    // Connect to wzp relay
     let relay_addr = state.relay_addr;
     let bind_addr: SocketAddr = if relay_addr.is_ipv6() {
         "[::]:0".parse().unwrap()
@@ -132,7 +164,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let encoder = Arc::new(Mutex::new(CallEncoder::new(&config)));
     let decoder = Arc::new(Mutex::new(CallDecoder::new(&config)));
 
-    // --- Browser → Relay: receive PCM from WebSocket, encode, send to relay ---
+    // Browser -> Relay
     let send_transport = transport.clone();
     let send_encoder = encoder.clone();
     let send_task = tokio::spawn(async move {
@@ -140,9 +172,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Binary(data) => {
-                    // data is raw s16le PCM from browser
                     if data.len() < FRAME_SAMPLES * 2 {
-                        continue; // incomplete frame
+                        continue;
                     }
                     let pcm: Vec<i16> = data
                         .chunks_exact(2)
@@ -169,7 +200,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     }
                     frames_sent += 1;
                     if frames_sent % 250 == 0 {
-                        info!(frames_sent, "browser → relay");
+                        info!(frames_sent, "browser -> relay");
                     }
                 }
                 Message::Close(_) => break,
@@ -179,7 +210,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         info!(frames_sent, "browser send loop ended");
     });
 
-    // --- Relay → Browser: receive from relay, decode, send PCM to WebSocket ---
+    // Relay -> Browser
     let recv_transport = transport.clone();
     let recv_decoder = decoder.clone();
     let recv_task = tokio::spawn(async move {
@@ -194,19 +225,19 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         dec.ingest(pkt);
                         if !is_repair {
                             if let Some(_n) = dec.decode_next(&mut pcm_buf) {
-                                // Convert i16 PCM to bytes and send to browser
                                 let bytes: Vec<u8> = pcm_buf
                                     .iter()
                                     .flat_map(|s| s.to_le_bytes())
                                     .collect();
-                                if let Err(e) = ws_sender.send(Message::Binary(bytes.into())).await
+                                if let Err(e) =
+                                    ws_sender.send(Message::Binary(bytes.into())).await
                                 {
                                     error!("ws send error: {e}");
                                     return;
                                 }
                                 frames_recv += 1;
                                 if frames_recv % 250 == 0 {
-                                    info!(frames_recv, "relay → browser");
+                                    info!(frames_recv, "relay -> browser");
                                 }
                             }
                         }
