@@ -193,9 +193,14 @@ function playAudio(pcmInt16) {
 
   const now = audioCtx.currentTime;
 
-  if (nextPlayTime < now || nextPlayTime > now + 0.2) {
-    // Behind or drifted too far ahead — snap to now + 40ms
-    nextPlayTime = now + 0.04;
+  const drift = nextPlayTime - now;
+  if (drift < 0) {
+    // Fell behind — catch up
+    nextPlayTime = now + 0.02;
+  } else if (drift > 1.0) {
+    // More than 1 second ahead — hard reset (real drift)
+    console.log('drift reset:', drift.toFixed(3) + 's');
+    nextPlayTime = now + 0.02;
   }
   source.start(nextPlayTime);
   nextPlayTime += buffer.duration;
