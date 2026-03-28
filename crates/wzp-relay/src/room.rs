@@ -3,12 +3,12 @@
 //! Each room holds N participants. When one participant sends a media packet,
 //! the relay forwards it to all other participants in the room (SFU model).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use wzp_proto::MediaTransport;
 
@@ -72,24 +72,67 @@ impl Room {
 /// Manages all rooms on the relay.
 pub struct RoomManager {
     rooms: HashMap<String, Room>,
+    /// Room access control list. Maps hashed room name → allowed fingerprints.
+    /// When `None`, rooms are open (no auth mode). When `Some`, only listed
+    /// fingerprints can join the corresponding room.
+    acl: Option<HashMap<String, HashSet<String>>>,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
         Self {
             rooms: HashMap::new(),
+            acl: None,
         }
     }
 
-    /// Join a room. Returns the participant ID.
+    /// Create a room manager with ACL enforcement enabled.
+    pub fn with_acl() -> Self {
+        Self {
+            rooms: HashMap::new(),
+            acl: Some(HashMap::new()),
+        }
+    }
+
+    /// Grant a fingerprint access to a room.
+    pub fn allow(&mut self, room_name: &str, fingerprint: &str) {
+        if let Some(ref mut acl) = self.acl {
+            acl.entry(room_name.to_string())
+                .or_default()
+                .insert(fingerprint.to_string());
+        }
+    }
+
+    /// Check if a fingerprint is authorized to join a room.
+    /// Returns true if ACL is disabled (open mode) or the fingerprint is in the allow list.
+    pub fn is_authorized(&self, room_name: &str, fingerprint: Option<&str>) -> bool {
+        match (&self.acl, fingerprint) {
+            (None, _) => true, // no ACL = open
+            (Some(_), None) => false, // ACL enabled but no fingerprint
+            (Some(acl), Some(fp)) => {
+                // Room not in ACL = open room (allow anyone authenticated)
+                match acl.get(room_name) {
+                    None => true,
+                    Some(allowed) => allowed.contains(fp),
+                }
+            }
+        }
+    }
+
+    /// Join a room. Returns the participant ID or an error if unauthorized.
     pub fn join(
         &mut self,
         room_name: &str,
         addr: std::net::SocketAddr,
         transport: Arc<wzp_transport::QuinnTransport>,
-    ) -> ParticipantId {
+        fingerprint: Option<&str>,
+    ) -> Result<ParticipantId, String> {
+        if !self.is_authorized(room_name, fingerprint) {
+            warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
+            return Err("not authorized for this room".to_string());
+        }
         let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
-        room.add(addr, transport)
+        Ok(room.add(addr, transport))
     }
 
     /// Leave a room. Removes the room if empty.
@@ -193,8 +236,32 @@ mod tests {
     #[test]
     fn room_join_leave() {
         let mut mgr = RoomManager::new();
-        // Can't test with real transports, but test the room logic
         assert_eq!(mgr.room_size("test"), 0);
         assert!(mgr.list().is_empty());
+    }
+
+    #[test]
+    fn acl_open_mode_allows_all() {
+        let mgr = RoomManager::new();
+        assert!(mgr.is_authorized("any-room", None));
+        assert!(mgr.is_authorized("any-room", Some("abc")));
+    }
+
+    #[test]
+    fn acl_enforced_requires_fingerprint() {
+        let mgr = RoomManager::with_acl();
+        assert!(!mgr.is_authorized("room1", None));
+        // Room not in ACL = open to any authenticated user
+        assert!(mgr.is_authorized("room1", Some("abc")));
+    }
+
+    #[test]
+    fn acl_restricts_to_allowed() {
+        let mut mgr = RoomManager::with_acl();
+        mgr.allow("room1", "alice");
+        mgr.allow("room1", "bob");
+        assert!(mgr.is_authorized("room1", Some("alice")));
+        assert!(mgr.is_authorized("room1", Some("bob")));
+        assert!(!mgr.is_authorized("room1", Some("eve")));
     }
 }

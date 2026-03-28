@@ -140,7 +140,10 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    info!(addr = %config.listen_addr, "WarzonePhone relay starting");
+    // Generate ephemeral relay identity for crypto handshake
+    let relay_seed = wzp_crypto::Seed::generate();
+    let relay_fp = relay_seed.derive_identity().public_identity().fingerprint;
+    info!(addr = %config.listen_addr, fingerprint = %relay_fp, "WarzonePhone relay starting");
 
     let (server_config, _cert) = wzp_transport::server_config();
     let endpoint = wzp_transport::create_endpoint(config.listen_addr, Some(server_config))?;
@@ -177,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         let remote_transport = remote_transport.clone();
         let room_mgr = room_mgr.clone();
         let auth_url = config.auth_url.clone();
+        let relay_seed_bytes = relay_seed.0;
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -192,7 +196,8 @@ async fn main() -> anyhow::Result<()> {
             let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
             // Auth check: if --auth-url is set, expect first signal message to be a token
-            if let Some(ref url) = auth_url {
+            // Auth: if --auth-url is set, expect AuthToken as first signal
+            let authenticated_fp: Option<String> = if let Some(ref url) = auth_url {
                 info!(%addr, "waiting for auth token...");
                 match transport.recv_signal().await {
                     Ok(Some(wzp_proto::SignalMessage::AuthToken { token })) => {
@@ -204,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
                                     alias = ?client.alias,
                                     "authenticated"
                                 );
+                                Some(client.fingerprint)
                             }
                             Err(e) => {
                                 error!(%addr, "auth failed: {e}");
@@ -227,9 +233,27 @@ async fn main() -> anyhow::Result<()> {
                         return;
                     }
                 }
-            }
+            } else {
+                None
+            };
 
-            info!(%addr, room = %room_name, "client joined");
+            // Crypto handshake: verify client identity + negotiate quality profile
+            let (_crypto_session, _chosen_profile) = match wzp_relay::handshake::accept_handshake(
+                &*transport,
+                &relay_seed_bytes,
+            ).await {
+                Ok(result) => {
+                    info!(%addr, "crypto handshake complete");
+                    result
+                }
+                Err(e) => {
+                    error!(%addr, "handshake failed: {e}");
+                    transport.close().await.ok();
+                    return;
+                }
+            };
+
+            info!(%addr, room = %room_name, "client joining");
 
             if let Some(remote) = remote_transport {
                 // Forward mode — same as before
@@ -263,7 +287,14 @@ async fn main() -> anyhow::Result<()> {
                 // Room mode — join room and forward to all others
                 let participant_id = {
                     let mut mgr = room_mgr.lock().await;
-                    mgr.join(&room_name, addr, transport.clone())
+                    match mgr.join(&room_name, addr, transport.clone(), authenticated_fp.as_deref()) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            error!(%addr, room = %room_name, "room join denied: {e}");
+                            transport.close().await.ok();
+                            return;
+                        }
+                    }
                 };
 
                 room::run_participant(

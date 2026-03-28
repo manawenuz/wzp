@@ -187,6 +187,22 @@ pub struct PublicIdentity {
     pub fingerprint: Fingerprint,
 }
 
+/// Hash a human-readable room/group name into an opaque hex string.
+/// Used as QUIC SNI to prevent leaking group names to network observers.
+///
+/// `hash_room_name("my-group")` → 32 hex chars (16 bytes of SHA-256).
+///
+/// Mirrors the convention in featherChat WZP-FC-5:
+/// `SHA-256("featherchat-group:" + group_name)[:16]`
+pub fn hash_room_name(group_name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"featherchat-group:");
+    hasher.update(group_name.as_bytes());
+    let hash = hasher.finalize();
+    hex::encode(&hash[..16])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +245,20 @@ mod tests {
         // Format: xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
         assert_eq!(fp_str.len(), 39);
         assert_eq!(fp_str.chars().filter(|c| *c == ':').count(), 7);
+    }
+
+    #[test]
+    fn hash_room_name_deterministic() {
+        let h1 = hash_room_name("my-group");
+        let h2 = hash_room_name("my-group");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32); // 16 bytes = 32 hex chars
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_room_name_different_inputs() {
+        assert_ne!(hash_room_name("alpha"), hash_room_name("beta"));
     }
 
     #[test]

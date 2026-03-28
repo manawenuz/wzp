@@ -3839,7 +3839,9 @@ dependencies = [
  "futures",
  "rcgen",
  "rustls",
+ "rustls-pemfile",
  "rustls-pki-types",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tower-http",
@@ -3850,6 +3852,7 @@ dependencies = [
  "wzp-crypto",
  "wzp-fec",
  "wzp-proto",
+ "wzp-relay",
  "wzp-transport",
 ]
 

@@ -42,6 +42,8 @@ struct CliArgs {
     echo_test_secs: Option<u32>,
     seed_hex: Option<String>,
     mnemonic: Option<String>,
+    room: Option<String>,
+    token: Option<String>,
 }
 
 impl CliArgs {
@@ -78,6 +80,8 @@ fn parse_args() -> CliArgs {
     let mut echo_test_secs = None;
     let mut seed_hex = None;
     let mut mnemonic = None;
+    let mut room = None;
+    let mut token = None;
     let mut relay_str = None;
 
     let mut i = 1;
@@ -116,6 +120,14 @@ fn parse_args() -> CliArgs {
                 i -= 1; // back up since outer loop will increment
                 mnemonic = Some(words.join(" "));
             }
+            "--room" => {
+                i += 1;
+                room = Some(args.get(i).expect("--room requires a name").to_string());
+            }
+            "--token" => {
+                i += 1;
+                token = Some(args.get(i).expect("--token requires a value").to_string());
+            }
             "--record" => {
                 i += 1;
                 record_file = Some(
@@ -144,6 +156,8 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
                 eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
+                eprintln!("  --room <name>          Room name (hashed for privacy before sending)");
+                eprintln!("  --token <token>        featherChat bearer token for relay auth");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
                 eprintln!();
                 eprintln!("Default relay: 127.0.0.1:4433");
@@ -175,6 +189,8 @@ fn parse_args() -> CliArgs {
         echo_test_secs,
         seed_hex,
         mnemonic,
+        room,
+        token,
     }
 }
 
@@ -183,15 +199,26 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
     let cli = parse_args();
-    let _seed = cli.resolve_seed();
+    let seed = cli.resolve_seed();
 
     info!(
         relay = %cli.relay_addr,
         live = cli.live,
         send_tone = ?cli.send_tone_secs,
         record = ?cli.record_file,
+        room = ?cli.room,
         "WarzonePhone client"
     );
+
+    // Hash room name for SNI privacy (or "default" if none specified)
+    let sni = match &cli.room {
+        Some(name) => {
+            let hashed = wzp_crypto::hash_room_name(name);
+            info!(room = %name, hashed = %hashed, "room name hashed for SNI");
+            hashed
+        }
+        None => "default".to_string(),
+    };
 
     let client_config = wzp_transport::client_config();
     let bind_addr = if cli.relay_addr.is_ipv6() {
@@ -201,11 +228,27 @@ async fn main() -> anyhow::Result<()> {
     };
     let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
     let connection =
-        wzp_transport::connect(&endpoint, cli.relay_addr, "localhost", client_config).await?;
+        wzp_transport::connect(&endpoint, cli.relay_addr, &sni, client_config).await?;
 
     info!("Connected to relay");
 
     let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
+
+    // Send auth token if provided (relay with --auth-url expects this first)
+    if let Some(ref token) = cli.token {
+        let auth = wzp_proto::SignalMessage::AuthToken {
+            token: token.clone(),
+        };
+        transport.send_signal(&auth).await?;
+        info!("auth token sent");
+    }
+
+    // Crypto handshake — establishes verified identity + session key
+    let _crypto_session = wzp_client::handshake::perform_handshake(
+        &*transport,
+        &seed.0,
+    ).await?;
+    info!("crypto handshake complete");
 
     if cli.live {
         #[cfg(feature = "audio")]

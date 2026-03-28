@@ -31,6 +31,7 @@ const FRAME_SAMPLES: usize = 960;
 struct AppState {
     relay_addr: SocketAddr,
     rooms: Arc<Mutex<HashMap<String, RoomSlot>>>,
+    auth_url: Option<String>,
 }
 
 /// A waiting client in a room.
@@ -51,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
     let mut port: u16 = 8080;
     let mut relay_addr: SocketAddr = "127.0.0.1:4433".parse()?;
     let mut use_tls = false;
+    let mut auth_url: Option<String> = None;
+    let mut cert_path: Option<String> = None;
+    let mut key_path: Option<String> = None;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -59,16 +63,22 @@ async fn main() -> anyhow::Result<()> {
             "--port" => { i += 1; port = args[i].parse().expect("invalid port"); }
             "--relay" => { i += 1; relay_addr = args[i].parse().expect("invalid relay address"); }
             "--tls" => { use_tls = true; }
+            "--auth-url" => { i += 1; auth_url = Some(args[i].clone()); }
+            "--cert" => { i += 1; cert_path = Some(args[i].clone()); }
+            "--key" => { i += 1; key_path = Some(args[i].clone()); }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433] [--tls]");
+                eprintln!("Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433] [--tls] [--auth-url <url>]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --port <port>     HTTP/WebSocket port (default: 8080)");
-                eprintln!("  --relay <addr>    WZP relay address (default: 127.0.0.1:4433)");
-                eprintln!("  --tls             Enable HTTPS (required for mic on Android)");
+                eprintln!("  --port <port>      HTTP/WebSocket port (default: 8080)");
+                eprintln!("  --relay <addr>     WZP relay address (default: 127.0.0.1:4433)");
+                eprintln!("  --tls              Enable HTTPS (required for mic on Android)");
+                eprintln!("  --auth-url <url>   featherChat auth endpoint for token validation");
+                eprintln!("  --cert <path>      TLS certificate PEM file (optional, overrides self-signed)");
+                eprintln!("  --key <path>       TLS private key PEM file (optional, overrides self-signed)");
                 eprintln!();
                 eprintln!("Rooms: open https://host:port/<room-name> to join a room.");
-                eprintln!("Two clients in the same room are connected for a call.");
+                eprintln!("Browser sends auth JSON as first WS message when --auth-url is set.");
                 std::process::exit(0);
             }
             _ => {}
@@ -76,9 +86,14 @@ async fn main() -> anyhow::Result<()> {
         i += 1;
     }
 
+    if let Some(ref url) = auth_url {
+        info!(url, "auth enabled — browsers must send token as first WS message");
+    }
+
     let state = AppState {
         relay_addr,
         rooms: Arc::new(Mutex::new(HashMap::new())),
+        auth_url,
     };
 
     let static_dir = if std::path::Path::new("crates/wzp-web/static").exists() {
@@ -97,12 +112,28 @@ async fn main() -> anyhow::Result<()> {
     let listen: SocketAddr = format!("0.0.0.0:{port}").parse()?;
 
     if use_tls {
-        let cert_key = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_string(), "wzp".to_string(),
-        ])?;
-        let cert_der = rustls_pki_types::CertificateDer::from(cert_key.cert);
-        let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert_key.key_pair.serialize_der())
-            .map_err(|e| anyhow::anyhow!("key error: {e}"))?;
+        let (cert_der, key_der) = if let (Some(cp), Some(kp)) = (&cert_path, &key_path) {
+            // Load real certificates from files
+            info!(cert = %cp, key = %kp, "loading TLS certificates from files");
+            let cert_pem = std::fs::read(cp)?;
+            let key_pem = std::fs::read(kp)?;
+            let cert = rustls_pemfile::certs(&mut &cert_pem[..])
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("no certificate found in PEM"))??;
+            let key = rustls_pemfile::private_key(&mut &key_pem[..])?
+                .ok_or_else(|| anyhow::anyhow!("no private key found in PEM"))?;
+            (cert, key)
+        } else {
+            // Generate self-signed for development
+            info!("generating self-signed TLS certificate (use --cert/--key for production)");
+            let cert_key = rcgen::generate_simple_self_signed(vec![
+                "localhost".to_string(), "wzp".to_string(),
+            ])?;
+            let cert = rustls_pki_types::CertificateDer::from(cert_key.cert);
+            let key = rustls_pki_types::PrivateKeyDer::try_from(cert_key.key_pair.serialize_der())
+                .map_err(|e| anyhow::anyhow!("key error: {e}"))?;
+            (cert, key)
+        };
 
         let mut tls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -141,6 +172,49 @@ async fn ws_handler(
 async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     info!(room = %room, "client joined room");
 
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Auth: if --auth-url is set, expect a JSON auth message from the browser first
+    let browser_token: Option<String> = if state.auth_url.is_some() {
+        info!(room = %room, "waiting for auth token from browser...");
+        match ws_receiver.next().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(v) if v.get("type").and_then(|t| t.as_str()) == Some("auth") => {
+                        let token = v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                        if token.is_empty() {
+                            error!(room = %room, "empty auth token");
+                            return;
+                        }
+                        // Validate against featherChat
+                        if let Some(ref url) = state.auth_url {
+                            match wzp_relay::auth::validate_token(url, &token).await {
+                                Ok(client) => {
+                                    info!(room = %room, fingerprint = %client.fingerprint, "browser authenticated");
+                                }
+                                Err(e) => {
+                                    error!(room = %room, "browser auth failed: {e}");
+                                    return;
+                                }
+                            }
+                        }
+                        Some(token)
+                    }
+                    _ => {
+                        error!(room = %room, "expected auth JSON, got: {text}");
+                        return;
+                    }
+                }
+            }
+            _ => {
+                error!(room = %room, "no auth message from browser");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     // Connect to relay
     let relay_addr = state.relay_addr;
     let bind_addr: SocketAddr = if relay_addr.is_ipv6() {
@@ -155,10 +229,14 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
         Err(e) => { error!("create endpoint: {e}"); return; }
     };
 
-    // Pass room name as QUIC SNI so the relay knows which room to join
-    let sni = if room.is_empty() { "default" } else { &room };
+    // Hash room name for SNI privacy
+    let sni = if room.is_empty() {
+        "default".to_string()
+    } else {
+        wzp_crypto::hash_room_name(&room)
+    };
     let connection =
-        match wzp_transport::connect(&endpoint, relay_addr, sni, client_config).await {
+        match wzp_transport::connect(&endpoint, relay_addr, &sni, client_config).await {
             Ok(c) => c,
             Err(e) => { error!("connect to relay: {e}"); return; }
         };
@@ -166,9 +244,32 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     info!(room = %room, "connected to relay");
 
     let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
-    let config = CallConfig::default();
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    // Send auth token to relay (if auth is enabled)
+    if let Some(ref token) = browser_token {
+        let auth = wzp_proto::SignalMessage::AuthToken {
+            token: token.clone(),
+        };
+        if let Err(e) = transport.send_signal(&auth).await {
+            error!(room = %room, "send auth to relay: {e}");
+            return;
+        }
+    }
+
+    // Crypto handshake with relay
+    let bridge_seed = wzp_crypto::Seed::generate();
+    match wzp_client::handshake::perform_handshake(&*transport, &bridge_seed.0).await {
+        Ok(_session) => {
+            info!(room = %room, "crypto handshake with relay complete");
+        }
+        Err(e) => {
+            error!(room = %room, "relay handshake failed: {e}");
+            transport.close().await.ok();
+            return;
+        }
+    }
+
+    let config = CallConfig::default();
     let encoder = Arc::new(Mutex::new(CallEncoder::new(&config)));
     let decoder = Arc::new(Mutex::new(CallDecoder::new(&config)));
 
