@@ -99,10 +99,17 @@ async fn main() -> anyhow::Result<()> {
         "static"
     };
 
+    // Serve index.html for any path that isn't /ws/, /metrics, or a static file.
+    // This lets URLs like /manwe load the SPA which reads the room from the path.
+    let static_service = ServeDir::new(static_dir)
+        .fallback(tower_http::services::ServeFile::new(
+            format!("{}/index.html", static_dir),
+        ));
+
     let app = Router::new()
         .route("/ws/{room}", get(ws_handler))
         .route("/metrics", get(metrics::metrics_handler))
-        .fallback_service(ServeDir::new(static_dir))
+        .fallback_service(static_service)
         .with_state(state);
 
     let listen: SocketAddr = format!("0.0.0.0:{port}").parse()?;

@@ -66,13 +66,20 @@ let statsInterval = null;
 
 // Use room from URL path or input field
 function getRoom() {
-  // Check URL: /roomname or /#roomname
   const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
   if (path && path !== 'index.html') return path;
   const hash = location.hash.replace('#', '');
   if (hash) return hash;
   return document.getElementById('room').value.trim() || 'default';
 }
+
+// Pre-fill room input from URL on page load
+(function() {
+  const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  if (path && path !== 'index.html') {
+    document.getElementById('room').value = path;
+  }
+})();
 
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
 function setStats(msg) { document.getElementById('stats').textContent = msg; }
