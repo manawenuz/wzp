@@ -94,7 +94,7 @@ do_prepare() {
 
   # Install build dependencies
   echo "[3/5] Installing build dependencies..."
-  ssh_cmd "apt-get update -qq && apt-get install -y -qq build-essential cmake pkg-config libasound2-dev curl git libstdc++-12-dev > /dev/null 2>&1"
+  ssh_cmd "apt-get update -qq && apt-get install -y -qq build-essential cmake pkg-config libasound2-dev libssl-dev curl git libstdc++-12-dev > /dev/null 2>&1"
 
   # Install Rust
   echo "[4/5] Installing Rust..."
