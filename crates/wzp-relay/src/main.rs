@@ -38,17 +38,23 @@ fn parse_args() -> RelayConfig {
                         .parse().expect("invalid --remote address"),
                 );
             }
+            "--auth-url" => {
+                i += 1;
+                config.auth_url = Some(
+                    args.get(i).expect("--auth-url requires a URL").to_string(),
+                );
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>]");
+                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --listen <addr>  Listen address (default: 0.0.0.0:4433)");
-                eprintln!("  --remote <addr>  Remote relay for forwarding (disables room mode)");
+                eprintln!("  --listen <addr>    Listen address (default: 0.0.0.0:4433)");
+                eprintln!("  --remote <addr>    Remote relay for forwarding (disables room mode)");
+                eprintln!("  --auth-url <url>   featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
+                eprintln!("                     When set, clients must send a bearer token as first signal message.");
                 eprintln!();
                 eprintln!("Room mode (default):");
-                eprintln!("  Clients join rooms by name. Packets are forwarded to all");
-                eprintln!("  other participants in the same room (SFU model).");
-                eprintln!("  Room name comes from QUIC SNI or defaults to 'default'.");
+                eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
                 std::process::exit(0);
             }
             other => {
@@ -154,6 +160,12 @@ async fn main() -> anyhow::Result<()> {
     // Room manager (room mode only)
     let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
 
+    if let Some(ref url) = config.auth_url {
+        info!(url, "auth enabled — clients must present featherChat token");
+    } else {
+        info!("auth disabled — any client can connect (use --auth-url to enable)");
+    }
+
     info!("Listening for connections...");
 
     loop {
@@ -164,12 +176,11 @@ async fn main() -> anyhow::Result<()> {
 
         let remote_transport = remote_transport.clone();
         let room_mgr = room_mgr.clone();
+        let auth_url = config.auth_url.clone();
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
 
-            // Extract room name from QUIC handshake data (SNI).
-            // The web bridge connects with the room name as server_name.
             let room_name = connection
                 .handshake_data()
                 .and_then(|hd| {
@@ -180,7 +191,45 @@ async fn main() -> anyhow::Result<()> {
 
             let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
-            info!(%addr, room = %room_name, "new client");
+            // Auth check: if --auth-url is set, expect first signal message to be a token
+            if let Some(ref url) = auth_url {
+                info!(%addr, "waiting for auth token...");
+                match transport.recv_signal().await {
+                    Ok(Some(wzp_proto::SignalMessage::AuthToken { token })) => {
+                        match wzp_relay::auth::validate_token(url, &token).await {
+                            Ok(client) => {
+                                info!(
+                                    %addr,
+                                    fingerprint = %client.fingerprint,
+                                    alias = ?client.alias,
+                                    "authenticated"
+                                );
+                            }
+                            Err(e) => {
+                                error!(%addr, "auth failed: {e}");
+                                transport.close().await.ok();
+                                return;
+                            }
+                        }
+                    }
+                    Ok(Some(_)) => {
+                        error!(%addr, "expected AuthToken as first signal, got something else");
+                        transport.close().await.ok();
+                        return;
+                    }
+                    Ok(None) => {
+                        error!(%addr, "connection closed before auth");
+                        return;
+                    }
+                    Err(e) => {
+                        error!(%addr, "signal recv error during auth: {e}");
+                        transport.close().await.ok();
+                        return;
+                    }
+                }
+            }
+
+            info!(%addr, room = %room_name, "client joined");
 
             if let Some(remote) = remote_transport {
                 // Forward mode — same as before

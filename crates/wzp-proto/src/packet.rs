@@ -297,6 +297,10 @@ pub enum SignalMessage {
 
     /// End the call.
     Hangup { reason: HangupReason },
+
+    /// featherChat bearer token for relay authentication.
+    /// Sent as the first signal message when --auth-url is configured.
+    AuthToken { token: String },
 }
 
 /// Reasons for ending a call.

@@ -11,6 +11,7 @@ pub mod audio_io;
 pub mod bench;
 pub mod call;
 pub mod echo_test;
+pub mod featherchat;
 pub mod handshake;
 
 #[cfg(feature = "audio")]

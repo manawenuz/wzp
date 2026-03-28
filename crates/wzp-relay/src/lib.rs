@@ -7,6 +7,7 @@
 //! It operates on FEC-protected packets, managing loss recovery and adaptive
 //! quality transitions.
 
+pub mod auth;
 pub mod config;
 pub mod handshake;
 pub mod pipeline;

@@ -19,6 +19,9 @@ pub struct RelayConfig {
     pub jitter_max_depth: usize,
     /// Logging level (trace, debug, info, warn, error).
     pub log_level: String,
+    /// featherChat auth validation URL (e.g., "https://chat.example.com/v1/auth/validate").
+    /// If set, clients must present a valid token before joining rooms.
+    pub auth_url: Option<String>,
 }
 
 impl Default for RelayConfig {
@@ -30,6 +33,7 @@ impl Default for RelayConfig {
             jitter_target_depth: 50,
             jitter_max_depth: 250,
             log_level: "info".to_string(),
+            auth_url: None,
         }
     }
 }
