@@ -3806,6 +3806,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wzp-client",
  "wzp-codec",
  "wzp-crypto",
  "wzp-fec",

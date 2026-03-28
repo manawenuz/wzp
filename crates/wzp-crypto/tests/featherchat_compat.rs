@@ -311,3 +311,261 @@ fn all_signal_types_map_correctly() {
         assert_eq!(name, expected_name, "signal type mapping for {expected_name}");
     }
 }
+
+// ─── Room Hashing + Access Control ─────────────────────────────────────────
+
+#[test]
+fn hash_room_name_deterministic() {
+    let h1 = wzp_crypto::hash_room_name("ops-channel");
+    let h2 = wzp_crypto::hash_room_name("ops-channel");
+    assert_eq!(h1, h2, "same input must produce same hash");
+}
+
+#[test]
+fn hash_room_name_is_32_hex_chars() {
+    let h = wzp_crypto::hash_room_name("test-room");
+    assert_eq!(h.len(), 32, "hash must be 32 hex chars (16 bytes)");
+    assert!(
+        h.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash must contain only hex characters, got: {h}"
+    );
+}
+
+#[test]
+fn hash_room_name_different_inputs() {
+    let h1 = wzp_crypto::hash_room_name("alpha");
+    let h2 = wzp_crypto::hash_room_name("beta");
+    let h3 = wzp_crypto::hash_room_name("alpha-2");
+    assert_ne!(h1, h2, "different names must produce different hashes");
+    assert_ne!(h1, h3);
+    assert_ne!(h2, h3);
+}
+
+#[test]
+fn hash_room_name_matches_fc_convention() {
+    // Manual SHA-256("featherchat-group:" + name)[:16] using the sha2 crate directly
+    use sha2::{Digest, Sha256};
+
+    let name = "warzone-squad";
+    let mut hasher = Sha256::new();
+    hasher.update(b"featherchat-group:");
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    let expected = hex::encode(&digest[..16]);
+
+    let actual = wzp_crypto::hash_room_name(name);
+    assert_eq!(
+        actual, expected,
+        "hash_room_name must equal SHA-256('featherchat-group:' + name)[:16]"
+    );
+}
+
+#[test]
+fn room_acl_open_mode() {
+    let mgr = wzp_relay::room::RoomManager::new();
+    // Open mode: everyone is authorized regardless of fingerprint presence
+    assert!(mgr.is_authorized("any-room", None));
+    assert!(mgr.is_authorized("any-room", Some("random-fp")));
+    assert!(mgr.is_authorized("another-room", Some("abc:def")));
+}
+
+#[test]
+fn room_acl_enforced() {
+    let mgr = wzp_relay::room::RoomManager::with_acl();
+    // ACL enabled but no fingerprint provided => denied
+    assert!(
+        !mgr.is_authorized("room1", None),
+        "ACL mode must reject connections without a fingerprint"
+    );
+}
+
+#[test]
+fn room_acl_allows_listed() {
+    let mut mgr = wzp_relay::room::RoomManager::with_acl();
+    mgr.allow("secure-room", "alice-fp");
+    mgr.allow("secure-room", "bob-fp");
+
+    assert!(mgr.is_authorized("secure-room", Some("alice-fp")));
+    assert!(mgr.is_authorized("secure-room", Some("bob-fp")));
+}
+
+#[test]
+fn room_acl_denies_unlisted() {
+    let mut mgr = wzp_relay::room::RoomManager::with_acl();
+    mgr.allow("secure-room", "alice-fp");
+
+    assert!(
+        !mgr.is_authorized("secure-room", Some("eve-fp")),
+        "unlisted fingerprints must be denied"
+    );
+    assert!(
+        !mgr.is_authorized("secure-room", Some("mallory-fp")),
+        "unlisted fingerprints must be denied"
+    );
+    // No fingerprint at all => also denied
+    assert!(
+        !mgr.is_authorized("secure-room", None),
+        "no fingerprint must be denied in ACL mode"
+    );
+}
+
+// ─── Web Bridge Auth + Proto Standalone + S-9 ──────────────────────────────
+
+/// WZP-S-6: featherChat may include `eth_address` in ValidateResponse.
+/// WZP's ValidateResponse must handle it gracefully (serde ignores unknown fields).
+#[test]
+fn auth_response_with_eth_address() {
+    // FC response with eth_address present (non-null)
+    let with_eth = serde_json::json!({
+        "valid": true,
+        "fingerprint": "a1b2:c3d4:e5f6:7890:abcd:ef01:2345:6789",
+        "alias": "vitalik",
+        "eth_address": "0x1234567890abcdef1234567890abcdef12345678"
+    });
+    let resp: wzp_relay::auth::ValidateResponse =
+        serde_json::from_value(with_eth).unwrap();
+    assert!(resp.valid);
+    assert_eq!(
+        resp.fingerprint.unwrap(),
+        "a1b2:c3d4:e5f6:7890:abcd:ef01:2345:6789"
+    );
+    assert_eq!(resp.alias.unwrap(), "vitalik");
+
+    // FC response with eth_address = null
+    let with_null_eth = serde_json::json!({
+        "valid": true,
+        "fingerprint": "dead:beef:cafe:babe:1234:5678:9abc:def0",
+        "alias": "anon",
+        "eth_address": null
+    });
+    let resp2: wzp_relay::auth::ValidateResponse =
+        serde_json::from_value(with_null_eth).unwrap();
+    assert!(resp2.valid);
+    assert_eq!(
+        resp2.fingerprint.unwrap(),
+        "dead:beef:cafe:babe:1234:5678:9abc:def0"
+    );
+
+    // FC response without eth_address at all
+    let without_eth = serde_json::json!({
+        "valid": false
+    });
+    let resp3: wzp_relay::auth::ValidateResponse =
+        serde_json::from_value(without_eth).unwrap();
+    assert!(!resp3.valid);
+}
+
+/// WZP-S-7: SignalMessage::AuthToken { token } exists and round-trips via serde.
+#[test]
+fn wzp_proto_has_auth_token_variant() {
+    let msg = wzp_proto::SignalMessage::AuthToken {
+        token: "fc-bearer-token-xyz".to_string(),
+    };
+
+    // Serialize to JSON
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(json.contains("AuthToken"));
+    assert!(json.contains("fc-bearer-token-xyz"));
+
+    // Deserialize back
+    let decoded: wzp_proto::SignalMessage = serde_json::from_str(&json).unwrap();
+    if let wzp_proto::SignalMessage::AuthToken { token } = decoded {
+        assert_eq!(token, "fc-bearer-token-xyz");
+    } else {
+        panic!("expected AuthToken variant, got: {decoded:?}");
+    }
+}
+
+/// WZP-S-6: WZP CallSignalType has all variants matching featherChat's set.
+#[test]
+fn all_fc_call_signal_types_representable() {
+    use wzp_client::featherchat::CallSignalType;
+
+    // Verify each FC variant can be constructed and debug-printed
+    let variants: Vec<(CallSignalType, &str)> = vec![
+        (CallSignalType::Offer, "Offer"),
+        (CallSignalType::Answer, "Answer"),
+        (CallSignalType::IceCandidate, "IceCandidate"),
+        (CallSignalType::Hangup, "Hangup"),
+        (CallSignalType::Reject, "Reject"),
+        (CallSignalType::Ringing, "Ringing"),
+        (CallSignalType::Busy, "Busy"),
+    ];
+
+    assert_eq!(variants.len(), 7, "featherChat defines exactly 7 call signal types");
+
+    for (variant, expected_name) in &variants {
+        let name = format!("{variant:?}");
+        assert_eq!(&name, expected_name);
+
+        // Each variant should serialize/deserialize cleanly
+        let json = serde_json::to_string(variant).unwrap();
+        let round_tripped: CallSignalType = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{round_tripped:?}"), *expected_name);
+    }
+}
+
+/// WZP-S-9: hashed room name used as QUIC SNI must be valid — lowercase hex only.
+#[test]
+fn hash_room_name_used_as_sni_is_valid() {
+    let long_name = "x".repeat(1000);
+    let test_rooms = [
+        "general",
+        "Voice Room #1",
+        "café-lounge",
+        "a]b[c{d}e",
+        "\u{1f480}\u{1f525}",
+        long_name.as_str(),
+    ];
+
+    for room in &test_rooms {
+        let hashed = wzp_crypto::hash_room_name(room);
+
+        // Must be non-empty
+        assert!(!hashed.is_empty(), "hash of '{room}' must not be empty");
+
+        // Must contain only lowercase hex chars (valid for SNI)
+        for ch in hashed.chars() {
+            assert!(
+                ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase(),
+                "hash of '{room}' contains invalid SNI char: '{ch}' (full: {hashed})"
+            );
+        }
+
+        // SHA-256 truncated to 16 bytes -> 32 hex chars
+        assert_eq!(
+            hashed.len(),
+            32,
+            "hash should be 32 hex chars (16 bytes), got {} for '{room}'",
+            hashed.len()
+        );
+    }
+}
+
+/// WZP-S-7: wzp-proto Cargo.toml must be standalone — no `.workspace = true` inheritance.
+#[test]
+fn wzp_proto_cargo_toml_is_standalone() {
+    // Try both paths (run from workspace root or from crate directory)
+    let candidates = [
+        "crates/wzp-proto/Cargo.toml",
+        "../wzp-proto/Cargo.toml",
+    ];
+
+    let contents = candidates
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .expect("could not read crates/wzp-proto/Cargo.toml from any expected path");
+
+    // Must NOT contain ".workspace = true" anywhere — that would break standalone use
+    assert!(
+        !contents.contains(".workspace = true"),
+        "wzp-proto Cargo.toml must not use workspace inheritance (.workspace = true), \
+         found in:\n{contents}"
+    );
+
+    // Sanity: it should still be a valid Cargo.toml with the right package name
+    assert!(
+        contents.contains("name = \"wzp-proto\""),
+        "expected package name 'wzp-proto' in Cargo.toml"
+    );
+}

@@ -30,3 +30,6 @@ name = "wzp-relay"
 path = "src/main.rs"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wzp-transport = { workspace = true }
+wzp-client = { workspace = true }
