@@ -30,7 +30,7 @@ fn next_id() -> ParticipantId {
 /// A participant in a room.
 struct Participant {
     id: ParticipantId,
-    addr: std::net::SocketAddr,
+    _addr: std::net::SocketAddr,
     transport: Arc<wzp_transport::QuinnTransport>,
 }
 
@@ -49,7 +49,7 @@ impl Room {
     fn add(&mut self, addr: std::net::SocketAddr, transport: Arc<wzp_transport::QuinnTransport>) -> ParticipantId {
         let id = next_id();
         info!(room_size = self.participants.len() + 1, participant = id, %addr, "joined room");
-        self.participants.push(Participant { id, addr, transport });
+        self.participants.push(Participant { id, _addr: addr, transport });
         id
     }
 

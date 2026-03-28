@@ -7,7 +7,6 @@
 //!
 //! Rooms: clients connect to /ws/<room-name> and are paired by room.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -33,17 +32,8 @@ const FRAME_SAMPLES: usize = 960;
 #[derive(Clone)]
 struct AppState {
     relay_addr: SocketAddr,
-    rooms: Arc<Mutex<HashMap<String, RoomSlot>>>,
     auth_url: Option<String>,
     metrics: WebMetrics,
-}
-
-/// A waiting client in a room.
-struct RoomSlot {
-    /// Sender half — send audio TO this waiting client's browser.
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    /// Receiver half — receive audio FROM this waiting client's browser.
-    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<i16>>>>,
 }
 
 #[tokio::main]
@@ -97,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
     let web_metrics = WebMetrics::new();
     let state = AppState {
         relay_addr,
-        rooms: Arc::new(Mutex::new(HashMap::new())),
         auth_url,
         metrics: web_metrics,
     };

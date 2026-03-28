@@ -209,8 +209,6 @@ pub struct CallEncoder {
     timestamp_ms: u32,
     /// Silence detector for suppression.
     silence_detector: SilenceDetector,
-    /// Comfort noise generator for CN packets.
-    comfort_noise: ComfortNoise,
     /// Whether silence suppression is enabled.
     suppression_enabled: bool,
     /// Total frames suppressed (telemetry).
@@ -243,7 +241,6 @@ impl CallEncoder {
                 config.silence_threshold_rms,
                 config.silence_hangover_frames,
             ),
-            comfort_noise: ComfortNoise::new(config.comfort_noise_level),
             suppression_enabled: config.suppression_enabled,
             frames_suppressed: 0,
             cn_counter: 0,

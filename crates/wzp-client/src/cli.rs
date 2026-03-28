@@ -46,7 +46,7 @@ struct CliArgs {
     mnemonic: Option<String>,
     room: Option<String>,
     token: Option<String>,
-    metrics_file: Option<String>,
+    _metrics_file: Option<String>,
 }
 
 impl CliArgs {
@@ -220,7 +220,7 @@ fn parse_args() -> CliArgs {
         mnemonic,
         room,
         token,
-        metrics_file,
+        _metrics_file: metrics_file,
     }
 }
 

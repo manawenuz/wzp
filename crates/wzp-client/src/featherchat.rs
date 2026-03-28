@@ -11,10 +11,7 @@
 //! 5. Connects QUIC to relay for media
 
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
-
 use wzp_proto::packet::SignalMessage;
-use wzp_proto::QualityProfile;
 
 /// featherChat CallSignal types (mirrors warzone-protocol::message::CallSignalType).
 #[derive(Clone, Debug, Serialize, Deserialize)]
