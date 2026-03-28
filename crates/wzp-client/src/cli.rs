@@ -509,12 +509,13 @@ async fn run_file_mode(
     let all_pcm = if record_file.is_some() {
         // Wait a bit for remaining packets after sender finishes
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        // The recv task will be aborted when we drop it, but first
-        // let's signal it by closing transport
         transport.close().await?;
         recv_handle.await.unwrap_or_default()
     } else {
-        recv_handle.await.unwrap_or_default()
+        // No recording — just close and exit
+        transport.close().await?;
+        recv_handle.abort();
+        Vec::new()
     };
 
     // Write recorded audio to file
