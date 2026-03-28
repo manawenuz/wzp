@@ -1,329 +1,607 @@
-# WarzonePhone Protocol Design & Architecture
+# WarzonePhone Architecture
 
-## Network Topology
+> Custom lossy VoIP protocol built in Rust. E2E encrypted, FEC-protected, adaptive quality, designed for hostile network conditions.
 
+## System Overview
+
+```mermaid
+graph TB
+    subgraph "Client A (Browser/CLI)"
+        MIC[Microphone] --> DN[NoiseSupressor<br/>RNNoise ML]
+        DN --> SD[SilenceDetector<br/>VAD + Hangover]
+        SD --> ENC[CallEncoder<br/>Opus/Codec2]
+        ENC --> FEC_E[FEC Encoder<br/>RaptorQ]
+        FEC_E --> CRYPT_E[ChaCha20-Poly1305<br/>Encrypt]
+        CRYPT_E --> QUIC_S[QUIC Datagram<br/>Send]
+
+        QUIC_R[QUIC Datagram<br/>Recv] --> CRYPT_D[ChaCha20-Poly1305<br/>Decrypt]
+        CRYPT_D --> FEC_D[FEC Decoder<br/>RaptorQ]
+        FEC_D --> JIT[JitterBuffer<br/>Adaptive Playout]
+        JIT --> DEC[CallDecoder<br/>Opus/Codec2]
+        DEC --> SPK[Speaker]
+    end
+
+    subgraph "Relay (SFU)"
+        ACCEPT[Accept QUIC] --> AUTH{Auth?}
+        AUTH -->|token| VALIDATE[POST /v1/auth/validate]
+        AUTH -->|no auth| HS
+        VALIDATE --> HS[Crypto Handshake<br/>X25519 + Ed25519]
+        HS --> ROOM[Room Manager<br/>Named Rooms via SNI]
+        ROOM --> FWD[Forward to<br/>Other Participants]
+    end
+
+    subgraph "Client B"
+        B_SPK[Speaker]
+        B_MIC[Microphone]
+    end
+
+    QUIC_S -->|UDP/QUIC| ACCEPT
+    FWD -->|UDP/QUIC| QUIC_R
+    B_MIC -.->|same pipeline| ACCEPT
+    FWD -.->|same pipeline| B_SPK
+
+    style MIC fill:#4a9eff
+    style SPK fill:#4a9eff
+    style B_MIC fill:#4a9eff
+    style B_SPK fill:#4a9eff
+    style ROOM fill:#ff9f43
+    style CRYPT_E fill:#ee5a24
+    style CRYPT_D fill:#ee5a24
 ```
-                 Lossy / censored link
-                 ◄──────────────────────►
-  ┌────────┐      ┌─────────┐      ┌─────────┐      ┌─────────────┐
-  │ Client │─QUIC─│ Relay A │─QUIC─│ Relay B │─QUIC─│ Destination │
-  └────────┘      └─────────┘      └─────────┘      └─────────────┘
-      │                │                │                   │
-   Encode           Forward          Forward             Decode
-   FEC              FEC              FEC                 FEC
-   Encrypt          (opaque)         (opaque)            Decrypt
+
+## Crate Dependency Graph
+
+```mermaid
+graph TD
+    PROTO[wzp-proto<br/>Types, Traits, Wire Format]
+
+    CODEC[wzp-codec<br/>Opus + Codec2 + RNNoise]
+    FEC[wzp-fec<br/>RaptorQ FEC]
+    CRYPTO[wzp-crypto<br/>ChaCha20 + Identity]
+    TRANSPORT[wzp-transport<br/>QUIC/Quinn]
+
+    RELAY[wzp-relay<br/>Relay Daemon]
+    CLIENT[wzp-client<br/>CLI + Call Engine]
+    WEB[wzp-web<br/>Browser Bridge]
+
+    PROTO --> CODEC
+    PROTO --> FEC
+    PROTO --> CRYPTO
+    PROTO --> TRANSPORT
+
+    CODEC --> CLIENT
+    FEC --> CLIENT
+    CRYPTO --> CLIENT
+    TRANSPORT --> CLIENT
+    CODEC --> RELAY
+    FEC --> RELAY
+    CRYPTO --> RELAY
+    TRANSPORT --> RELAY
+
+    CLIENT --> WEB
+    TRANSPORT --> WEB
+    CRYPTO --> WEB
+
+    FC[warzone-protocol<br/>featherChat Identity] -.->|path dep| CRYPTO
+
+    style PROTO fill:#6c5ce7
+    style RELAY fill:#ff9f43
+    style CLIENT fill:#00b894
+    style WEB fill:#0984e3
+    style FC fill:#fd79a8
 ```
 
-In the simplest deployment a single relay serves as the meeting point (room mode, SFU). Clients connect directly to one relay, which forwards media to all other participants in the same room. For censorship-resistant links, two relays can be chained: a client-facing relay forwards all traffic to a remote relay via QUIC.
-
-Room names are carried in the QUIC SNI field during the TLS handshake, so a single relay can host many independent rooms without additional signaling.
-
-## Protocol Stack
-
-```
-┌──────────────────────────────────────────────┐
-│  Application (Opus / Codec2 audio)           │  wzp-codec
-├──────────────────────────────────────────────┤
-│  Redundancy (RaptorQ FEC + interleaving)     │  wzp-fec
-├──────────────────────────────────────────────┤
-│  Crypto (ChaCha20-Poly1305 + AEAD)          │  wzp-crypto
-├──────────────────────────────────────────────┤
-│  Transport (QUIC DATAGRAM + reliable stream) │  wzp-transport
-├──────────────────────────────────────────────┤
-│  Obfuscation (Phase 2 — trait defined)       │  wzp-proto::ObfuscationLayer
-└──────────────────────────────────────────────┘
-```
-
-Audio and FEC are end-to-end between caller and callee. The relay operates on opaque, encrypted, FEC-protected packets. Crypto keys are never shared with relays.
-
-## Wire Format
+## Wire Formats
 
 ### MediaHeader (12 bytes)
 
 ```
-Byte 0:  [V:1][T:1][CodecID:4][Q:1][FecRatioHi:1]
-Byte 1:  [FecRatioLo:6][unused:2]
-Byte 2-3: Sequence number (big-endian u16)
-Byte 4-7: Timestamp in ms since session start (big-endian u32)
-Byte 8:   FEC block ID (wrapping u8)
-Byte 9:   FEC symbol index within block
-Byte 10:  Reserved / flags
-Byte 11:  CSRC count (for future mixing)
+Byte 0:  [V:1][T:1][CodecID:4][Q:1][FecHi:1]
+Byte 1:  [FecLo:6][unused:2]
+Bytes 2-3:  sequence (u16 BE)
+Bytes 4-7:  timestamp_ms (u32 BE)
+Byte 8:     fec_block_id (u8)
+Byte 9:     fec_symbol_idx (u8)
+Byte 10:    reserved
+Byte 11:    csrc_count
+
+V = version (0), T = is_repair, CodecID = codec, Q = quality_report appended
 ```
 
-Field details:
-
-| Field | Bits | Description |
-|-------|------|-------------|
-| V | 1 | Protocol version (0 = v1) |
-| T | 1 | 1 = FEC repair packet, 0 = source media |
-| CodecID | 4 | Codec identifier (0=Opus24k, 1=Opus16k, 2=Opus6k, 3=Codec2_3200, 4=Codec2_1200) |
-| Q | 1 | QualityReport trailer appended |
-| FecRatio | 7 | FEC ratio encoded as 7-bit value (0-127 maps to 0.0-2.0) |
-| Seq | 16 | Wrapping packet sequence number |
-| Timestamp | 32 | Milliseconds since session start |
-| FEC block | 8 | Source block ID (wrapping) |
-| FEC symbol | 8 | Symbol index within the FEC block |
-| Reserved | 8 | Reserved flags |
-| CSRC count | 8 | Contributing source count (future) |
-
-Defined in `crates/wzp-proto/src/packet.rs` as `MediaHeader`.
-
-### QualityReport (4 bytes)
-
-Appended to a media packet when the Q flag is set.
+### MiniHeader (4 bytes, compressed)
 
 ```
-Byte 0: loss_pct     — 0-255 maps to 0-100% loss
-Byte 1: rtt_4ms      — RTT in 4ms units (0-255 = 0-1020ms)
-Byte 2: jitter_ms    — Jitter in milliseconds
-Byte 3: bitrate_cap  — Max receive bitrate in kbps
+Bytes 0-1: timestamp_delta_ms (u16 BE)
+Bytes 2-3: payload_len (u16 BE)
+
+Preceded by FRAME_TYPE_MINI (0x01). Full header every 50 frames (~1s).
+Saves 8 bytes/packet (67% header reduction).
 ```
 
-Defined in `crates/wzp-proto/src/packet.rs` as `QualityReport`.
-
-### MediaPacket
-
-A complete media packet on the wire:
+### TrunkFrame (batched datagrams)
 
 ```
-[MediaHeader: 12 bytes][Payload: variable][QualityReport: 4 bytes if Q=1]
+[count:u16]
+  [session_id:2][len:u16][payload:len]  x count
+
+Packs multiple session packets into one QUIC datagram.
+Max 10 entries or 1200 bytes, flushed every 5ms.
 ```
 
-Defined in `crates/wzp-proto/src/packet.rs` as `MediaPacket`.
-
-### SignalMessage (reliable stream)
-
-Signaling uses length-prefixed JSON over reliable QUIC bidirectional streams. Each message opens a new bidi stream, writes a 4-byte big-endian length prefix followed by the JSON payload, then finishes the send side.
-
-Variants defined in `crates/wzp-proto/src/packet.rs`:
-
-- `CallOffer` — identity_pub, ephemeral_pub, signature, supported_profiles
-- `CallAnswer` — identity_pub, ephemeral_pub, signature, chosen_profile
-- `IceCandidate` — NAT traversal candidate string
-- `Rekey` — new_ephemeral_pub, signature
-- `QualityUpdate` — report, recommended_profile
-- `Ping` / `Pong` — timestamp_ms for RTT measurement
-- `Hangup` — reason (Normal, Busy, Declined, Timeout, Error)
-
-## FEC Strategy
-
-WarzonePhone uses **RaptorQ fountain codes** (via the `raptorq` crate) for forward error correction. This is implemented in `crates/wzp-fec/`.
-
-### Block Structure
-
-Audio frames are grouped into FEC blocks. Each block contains a fixed number of source symbols (configured per quality profile). Each source symbol is a single encoded audio frame, zero-padded to a uniform 256-byte symbol size with a 2-byte little-endian length prefix.
-
-### Encoding Process
-
-1. Audio frames are added to the encoder as source symbols
-2. When a block is full (`frames_per_block` symbols), repair symbols are generated
-3. The repair ratio determines how many repair symbols: `ceil(num_source * ratio)`
-4. Both source and repair packets are transmitted with the block ID and symbol index in the header
-
-### Decoding Process
-
-1. Received symbols (source or repair) are fed to the decoder keyed by block ID
-2. The decoder attempts reconstruction when sufficient symbols arrive
-3. RaptorQ can recover the full block from any `K` symbols out of `K + R` total (where K = source count, R = repair count)
-4. Old blocks are expired via wrapping u8 distance
-
-### Interleaving
-
-The `Interleaver` spreads symbols from multiple FEC blocks across transmission slots in round-robin fashion. With depth=3, a burst loss of 6 consecutive packets damages at most 2 symbols per block instead of 6 symbols in one block.
-
-### FEC Configuration by Quality Tier
-
-| Tier | Frames/Block | Repair Ratio | Total Bandwidth Overhead |
-|------|-------------|-------------|-------------------------|
-| GOOD | 5 | 0.2 (20%) | 1.2x |
-| DEGRADED | 10 | 0.5 (50%) | 1.5x |
-| CATASTROPHIC | 8 | 1.0 (100%) | 2.0x |
-
-## Adaptive Quality
-
-Three quality tiers drive codec and FEC selection. The controller is implemented in `crates/wzp-proto/src/quality.rs` as `AdaptiveQualityController`.
-
-### Tier Thresholds
-
-| Tier | Loss | RTT | Codec | FEC Ratio |
-|------|------|-----|-------|-----------|
-| GOOD | < 10% | < 400ms | Opus 24kbps, 20ms frames | 0.2 |
-| DEGRADED | 10-40% or 400-600ms | | Opus 6kbps, 40ms frames | 0.5 |
-| CATASTROPHIC | > 40% or > 600ms | | Codec2 1200bps, 40ms frames | 1.0 |
-
-### Hysteresis
-
-- **Downgrade**: Triggers after 3 consecutive reports in a worse tier (fast reaction)
-- **Upgrade**: Triggers after 10 consecutive reports in a better tier (slow, cautious)
-- **Step limit**: Upgrades move only one tier at a time (Catastrophic -> Degraded -> Good)
-- **History**: A sliding window of 20 recent reports is maintained for smoothing
-- **Force mode**: Manual `force_profile()` disables adaptive logic entirely
-
-### QualityProfile Constants
-
-```rust
-GOOD:         Opus24k,     fec=0.2, 20ms, 5 frames/block  → 28.8 kbps total
-DEGRADED:     Opus6k,      fec=0.5, 40ms, 10 frames/block → 9.0 kbps total
-CATASTROPHIC: Codec2_1200, fec=1.0, 40ms, 8 frames/block  → 2.4 kbps total
-```
-
-## Encryption
-
-Implemented in `crates/wzp-crypto/`.
-
-### Identity Model (Warzone-Compatible)
-
-- **Seed**: 32-byte random value (BIP39 mnemonic for backup)
-- **Ed25519**: Derived via `HKDF(seed, "warzone-ed25519-identity")` -- signing/identity
-- **X25519**: Derived via `HKDF(seed, "warzone-x25519-identity")` -- encryption
-- **Fingerprint**: `SHA-256(Ed25519_pub)[:16]` -- 128-bit identifier
-
-### Per-Call Key Exchange
-
-1. Each side generates an ephemeral X25519 keypair
-2. Ephemeral public keys are exchanged via `CallOffer`/`CallAnswer` signaling
-3. Signatures are computed: `Ed25519_sign(ephemeral_pub || context_string)`
-4. Shared secret: `X25519_DH(our_ephemeral_secret, peer_ephemeral_pub)`
-5. Session key: `HKDF(shared_secret, "warzone-session-key")` -> 32 bytes
-
-### Nonce Construction (12 bytes, not transmitted)
+### QualityReport (4 bytes, optional)
 
 ```
-session_id[0..4] || sequence_number (u32 BE) || direction (1 byte) || padding (3 bytes zero)
+Byte 0: loss_pct (0-255 maps to 0-100%)
+Byte 1: rtt_4ms (0-255 maps to 0-1020ms)
+Byte 2: jitter_ms
+Byte 3: bitrate_cap_kbps
 ```
 
-- `session_id`: First 4 bytes of `SHA-256(session_key)`
-- `direction`: 0 = Send, 1 = Recv
-- Nonces are derived deterministically, saving 12 bytes per packet
-
-### AEAD Encryption
-
-- Algorithm: ChaCha20-Poly1305
-- AAD: The 12-byte MediaHeader (authenticated but not encrypted)
-- Tag: 16 bytes appended to ciphertext
-- Overhead per packet: 16 bytes
-
-### Rekeying
-
-- Trigger: Every 2^16 packets (65536)
-- Process: New ephemeral X25519 exchange, mixed with old key via HKDF
-- Key evolution: `HKDF(old_key as salt, new_DH_result, "warzone-rekey")`
-- Old key is zeroized after derivation (forward secrecy)
-- Sequence counters reset to 0 after rekey
-
-### Anti-Replay
-
-- Sliding window of 1024 packets using a bitmap
-- Sequence numbers too old (> 1024 behind highest seen) are rejected
-- Handles u16 wrapping correctly (RFC 1982 serial number arithmetic)
-- Implemented in `crates/wzp-crypto/src/anti_replay.rs` as `AntiReplayWindow`
-
-## Jitter Buffer
-
-Implemented in `crates/wzp-proto/src/jitter.rs` as `JitterBuffer`.
-
-- **Structure**: BTreeMap keyed by sequence number for ordered playout
-- **Target depth**: 50 packets (1 second) default
-- **Max depth**: 250 packets (5 seconds at 20ms/frame)
-- **Min depth**: 25 packets (0.5 seconds) before playout begins
-- **Sequence wrapping**: RFC 1982 serial number arithmetic for u16
-- **Duplicate handling**: Silently dropped
-- **Late packets**: Packets arriving after their sequence has been played out are dropped
-- **Overflow**: When buffer exceeds max depth, oldest packets are evicted
-
-### Playout Results
-
-- `Packet(MediaPacket)` -- normal delivery
-- `Missing { seq }` -- gap detected, decoder should generate PLC
-- `NotReady` -- buffer not yet filled to minimum depth
-
-### Known Limitations
-
-- No adaptive depth adjustment based on observed jitter (target_depth is configurable but not self-tuning in the current implementation)
-- No timestamp-based playout scheduling (uses sequence-number ordering only)
-- Jitter buffer drift has been observed during long echo tests
-
-## Session State Machine
-
-Defined in `crates/wzp-proto/src/session.rs`:
+### SignalMessage (JSON over reliable QUIC stream)
 
 ```
-Idle -> Connecting -> Handshaking -> Active <-> Rekeying -> Active
-                                       |
-                                     Closed
+[4-byte length prefix][serde_json payload]
+
+Variants:
+  CallOffer    { identity_pub, ephemeral_pub, signature, supported_profiles }
+  CallAnswer   { identity_pub, ephemeral_pub, signature, chosen_profile }
+  IceCandidate { candidate }
+  Hangup       { reason: Normal|Busy|Declined|Timeout|Error }
+  AuthToken    { token }
+  Hold, Unhold, Mute, Unmute
+  Transfer     { target_fingerprint, relay_addr }
+  TransferAck
+  Rekey        { new_ephemeral_pub, signature }
+  QualityUpdate { report, recommended_profile }
+  Ping/Pong    { timestamp_ms }
 ```
 
-- Media flows during both `Active` and `Rekeying` states
-- Any state can transition to `Closed` via `Terminate` or `ConnectionLost`
-- Invalid transitions produce a `TransitionError`
+## Quality Profiles
+
+```mermaid
+graph LR
+    subgraph GOOD ["GOOD (28.8 kbps)"]
+        G_C[Opus 24kbps]
+        G_F[FEC 20%]
+        G_FR[20ms frames]
+    end
+
+    subgraph DEGRADED ["DEGRADED (9.0 kbps)"]
+        D_C[Opus 6kbps]
+        D_F[FEC 50%]
+        D_FR[40ms frames]
+    end
+
+    subgraph CATASTROPHIC ["CATASTROPHIC (2.4 kbps)"]
+        C_C[Codec2 1200bps]
+        C_F[FEC 100%]
+        C_FR[40ms frames]
+    end
+
+    GOOD -->|"loss>5% or RTT>100ms<br/>3 consecutive reports"| DEGRADED
+    DEGRADED -->|"loss>15% or RTT>200ms<br/>3 consecutive"| CATASTROPHIC
+    CATASTROPHIC -->|"loss<5% and RTT<100ms<br/>3 consecutive"| DEGRADED
+    DEGRADED -->|"loss<5% and RTT<100ms<br/>3 consecutive"| GOOD
+
+    style GOOD fill:#00b894
+    style DEGRADED fill:#fdcb6e
+    style CATASTROPHIC fill:#e17055
+```
+
+## Cryptographic Handshake
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant R as Relay/Callee
+
+    Note over C: Derive identity from seed<br/>Ed25519 + X25519 via HKDF
+
+    C->>C: Generate ephemeral X25519
+    C->>C: Sign(ephemeral_pub || "call-offer")
+    C->>R: CallOffer { identity_pub, ephemeral_pub, signature, profiles }
+
+    R->>R: Verify Ed25519 signature
+    R->>R: Generate ephemeral X25519
+    R->>R: shared_secret = DH(eph_b, eph_a)
+    R->>R: session_key = HKDF(shared_secret, "warzone-session-key")
+    R->>R: Sign(ephemeral_pub || "call-answer")
+    R->>C: CallAnswer { identity_pub, ephemeral_pub, signature, chosen_profile }
+
+    C->>C: Verify signature
+    C->>C: shared_secret = DH(eph_a, eph_b)
+    C->>C: session_key = HKDF(shared_secret)
+
+    Note over C,R: Both have identical ChaCha20-Poly1305 session key
+    C->>R: Encrypted media (QUIC datagrams)
+    R->>C: Encrypted media (QUIC datagrams)
+
+    Note over C,R: Rekey every 65,536 packets<br/>New ephemeral DH + HKDF mix
+```
+
+## Identity Model (featherChat Compatible)
+
+```mermaid
+graph TD
+    SEED[32-byte Seed<br/>BIP39 Mnemonic 24 words] --> HKDF1[HKDF<br/>salt=None<br/>info=warzone-ed25519]
+    SEED --> HKDF2[HKDF<br/>salt=None<br/>info=warzone-x25519]
+
+    HKDF1 --> ED[Ed25519 SigningKey<br/>Digital Signatures]
+    HKDF2 --> X25519[X25519 StaticSecret<br/>Key Agreement]
+
+    ED --> VKEY[Ed25519 VerifyingKey<br/>Public]
+    X25519 --> XPUB[X25519 PublicKey<br/>Public]
+
+    VKEY --> FP[Fingerprint<br/>SHA-256 pubkey truncated 16 bytes<br/>xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx]
+
+    style SEED fill:#6c5ce7
+    style FP fill:#fd79a8
+    style ED fill:#ee5a24
+    style X25519 fill:#00b894
+```
 
 ## Relay Modes
 
-### Room Mode (Default, SFU)
+```mermaid
+graph TB
+    subgraph "Room Mode (Default SFU)"
+        C1[Client 1] -->|QUIC SNI=room-hash| RM[Room Manager]
+        C2[Client 2] -->|QUIC SNI=room-hash| RM
+        C3[Client 3] -->|QUIC SNI=room-hash| RM
+        RM --> R1[Room abc123]
+        R1 -->|fan-out| C1
+        R1 -->|fan-out| C2
+        R1 -->|fan-out| C3
+    end
 
-- Clients join named rooms via QUIC SNI
-- When a participant sends a packet, the relay forwards it to all other participants
-- No transcoding -- packets are forwarded opaquely
-- Rooms are auto-created when the first participant joins and auto-deleted when empty
-- Managed by `RoomManager` in `crates/wzp-relay/src/room.rs`
+    subgraph "Forward Mode with --remote"
+        C4[Client] -->|QUIC| RA[Relay A]
+        RA -->|FEC decode then jitter then FEC encode| RB[Relay B]
+        RB -->|QUIC| C5[Client]
+    end
 
-### Forward Mode (`--remote`)
+    subgraph "Probe Mode with --probe"
+        PA[Relay A] -->|Ping 1/s ~50 bytes| PB[Relay B]
+        PB -->|Pong| PA
+        PA --> PM[Prometheus<br/>RTT Loss Jitter Up/Down]
+    end
 
-- All incoming traffic is forwarded to a remote relay via QUIC
-- Two-pipeline architecture: upstream (client->remote) and downstream (remote->client)
-- Each direction has its own `RelayPipeline` with FEC decode/encode and jitter buffering
-- Intended for chaining relays across censored/lossy boundaries
+    style RM fill:#ff9f43
+    style R1 fill:#fdcb6e
+    style PM fill:#0984e3
+```
 
-### Relay Pipeline (Forward Mode)
+## Web Bridge Architecture
 
-Implemented in `crates/wzp-relay/src/pipeline.rs` as `RelayPipeline`:
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant W as wzp-web
+    participant R as wzp-relay
+
+    B->>W: HTTPS GET /room-name
+    W->>B: index.html (SPA)
+
+    B->>W: WebSocket /ws/room-name
+    Note over B,W: Optional auth JSON message
+
+    W->>R: QUIC connect (SNI = hashed room name)
+    Note over W,R: AuthToken then Handshake then Join Room
+
+    loop Every 20ms
+        B->>W: WS Binary Int16 x 960 PCM
+        W->>W: CallEncoder Opus + FEC
+        W->>R: QUIC Datagram encrypted
+    end
+
+    loop Incoming audio
+        R->>W: QUIC Datagram
+        W->>W: CallDecoder FEC + Opus
+        W->>B: WS Binary Int16 x 960 PCM
+    end
+
+    Note over B: AudioWorklet<br/>WZPCaptureProcessor mic to 960 frames<br/>WZPPlaybackProcessor ring buffer to speaker
+```
+
+## FEC Protection (RaptorQ)
+
+```mermaid
+graph LR
+    subgraph "Encoder"
+        F1[Frame 1] --> BLK[Source Block<br/>5-10 frames]
+        F2[Frame 2] --> BLK
+        F3[Frame 3] --> BLK
+        F4[Frame 4] --> BLK
+        F5[Frame 5] --> BLK
+        BLK --> SRC[5 Source Symbols]
+        BLK --> REP[1-10 Repair Symbols<br/>ratio dependent]
+        SRC --> INT[Interleaver<br/>depth=3]
+        REP --> INT
+    end
+
+    subgraph "Network"
+        INT --> LOSS{Packet Loss}
+        LOSS -->|some lost| RCV[Received Symbols]
+    end
+
+    subgraph "Decoder"
+        RCV --> DEINT[De-interleaver]
+        DEINT --> RAPTORQ[RaptorQ Decoder<br/>Reconstruct from<br/>any K of K+R symbols]
+        RAPTORQ --> OUT[Original Frames]
+    end
+
+    style LOSS fill:#e17055
+    style RAPTORQ fill:#00b894
+```
+
+## Telemetry Stack
+
+```mermaid
+graph TB
+    subgraph "Relay"
+        RM[RelayMetrics<br/>sessions rooms packets]
+        SM[SessionMetrics<br/>per-session jitter loss RTT]
+        PM[ProbeMetrics<br/>inter-relay RTT loss]
+        RM --> PROM1[GET /metrics :9090]
+        SM --> PROM1
+        PM --> PROM1
+    end
+
+    subgraph "Web Bridge"
+        WM[WebMetrics<br/>connections frames latency]
+        WM --> PROM2[GET /metrics :8080]
+    end
+
+    subgraph "Client"
+        CM[JitterStats + QualityAdapter]
+        CM --> JSONL[--metrics-file<br/>JSONL 1 line/sec]
+    end
+
+    PROM1 --> GRAF[Grafana Dashboard<br/>4 rows 18 panels]
+    PROM2 --> GRAF
+    JSONL --> ANALYSIS[Offline Analysis]
+
+    style GRAF fill:#ff6b6b
+    style PROM1 fill:#0984e3
+    style PROM2 fill:#0984e3
+```
+
+## Session State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Connecting: connect
+    Connecting --> Handshaking: QUIC established
+    Handshaking --> Active: CallOffer/Answer complete
+    Active --> Rekeying: 65536 packets
+    Rekeying --> Active: new key derived
+    Active --> Closed: Hangup/Error/Timeout
+    Rekeying --> Closed: Error
+    Connecting --> Closed: Timeout
+    Handshaking --> Closed: Signature fail
+
+    note right of Active: Media flows
+    note right of Rekeying: Media continues while rekeying
+```
+
+## Audio Processing Pipeline Detail
+
+```mermaid
+graph TD
+    subgraph "Capture 20ms at 48kHz = 960 samples"
+        MIC[Microphone / AudioWorklet] --> PCM[PCM i16 x 960]
+        PCM --> RNN[RNNoise Denoise<br/>2 x 480 samples]
+        RNN --> VAD{Silent?}
+        VAD -->|Yes over 100ms| CN[ComfortNoise packet<br/>every 200ms]
+        VAD -->|No or Hangover| OPUS[Opus/Codec2 Encode]
+    end
+
+    subgraph "FEC + Crypto"
+        OPUS --> SYMBOL[Pad to 256-byte symbol]
+        CN --> SYMBOL
+        SYMBOL --> BLOCK[Accumulate block<br/>5-10 symbols]
+        BLOCK --> RAPTOR[RaptorQ encode<br/>+ repair symbols]
+        RAPTOR --> INTERLEAVE[Interleave depth=3]
+        INTERLEAVE --> HDR[Add MediaHeader<br/>or MiniHeader]
+        HDR --> ENCRYPT[ChaCha20-Poly1305<br/>header=AAD payload=encrypted]
+        ENCRYPT --> QUIC[QUIC Datagram]
+    end
+
+    style RNN fill:#a29bfe
+    style ENCRYPT fill:#ee5a24
+    style RAPTOR fill:#00b894
+```
+
+## Adaptive Jitter Buffer
+
+```mermaid
+graph TD
+    PKT[Incoming Packet] --> SEQ{Sequence Check}
+    SEQ -->|Duplicate| DROP[Drop + AntiReplay]
+    SEQ -->|Valid| BUF[BTreeMap Buffer<br/>ordered by seq]
+
+    BUF --> ADAPT[AdaptivePlayoutDelay<br/>EMA jitter tracking]
+    ADAPT --> TARGET[target_delay =<br/>ceil jitter_ema/20ms + 2]
+
+    BUF --> READY{depth >= target?}
+    READY -->|No| WAIT[Wait / Underrun++]
+    READY -->|Yes| POP[Pop lowest seq]
+    POP --> DECODE[Decode to PCM]
+    DECODE --> PLAY[Playout]
+
+    BUF --> OVERFLOW{depth > max?}
+    OVERFLOW -->|Yes| EVICT[Drop oldest<br/>Overrun++]
+
+    style ADAPT fill:#fdcb6e
+    style DROP fill:#e17055
+    style EVICT fill:#e17055
+```
+
+## Deployment Topology
+
+```mermaid
+graph TB
+    subgraph "Region A"
+        RA[wzp-relay A<br/>:4433 UDP]
+        WA[wzp-web A<br/>:8080 HTTPS]
+        WA --> RA
+    end
+
+    subgraph "Region B"
+        RB[wzp-relay B<br/>:4433 UDP]
+        WB[wzp-web B<br/>:8080 HTTPS]
+        WB --> RB
+    end
+
+    RA <-->|Probe 1/s| RB
+
+    BA[Browser A] -->|WSS| WA
+    BB[Browser B] -->|WSS| WB
+    CA[CLI Client] -->|QUIC| RA
+
+    PROM[Prometheus] -->|scrape| RA
+    PROM -->|scrape| RB
+    PROM -->|scrape| WA
+    PROM --> GRAF[Grafana]
+
+    FC[featherChat Server] -->|auth validate| RA
+    FC -->|auth validate| RB
+
+    style RA fill:#ff9f43
+    style RB fill:#ff9f43
+    style GRAF fill:#ff6b6b
+    style FC fill:#fd79a8
+```
+
+## featherChat Integration Flow
+
+```mermaid
+sequenceDiagram
+    participant A as User A WZP Client
+    participant FC as featherChat Server
+    participant R as WZP Relay
+    participant B as User B WZP Client
+
+    Note over A,B: Both users share BIP39 seed = same identity
+
+    A->>FC: WS CallSignal Offer payload=JSON SignalMessage
+    FC->>B: WS CallSignal Offer payload + relay_addr + room
+
+    B->>R: QUIC connect SNI = hashed room
+    B->>R: AuthToken fc_bearer_token
+    R->>FC: POST /v1/auth/validate token
+    FC->>R: valid true fingerprint ...
+    B->>R: CallOffer then CallAnswer handshake
+
+    A->>R: QUIC connect same room
+    A->>R: AuthToken + Handshake
+
+    Note over A,B: Both in same room media flows E2E encrypted
+    A->>R: Encrypted media
+    R->>B: Forward SFU no decryption
+    B->>R: Encrypted media
+    R->>A: Forward
+```
+
+## Bandwidth Usage
+
+| Profile | Audio | FEC Overhead | Total | Use Case |
+|---------|-------|-------------|-------|----------|
+| **GOOD** | 24 kbps (Opus) | 20% = 4.8 kbps | **28.8 kbps** | WiFi, LTE, good links |
+| **DEGRADED** | 6 kbps (Opus) | 50% = 3 kbps | **9.0 kbps** | 3G, congested WiFi |
+| **CATASTROPHIC** | 1.2 kbps (Codec2) | 100% = 1.2 kbps | **2.4 kbps** | Satellite, extreme loss |
+
+With silence suppression: ~50% savings in typical conversations.
+With mini-frames: 8 bytes/packet saved (67% header reduction).
+With trunking: shared QUIC overhead across multiplexed sessions.
+
+## Project Structure
 
 ```
-Inbound:  recv -> FEC decode -> jitter buffer -> pop
-Outbound: packet -> assign seq -> FEC encode -> repair packets -> send
+warzonePhone/
+├── Cargo.toml                    # Workspace root
+├── crates/
+│   ├── wzp-proto/                # Protocol types, traits, wire format
+│   │   └── src/
+│   │       ├── codec_id.rs       # CodecId, QualityProfile
+│   │       ├── error.rs          # Error types
+│   │       ├── jitter.rs         # JitterBuffer, AdaptivePlayoutDelay
+│   │       ├── packet.rs         # MediaHeader, MiniHeader, TrunkFrame, SignalMessage
+│   │       ├── quality.rs        # Tier, AdaptiveQualityController
+│   │       ├── session.rs        # SessionState machine
+│   │       └── traits.rs         # AudioEncoder, FecEncoder, CryptoSession, etc.
+│   ├── wzp-codec/                # Audio codecs
+│   │   └── src/
+│   │       ├── adaptive.rs       # AdaptiveEncoder/Decoder (Opus + Codec2)
+│   │       ├── denoise.rs        # NoiseSupressor (RNNoise/nnnoiseless)
+│   │       └── silence.rs        # SilenceDetector, ComfortNoise
+│   ├── wzp-fec/                  # Forward error correction
+│   │   └── src/
+│   │       ├── encoder.rs        # RaptorQFecEncoder
+│   │       ├── decoder.rs        # RaptorQFecDecoder
+│   │       └── interleave.rs     # Interleaver (burst protection)
+│   ├── wzp-crypto/               # Cryptography + identity
+│   │   └── src/
+│   │       ├── identity.rs       # Seed, Fingerprint, hash_room_name
+│   │       ├── handshake.rs      # WarzoneKeyExchange (X25519 + Ed25519)
+│   │       ├── session.rs        # ChaChaSession (ChaCha20-Poly1305)
+│   │       ├── nonce.rs          # Deterministic nonce construction
+│   │       ├── anti_replay.rs    # Sliding window replay protection
+│   │       └── rekey.rs          # Forward secrecy rekeying
+│   ├── wzp-transport/            # QUIC transport layer
+│   │   └── src/lib.rs            # QuinnTransport, send/recv media/signal/trunk
+│   ├── wzp-relay/                # Relay daemon
+│   │   └── src/
+│   │       ├── main.rs           # CLI, connection loop, auth + handshake
+│   │       ├── room.rs           # RoomManager, TrunkedForwarder
+│   │       ├── pipeline.rs       # RelayPipeline (forward mode)
+│   │       ├── session_mgr.rs    # SessionManager (limits, lifecycle)
+│   │       ├── auth.rs           # featherChat token validation
+│   │       ├── handshake.rs      # Relay-side accept_handshake
+│   │       ├── metrics.rs        # Prometheus RelayMetrics + per-session
+│   │       ├── probe.rs          # Inter-relay probes + ProbeMesh
+│   │       └── trunk.rs          # TrunkBatcher
+│   ├── wzp-client/               # Call engine + CLI
+│   │   └── src/
+│   │       ├── cli.rs            # CLI arg parsing + main
+│   │       ├── call.rs           # CallEncoder, CallDecoder, QualityAdapter
+│   │       ├── handshake.rs      # Client-side perform_handshake
+│   │       ├── featherchat.rs    # CallSignal bridge
+│   │       ├── echo_test.rs      # Automated echo quality test
+│   │       ├── drift_test.rs     # Clock drift measurement
+│   │       ├── sweep.rs          # Jitter buffer parameter sweep
+│   │       ├── metrics.rs        # JSONL telemetry writer
+│   │       └── bench.rs          # Component benchmarks
+│   └── wzp-web/                  # Browser bridge
+│       ├── src/
+│       │   ├── main.rs           # Axum server, WS handler, TLS
+│       │   └── metrics.rs        # Prometheus WebMetrics
+│       └── static/
+│           ├── index.html        # SPA UI (room, PTT, level meter)
+│           └── audio-processor.js # AudioWorklet (capture + playback)
+├── deps/featherchat/             # Git submodule
+├── docs/
+│   ├── ARCHITECTURE.md           # This file
+│   ├── TELEMETRY.md              # Metrics specification
+│   ├── INTEGRATION_TASKS.md      # featherChat task tracker
+│   ├── WZP-FC-SHARED-CRATES.md   # Shared crate strategy
+│   └── grafana-dashboard.json    # Pre-built Grafana dashboard
+└── scripts/
+    └── build-linux.sh            # Hetzner VM build
 ```
 
-The pipeline does NOT decode/re-encode audio. It operates on FEC-protected packets, managing loss recovery and re-FEC-encoding for the next hop.
+## Test Coverage
 
-## Transport
+272 tests across all crates, 0 failures.
 
-Implemented in `crates/wzp-transport/` using QUIC via the `quinn` crate.
-
-### QUIC Configuration
-
-- ALPN protocol: `wzp`
-- Idle timeout: 30 seconds
-- Keep-alive interval: 5 seconds
-- DATAGRAM extension enabled (for unreliable media)
-- Datagram receive buffer: 64 KB
-- Receive window: 256 KB
-- Send window: 128 KB
-- Stream receive window: 64 KB per stream
-- Initial RTT estimate: 300ms (tuned for high-latency links)
-
-### Media Transport
-
-- **Unreliable media**: QUIC DATAGRAM frames (no retransmission, no head-of-line blocking)
-- **Reliable signaling**: QUIC bidirectional streams with length-prefixed JSON framing
-
-### Path Quality Monitoring
-
-`PathMonitor` in `crates/wzp-transport/src/path_monitor.rs` tracks:
-
-- **Loss**: EWMA-smoothed percentage from sent/received packet counts
-- **RTT**: EWMA-smoothed round-trip time (alpha=0.1)
-- **Jitter**: EWMA of RTT variance (|current_rtt - previous_rtt|)
-- **Bandwidth**: Estimated from bytes received over elapsed time
-
-### Codec Selection by Tier
-
-| Codec | Sample Rate | Frame Duration | Bitrate | Use Case |
-|-------|------------|----------------|---------|----------|
-| Opus24k | 48 kHz | 20ms (960 samples) | 24 kbps | Good conditions |
-| Opus16k | 48 kHz | 20ms | 16 kbps | Moderate conditions |
-| Opus6k | 48 kHz | 40ms (1920 samples) | 6 kbps | Degraded conditions |
-| Codec2_3200 | 8 kHz | 20ms (160 samples) | 3.2 kbps | Poor conditions |
-| Codec2_1200 | 8 kHz | 40ms (320 samples) | 1.2 kbps | Catastrophic conditions |
-
-Opus operates at 48 kHz natively. When Codec2 is selected, the adaptive codec layer handles 48 kHz <-> 8 kHz resampling transparently using a simple linear resampler (6:1 decimation/interpolation).
+| Crate | Tests | Key Coverage |
+|-------|-------|-------------|
+| wzp-proto | 41 | Wire format, jitter buffer, quality tiers, mini-frames, trunking |
+| wzp-codec | 31 | Opus/Codec2 roundtrip, silence detection, noise suppression |
+| wzp-fec | 22 | RaptorQ encode/decode, loss recovery, interleaving |
+| wzp-crypto | 34 + 28 compat | Encrypt/decrypt, handshake, anti-replay, featherChat identity compat |
+| wzp-transport | 2 | QUIC connection setup |
+| wzp-relay | 40 + 4 integration | Room ACL, session mgmt, metrics, probes, mesh, trunking |
+| wzp-client | 30 + 2 integration | Encoder/decoder, quality adapter, silence, drift, sweep |
+| wzp-web | 2 | Metrics |
