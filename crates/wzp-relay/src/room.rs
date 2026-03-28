@@ -281,7 +281,12 @@ async fn run_participant_plain(
                 break;
             }
             Err(e) => {
-                error!(%addr, participant = participant_id, "recv error: {e}");
+                let msg = e.to_string();
+                if msg.contains("timed out") || msg.contains("reset") || msg.contains("closed") {
+                    info!(%addr, participant = participant_id, "connection closed: {e}");
+                } else {
+                    error!(%addr, participant = participant_id, "recv error: {e}");
+                }
                 break;
             }
         };

@@ -359,6 +359,10 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
     }
 
     info!(total_source, total_repair, total_bytes, "done — closing");
+    let hangup = wzp_proto::SignalMessage::Hangup {
+        reason: wzp_proto::HangupReason::Normal,
+    };
+    transport.send_signal(&hangup).await.ok();
     transport.close().await?;
     Ok(())
 }
@@ -505,14 +509,17 @@ async fn run_file_mode(
     // Wait for send to finish (or ctrl+c in recv)
     let _ = send_handle.await;
 
-    // If send finished but recv is still going, give it a moment then stop
+    // Send Hangup signal so the relay knows we're done
+    let hangup = wzp_proto::SignalMessage::Hangup {
+        reason: wzp_proto::HangupReason::Normal,
+    };
+    transport.send_signal(&hangup).await.ok();
+
     let all_pcm = if record_file.is_some() {
-        // Wait a bit for remaining packets after sender finishes
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         transport.close().await?;
         recv_handle.await.unwrap_or_default()
     } else {
-        // No recording — just close and exit
         transport.close().await?;
         recv_handle.abort();
         Vec::new()
