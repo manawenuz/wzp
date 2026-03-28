@@ -266,7 +266,7 @@ pub async fn run_echo_test(
         }
     }
 
-    let jitter_stats = decoder.jitter_stats();
+    let jitter_stats = decoder.stats().clone();
     let total_frames_received = recv_pcm.len() as u64 / FRAME_SAMPLES as u64;
     let overall_loss = if total_frames > 0 {
         (1.0 - total_frames_received as f32 / total_frames as f32) * 100.0

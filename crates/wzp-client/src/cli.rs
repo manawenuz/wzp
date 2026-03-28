@@ -40,6 +40,8 @@ struct CliArgs {
     send_file: Option<String>,
     record_file: Option<String>,
     echo_test_secs: Option<u32>,
+    drift_test_secs: Option<u32>,
+    sweep: bool,
     seed_hex: Option<String>,
     mnemonic: Option<String>,
     room: Option<String>,
@@ -78,6 +80,8 @@ fn parse_args() -> CliArgs {
     let mut send_file = None;
     let mut record_file = None;
     let mut echo_test_secs = None;
+    let mut drift_test_secs = None;
+    let mut sweep = false;
     let mut seed_hex = None;
     let mut mnemonic = None;
     let mut room = None;
@@ -145,6 +149,16 @@ fn parse_args() -> CliArgs {
                         .expect("--echo-test value must be a number"),
                 );
             }
+            "--drift-test" => {
+                i += 1;
+                drift_test_secs = Some(
+                    args.get(i)
+                        .expect("--drift-test requires seconds")
+                        .parse()
+                        .expect("--drift-test value must be a number"),
+                );
+            }
+            "--sweep" => sweep = true,
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
                 eprintln!();
@@ -154,6 +168,8 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --send-file <file>     Send a raw PCM file (48kHz mono s16le)");
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
+                eprintln!("  --drift-test <secs>    Run automated clock-drift measurement");
+                eprintln!("  --sweep                Run jitter buffer parameter sweep (local, no network)");
                 eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
                 eprintln!("  --room <name>          Room name (hashed for privacy before sending)");
@@ -187,6 +203,8 @@ fn parse_args() -> CliArgs {
         send_file,
         record_file,
         echo_test_secs,
+        drift_test_secs,
+        sweep,
         seed_hex,
         mnemonic,
         room,
@@ -199,6 +217,13 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
     let cli = parse_args();
+
+    // --sweep runs locally (no network), so handle it before connecting.
+    if cli.sweep {
+        wzp_client::sweep::run_and_print_default_sweep();
+        return Ok(());
+    }
+
     let seed = cli.resolve_seed();
 
     info!(
@@ -262,6 +287,15 @@ async fn main() -> anyhow::Result<()> {
     } else if let Some(secs) = cli.echo_test_secs {
         let result = wzp_client::echo_test::run_echo_test(&*transport, secs, 5.0).await?;
         wzp_client::echo_test::print_report(&result);
+        transport.close().await?;
+        Ok(())
+    } else if let Some(secs) = cli.drift_test_secs {
+        let config = wzp_client::drift_test::DriftTestConfig {
+            duration_secs: secs,
+            tone_freq_hz: 440.0,
+        };
+        let result = wzp_client::drift_test::run_drift_test(&*transport, &config).await?;
+        wzp_client::drift_test::print_drift_report(&result);
         transport.close().await?;
         Ok(())
     } else if cli.send_tone_secs.is_some() || cli.send_file.is_some() || cli.record_file.is_some() {

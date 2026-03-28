@@ -10,9 +10,11 @@
 pub mod audio_io;
 pub mod bench;
 pub mod call;
+pub mod drift_test;
 pub mod echo_test;
 pub mod featherchat;
 pub mod handshake;
+pub mod sweep;
 
 #[cfg(feature = "audio")]
 pub use audio_io::{AudioCapture, AudioPlayback};

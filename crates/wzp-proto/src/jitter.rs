@@ -32,6 +32,14 @@ pub struct JitterStats {
     pub packets_late: u64,
     pub packets_duplicate: u64,
     pub current_depth: usize,
+    /// Total frames decoded by the consumer (tracked externally via `record_decode`).
+    pub total_decoded: u64,
+    /// Number of times the consumer tried to decode but the buffer was empty/not-ready.
+    pub underruns: u64,
+    /// Number of packets dropped because the buffer exceeded max depth.
+    pub overruns: u64,
+    /// High water mark — maximum buffer depth observed.
+    pub max_depth_seen: usize,
 }
 
 /// Result of attempting to get the next packet for playout.
@@ -105,6 +113,7 @@ impl JitterBuffer {
         while self.buffer.len() > self.max_depth {
             if let Some((&oldest_seq, _)) = self.buffer.first_key_value() {
                 self.buffer.remove(&oldest_seq);
+                self.stats.overruns += 1;
                 // Advance playout seq past evicted packet
                 if seq_before(self.next_playout_seq, oldest_seq.wrapping_add(1)) {
                     self.next_playout_seq = oldest_seq.wrapping_add(1);
@@ -114,6 +123,9 @@ impl JitterBuffer {
         }
 
         self.stats.current_depth = self.buffer.len();
+        if self.stats.current_depth > self.stats.max_depth_seen {
+            self.stats.max_depth_seen = self.stats.current_depth;
+        }
     }
 
     /// Get the next packet for playout.
@@ -161,6 +173,24 @@ impl JitterBuffer {
         self.buffer.clear();
         self.initialized = false;
         self.stats = JitterStats::default();
+    }
+
+    /// Record that the consumer attempted to decode but the buffer was empty/not-ready.
+    pub fn record_underrun(&mut self) {
+        self.stats.underruns += 1;
+    }
+
+    /// Record a successful frame decode by the consumer.
+    pub fn record_decode(&mut self) {
+        self.stats.total_decoded += 1;
+    }
+
+    /// Reset statistics counters (preserves buffer contents and playout state).
+    pub fn reset_stats(&mut self) {
+        self.stats = JitterStats {
+            current_depth: self.buffer.len(),
+            ..JitterStats::default()
+        };
     }
 
     /// Adjust target depth based on observed jitter.
