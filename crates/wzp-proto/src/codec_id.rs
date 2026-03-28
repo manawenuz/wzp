@@ -16,6 +16,8 @@ pub enum CodecId {
     Codec2_3200 = 3,
     /// Codec2 at 1200bps (catastrophic conditions)
     Codec2_1200 = 4,
+    /// Comfort noise descriptor (silence suppression)
+    ComfortNoise = 5,
 }
 
 impl CodecId {
@@ -27,6 +29,7 @@ impl CodecId {
             Self::Opus6k => 6_000,
             Self::Codec2_3200 => 3_200,
             Self::Codec2_1200 => 1_200,
+            Self::ComfortNoise => 0,
         }
     }
 
@@ -38,6 +41,7 @@ impl CodecId {
             Self::Opus6k => 40,
             Self::Codec2_3200 => 20,
             Self::Codec2_1200 => 40,
+            Self::ComfortNoise => 20,
         }
     }
 
@@ -46,6 +50,7 @@ impl CodecId {
         match self {
             Self::Opus24k | Self::Opus16k | Self::Opus6k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
+            Self::ComfortNoise => 48_000,
         }
     }
 
@@ -57,6 +62,7 @@ impl CodecId {
             2 => Some(Self::Opus6k),
             3 => Some(Self::Codec2_3200),
             4 => Some(Self::Codec2_1200),
+            5 => Some(Self::ComfortNoise),
             _ => None,
         }
     }

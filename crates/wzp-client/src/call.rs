@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tracing::{debug, info, warn};
 
+use wzp_codec::{ComfortNoise, SilenceDetector};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
 use wzp_proto::packet::{MediaHeader, MediaPacket};
@@ -15,7 +16,7 @@ use wzp_proto::traits::{
     AudioDecoder, AudioEncoder, FecDecoder, FecEncoder,
 };
 use wzp_proto::packet::QualityReport;
-use wzp_proto::QualityProfile;
+use wzp_proto::{CodecId, QualityProfile};
 
 /// Configuration for a call session.
 pub struct CallConfig {
@@ -27,6 +28,14 @@ pub struct CallConfig {
     pub jitter_max: usize,
     /// Jitter buffer min depth before playout.
     pub jitter_min: usize,
+    /// Enable silence suppression (default: true).
+    pub suppression_enabled: bool,
+    /// RMS threshold for silence detection (default: 100.0 for i16 PCM).
+    pub silence_threshold_rms: f64,
+    /// Hangover frames before suppression begins (default: 5 = 100ms at 20ms frames).
+    pub silence_hangover_frames: u32,
+    /// Comfort noise amplitude (default: 50).
+    pub comfort_noise_level: i16,
 }
 
 impl Default for CallConfig {
@@ -36,6 +45,10 @@ impl Default for CallConfig {
             jitter_target: 10,
             jitter_max: 250,
             jitter_min: 3, // 60ms — low latency start, still smooths jitter
+            suppression_enabled: true,
+            silence_threshold_rms: 100.0,
+            silence_hangover_frames: 5,
+            comfort_noise_level: 50,
         }
     }
 }
@@ -58,6 +71,7 @@ impl CallConfig {
             jitter_target,
             jitter_max,
             jitter_min,
+            ..Default::default()
         }
     }
 }
@@ -179,6 +193,18 @@ pub struct CallEncoder {
     frame_in_block: u8,
     /// Timestamp counter (ms).
     timestamp_ms: u32,
+    /// Silence detector for suppression.
+    silence_detector: SilenceDetector,
+    /// Comfort noise generator for CN packets.
+    comfort_noise: ComfortNoise,
+    /// Whether silence suppression is enabled.
+    suppression_enabled: bool,
+    /// Total frames suppressed (telemetry).
+    frames_suppressed: u64,
+    /// Frames since last CN packet was sent.
+    cn_counter: u32,
+    /// Comfort noise amplitude level (stored for CN packet payload).
+    cn_level: i16,
 }
 
 impl CallEncoder {
@@ -191,6 +217,15 @@ impl CallEncoder {
             block_id: 0,
             frame_in_block: 0,
             timestamp_ms: 0,
+            silence_detector: SilenceDetector::new(
+                config.silence_threshold_rms,
+                config.silence_hangover_frames,
+            ),
+            comfort_noise: ComfortNoise::new(config.comfort_noise_level),
+            suppression_enabled: config.suppression_enabled,
+            frames_suppressed: 0,
+            cn_counter: 0,
+            cn_level: config.comfort_noise_level,
         }
     }
 
@@ -199,6 +234,45 @@ impl CallEncoder {
     /// Input: 48kHz mono PCM, frame size depends on profile (960 for 20ms, 1920 for 40ms).
     /// Output: one or more MediaPackets to send.
     pub fn encode_frame(&mut self, pcm: &[i16]) -> Result<Vec<MediaPacket>, anyhow::Error> {
+        // Silence suppression: skip encoding silent frames, periodically send CN.
+        if self.suppression_enabled && self.silence_detector.is_silent(pcm) {
+            self.frames_suppressed += 1;
+            self.cn_counter += 1;
+
+            // Advance timestamp even for suppressed frames.
+            self.timestamp_ms = self
+                .timestamp_ms
+                .wrapping_add(self.profile.frame_duration_ms as u32);
+
+            // Every 10 frames (~200ms), send a comfort noise packet.
+            if self.cn_counter % 10 == 0 {
+                let cn_pkt = MediaPacket {
+                    header: MediaHeader {
+                        version: 0,
+                        is_repair: false,
+                        codec_id: CodecId::ComfortNoise,
+                        has_quality_report: false,
+                        fec_ratio_encoded: 0,
+                        seq: self.seq,
+                        timestamp: self.timestamp_ms,
+                        fec_block: self.block_id,
+                        fec_symbol: 0,
+                        reserved: 0,
+                        csrc_count: 0,
+                    },
+                    payload: Bytes::from(vec![self.cn_level as u8]),
+                    quality_report: None,
+                };
+                self.seq = self.seq.wrapping_add(1);
+                return Ok(vec![cn_pkt]);
+            }
+
+            return Ok(vec![]);
+        }
+
+        // Not silent — reset CN counter and proceed with normal encoding.
+        self.cn_counter = 0;
+
         // Encode audio
         let mut encoded = vec![0u8; self.audio_enc.max_frame_bytes()];
         let enc_len = self.audio_enc.encode(pcm, &mut encoded)?;
@@ -290,6 +364,10 @@ pub struct CallDecoder {
     pub quality: AdaptiveQualityController,
     /// Current profile.
     profile: QualityProfile,
+    /// Comfort noise generator for filling silent gaps.
+    comfort_noise: ComfortNoise,
+    /// Whether the last decoded frame was comfort noise.
+    last_was_cn: bool,
 }
 
 impl CallDecoder {
@@ -300,6 +378,8 @@ impl CallDecoder {
             jitter: JitterBuffer::new(config.jitter_target, config.jitter_max, config.jitter_min),
             quality: AdaptiveQualityController::new(),
             profile: config.profile,
+            comfort_noise: ComfortNoise::new(50),
+            last_was_cn: false,
         }
     }
 
@@ -325,6 +405,15 @@ impl CallDecoder {
     pub fn decode_next(&mut self, pcm: &mut [i16]) -> Option<usize> {
         match self.jitter.pop() {
             PlayoutResult::Packet(pkt) => {
+                // Comfort noise packet: generate CN instead of decoding audio.
+                if pkt.header.codec_id == CodecId::ComfortNoise {
+                    self.comfort_noise.generate(pcm);
+                    self.last_was_cn = true;
+                    self.jitter.record_decode();
+                    return Some(pcm.len());
+                }
+
+                self.last_was_cn = false;
                 let result = match self.audio_dec.decode(&pkt.payload, pcm) {
                     Ok(n) => Some(n),
                     Err(e) => {
@@ -714,5 +803,50 @@ mod tests {
         // (the interval hasn't elapsed since construction)
         let logged = telemetry.maybe_log(&stats);
         assert!(!logged, "should not log before interval elapses");
+    }
+
+    #[test]
+    fn silence_suppression_skips_silent_frames() {
+        let config = CallConfig {
+            suppression_enabled: true,
+            silence_threshold_rms: 100.0,
+            silence_hangover_frames: 5,
+            comfort_noise_level: 50,
+            ..Default::default()
+        };
+        let mut enc = CallEncoder::new(&config);
+
+        let silence = vec![0i16; 960];
+        let mut total_packets = 0;
+        let mut cn_packets = 0;
+
+        for _ in 0..20 {
+            let packets = enc.encode_frame(&silence).unwrap();
+            for p in &packets {
+                if p.header.codec_id == CodecId::ComfortNoise {
+                    cn_packets += 1;
+                    // CN payload should be a single byte with the noise level.
+                    assert_eq!(p.payload.len(), 1);
+                }
+            }
+            total_packets += packets.len();
+        }
+
+        // First 5 frames are hangover (not suppressed) => 5 normal source packets
+        // (plus potential repair packets from FEC block completion).
+        // Remaining 15 frames are suppressed; CN every 10 frames => 1 CN packet
+        // (cn_counter hits 10 on the 10th suppressed frame).
+        assert!(
+            total_packets < 20,
+            "suppression should reduce packet count, got {total_packets}"
+        );
+        assert!(
+            cn_packets >= 1,
+            "should have at least one CN packet, got {cn_packets}"
+        );
+        assert!(
+            enc.frames_suppressed > 0,
+            "frames_suppressed should be > 0"
+        );
     }
 }

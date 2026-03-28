@@ -16,4 +16,7 @@ audiopus = { workspace = true }
 # Pure-Rust Codec2 implementation
 codec2 = { workspace = true }
 
+# RNG for comfort noise generation
+rand = { workspace = true }
+
 [dev-dependencies]

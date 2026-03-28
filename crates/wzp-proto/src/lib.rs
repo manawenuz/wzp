@@ -23,7 +23,10 @@ pub mod traits;
 // Re-export key types at crate root for convenience.
 pub use codec_id::{CodecId, QualityProfile};
 pub use error::*;
-pub use packet::{HangupReason, MediaHeader, MediaPacket, QualityReport, SignalMessage};
+pub use packet::{
+    HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader, QualityReport,
+    SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL, FRAME_TYPE_MINI,
+};
 pub use quality::{AdaptiveQualityController, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;

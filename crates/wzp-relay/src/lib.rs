@@ -15,8 +15,10 @@ pub mod pipeline;
 pub mod probe;
 pub mod room;
 pub mod session_mgr;
+pub mod trunk;
 
 pub use config::RelayConfig;
 pub use handshake::accept_handshake;
 pub use pipeline::{PipelineConfig, PipelineStats, RelayPipeline};
 pub use session_mgr::{RelaySession, SessionId, SessionInfo, SessionManager, SessionState};
+pub use trunk::TrunkBatcher;

@@ -26,6 +26,11 @@ pub enum CallSignalType {
     Reject,
     Ringing,
     Busy,
+    Hold,
+    Unhold,
+    Mute,
+    Unmute,
+    Transfer,
 }
 
 /// A CallSignal as sent through featherChat's WireMessage.
@@ -96,6 +101,12 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::QualityUpdate { .. } => CallSignalType::Offer, // reuse
         SignalMessage::Ping { .. } | SignalMessage::Pong { .. } => CallSignalType::Offer,
         SignalMessage::AuthToken { .. } => CallSignalType::Offer,
+        SignalMessage::Hold => CallSignalType::Hold,
+        SignalMessage::Unhold => CallSignalType::Unhold,
+        SignalMessage::Mute => CallSignalType::Mute,
+        SignalMessage::Unmute => CallSignalType::Unmute,
+        SignalMessage::Transfer { .. } => CallSignalType::Transfer,
+        SignalMessage::TransferAck => CallSignalType::Offer, // reuse
     }
 }
 
@@ -134,5 +145,16 @@ mod tests {
             reason: wzp_proto::HangupReason::Normal,
         };
         assert!(matches!(signal_to_call_type(&hangup), CallSignalType::Hangup));
+
+        assert!(matches!(signal_to_call_type(&SignalMessage::Hold), CallSignalType::Hold));
+        assert!(matches!(signal_to_call_type(&SignalMessage::Unhold), CallSignalType::Unhold));
+        assert!(matches!(signal_to_call_type(&SignalMessage::Mute), CallSignalType::Mute));
+        assert!(matches!(signal_to_call_type(&SignalMessage::Unmute), CallSignalType::Unmute));
+
+        let transfer = SignalMessage::Transfer {
+            target_fingerprint: "abc".to_string(),
+            relay_addr: None,
+        };
+        assert!(matches!(signal_to_call_type(&transfer), CallSignalType::Transfer));
     }
 }

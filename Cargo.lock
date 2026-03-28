@@ -3820,6 +3820,7 @@ version = "0.1.0"
 dependencies = [
  "audiopus",
  "codec2",
+ "rand 0.8.5",
  "tracing",
  "wzp-proto",
 ]
@@ -3863,6 +3864,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

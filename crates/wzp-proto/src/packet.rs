@@ -241,6 +241,184 @@ impl MediaPacket {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trunking — multiplex multiple session packets into one QUIC datagram
+// ---------------------------------------------------------------------------
+
+/// A single entry inside a [`TrunkFrame`].
+#[derive(Clone, Debug)]
+pub struct TrunkEntry {
+    /// 2-byte session identifier (up to 65 536 sessions).
+    pub session_id: [u8; 2],
+    /// Encoded MediaPacket payload (already compressed).
+    pub payload: Bytes,
+}
+
+impl TrunkEntry {
+    /// Per-entry wire overhead: 2 (session_id) + 2 (len).
+    pub const OVERHEAD: usize = 4;
+}
+
+/// A trunked frame carrying multiple session packets in one datagram.
+///
+/// Wire format:
+/// ```text
+/// [count:u16] [entry1] [entry2] ...
+/// ```
+/// Each entry:
+/// ```text
+/// [session_id:2] [len:u16] [payload:len]
+/// ```
+#[derive(Clone, Debug)]
+pub struct TrunkFrame {
+    pub packets: Vec<TrunkEntry>,
+}
+
+impl TrunkFrame {
+    /// Create an empty trunk frame.
+    pub fn new() -> Self {
+        Self {
+            packets: Vec::new(),
+        }
+    }
+
+    /// Append a session packet to the frame.
+    pub fn push(&mut self, session_id: [u8; 2], payload: Bytes) {
+        self.packets.push(TrunkEntry {
+            session_id,
+            payload,
+        });
+    }
+
+    /// Number of entries in the frame.
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Whether the frame is empty.
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    /// Total wire size of the encoded frame.
+    pub fn wire_size(&self) -> usize {
+        // 2 bytes for count + each entry
+        2 + self
+            .packets
+            .iter()
+            .map(|e| TrunkEntry::OVERHEAD + e.payload.len())
+            .sum::<usize>()
+    }
+
+    /// Encode to wire bytes.
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(self.wire_size());
+        buf.put_u16(self.packets.len() as u16);
+        for entry in &self.packets {
+            buf.put_slice(&entry.session_id);
+            buf.put_u16(entry.payload.len() as u16);
+            buf.put(entry.payload.clone());
+        }
+        buf.freeze()
+    }
+
+    /// Decode from wire bytes. Returns `None` on malformed input.
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() < 2 {
+            return None;
+        }
+        let mut cursor = &buf[..];
+        let count = cursor.get_u16() as usize;
+        let mut packets = Vec::with_capacity(count);
+        for _ in 0..count {
+            if cursor.remaining() < TrunkEntry::OVERHEAD {
+                return None;
+            }
+            let mut session_id = [0u8; 2];
+            session_id[0] = cursor.get_u8();
+            session_id[1] = cursor.get_u8();
+            let len = cursor.get_u16() as usize;
+            if cursor.remaining() < len {
+                return None;
+            }
+            let payload = Bytes::copy_from_slice(&cursor[..len]);
+            cursor.advance(len);
+            packets.push(TrunkEntry {
+                session_id,
+                payload,
+            });
+        }
+        Some(Self { packets })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mini-frames — compact header for steady-state media packets
+// ---------------------------------------------------------------------------
+
+/// Frame type tag: full MediaHeader follows.
+pub const FRAME_TYPE_FULL: u8 = 0x00;
+/// Frame type tag: MiniHeader follows (requires prior baseline).
+pub const FRAME_TYPE_MINI: u8 = 0x01;
+
+/// Compact 4-byte header used after a full MediaHeader baseline has been
+/// established. Only the timestamp delta and payload length are transmitted;
+/// all other fields are inherited from the last full header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MiniHeader {
+    /// Milliseconds elapsed since the last header's timestamp.
+    pub timestamp_delta_ms: u16,
+    /// Length of the payload that follows this header.
+    pub payload_len: u16,
+}
+
+impl MiniHeader {
+    /// Header size in bytes on the wire.
+    pub const WIRE_SIZE: usize = 4;
+
+    /// Serialize to a 4-byte buffer.
+    pub fn write_to(&self, buf: &mut impl BufMut) {
+        buf.put_u16(self.timestamp_delta_ms);
+        buf.put_u16(self.payload_len);
+    }
+
+    /// Deserialize from a buffer. Returns `None` if insufficient data.
+    pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
+        if buf.remaining() < Self::WIRE_SIZE {
+            return None;
+        }
+        Some(Self {
+            timestamp_delta_ms: buf.get_u16(),
+            payload_len: buf.get_u16(),
+        })
+    }
+}
+
+/// Stateful context that expands [`MiniHeader`]s back into full
+/// [`MediaHeader`]s by tracking the last baseline header.
+#[derive(Clone, Debug, Default)]
+pub struct MiniFrameContext {
+    last_header: Option<MediaHeader>,
+}
+
+impl MiniFrameContext {
+    /// Record a full header as the new baseline for subsequent mini-frames.
+    pub fn update(&mut self, header: &MediaHeader) {
+        self.last_header = Some(*header);
+    }
+
+    /// Expand a mini-header into a full [`MediaHeader`] using the stored
+    /// baseline.  Returns `None` if no baseline has been set yet.
+    pub fn expand(&mut self, mini: &MiniHeader) -> Option<MediaHeader> {
+        let base = self.last_header.as_ref()?;
+        let mut expanded = *base;
+        expanded.seq = base.seq.wrapping_add(1);
+        expanded.timestamp = base.timestamp.wrapping_add(mini.timestamp_delta_ms as u32);
+        self.last_header = Some(expanded);
+        Some(expanded)
+    }
+}
+
 /// Signaling messages sent over the reliable QUIC stream.
 ///
 /// Compatible with Warzone messenger's identity model:
@@ -301,6 +479,23 @@ pub enum SignalMessage {
     /// featherChat bearer token for relay authentication.
     /// Sent as the first signal message when --auth-url is configured.
     AuthToken { token: String },
+
+    /// Put the call on hold (stop sending media, keep session alive).
+    Hold,
+    /// Resume a held call.
+    Unhold,
+    /// Mute request from the remote side (server-initiated mute, like IAX2 QUELCH).
+    Mute,
+    /// Unmute request from the remote side (like IAX2 UNQUELCH).
+    Unmute,
+    /// Transfer the call to another peer.
+    Transfer {
+        target_fingerprint: String,
+        /// Optional relay address for the transfer target.
+        relay_addr: Option<String>,
+    },
+    /// Acknowledge a transfer request.
+    TransferAck,
 }
 
 /// Reasons for ending a call.
@@ -415,6 +610,78 @@ mod tests {
     }
 
     #[test]
+    fn hold_unhold_serialize() {
+        let hold = SignalMessage::Hold;
+        let json = serde_json::to_string(&hold).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::Hold));
+
+        let unhold = SignalMessage::Unhold;
+        let json = serde_json::to_string(&unhold).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::Unhold));
+    }
+
+    #[test]
+    fn mute_unmute_serialize() {
+        let mute = SignalMessage::Mute;
+        let json = serde_json::to_string(&mute).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::Mute));
+
+        let unmute = SignalMessage::Unmute;
+        let json = serde_json::to_string(&unmute).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::Unmute));
+    }
+
+    #[test]
+    fn transfer_serialize() {
+        let transfer = SignalMessage::Transfer {
+            target_fingerprint: "abc123".to_string(),
+            relay_addr: Some("relay.example.com:4433".to_string()),
+        };
+        let json = serde_json::to_string(&transfer).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::Transfer {
+                target_fingerprint,
+                relay_addr,
+            } => {
+                assert_eq!(target_fingerprint, "abc123");
+                assert_eq!(relay_addr.unwrap(), "relay.example.com:4433");
+            }
+            _ => panic!("expected Transfer variant"),
+        }
+
+        // Also test with relay_addr = None
+        let transfer_no_relay = SignalMessage::Transfer {
+            target_fingerprint: "def456".to_string(),
+            relay_addr: None,
+        };
+        let json = serde_json::to_string(&transfer_no_relay).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::Transfer {
+                target_fingerprint,
+                relay_addr,
+            } => {
+                assert_eq!(target_fingerprint, "def456");
+                assert!(relay_addr.is_none());
+            }
+            _ => panic!("expected Transfer variant"),
+        }
+    }
+
+    #[test]
+    fn transfer_ack_serialize() {
+        let ack = SignalMessage::TransferAck;
+        let json = serde_json::to_string(&ack).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::TransferAck));
+    }
+
+    #[test]
     fn fec_ratio_encode_decode() {
         let ratio = 0.5;
         let encoded = MediaHeader::encode_fec_ratio(ratio);
@@ -424,5 +691,151 @@ mod tests {
         let ratio_max = 2.0;
         let encoded_max = MediaHeader::encode_fec_ratio(ratio_max);
         assert_eq!(encoded_max, 127);
+    }
+
+    // ---------------------------------------------------------------
+    // TrunkFrame tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn trunk_frame_encode_decode() {
+        let mut frame = TrunkFrame::new();
+        frame.push([0, 1], Bytes::from_static(b"hello"));
+        frame.push([0, 2], Bytes::from_static(b"world!"));
+        frame.push([1, 0], Bytes::from_static(b"x"));
+        assert_eq!(frame.len(), 3);
+
+        let encoded = frame.encode();
+        let decoded = TrunkFrame::decode(&encoded).expect("decode failed");
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded.packets[0].session_id, [0, 1]);
+        assert_eq!(decoded.packets[0].payload, Bytes::from_static(b"hello"));
+        assert_eq!(decoded.packets[1].session_id, [0, 2]);
+        assert_eq!(decoded.packets[1].payload, Bytes::from_static(b"world!"));
+        assert_eq!(decoded.packets[2].session_id, [1, 0]);
+        assert_eq!(decoded.packets[2].payload, Bytes::from_static(b"x"));
+    }
+
+    #[test]
+    fn trunk_frame_empty() {
+        let frame = TrunkFrame::new();
+        assert!(frame.is_empty());
+        assert_eq!(frame.len(), 0);
+
+        let encoded = frame.encode();
+        // Just the 2-byte count header with value 0.
+        assert_eq!(encoded.len(), 2);
+        assert_eq!(&encoded[..], &[0, 0]);
+
+        let decoded = TrunkFrame::decode(&encoded).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn trunk_entry_wire_size() {
+        // Each entry overhead must be exactly 4 bytes (2 session_id + 2 len).
+        assert_eq!(TrunkEntry::OVERHEAD, 4);
+
+        // Verify empirically: one entry with a 10-byte payload should produce
+        // 2 (count) + 4 (overhead) + 10 (payload) = 16 bytes total.
+        let mut frame = TrunkFrame::new();
+        frame.push([0xAB, 0xCD], Bytes::from(vec![0u8; 10]));
+        let encoded = frame.encode();
+        assert_eq!(encoded.len(), 2 + 4 + 10);
+    }
+
+    // ---------------------------------------------------------------
+    // MiniHeader / MiniFrameContext tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn mini_header_encode_decode() {
+        let mini = MiniHeader {
+            timestamp_delta_ms: 20,
+            payload_len: 160,
+        };
+        let mut buf = BytesMut::new();
+        mini.write_to(&mut buf);
+
+        let mut cursor = &buf[..];
+        let decoded = MiniHeader::read_from(&mut cursor).unwrap();
+        assert_eq!(mini, decoded);
+    }
+
+    #[test]
+    fn mini_header_wire_size() {
+        let mini = MiniHeader {
+            timestamp_delta_ms: 0xFFFF,
+            payload_len: 0xFFFF,
+        };
+        let mut buf = BytesMut::new();
+        mini.write_to(&mut buf);
+        assert_eq!(buf.len(), 4);
+        assert_eq!(MiniHeader::WIRE_SIZE, 4);
+    }
+
+    #[test]
+    fn mini_frame_context_expand() {
+        let baseline = MediaHeader {
+            version: 0,
+            is_repair: false,
+            codec_id: CodecId::Opus24k,
+            has_quality_report: false,
+            fec_ratio_encoded: 10,
+            seq: 100,
+            timestamp: 1000,
+            fec_block: 5,
+            fec_symbol: 0,
+            reserved: 0,
+            csrc_count: 0,
+        };
+
+        let mut ctx = MiniFrameContext::default();
+        ctx.update(&baseline);
+
+        // First expansion
+        let mini1 = MiniHeader {
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        let h1 = ctx.expand(&mini1).unwrap();
+        assert_eq!(h1.seq, 101);
+        assert_eq!(h1.timestamp, 1020);
+        assert_eq!(h1.codec_id, CodecId::Opus24k);
+        assert_eq!(h1.fec_block, 5);
+
+        // Second expansion — builds on expanded h1
+        let mini2 = MiniHeader {
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        let h2 = ctx.expand(&mini2).unwrap();
+        assert_eq!(h2.seq, 102);
+        assert_eq!(h2.timestamp, 1040);
+    }
+
+    #[test]
+    fn mini_frame_context_no_baseline() {
+        let mut ctx = MiniFrameContext::default();
+        let mini = MiniHeader {
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        assert!(ctx.expand(&mini).is_none());
+    }
+
+    #[test]
+    fn full_vs_mini_size_comparison() {
+        // Full frame on wire: 1 byte type tag + 12 byte MediaHeader = 13
+        let full_size = 1 + MediaHeader::WIRE_SIZE;
+        assert_eq!(full_size, 13);
+
+        // Mini frame on wire: 1 byte type tag + 4 byte MiniHeader = 5
+        let mini_size = 1 + MiniHeader::WIRE_SIZE;
+        assert_eq!(mini_size, 5);
+
+        // Verify the constants match expectations
+        assert_eq!(FRAME_TYPE_FULL, 0x00);
+        assert_eq!(FRAME_TYPE_MINI, 0x01);
     }
 }

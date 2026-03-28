@@ -89,6 +89,7 @@ pub fn run_local_sweep(config: &SweepConfig) -> Vec<SweepResult> {
                 jitter_target: target,
                 jitter_max: max,
                 jitter_min: target.min(3).max(1),
+                ..Default::default()
             };
 
             let mut encoder = CallEncoder::new(&call_cfg);
