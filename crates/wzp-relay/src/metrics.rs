@@ -1,9 +1,10 @@
 //! Prometheus metrics for the WZP relay daemon.
 
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
-    TextEncoder,
+    Encoder, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
+use wzp_proto::packet::QualityReport;
 use std::sync::Arc;
 
 /// All relay-level Prometheus metrics.
@@ -15,6 +16,12 @@ pub struct RelayMetrics {
     pub bytes_forwarded: IntCounter,
     pub auth_attempts: IntCounterVec,
     pub handshake_duration: Histogram,
+    // Per-session metrics
+    pub session_buffer_depth: IntGaugeVec,
+    pub session_loss_pct: GaugeVec,
+    pub session_rtt_ms: GaugeVec,
+    pub session_underruns: IntCounterVec,
+    pub session_overruns: IntCounterVec,
     registry: Registry,
 }
 
@@ -53,12 +60,58 @@ impl RelayMetrics {
         )
         .expect("metric");
 
+        let session_buffer_depth = IntGaugeVec::new(
+            Opts::new(
+                "wzp_relay_session_jitter_buffer_depth",
+                "Buffer depth per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+        let session_loss_pct = GaugeVec::new(
+            Opts::new(
+                "wzp_relay_session_loss_pct",
+                "Packet loss percentage per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+        let session_rtt_ms = GaugeVec::new(
+            Opts::new(
+                "wzp_relay_session_rtt_ms",
+                "Round-trip time per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+        let session_underruns = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_session_underruns_total",
+                "Jitter buffer underruns per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+        let session_overruns = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_session_overruns_total",
+                "Jitter buffer overruns per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+
         registry.register(Box::new(active_sessions.clone())).expect("register");
         registry.register(Box::new(active_rooms.clone())).expect("register");
         registry.register(Box::new(packets_forwarded.clone())).expect("register");
         registry.register(Box::new(bytes_forwarded.clone())).expect("register");
         registry.register(Box::new(auth_attempts.clone())).expect("register");
         registry.register(Box::new(handshake_duration.clone())).expect("register");
+        registry.register(Box::new(session_buffer_depth.clone())).expect("register");
+        registry.register(Box::new(session_loss_pct.clone())).expect("register");
+        registry.register(Box::new(session_rtt_ms.clone())).expect("register");
+        registry.register(Box::new(session_underruns.clone())).expect("register");
+        registry.register(Box::new(session_overruns.clone())).expect("register");
 
         Self {
             active_sessions,
@@ -67,8 +120,75 @@ impl RelayMetrics {
             bytes_forwarded,
             auth_attempts,
             handshake_duration,
+            session_buffer_depth,
+            session_loss_pct,
+            session_rtt_ms,
+            session_underruns,
+            session_overruns,
             registry,
         }
+    }
+
+    /// Update per-session quality metrics from a QualityReport.
+    pub fn update_session_quality(&self, session_id: &str, report: &QualityReport) {
+        self.session_loss_pct
+            .with_label_values(&[session_id])
+            .set(report.loss_percent() as f64);
+        self.session_rtt_ms
+            .with_label_values(&[session_id])
+            .set(report.rtt_ms() as f64);
+    }
+
+    /// Update per-session buffer metrics.
+    pub fn update_session_buffer(
+        &self,
+        session_id: &str,
+        depth: usize,
+        underruns: u64,
+        overruns: u64,
+    ) {
+        self.session_buffer_depth
+            .with_label_values(&[session_id])
+            .set(depth as i64);
+        // IntCounterVec doesn't have a `set` — we inc by the delta.
+        // Since these are cumulative from the jitter buffer, we use inc_by
+        // with the current totals. To avoid double-counting, callers should
+        // track previous values externally. For simplicity the relay reports
+        // the absolute value each tick; counters only go up so we take the
+        // max(0, new - current) approach.
+        let cur_underruns = self
+            .session_underruns
+            .with_label_values(&[session_id])
+            .get();
+        if underruns > cur_underruns as u64 {
+            self.session_underruns
+                .with_label_values(&[session_id])
+                .inc_by(underruns - cur_underruns as u64);
+        }
+        let cur_overruns = self
+            .session_overruns
+            .with_label_values(&[session_id])
+            .get();
+        if overruns > cur_overruns as u64 {
+            self.session_overruns
+                .with_label_values(&[session_id])
+                .inc_by(overruns - cur_overruns as u64);
+        }
+    }
+
+    /// Remove all per-session label values for a disconnected session.
+    pub fn remove_session_metrics(&self, session_id: &str) {
+        let _ = self.session_buffer_depth.remove_label_values(&[session_id]);
+        let _ = self.session_loss_pct.remove_label_values(&[session_id]);
+        let _ = self.session_rtt_ms.remove_label_values(&[session_id]);
+        let _ = self.session_underruns.remove_label_values(&[session_id]);
+        let _ = self.session_overruns.remove_label_values(&[session_id]);
+    }
+
+    /// Get a reference to the underlying Prometheus registry.
+    /// Probe metrics are registered on this same registry so they appear in /metrics output.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// Gather all metrics and encode them as Prometheus text format.
@@ -121,6 +241,46 @@ mod tests {
         assert!(output.contains("wzp_relay_bytes_forwarded_total"));
         assert!(output.contains("wzp_relay_auth_attempts_total"));
         assert!(output.contains("wzp_relay_handshake_duration_seconds"));
+    }
+
+    #[test]
+    fn session_quality_update() {
+        let m = RelayMetrics::new();
+        let report = QualityReport {
+            loss_pct: 128,   // ~50%
+            rtt_4ms: 25,     // 100ms
+            jitter_ms: 10,
+            bitrate_cap_kbps: 200,
+        };
+        m.update_session_quality("sess-abc", &report);
+
+        let output = m.metrics_handler();
+        assert!(output.contains("wzp_relay_session_loss_pct{session_id=\"sess-abc\"}"));
+        assert!(output.contains("wzp_relay_session_rtt_ms{session_id=\"sess-abc\"}"));
+        // Verify rtt value (25 * 4 = 100)
+        assert!(output.contains("wzp_relay_session_rtt_ms{session_id=\"sess-abc\"} 100"));
+    }
+
+    #[test]
+    fn session_metrics_cleanup() {
+        let m = RelayMetrics::new();
+        let report = QualityReport {
+            loss_pct: 50,
+            rtt_4ms: 10,
+            jitter_ms: 5,
+            bitrate_cap_kbps: 100,
+        };
+        m.update_session_quality("sess-cleanup", &report);
+        m.update_session_buffer("sess-cleanup", 42, 3, 1);
+
+        // Verify they appear
+        let output = m.metrics_handler();
+        assert!(output.contains("sess-cleanup"));
+
+        // Remove and verify they are gone
+        m.remove_session_metrics("sess-cleanup");
+        let output = m.metrics_handler();
+        assert!(!output.contains("sess-cleanup"));
     }
 
     #[test]

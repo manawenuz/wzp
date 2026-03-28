@@ -179,6 +179,7 @@ pub async fn run_participant(
     participant_id: ParticipantId,
     transport: Arc<wzp_transport::QuinnTransport>,
     metrics: Arc<RelayMetrics>,
+    session_id: &str,
 ) {
     let addr = transport.connection().remote_address();
     let mut packets_forwarded = 0u64;
@@ -195,6 +196,11 @@ pub async fn run_participant(
                 break;
             }
         };
+
+        // Update per-session quality metrics if a quality report is present
+        if let Some(ref report) = pkt.quality_report {
+            metrics.update_session_quality(session_id, report);
+        }
 
         // Get current list of other participants
         let others = {

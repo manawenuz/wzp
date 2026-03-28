@@ -25,6 +25,10 @@ pub struct RelayConfig {
     /// Port for the Prometheus metrics HTTP endpoint (e.g., 9090).
     /// If None, the metrics endpoint is disabled.
     pub metrics_port: Option<u16>,
+    /// Peer relay addresses to probe for health monitoring.
+    /// Each target gets a persistent QUIC connection sending 1 Ping/s.
+    #[serde(default)]
+    pub probe_targets: Vec<SocketAddr>,
 }
 
 impl Default for RelayConfig {
@@ -38,6 +42,7 @@ impl Default for RelayConfig {
             log_level: "info".to_string(),
             auth_url: None,
             metrics_port: None,
+            probe_targets: Vec::new(),
         }
     }
 }

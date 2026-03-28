@@ -53,8 +53,16 @@ fn parse_args() -> RelayConfig {
                         .parse().expect("invalid --metrics-port number"),
                 );
             }
+            "--probe" => {
+                i += 1;
+                let addr: SocketAddr = args.get(i)
+                    .expect("--probe requires an address")
+                    .parse()
+                    .expect("invalid --probe address");
+                config.probe_targets.push(addr);
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>]");
+                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]...");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --listen <addr>        Listen address (default: 0.0.0.0:4433)");
@@ -62,6 +70,7 @@ fn parse_args() -> RelayConfig {
                 eprintln!("  --auth-url <url>       featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
                 eprintln!("                         When set, clients must send a bearer token as first signal message.");
                 eprintln!("  --metrics-port <port>  Prometheus metrics HTTP port (e.g., 9090). Disabled if not set.");
+                eprintln!("  --probe <addr>         Peer relay to probe for health monitoring (repeatable).");
                 eprintln!();
                 eprintln!("Room mode (default):");
                 eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
@@ -183,6 +192,14 @@ async fn main() -> anyhow::Result<()> {
     // Session manager — enforces max concurrent sessions
     let session_mgr = Arc::new(Mutex::new(SessionManager::new(config.max_sessions)));
 
+    // Spawn inter-relay health probes
+    for target in &config.probe_targets {
+        let probe_config = wzp_relay::probe::ProbeConfig::new(*target);
+        let runner = wzp_relay::probe::ProbeRunner::new(probe_config, metrics.registry());
+        info!(target = %target, "spawning inter-relay health probe");
+        tokio::spawn(async move { runner.run().await });
+    }
+
     if let Some(ref url) = config.auth_url {
         info!(url, "auth enabled — clients must present featherChat token");
     } else {
@@ -216,6 +233,37 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "default".to_string());
 
             let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
+
+            // Probe connections use SNI "_probe" to identify themselves.
+            // They skip auth + handshake and just do Ping->Pong.
+            if room_name == "_probe" {
+                info!(%addr, "probe connection detected, entering Ping/Pong responder");
+                loop {
+                    match transport.recv_signal().await {
+                        Ok(Some(wzp_proto::SignalMessage::Ping { timestamp_ms })) => {
+                            if let Err(e) = transport.send_signal(
+                                &wzp_proto::SignalMessage::Pong { timestamp_ms },
+                            ).await {
+                                error!(%addr, "probe pong send error: {e}");
+                                break;
+                            }
+                        }
+                        Ok(Some(_)) => {
+                            // Ignore non-Ping signals on probe connections
+                        }
+                        Ok(None) => {
+                            info!(%addr, "probe connection closed");
+                            break;
+                        }
+                        Err(e) => {
+                            error!(%addr, "probe recv error: {e}");
+                            break;
+                        }
+                    }
+                }
+                transport.close().await.ok();
+                return;
+            }
 
             // Auth check: if --auth-url is set, expect first signal message to be a token
             // Auth: if --auth-url is set, expect AuthToken as first signal
@@ -345,15 +393,21 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
+                let session_id_str: String = session_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
                 room::run_participant(
                     room_mgr.clone(),
                     room_name,
                     participant_id,
                     transport.clone(),
                     metrics.clone(),
+                    &session_id_str,
                 ).await;
 
-                // Participant disconnected — clean up session
+                // Participant disconnected — clean up per-session metrics
+                metrics.remove_session_metrics(&session_id_str);
                 metrics.active_sessions.dec();
                 {
                     let mgr = room_mgr.lock().await;
