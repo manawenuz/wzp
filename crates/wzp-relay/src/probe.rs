@@ -279,6 +279,106 @@ impl ProbeRunner {
     }
 }
 
+/// Coordinates multiple `ProbeRunner` instances for mesh mode.
+///
+/// Each relay probes all configured peers concurrently. The `ProbeMesh` owns the
+/// runners and spawns them as independent tokio tasks.
+pub struct ProbeMesh {
+    runners: Vec<ProbeRunner>,
+}
+
+impl ProbeMesh {
+    /// Create a new mesh coordinator, registering metrics for every target.
+    pub fn new(targets: Vec<SocketAddr>, registry: &Registry) -> Self {
+        let runners = targets
+            .into_iter()
+            .map(|addr| {
+                let config = ProbeConfig::new(addr);
+                ProbeRunner::new(config, registry)
+            })
+            .collect();
+        Self { runners }
+    }
+
+    /// Spawn all runners as concurrent tokio tasks. This consumes the mesh.
+    pub async fn run_all(self) {
+        let mut handles = Vec::with_capacity(self.runners.len());
+        for runner in self.runners {
+            let target = runner.config.target;
+            info!(target = %target, "spawning mesh probe");
+            handles.push(tokio::spawn(async move { runner.run().await }));
+        }
+        // Probes run forever; if we ever need to wait:
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
+    /// Number of probe targets in this mesh.
+    pub fn target_count(&self) -> usize {
+        self.runners.len()
+    }
+}
+
+/// Build a human-readable mesh health table from probe metrics in the registry.
+///
+/// Scans the registry for `wzp_probe_*` gauges and formats them into a table.
+pub fn mesh_summary(registry: &Registry) -> String {
+    use std::collections::BTreeMap;
+
+    let families = registry.gather();
+
+    // Collect per-target values: target -> (rtt, loss, jitter, up)
+    let mut targets: BTreeMap<String, (f64, f64, f64, bool)> = BTreeMap::new();
+
+    for family in &families {
+        let name = family.get_name();
+        for metric in family.get_metric() {
+            // Find the "target" label
+            let target_label = metric
+                .get_label()
+                .iter()
+                .find(|l| l.get_name() == "target");
+            let target = match target_label {
+                Some(l) => l.get_value().to_string(),
+                None => continue,
+            };
+
+            let entry = targets.entry(target).or_insert((0.0, 0.0, 0.0, false));
+
+            match name {
+                "wzp_probe_rtt_ms" => entry.0 = metric.get_gauge().get_value(),
+                "wzp_probe_loss_pct" => entry.1 = metric.get_gauge().get_value(),
+                "wzp_probe_jitter_ms" => entry.2 = metric.get_gauge().get_value(),
+                "wzp_probe_up" => entry.3 = metric.get_gauge().get_value() as i64 == 1,
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("Relay Mesh Health\n");
+    out.push_str("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    out.push_str(&format!(
+        "{:<20} {:>6} {:>6} {:>7}  {}\n",
+        "Target", "RTT", "Loss", "Jitter", "Status"
+    ));
+
+    for (target, (rtt, loss, jitter, up)) in &targets {
+        let status = if *up { "UP" } else { "DOWN" };
+        out.push_str(&format!(
+            "{:<20} {:>5.0}ms {:>5.1}% {:>5.0}ms  {}\n",
+            target, rtt, loss, jitter, status
+        ));
+    }
+
+    if targets.is_empty() {
+        out.push_str("  (no probe targets configured)\n");
+    }
+
+    out
+}
+
 /// Handle an incoming Ping signal by replying with a Pong carrying the same timestamp.
 /// Returns true if the message was a Ping and was handled, false otherwise.
 pub async fn handle_ping(
@@ -416,5 +516,77 @@ mod tests {
         assert_eq!(window.loss_pct(), 0.0);
         assert_eq!(window.jitter_ms(), 0.0);
         assert!(window.latest_rtt().is_none());
+    }
+
+    #[test]
+    fn mesh_creates_runners() {
+        let registry = Registry::new();
+        let targets: Vec<SocketAddr> = vec![
+            "127.0.0.1:4433".parse().unwrap(),
+            "127.0.0.2:4433".parse().unwrap(),
+            "127.0.0.3:4433".parse().unwrap(),
+        ];
+        let mesh = ProbeMesh::new(targets, &registry);
+        assert_eq!(mesh.target_count(), 3);
+
+        // Verify metrics were registered for each target
+        let encoder = prometheus::TextEncoder::new();
+        let families = registry.gather();
+        let mut buf = Vec::new();
+        encoder.encode(&families, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("target=\"127.0.0.1:4433\""));
+        assert!(output.contains("target=\"127.0.0.2:4433\""));
+        assert!(output.contains("target=\"127.0.0.3:4433\""));
+    }
+
+    #[test]
+    fn mesh_summary_empty() {
+        let registry = Registry::new();
+        let summary = mesh_summary(&registry);
+
+        // Should contain the header
+        assert!(summary.contains("Relay Mesh Health"));
+        assert!(summary.contains("Target"));
+        assert!(summary.contains("RTT"));
+        assert!(summary.contains("Loss"));
+        assert!(summary.contains("Jitter"));
+        assert!(summary.contains("Status"));
+        // Should indicate no targets
+        assert!(summary.contains("no probe targets configured"));
+    }
+
+    #[test]
+    fn mesh_summary_with_targets() {
+        let registry = Registry::new();
+        // Register probe metrics for two targets and set values
+        let m1 = ProbeMetrics::register("relay-b:4433", &registry);
+        m1.rtt_ms.set(12.0);
+        m1.loss_pct.set(0.0);
+        m1.jitter_ms.set(2.0);
+        m1.up.set(1);
+
+        let m2 = ProbeMetrics::register("relay-c:4433", &registry);
+        m2.rtt_ms.set(45.0);
+        m2.loss_pct.set(0.1);
+        m2.jitter_ms.set(5.0);
+        m2.up.set(0);
+
+        let summary = mesh_summary(&registry);
+
+        assert!(summary.contains("relay-b:4433"));
+        assert!(summary.contains("relay-c:4433"));
+        assert!(summary.contains("UP"));
+        assert!(summary.contains("DOWN"));
+        // Should NOT contain "no probe targets"
+        assert!(!summary.contains("no probe targets configured"));
+    }
+
+    #[test]
+    fn mesh_zero_targets() {
+        let registry = Registry::new();
+        let mesh = ProbeMesh::new(vec![], &registry);
+        assert_eq!(mesh.target_count(), 0);
     }
 }

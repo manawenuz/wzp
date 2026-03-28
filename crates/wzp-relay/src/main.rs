@@ -61,8 +61,19 @@ fn parse_args() -> RelayConfig {
                     .expect("invalid --probe address");
                 config.probe_targets.push(addr);
             }
+            "--probe-mesh" => {
+                config.probe_mesh = true;
+            }
+            "--mesh-status" => {
+                // Print mesh table from a fresh registry and exit.
+                // In practice this is useful after the relay has been running;
+                // here we just demonstrate the formatter with an empty registry.
+                let m = RelayMetrics::new();
+                print!("{}", wzp_relay::probe::mesh_summary(m.registry()));
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]...");
+                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]... [--probe-mesh] [--mesh-status]");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --listen <addr>        Listen address (default: 0.0.0.0:4433)");
@@ -71,6 +82,8 @@ fn parse_args() -> RelayConfig {
                 eprintln!("                         When set, clients must send a bearer token as first signal message.");
                 eprintln!("  --metrics-port <port>  Prometheus metrics HTTP port (e.g., 9090). Disabled if not set.");
                 eprintln!("  --probe <addr>         Peer relay to probe for health monitoring (repeatable).");
+                eprintln!("  --probe-mesh           Enable mesh mode (mark config flag, probes all --probe targets).");
+                eprintln!("  --mesh-status          Print mesh health table and exit (diagnostic).");
                 eprintln!();
                 eprintln!("Room mode (default):");
                 eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
@@ -192,12 +205,18 @@ async fn main() -> anyhow::Result<()> {
     // Session manager — enforces max concurrent sessions
     let session_mgr = Arc::new(Mutex::new(SessionManager::new(config.max_sessions)));
 
-    // Spawn inter-relay health probes
-    for target in &config.probe_targets {
-        let probe_config = wzp_relay::probe::ProbeConfig::new(*target);
-        let runner = wzp_relay::probe::ProbeRunner::new(probe_config, metrics.registry());
-        info!(target = %target, "spawning inter-relay health probe");
-        tokio::spawn(async move { runner.run().await });
+    // Spawn inter-relay health probes via ProbeMesh coordinator
+    if !config.probe_targets.is_empty() {
+        let mesh = wzp_relay::probe::ProbeMesh::new(
+            config.probe_targets.clone(),
+            metrics.registry(),
+        );
+        info!(
+            targets = mesh.target_count(),
+            mesh = config.probe_mesh,
+            "spawning probe mesh"
+        );
+        tokio::spawn(async move { mesh.run_all().await });
     }
 
     if let Some(ref url) = config.auth_url {

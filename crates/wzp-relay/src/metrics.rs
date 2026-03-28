@@ -201,17 +201,26 @@ impl RelayMetrics {
     }
 }
 
-/// Start an HTTP server serving GET /metrics on the given port.
+/// Start an HTTP server serving GET /metrics and GET /mesh on the given port.
 pub async fn serve_metrics(port: u16, metrics: Arc<RelayMetrics>) {
     use axum::{routing::get, Router};
 
-    let app = Router::new().route(
-        "/metrics",
-        get(move || {
-            let m = metrics.clone();
-            async move { m.metrics_handler() }
-        }),
-    );
+    let metrics_clone = metrics.clone();
+    let app = Router::new()
+        .route(
+            "/metrics",
+            get(move || {
+                let m = metrics.clone();
+                async move { m.metrics_handler() }
+            }),
+        )
+        .route(
+            "/mesh",
+            get(move || {
+                let m = metrics_clone.clone();
+                async move { crate::probe::mesh_summary(m.registry()) }
+            }),
+        );
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)

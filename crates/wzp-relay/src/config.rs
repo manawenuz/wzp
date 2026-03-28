@@ -29,6 +29,10 @@ pub struct RelayConfig {
     /// Each target gets a persistent QUIC connection sending 1 Ping/s.
     #[serde(default)]
     pub probe_targets: Vec<SocketAddr>,
+    /// Enable mesh mode: each relay probes all configured targets concurrently.
+    /// Discovery is manual via multiple --probe flags; this flag signals intent.
+    #[serde(default)]
+    pub probe_mesh: bool,
 }
 
 impl Default for RelayConfig {
@@ -43,6 +47,7 @@ impl Default for RelayConfig {
             auth_url: None,
             metrics_port: None,
             probe_targets: Vec::new(),
+            probe_mesh: false,
         }
     }
 }
