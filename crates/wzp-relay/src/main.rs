@@ -17,6 +17,7 @@ use tracing::{error, info};
 
 use wzp_proto::MediaTransport;
 use wzp_relay::config::RelayConfig;
+use wzp_relay::metrics::RelayMetrics;
 use wzp_relay::pipeline::{PipelineConfig, RelayPipeline};
 use wzp_relay::room::{self, RoomManager};
 use wzp_relay::session_mgr::SessionManager;
@@ -45,14 +46,22 @@ fn parse_args() -> RelayConfig {
                     args.get(i).expect("--auth-url requires a URL").to_string(),
                 );
             }
+            "--metrics-port" => {
+                i += 1;
+                config.metrics_port = Some(
+                    args.get(i).expect("--metrics-port requires a port number")
+                        .parse().expect("invalid --metrics-port number"),
+                );
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>]");
+                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --listen <addr>    Listen address (default: 0.0.0.0:4433)");
-                eprintln!("  --remote <addr>    Remote relay for forwarding (disables room mode)");
-                eprintln!("  --auth-url <url>   featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
-                eprintln!("                     When set, clients must send a bearer token as first signal message.");
+                eprintln!("  --listen <addr>        Listen address (default: 0.0.0.0:4433)");
+                eprintln!("  --remote <addr>        Remote relay for forwarding (disables room mode)");
+                eprintln!("  --auth-url <url>       featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
+                eprintln!("                         When set, clients must send a bearer token as first signal message.");
+                eprintln!("  --metrics-port <port>  Prometheus metrics HTTP port (e.g., 9090). Disabled if not set.");
                 eprintln!();
                 eprintln!("Room mode (default):");
                 eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
@@ -141,6 +150,13 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // Prometheus metrics
+    let metrics = Arc::new(RelayMetrics::new());
+    if let Some(port) = config.metrics_port {
+        let m = metrics.clone();
+        tokio::spawn(wzp_relay::metrics::serve_metrics(port, m));
+    }
+
     // Generate ephemeral relay identity for crypto handshake
     let relay_seed = wzp_crypto::Seed::generate();
     let relay_fp = relay_seed.derive_identity().public_identity().fingerprint;
@@ -186,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
         let session_mgr = session_mgr.clone();
         let auth_url = config.auth_url.clone();
         let relay_seed_bytes = relay_seed.0;
+        let metrics = metrics.clone();
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -208,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
                     Ok(Some(wzp_proto::SignalMessage::AuthToken { token })) => {
                         match wzp_relay::auth::validate_token(url, &token).await {
                             Ok(client) => {
+                                metrics.auth_attempts.with_label_values(&["ok"]).inc();
                                 info!(
                                     %addr,
                                     fingerprint = %client.fingerprint,
@@ -217,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
                                 Some(client.fingerprint)
                             }
                             Err(e) => {
+                                metrics.auth_attempts.with_label_values(&["fail"]).inc();
                                 error!(%addr, "auth failed: {e}");
                                 transport.close().await.ok();
                                 return;
@@ -243,12 +262,15 @@ async fn main() -> anyhow::Result<()> {
             };
 
             // Crypto handshake: verify client identity + negotiate quality profile
+            let handshake_start = std::time::Instant::now();
             let (_crypto_session, _chosen_profile) = match wzp_relay::handshake::accept_handshake(
                 &*transport,
                 &relay_seed_bytes,
             ).await {
                 Ok(result) => {
-                    info!(%addr, "crypto handshake complete");
+                    let elapsed = handshake_start.elapsed().as_secs_f64();
+                    metrics.handshake_duration.observe(elapsed);
+                    info!(%addr, elapsed_ms = %(elapsed * 1000.0), "crypto handshake complete");
                     result
                 }
                 Err(e) => {
@@ -302,13 +324,19 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
+                metrics.active_sessions.inc();
+
                 let participant_id = {
                     let mut mgr = room_mgr.lock().await;
                     match mgr.join(&room_name, addr, transport.clone(), authenticated_fp.as_deref()) {
-                        Ok(id) => id,
+                        Ok(id) => {
+                            metrics.active_rooms.set(mgr.list().len() as i64);
+                            id
+                        }
                         Err(e) => {
                             error!(%addr, room = %room_name, "room join denied: {e}");
                             // Clean up the session we just created
+                            metrics.active_sessions.dec();
                             let mut smgr = session_mgr.lock().await;
                             smgr.remove_session(session_id);
                             transport.close().await.ok();
@@ -322,9 +350,15 @@ async fn main() -> anyhow::Result<()> {
                     room_name,
                     participant_id,
                     transport.clone(),
+                    metrics.clone(),
                 ).await;
 
                 // Participant disconnected — clean up session
+                metrics.active_sessions.dec();
+                {
+                    let mgr = room_mgr.lock().await;
+                    metrics.active_rooms.set(mgr.list().len() as i64);
+                }
                 {
                     let mut smgr = session_mgr.lock().await;
                     smgr.remove_session(session_id);

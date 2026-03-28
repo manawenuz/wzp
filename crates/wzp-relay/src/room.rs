@@ -12,6 +12,8 @@ use tracing::{error, info, warn};
 
 use wzp_proto::MediaTransport;
 
+use crate::metrics::RelayMetrics;
+
 /// Unique participant ID within a room.
 pub type ParticipantId = u64;
 
@@ -176,6 +178,7 @@ pub async fn run_participant(
     room_name: String,
     participant_id: ParticipantId,
     transport: Arc<wzp_transport::QuinnTransport>,
+    metrics: Arc<RelayMetrics>,
 ) {
     let addr = transport.connection().remote_address();
     let mut packets_forwarded = 0u64;
@@ -200,6 +203,7 @@ pub async fn run_participant(
         };
 
         // Forward to all others
+        let pkt_bytes = pkt.payload.len() as u64;
         for other in &others {
             // Best-effort: if one send fails, continue to others
             if let Err(e) = other.send_media(&pkt).await {
@@ -208,6 +212,9 @@ pub async fn run_participant(
             }
         }
 
+        let fan_out = others.len() as u64;
+        metrics.packets_forwarded.inc_by(fan_out);
+        metrics.bytes_forwarded.inc_by(pkt_bytes * fan_out);
         packets_forwarded += 1;
         if packets_forwarded % 500 == 0 {
             let room_size = {

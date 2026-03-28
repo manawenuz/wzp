@@ -29,6 +29,7 @@ rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 tokio-rustls = "0.26"
+prometheus = "0.13"
 
 [[bin]]
 name = "wzp-web"

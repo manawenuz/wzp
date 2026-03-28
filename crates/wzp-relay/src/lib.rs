@@ -10,6 +10,7 @@
 pub mod auth;
 pub mod config;
 pub mod handshake;
+pub mod metrics;
 pub mod pipeline;
 pub mod room;
 pub mod session_mgr;

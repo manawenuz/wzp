@@ -24,6 +24,8 @@ reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 quinn = { workspace = true }
+prometheus = "0.13"
+axum = { version = "0.7", default-features = false, features = ["tokio", "http1"] }
 
 [[bin]]
 name = "wzp-relay"

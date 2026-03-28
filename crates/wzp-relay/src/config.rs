@@ -22,6 +22,9 @@ pub struct RelayConfig {
     /// featherChat auth validation URL (e.g., "https://chat.example.com/v1/auth/validate").
     /// If set, clients must present a valid token before joining rooms.
     pub auth_url: Option<String>,
+    /// Port for the Prometheus metrics HTTP endpoint (e.g., 9090).
+    /// If None, the metrics endpoint is disabled.
+    pub metrics_port: Option<u16>,
 }
 
 impl Default for RelayConfig {
@@ -34,6 +37,7 @@ impl Default for RelayConfig {
             jitter_max_depth: 250,
             log_level: "info".to_string(),
             auth_url: None,
+            metrics_port: None,
         }
     }
 }

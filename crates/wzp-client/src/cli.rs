@@ -46,6 +46,7 @@ struct CliArgs {
     mnemonic: Option<String>,
     room: Option<String>,
     token: Option<String>,
+    metrics_file: Option<String>,
 }
 
 impl CliArgs {
@@ -86,6 +87,7 @@ fn parse_args() -> CliArgs {
     let mut mnemonic = None;
     let mut room = None;
     let mut token = None;
+    let mut metrics_file = None;
     let mut relay_str = None;
 
     let mut i = 1;
@@ -132,6 +134,14 @@ fn parse_args() -> CliArgs {
                 i += 1;
                 token = Some(args.get(i).expect("--token requires a value").to_string());
             }
+            "--metrics-file" => {
+                i += 1;
+                metrics_file = Some(
+                    args.get(i)
+                        .expect("--metrics-file requires a path")
+                        .to_string(),
+                );
+            }
             "--record" => {
                 i += 1;
                 record_file = Some(
@@ -174,6 +184,7 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
                 eprintln!("  --room <name>          Room name (hashed for privacy before sending)");
                 eprintln!("  --token <token>        featherChat bearer token for relay auth");
+                eprintln!("  --metrics-file <path>  Write JSONL telemetry to file (1 line/sec)");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
                 eprintln!();
                 eprintln!("Default relay: 127.0.0.1:4433");
@@ -209,6 +220,7 @@ fn parse_args() -> CliArgs {
         mnemonic,
         room,
         token,
+        metrics_file,
     }
 }
 

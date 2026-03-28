@@ -14,6 +14,7 @@ pub mod drift_test;
 pub mod echo_test;
 pub mod featherchat;
 pub mod handshake;
+pub mod metrics;
 pub mod sweep;
 
 #[cfg(feature = "audio")]

@@ -25,6 +25,9 @@ use tracing::{error, info, warn};
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
 use wzp_proto::MediaTransport;
 
+mod metrics;
+use metrics::WebMetrics;
+
 const FRAME_SAMPLES: usize = 960;
 
 #[derive(Clone)]
@@ -32,6 +35,7 @@ struct AppState {
     relay_addr: SocketAddr,
     rooms: Arc<Mutex<HashMap<String, RoomSlot>>>,
     auth_url: Option<String>,
+    metrics: WebMetrics,
 }
 
 /// A waiting client in a room.
@@ -90,10 +94,12 @@ async fn main() -> anyhow::Result<()> {
         info!(url, "auth enabled — browsers must send token as first WS message");
     }
 
+    let web_metrics = WebMetrics::new();
     let state = AppState {
         relay_addr,
         rooms: Arc::new(Mutex::new(HashMap::new())),
         auth_url,
+        metrics: web_metrics,
     };
 
     let static_dir = if std::path::Path::new("crates/wzp-web/static").exists() {
@@ -106,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/ws/{room}", get(ws_handler))
+        .route("/metrics", get(metrics::metrics_handler))
         .fallback_service(ServeDir::new(static_dir))
         .with_state(state);
 
@@ -172,6 +179,8 @@ async fn ws_handler(
 async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     info!(room = %room, "client joined room");
 
+    state.metrics.active_connections.inc();
+
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Auth: if --auth-url is set, expect a JSON auth message from the browser first
@@ -184,6 +193,8 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                         let token = v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string();
                         if token.is_empty() {
                             error!(room = %room, "empty auth token");
+                            state.metrics.auth_failures.inc();
+                            state.metrics.active_connections.dec();
                             return;
                         }
                         // Validate against featherChat
@@ -194,6 +205,8 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                                 }
                                 Err(e) => {
                                     error!(room = %room, "browser auth failed: {e}");
+                                    state.metrics.auth_failures.inc();
+                                    state.metrics.active_connections.dec();
                                     return;
                                 }
                             }
@@ -202,12 +215,16 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                     }
                     _ => {
                         error!(room = %room, "expected auth JSON, got: {text}");
+                        state.metrics.auth_failures.inc();
+                        state.metrics.active_connections.dec();
                         return;
                     }
                 }
             }
             _ => {
                 error!(room = %room, "no auth message from browser");
+                state.metrics.auth_failures.inc();
+                state.metrics.active_connections.dec();
                 return;
             }
         }
@@ -257,14 +274,18 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     }
 
     // Crypto handshake with relay
+    let handshake_start = std::time::Instant::now();
     let bridge_seed = wzp_crypto::Seed::generate();
     match wzp_client::handshake::perform_handshake(&*transport, &bridge_seed.0).await {
         Ok(_session) => {
-            info!(room = %room, "crypto handshake with relay complete");
+            let elapsed = handshake_start.elapsed().as_secs_f64();
+            state.metrics.handshake_latency.observe(elapsed);
+            info!(room = %room, elapsed_ms = %(elapsed * 1000.0), "crypto handshake with relay complete");
         }
         Err(e) => {
             error!(room = %room, "relay handshake failed: {e}");
             transport.close().await.ok();
+            state.metrics.active_connections.dec();
             return;
         }
     }
@@ -277,6 +298,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     let send_transport = transport.clone();
     let send_encoder = encoder.clone();
     let send_room = room.clone();
+    let send_metrics = state.metrics.clone();
     let send_task = tokio::spawn(async move {
         let mut frames_sent = 0u64;
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -302,6 +324,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                             return;
                         }
                     }
+                    send_metrics.frames_bridged.with_label_values(&["up"]).inc();
                     frames_sent += 1;
                     if frames_sent % 500 == 0 {
                         info!(room = %send_room, frames_sent, "browser → relay");
@@ -318,6 +341,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     let recv_transport = transport.clone();
     let recv_decoder = decoder.clone();
     let recv_room = room.clone();
+    let recv_metrics = state.metrics.clone();
     let recv_task = tokio::spawn(async move {
         let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
         let mut frames_recv = 0u64;
@@ -336,6 +360,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                                 error!("ws send: {e}");
                                 return;
                             }
+                            recv_metrics.frames_bridged.with_label_values(&["down"]).inc();
                             frames_recv += 1;
                             if frames_recv % 500 == 0 {
                                 info!(room = %recv_room, frames_recv, "relay → browser");
@@ -356,5 +381,6 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     }
 
     transport.close().await.ok();
+    state.metrics.active_connections.dec();
     info!(room = %room, "session ended");
 }
