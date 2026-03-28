@@ -279,7 +279,15 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
         }
     }
 
-    let config = CallConfig::default();
+    // Web bridge config: low latency for PTT, disable silence suppression
+    // (PTT handles silence at the browser level, no need to suppress here)
+    let config = CallConfig {
+        suppression_enabled: false,
+        jitter_target: 3,   // 60ms instead of default (~1s)
+        jitter_max: 20,     // 400ms cap
+        jitter_min: 1,      // start playing after 20ms
+        ..CallConfig::default()
+    };
     let encoder = Arc::new(Mutex::new(CallEncoder::new(&config)));
     let decoder = Arc::new(Mutex::new(CallDecoder::new(&config)));
 
