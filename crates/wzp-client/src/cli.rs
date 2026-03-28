@@ -227,6 +227,9 @@ fn parse_args() -> CliArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
 
     let cli = parse_args();
 

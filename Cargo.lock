@@ -4149,6 +4149,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cpal",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
