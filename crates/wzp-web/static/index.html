@@ -165,16 +165,34 @@ function stopCall() {
 function cleanupAudio() {
   if (captureNode) { captureNode.disconnect(); captureNode = null; }
   if (playbackNode) { playbackNode.disconnect(); playbackNode = null; }
-  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; workletLoaded = false; }
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+}
+
+let workletLoaded = false;
+
+async function loadWorkletModule() {
+  if (workletLoaded) return true;
+  if (typeof AudioWorkletNode === 'undefined' || !audioCtx.audioWorklet) {
+    console.warn('AudioWorklet API not supported in this browser — using ScriptProcessorNode fallback');
+    return false;
+  }
+  try {
+    await audioCtx.audioWorklet.addModule('audio-processor.js');
+    workletLoaded = true;
+    return true;
+  } catch(e) {
+    console.warn('AudioWorklet module failed to load — using ScriptProcessorNode fallback:', e);
+    return false;
+  }
 }
 
 async function startAudioCapture() {
   const source = audioCtx.createMediaStreamSource(mediaStream);
+  const hasWorklet = await loadWorkletModule();
 
-  try {
-    await audioCtx.audioWorklet.addModule('audio-processor.js');
-    captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+  if (hasWorklet) {
+    captureNode = new AudioWorkletNode(audioCtx, 'wzp-capture-processor');
     captureNode.port.onmessage = (e) => {
       if (!active || !ws || ws.readyState !== WebSocket.OPEN || !transmitting) return;
       ws.send(e.data);
@@ -188,10 +206,10 @@ async function startAudioCapture() {
     };
     source.connect(captureNode);
     captureNode.connect(audioCtx.destination); // needed to keep worklet alive
-  } catch(e) {
-    // Fallback to ScriptProcessor if AudioWorklet not supported
-    console.warn('AudioWorklet not available, using ScriptProcessor fallback:', e);
-    captureNode = audioCtx.createScriptProcessor(1024, 1, 1);
+  } else {
+    // Fallback to ScriptProcessorNode (deprecated but widely supported)
+    console.warn('Capture: using ScriptProcessorNode fallback');
+    captureNode = audioCtx.createScriptProcessor(4096, 1, 1);
     let acc = new Float32Array(0);
     captureNode.onaudioprocess = (ev) => {
       if (!active || !ws || ws.readyState !== WebSocket.OPEN || !transmitting) return;
@@ -215,13 +233,14 @@ async function startAudioCapture() {
 }
 
 async function startAudioPlayback() {
-  try {
-    await audioCtx.audioWorklet.addModule('playback-processor.js');
-    playbackNode = new AudioWorkletNode(audioCtx, 'playback-processor');
+  const hasWorklet = await loadWorkletModule();
+
+  if (hasWorklet) {
+    playbackNode = new AudioWorkletNode(audioCtx, 'wzp-playback-processor');
     playbackNode.connect(audioCtx.destination);
-  } catch(e) {
-    console.warn('AudioWorklet playback not available, using scheduled fallback');
-    playbackNode = null; // will use createBufferSource fallback
+  } else {
+    console.warn('Playback: using scheduled BufferSource fallback');
+    playbackNode = null; // will use createBufferSource fallback in playAudio()
   }
 }
 
@@ -230,16 +249,15 @@ let nextPlayTime = 0;
 function playAudio(pcmInt16) {
   if (!audioCtx) return;
 
-  const floatData = new Float32Array(pcmInt16.length);
-  for (let i = 0; i < pcmInt16.length; i++) {
-    floatData[i] = pcmInt16[i] / 32768.0;
-  }
-
   if (playbackNode && playbackNode.port) {
-    // AudioWorklet path — send float samples to the worklet
-    playbackNode.port.postMessage(floatData.buffer, [floatData.buffer]);
+    // AudioWorklet path — send Int16 PCM directly to the worklet for conversion
+    playbackNode.port.postMessage(pcmInt16.buffer, [pcmInt16.buffer]);
   } else {
-    // Fallback: scheduled BufferSource
+    // Fallback: scheduled BufferSource (convert Int16 -> Float32 on main thread)
+    const floatData = new Float32Array(pcmInt16.length);
+    for (let i = 0; i < pcmInt16.length; i++) {
+      floatData[i] = pcmInt16[i] / 32768.0;
+    }
     const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
     buffer.getChannelData(0).set(floatData);
     const source = audioCtx.createBufferSource();

@@ -19,6 +19,7 @@ use wzp_proto::MediaTransport;
 use wzp_relay::config::RelayConfig;
 use wzp_relay::pipeline::{PipelineConfig, RelayPipeline};
 use wzp_relay::room::{self, RoomManager};
+use wzp_relay::session_mgr::SessionManager;
 
 fn parse_args() -> RelayConfig {
     let mut config = RelayConfig::default();
@@ -163,6 +164,9 @@ async fn main() -> anyhow::Result<()> {
     // Room manager (room mode only)
     let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
 
+    // Session manager — enforces max concurrent sessions
+    let session_mgr = Arc::new(Mutex::new(SessionManager::new(config.max_sessions)));
+
     if let Some(ref url) = config.auth_url {
         info!(url, "auth enabled — clients must present featherChat token");
     } else {
@@ -179,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
 
         let remote_transport = remote_transport.clone();
         let room_mgr = room_mgr.clone();
+        let session_mgr = session_mgr.clone();
         let auth_url = config.auth_url.clone();
         let relay_seed_bytes = relay_seed.0;
 
@@ -284,13 +289,28 @@ async fn main() -> anyhow::Result<()> {
                 stats_handle.abort();
                 transport.close().await.ok();
             } else {
-                // Room mode — join room and forward to all others
+                // Room mode — enforce max sessions, then join room
+                let session_id = {
+                    let mut smgr = session_mgr.lock().await;
+                    match smgr.create_session(&room_name, authenticated_fp.clone()) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            error!(%addr, room = %room_name, "session rejected: {e}");
+                            transport.close().await.ok();
+                            return;
+                        }
+                    }
+                };
+
                 let participant_id = {
                     let mut mgr = room_mgr.lock().await;
                     match mgr.join(&room_name, addr, transport.clone(), authenticated_fp.as_deref()) {
                         Ok(id) => id,
                         Err(e) => {
                             error!(%addr, room = %room_name, "room join denied: {e}");
+                            // Clean up the session we just created
+                            let mut smgr = session_mgr.lock().await;
+                            smgr.remove_session(session_id);
                             transport.close().await.ok();
                             return;
                         }
@@ -303,6 +323,12 @@ async fn main() -> anyhow::Result<()> {
                     participant_id,
                     transport.clone(),
                 ).await;
+
+                // Participant disconnected — clean up session
+                {
+                    let mut smgr = session_mgr.lock().await;
+                    smgr.remove_session(session_id);
+                }
 
                 transport.close().await.ok();
             }

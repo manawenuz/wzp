@@ -12,6 +12,7 @@ use wzp_proto::quality::AdaptiveQualityController;
 use wzp_proto::traits::{
     AudioDecoder, AudioEncoder, FecDecoder, FecEncoder,
 };
+use wzp_proto::packet::QualityReport;
 use wzp_proto::QualityProfile;
 
 /// Configuration for a call session.
@@ -33,6 +34,129 @@ impl Default for CallConfig {
             jitter_target: 10,
             jitter_max: 250,
             jitter_min: 3, // 60ms — low latency start, still smooths jitter
+        }
+    }
+}
+
+impl CallConfig {
+    /// Build a `CallConfig` tuned for the given quality profile.
+    pub fn from_profile(profile: QualityProfile) -> Self {
+        let (jitter_target, jitter_max, jitter_min) = if profile == QualityProfile::CATASTROPHIC {
+            // Catastrophic: larger jitter buffer to absorb spikes
+            (20, 500, 8)
+        } else if profile == QualityProfile::DEGRADED {
+            // Degraded: moderately deeper buffer
+            (15, 350, 5)
+        } else {
+            // Good: low-latency defaults
+            (10, 250, 3)
+        };
+        Self {
+            profile,
+            jitter_target,
+            jitter_max,
+            jitter_min,
+        }
+    }
+}
+
+/// Sliding-window quality adapter that reacts to relay `QualityReport`s.
+///
+/// Thresholds (per-report):
+///   - loss > 15% OR rtt > 200ms  => CATASTROPHIC
+///   - loss > 5%  OR rtt > 100ms  => DEGRADED
+///   - otherwise                   => GOOD
+///
+/// Hysteresis: a profile switch is only recommended after the new profile
+/// has been the recommendation for 3 or more consecutive reports.
+pub struct QualityAdapter {
+    /// Sliding window of the last N reports.
+    window: std::collections::VecDeque<QualityReport>,
+    /// Maximum window size.
+    max_window: usize,
+    /// Number of consecutive reports recommending the same (non-current) profile.
+    consecutive_same: u32,
+    /// The profile that the last `consecutive_same` reports recommended.
+    pending_profile: Option<QualityProfile>,
+}
+
+/// Number of consecutive reports required before accepting a switch.
+const HYSTERESIS_COUNT: u32 = 3;
+/// Default sliding window capacity.
+const ADAPTER_WINDOW: usize = 10;
+
+impl QualityAdapter {
+    pub fn new() -> Self {
+        Self {
+            window: std::collections::VecDeque::with_capacity(ADAPTER_WINDOW),
+            max_window: ADAPTER_WINDOW,
+            consecutive_same: 0,
+            pending_profile: None,
+        }
+    }
+
+    /// Record a new quality report from the relay.
+    pub fn ingest(&mut self, report: &QualityReport) {
+        if self.window.len() >= self.max_window {
+            self.window.pop_front();
+        }
+        self.window.push_back(*report);
+    }
+
+    /// Classify a single report into a recommended profile.
+    fn classify(report: &QualityReport) -> QualityProfile {
+        let loss = report.loss_percent();
+        let rtt = report.rtt_ms();
+
+        if loss > 15.0 || rtt > 200 {
+            QualityProfile::CATASTROPHIC
+        } else if loss > 5.0 || rtt > 100 {
+            QualityProfile::DEGRADED
+        } else {
+            QualityProfile::GOOD
+        }
+    }
+
+    /// Return the best profile based on the most recent report in the window.
+    pub fn recommended_profile(&self) -> QualityProfile {
+        match self.window.back() {
+            Some(report) => Self::classify(report),
+            None => QualityProfile::GOOD,
+        }
+    }
+
+    /// Determine if a profile switch should happen, applying hysteresis.
+    ///
+    /// Returns `Some(new_profile)` only when the recommendation has differed
+    /// from `current` for at least `HYSTERESIS_COUNT` consecutive reports.
+    pub fn should_switch(&mut self, current: &QualityProfile) -> Option<QualityProfile> {
+        let recommended = self.recommended_profile();
+
+        if recommended == *current {
+            // Conditions match current profile — reset pending state.
+            self.consecutive_same = 0;
+            self.pending_profile = None;
+            return None;
+        }
+
+        // Recommended differs from current.
+        match self.pending_profile {
+            Some(pending) if pending == recommended => {
+                self.consecutive_same += 1;
+            }
+            _ => {
+                // New or changed recommendation — restart counter.
+                self.pending_profile = Some(recommended);
+                self.consecutive_same = 1;
+            }
+        }
+
+        if self.consecutive_same >= HYSTERESIS_COUNT {
+            self.consecutive_same = 0;
+            self.pending_profile = None;
+            Some(recommended)
+        } else {
+            None
         }
     }
 }
@@ -300,5 +424,138 @@ mod tests {
         // Not enough buffered yet (min_depth = 25)
         let mut pcm = vec![0i16; 960];
         assert!(dec.decode_next(&mut pcm).is_none());
+    }
+
+    // ---- QualityAdapter tests ----
+
+    /// Helper: build a QualityReport from human-readable loss% and RTT ms.
+    fn make_report(loss_pct_f: f32, rtt_ms: u16) -> QualityReport {
+        QualityReport {
+            loss_pct: (loss_pct_f / 100.0 * 255.0) as u8,
+            rtt_4ms: (rtt_ms / 4) as u8,
+            jitter_ms: 10,
+            bitrate_cap_kbps: 200,
+        }
+    }
+
+    #[test]
+    fn good_conditions_stays_good() {
+        let mut adapter = QualityAdapter::new();
+        let good = make_report(1.0, 40);
+        for _ in 0..10 {
+            adapter.ingest(&good);
+        }
+        assert_eq!(adapter.recommended_profile(), QualityProfile::GOOD);
+
+        let current = QualityProfile::GOOD;
+        for _ in 0..10 {
+            adapter.ingest(&good);
+            assert!(adapter.should_switch(&current).is_none());
+        }
+    }
+
+    #[test]
+    fn high_loss_degrades() {
+        let mut adapter = QualityAdapter::new();
+        // 8% loss, low RTT => DEGRADED
+        let degraded = make_report(8.0, 40);
+        let mut current = QualityProfile::GOOD;
+
+        // Feed 3 consecutive degraded reports to pass hysteresis
+        for _ in 0..3 {
+            adapter.ingest(&degraded);
+            if let Some(new) = adapter.should_switch(&current) {
+                current = new;
+            }
+        }
+        assert_eq!(current, QualityProfile::DEGRADED);
+    }
+
+    #[test]
+    fn catastrophic_conditions() {
+        let mut adapter = QualityAdapter::new();
+        // 20% loss => CATASTROPHIC
+        let terrible = make_report(20.0, 50);
+        let mut current = QualityProfile::GOOD;
+
+        for _ in 0..3 {
+            adapter.ingest(&terrible);
+            if let Some(new) = adapter.should_switch(&current) {
+                current = new;
+            }
+        }
+        assert_eq!(current, QualityProfile::CATASTROPHIC);
+
+        // Also test via high RTT alone (250ms > 200ms threshold)
+        let mut adapter2 = QualityAdapter::new();
+        let high_rtt = make_report(1.0, 252); // rtt_4ms rounds to 63 => 252ms
+        let mut current2 = QualityProfile::GOOD;
+
+        for _ in 0..3 {
+            adapter2.ingest(&high_rtt);
+            if let Some(new) = adapter2.should_switch(&current2) {
+                current2 = new;
+            }
+        }
+        assert_eq!(current2, QualityProfile::CATASTROPHIC);
+    }
+
+    #[test]
+    fn hysteresis_prevents_flapping() {
+        let mut adapter = QualityAdapter::new();
+        let good = make_report(1.0, 40);
+        let bad = make_report(8.0, 40); // DEGRADED
+        let current = QualityProfile::GOOD;
+
+        // Alternate good/bad — should never trigger a switch because
+        // we never get 3 consecutive same-recommendation reports.
+        for _ in 0..20 {
+            adapter.ingest(&bad);
+            assert!(adapter.should_switch(&current).is_none());
+            adapter.ingest(&good);
+            assert!(adapter.should_switch(&current).is_none());
+        }
+        assert_eq!(current, QualityProfile::GOOD);
+    }
+
+    #[test]
+    fn recovery_to_good() {
+        let mut adapter = QualityAdapter::new();
+        let bad = make_report(20.0, 50);
+        let good = make_report(1.0, 40);
+
+        // Drive to CATASTROPHIC first
+        let mut current = QualityProfile::GOOD;
+        for _ in 0..3 {
+            adapter.ingest(&bad);
+            if let Some(new) = adapter.should_switch(&current) {
+                current = new;
+            }
+        }
+        assert_eq!(current, QualityProfile::CATASTROPHIC);
+
+        // Now feed good reports — should recover to GOOD after 3 consecutive
+        for _ in 0..3 {
+            adapter.ingest(&good);
+            if let Some(new) = adapter.should_switch(&current) {
+                current = new;
+            }
+        }
+        assert_eq!(current, QualityProfile::GOOD);
+    }
+
+    #[test]
+    fn call_config_from_profile() {
+        let good = CallConfig::from_profile(QualityProfile::GOOD);
+        assert_eq!(good.profile, QualityProfile::GOOD);
+        assert_eq!(good.jitter_min, 3);
+
+        let degraded = CallConfig::from_profile(QualityProfile::DEGRADED);
+        assert_eq!(degraded.profile, QualityProfile::DEGRADED);
+        assert!(degraded.jitter_target > good.jitter_target);
+
+        let catastrophic = CallConfig::from_profile(QualityProfile::CATASTROPHIC);
+        assert_eq!(catastrophic.profile, QualityProfile::CATASTROPHIC);
+        assert!(catastrophic.jitter_max > degraded.jitter_max);
     }
 }
