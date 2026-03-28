@@ -33,13 +33,13 @@ impl KeyExchange for WarzoneKeyExchange {
         // Derive Ed25519 signing key via HKDF
         let hk = Hkdf::<Sha256>::new(None, seed);
         let mut ed25519_bytes = [0u8; 32];
-        hk.expand(b"warzone-ed25519-identity", &mut ed25519_bytes)
+        hk.expand(b"warzone-ed25519", &mut ed25519_bytes)
             .expect("HKDF expand for Ed25519 should not fail");
         let signing_key = SigningKey::from_bytes(&ed25519_bytes);
 
         // Derive X25519 static key via HKDF
         let mut x25519_bytes = [0u8; 32];
-        hk.expand(b"warzone-x25519-identity", &mut x25519_bytes)
+        hk.expand(b"warzone-x25519", &mut x25519_bytes)
             .expect("HKDF expand for X25519 should not fail");
         let x25519_static_secret = StaticSecret::from(x25519_bytes);
         let x25519_static_public = X25519PublicKey::from(&x25519_static_secret);
