@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use std::sync::Mutex;
 
+use wzp_proto::packet::TrunkFrame;
 use wzp_proto::{MediaPacket, MediaTransport, PathQuality, SignalMessage, TransportError};
 
 use crate::datagram;
@@ -35,6 +36,47 @@ impl QuinnTransport {
     /// Get the maximum datagram payload size, if datagrams are supported.
     pub fn max_datagram_size(&self) -> Option<usize> {
         datagram::max_datagram_payload(&self.connection)
+    }
+
+    /// Send an encoded [`TrunkFrame`] as a single QUIC datagram.
+    pub fn send_trunk(&self, frame: &TrunkFrame) -> Result<(), TransportError> {
+        let data = frame.encode();
+
+        if let Some(max_size) = self.connection.max_datagram_size() {
+            if data.len() > max_size {
+                return Err(TransportError::DatagramTooLarge {
+                    size: data.len(),
+                    max: max_size,
+                });
+            }
+        }
+
+        self.connection.send_datagram(data).map_err(|e| {
+            TransportError::Internal(format!("send trunk datagram error: {e}"))
+        })?;
+
+        Ok(())
+    }
+
+    /// Receive a single QUIC datagram and decode it as a [`TrunkFrame`].
+    ///
+    /// Returns `Ok(None)` on connection close, `Ok(Some(frame))` on success,
+    /// or an error on malformed data / transport failure.
+    pub async fn recv_trunk(&self) -> Result<Option<TrunkFrame>, TransportError> {
+        let data = match self.connection.read_datagram().await {
+            Ok(data) => data,
+            Err(quinn::ConnectionError::ApplicationClosed(_)) => return Ok(None),
+            Err(quinn::ConnectionError::LocallyClosed) => return Ok(None),
+            Err(e) => {
+                return Err(TransportError::Internal(format!(
+                    "recv trunk datagram error: {e}"
+                )))
+            }
+        };
+
+        TrunkFrame::decode(&data)
+            .map(Some)
+            .ok_or_else(|| TransportError::Internal("malformed trunk frame".into()))
     }
 }
 

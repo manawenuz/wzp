@@ -12,12 +12,14 @@
 pub mod adaptive;
 pub mod codec2_dec;
 pub mod codec2_enc;
+pub mod denoise;
 pub mod opus_dec;
 pub mod opus_enc;
 pub mod resample;
 pub mod silence;
 
 pub use adaptive::{AdaptiveDecoder, AdaptiveEncoder};
+pub use denoise::NoiseSupressor;
 pub use silence::{ComfortNoise, SilenceDetector};
 pub use wzp_proto::{AudioDecoder, AudioEncoder, CodecId, QualityProfile};
 

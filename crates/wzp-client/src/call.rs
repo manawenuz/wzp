@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tracing::{debug, info, warn};
 
-use wzp_codec::{ComfortNoise, SilenceDetector};
+use wzp_codec::{ComfortNoise, NoiseSupressor, SilenceDetector};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
-use wzp_proto::packet::{MediaHeader, MediaPacket};
+use wzp_proto::packet::{MediaHeader, MediaPacket, MiniFrameContext};
 use wzp_proto::quality::AdaptiveQualityController;
 use wzp_proto::traits::{
     AudioDecoder, AudioEncoder, FecDecoder, FecEncoder,
@@ -36,6 +36,17 @@ pub struct CallConfig {
     pub silence_hangover_frames: u32,
     /// Comfort noise amplitude (default: 50).
     pub comfort_noise_level: i16,
+    /// Enable ML-based noise suppression via RNNoise (default: true).
+    pub noise_suppression: bool,
+    /// Enable mini-frame header compression (default: true).
+    /// When enabled, only every 50th frame carries a full 12-byte MediaHeader;
+    /// intermediate frames use a compact 4-byte MiniHeader.
+    pub mini_frames_enabled: bool,
+    /// Enable adaptive jitter buffer (default: true).
+    ///
+    /// When true, the jitter buffer target depth is automatically adjusted
+    /// based on observed inter-arrival jitter (NetEq-inspired algorithm).
+    pub adaptive_jitter: bool,
 }
 
 impl Default for CallConfig {
@@ -49,6 +60,9 @@ impl Default for CallConfig {
             silence_threshold_rms: 100.0,
             silence_hangover_frames: 5,
             comfort_noise_level: 50,
+            noise_suppression: true,
+            mini_frames_enabled: true,
+            adaptive_jitter: true,
         }
     }
 }
@@ -205,6 +219,14 @@ pub struct CallEncoder {
     cn_counter: u32,
     /// Comfort noise amplitude level (stored for CN packet payload).
     cn_level: i16,
+    /// ML-based noise suppressor (RNNoise).
+    denoiser: NoiseSupressor,
+    /// Mini-frame compression context (tracks last full header).
+    mini_context: MiniFrameContext,
+    /// Whether mini-frame header compression is enabled.
+    mini_frames_enabled: bool,
+    /// Frames encoded since the last full header was emitted.
+    frames_since_full: u32,
 }
 
 impl CallEncoder {
@@ -226,6 +248,27 @@ impl CallEncoder {
             frames_suppressed: 0,
             cn_counter: 0,
             cn_level: config.comfort_noise_level,
+            denoiser: {
+                let mut d = NoiseSupressor::new();
+                d.set_enabled(config.noise_suppression);
+                d
+            },
+            mini_context: MiniFrameContext::default(),
+            mini_frames_enabled: config.mini_frames_enabled,
+            frames_since_full: 0,
+        }
+    }
+
+    /// Serialize a `MediaPacket` for transmission, applying mini-frame
+    /// compression when enabled.
+    ///
+    /// Returns compact wire bytes: either `[FRAME_TYPE_FULL][MediaHeader][payload]`
+    /// or `[FRAME_TYPE_MINI][MiniHeader][payload]`.
+    pub fn serialize_compact(&mut self, packet: &MediaPacket) -> Bytes {
+        if self.mini_frames_enabled {
+            packet.encode_compact(&mut self.mini_context, &mut self.frames_since_full)
+        } else {
+            packet.to_bytes()
         }
     }
 
@@ -234,6 +277,16 @@ impl CallEncoder {
     /// Input: 48kHz mono PCM, frame size depends on profile (960 for 20ms, 1920 for 40ms).
     /// Output: one or more MediaPackets to send.
     pub fn encode_frame(&mut self, pcm: &[i16]) -> Result<Vec<MediaPacket>, anyhow::Error> {
+        // Noise suppression: denoise the PCM before silence detection and encoding.
+        let pcm = if self.denoiser.is_enabled() {
+            let mut buf = pcm.to_vec();
+            self.denoiser.process(&mut buf);
+            buf
+        } else {
+            pcm.to_vec()
+        };
+        let pcm = &pcm[..];
+
         // Silence suppression: skip encoding silent frames, periodically send CN.
         if self.suppression_enabled && self.silence_detector.is_silent(pcm) {
             self.frames_suppressed += 1;
@@ -368,19 +421,36 @@ pub struct CallDecoder {
     comfort_noise: ComfortNoise,
     /// Whether the last decoded frame was comfort noise.
     last_was_cn: bool,
+    /// Mini-frame decompression context (tracks last full header baseline).
+    mini_context: MiniFrameContext,
 }
 
 impl CallDecoder {
     pub fn new(config: &CallConfig) -> Self {
+        let jitter = if config.adaptive_jitter {
+            JitterBuffer::new_adaptive(config.jitter_min, config.jitter_max)
+        } else {
+            JitterBuffer::new(config.jitter_target, config.jitter_max, config.jitter_min)
+        };
         Self {
             audio_dec: wzp_codec::create_decoder(config.profile),
             fec_dec: wzp_fec::create_decoder(&config.profile),
-            jitter: JitterBuffer::new(config.jitter_target, config.jitter_max, config.jitter_min),
+            jitter,
             quality: AdaptiveQualityController::new(),
             profile: config.profile,
             comfort_noise: ComfortNoise::new(50),
             last_was_cn: false,
+            mini_context: MiniFrameContext::default(),
         }
+    }
+
+    /// Deserialize a compact wire-format buffer into a `MediaPacket`,
+    /// auto-detecting full vs mini headers.
+    ///
+    /// Returns `None` on malformed data or if a mini-frame arrives before
+    /// any full header baseline has been established.
+    pub fn deserialize_compact(&mut self, buf: &[u8]) -> Option<MediaPacket> {
+        MediaPacket::decode_compact(buf, &mut self.mini_context)
     }
 
     /// Feed a received media packet into the decode pipeline.

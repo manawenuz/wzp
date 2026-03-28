@@ -64,6 +64,9 @@ fn parse_args() -> RelayConfig {
             "--probe-mesh" => {
                 config.probe_mesh = true;
             }
+            "--trunking" => {
+                config.trunking_enabled = true;
+            }
             "--mesh-status" => {
                 // Print mesh table from a fresh registry and exit.
                 // In practice this is useful after the relay has been running;
@@ -84,6 +87,7 @@ fn parse_args() -> RelayConfig {
                 eprintln!("  --probe <addr>         Peer relay to probe for health monitoring (repeatable).");
                 eprintln!("  --probe-mesh           Enable mesh mode (mark config flag, probes all --probe targets).");
                 eprintln!("  --mesh-status          Print mesh health table and exit (diagnostic).");
+                eprintln!("  --trunking             Enable trunk batching for outgoing media in room mode.");
                 eprintln!();
                 eprintln!("Room mode (default):");
                 eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
@@ -239,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         let auth_url = config.auth_url.clone();
         let relay_seed_bytes = relay_seed.0;
         let metrics = metrics.clone();
+        let trunking_enabled = config.trunking_enabled;
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -423,6 +428,7 @@ async fn main() -> anyhow::Result<()> {
                     transport.clone(),
                     metrics.clone(),
                     &session_id_str,
+                    trunking_enabled,
                 ).await;
 
                 // Participant disconnected — clean up per-session metrics

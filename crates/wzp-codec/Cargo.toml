@@ -19,4 +19,7 @@ codec2 = { workspace = true }
 # RNG for comfort noise generation
 rand = { workspace = true }
 
+# ML-based noise suppression (pure-Rust port of RNNoise)
+nnnoiseless = "0.5"
+
 [dev-dependencies]

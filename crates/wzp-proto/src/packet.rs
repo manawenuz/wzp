@@ -191,6 +191,9 @@ pub struct MediaPacket {
     pub quality_report: Option<QualityReport>,
 }
 
+/// Maximum number of mini-frames between full headers (1 second at 50 fps).
+pub const MINI_FRAME_FULL_INTERVAL: u32 = 50;
+
 impl MediaPacket {
     /// Serialize the entire packet to bytes.
     pub fn to_bytes(&self) -> Bytes {
@@ -238,6 +241,98 @@ impl MediaPacket {
             payload,
             quality_report,
         })
+    }
+
+    /// Serialize with mini-frame compression.
+    ///
+    /// Uses the `MiniFrameContext` to decide whether to emit a compact 4-byte
+    /// mini-header or a full 12-byte header.  A full header is forced on the
+    /// first frame and every `MINI_FRAME_FULL_INTERVAL` frames thereafter.
+    pub fn encode_compact(
+        &self,
+        ctx: &mut MiniFrameContext,
+        frames_since_full: &mut u32,
+    ) -> Bytes {
+        if *frames_since_full > 0 && *frames_since_full < MINI_FRAME_FULL_INTERVAL {
+            // --- mini frame ---
+            let ts_delta = self
+                .header
+                .timestamp
+                .wrapping_sub(ctx.last_header.unwrap().timestamp)
+                as u16;
+            let mini = MiniHeader {
+                timestamp_delta_ms: ts_delta,
+                payload_len: self.payload.len() as u16,
+            };
+            let total = 1 + MiniHeader::WIRE_SIZE + self.payload.len();
+            let mut buf = BytesMut::with_capacity(total);
+            buf.put_u8(FRAME_TYPE_MINI);
+            mini.write_to(&mut buf);
+            buf.put(self.payload.clone());
+            // Advance the context so the next mini-frame delta is relative
+            // to this frame, mirroring what expand() does on the decoder side.
+            ctx.update(&self.header);
+            *frames_since_full += 1;
+            buf.freeze()
+        } else {
+            // --- full frame ---
+            let qr_size = if self.quality_report.is_some() {
+                QualityReport::WIRE_SIZE
+            } else {
+                0
+            };
+            let total = 1 + MediaHeader::WIRE_SIZE + self.payload.len() + qr_size;
+            let mut buf = BytesMut::with_capacity(total);
+            buf.put_u8(FRAME_TYPE_FULL);
+            self.header.write_to(&mut buf);
+            buf.put(self.payload.clone());
+            if let Some(ref qr) = self.quality_report {
+                qr.write_to(&mut buf);
+            }
+            ctx.update(&self.header);
+            *frames_since_full = 1; // next frame will be the 1st after full
+            buf.freeze()
+        }
+    }
+
+    /// Decode from compact wire format (auto-detects full vs mini).
+    ///
+    /// Returns `None` on malformed input or if a mini-frame arrives before any
+    /// full header baseline has been established.
+    pub fn decode_compact(buf: &[u8], ctx: &mut MiniFrameContext) -> Option<Self> {
+        if buf.is_empty() {
+            return None;
+        }
+        let frame_type = buf[0];
+        let rest = &buf[1..];
+
+        match frame_type {
+            FRAME_TYPE_FULL => {
+                let pkt = Self::from_bytes(Bytes::copy_from_slice(rest))?;
+                ctx.update(&pkt.header);
+                Some(pkt)
+            }
+            FRAME_TYPE_MINI => {
+                if rest.len() < MiniHeader::WIRE_SIZE {
+                    return None;
+                }
+                let mut cursor = rest;
+                let mini = MiniHeader::read_from(&mut cursor)?;
+                let payload_start = 1 + MiniHeader::WIRE_SIZE;
+                let payload_end = payload_start + mini.payload_len as usize;
+                if buf.len() < payload_end {
+                    return None;
+                }
+                let payload = Bytes::copy_from_slice(&buf[payload_start..payload_end]);
+                let header = ctx.expand(&mini)?;
+                Some(Self {
+                    header,
+                    payload,
+                    quality_report: None,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -837,5 +932,102 @@ mod tests {
         // Verify the constants match expectations
         assert_eq!(FRAME_TYPE_FULL, 0x00);
         assert_eq!(FRAME_TYPE_MINI, 0x01);
+    }
+
+    // ---------------------------------------------------------------
+    // encode_compact / decode_compact tests
+    // ---------------------------------------------------------------
+
+    fn make_media_packet(seq: u16, ts: u32, payload: &[u8]) -> MediaPacket {
+        MediaPacket {
+            header: MediaHeader {
+                version: 0,
+                is_repair: false,
+                codec_id: CodecId::Opus24k,
+                has_quality_report: false,
+                fec_ratio_encoded: 10,
+                seq,
+                timestamp: ts,
+                fec_block: 0,
+                fec_symbol: 0,
+                reserved: 0,
+                csrc_count: 0,
+            },
+            payload: Bytes::from(payload.to_vec()),
+            quality_report: None,
+        }
+    }
+
+    #[test]
+    fn mini_frame_encode_decode_sequence() {
+        let mut enc_ctx = MiniFrameContext::default();
+        let mut dec_ctx = MiniFrameContext::default();
+        let mut frames_since_full: u32 = 0;
+
+        let packets: Vec<MediaPacket> = (0..5)
+            .map(|i| make_media_packet(i, i as u32 * 20, b"audio"))
+            .collect();
+
+        for (i, pkt) in packets.iter().enumerate() {
+            let wire = pkt.encode_compact(&mut enc_ctx, &mut frames_since_full);
+
+            if i == 0 {
+                // First frame must be full
+                assert_eq!(wire[0], FRAME_TYPE_FULL, "frame 0 should be FULL");
+            } else {
+                // Subsequent frames should be mini
+                assert_eq!(wire[0], FRAME_TYPE_MINI, "frame {i} should be MINI");
+                // Mini wire: 1 (tag) + 4 (mini header) + payload
+                assert_eq!(wire.len(), 1 + MiniHeader::WIRE_SIZE + pkt.payload.len());
+            }
+
+            let decoded = MediaPacket::decode_compact(&wire, &mut dec_ctx)
+                .unwrap_or_else(|| panic!("decode failed at frame {i}"));
+            assert_eq!(decoded.header.seq, pkt.header.seq);
+            assert_eq!(decoded.header.timestamp, pkt.header.timestamp);
+            assert_eq!(decoded.payload, pkt.payload);
+        }
+    }
+
+    #[test]
+    fn mini_frame_periodic_full() {
+        let mut ctx = MiniFrameContext::default();
+        let mut frames_since_full: u32 = 0;
+
+        // Encode MINI_FRAME_FULL_INTERVAL + 1 frames. Frame 0 and frame 50
+        // should be FULL, everything in between should be MINI.
+        for i in 0..=MINI_FRAME_FULL_INTERVAL {
+            let pkt = make_media_packet(i as u16, i * 20, b"data");
+            let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
+
+            if i == 0 || i == MINI_FRAME_FULL_INTERVAL {
+                assert_eq!(
+                    wire[0], FRAME_TYPE_FULL,
+                    "frame {i} should be FULL"
+                );
+            } else {
+                assert_eq!(
+                    wire[0], FRAME_TYPE_MINI,
+                    "frame {i} should be MINI"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mini_frame_disabled() {
+        // Simulate disabled mini-frames by always keeping frames_since_full at 0
+        // (which is what the encoder does when the feature is off).
+        let mut ctx = MiniFrameContext::default();
+
+        for i in 0..10u16 {
+            let pkt = make_media_packet(i, i as u32 * 20, b"payload");
+            // When mini-frames are disabled, the encoder always passes
+            // frames_since_full = 0 equivalent by never using encode_compact.
+            // We test the raw path: frames_since_full forced to 0 every time.
+            let mut frames_since_full: u32 = 0;
+            let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
+            assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL when disabled");
+        }
     }
 }

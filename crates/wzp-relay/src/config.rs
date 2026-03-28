@@ -33,6 +33,12 @@ pub struct RelayConfig {
     /// Discovery is manual via multiple --probe flags; this flag signals intent.
     #[serde(default)]
     pub probe_mesh: bool,
+    /// Enable trunk batching for outgoing media in room mode.
+    /// When true, packets destined for the same receiver are accumulated into
+    /// [`TrunkFrame`]s and flushed every 5 ms (or when the batcher is full),
+    /// reducing per-packet QUIC datagram overhead.
+    #[serde(default)]
+    pub trunking_enabled: bool,
 }
 
 impl Default for RelayConfig {
@@ -48,6 +54,7 @@ impl Default for RelayConfig {
             metrics_port: None,
             probe_targets: Vec::new(),
             probe_mesh: false,
+            trunking_enabled: false,
         }
     }
 }
