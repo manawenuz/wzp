@@ -71,10 +71,16 @@ Based on featherChat commit 65f6390 — FUTURE_TASKS.md with WZP integration ite
 
 ## featherChat-Side Tasks (their responsibility, we support)
 
-### WZP-FC-1. Add CallSignal WireMessage variant — 2-4h
+### WZP-FC-1. Add CallSignal WireMessage variant — DONE (v0.0.21, 064a730)
+- `CallSignal { id, sender_fingerprint, signal_type, payload, target }`
+- `CallSignalType`: Offer, Answer, IceCandidate, Hangup, Reject, Ringing, Busy
+- payload field is String — WZP puts JSON-serialized SignalMessage here
+- target field: peer fingerprint (1:1) or room name (group)
 ### WZP-FC-2. Call state management + sled tree — 1-2d
 ### WZP-FC-3. WS handler for call signaling — 0.5d
-### WZP-FC-4. Auth token validation endpoint — 2-4h
+### WZP-FC-4. Auth token validation endpoint — DONE (v0.0.21, 064a730)
+- `POST /v1/auth/validate { "token": "..." }`
+- Returns: `{ "valid": true, "fingerprint": "...", "alias": "..." }`
 ### WZP-FC-5. Group-to-room mapping — 1d
 ### WZP-FC-6. Presence/online status API — 0.5-2d
 ### WZP-FC-7. Missed call notifications — 0.5d
