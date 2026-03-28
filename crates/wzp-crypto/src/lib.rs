@@ -9,12 +9,14 @@
 
 pub mod anti_replay;
 pub mod handshake;
+pub mod identity;
 pub mod nonce;
 pub mod rekey;
 pub mod session;
 
 pub use anti_replay::AntiReplayWindow;
 pub use handshake::WarzoneKeyExchange;
+pub use identity::{Fingerprint, IdentityKeyPair, PublicIdentity, Seed};
 pub use nonce::{build_nonce, Direction};
 pub use rekey::RekeyManager;
 pub use session::ChaChaSession;

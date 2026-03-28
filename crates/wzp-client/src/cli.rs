@@ -40,6 +40,33 @@ struct CliArgs {
     send_file: Option<String>,
     record_file: Option<String>,
     echo_test_secs: Option<u32>,
+    seed_hex: Option<String>,
+    mnemonic: Option<String>,
+}
+
+impl CliArgs {
+    /// Resolve the identity seed from --seed, --mnemonic, or generate a new one.
+    pub fn resolve_seed(&self) -> wzp_crypto::Seed {
+        if let Some(ref hex_str) = self.seed_hex {
+            let seed = wzp_crypto::Seed::from_hex(hex_str).expect("invalid --seed hex");
+            let id = seed.derive_identity();
+            let fp = id.public_identity().fingerprint;
+            info!(fingerprint = %fp, "identity from --seed");
+            seed
+        } else if let Some(ref words) = self.mnemonic {
+            let seed = wzp_crypto::Seed::from_mnemonic(words).expect("invalid --mnemonic");
+            let id = seed.derive_identity();
+            let fp = id.public_identity().fingerprint;
+            info!(fingerprint = %fp, "identity from --mnemonic");
+            seed
+        } else {
+            let seed = wzp_crypto::Seed::generate();
+            let id = seed.derive_identity();
+            let fp = id.public_identity().fingerprint;
+            info!(fingerprint = %fp, "generated ephemeral identity");
+            seed
+        }
+    }
 }
 
 fn parse_args() -> CliArgs {
@@ -49,6 +76,8 @@ fn parse_args() -> CliArgs {
     let mut send_file = None;
     let mut record_file = None;
     let mut echo_test_secs = None;
+    let mut seed_hex = None;
+    let mut mnemonic = None;
     let mut relay_str = None;
 
     let mut i = 1;
@@ -71,6 +100,21 @@ fn parse_args() -> CliArgs {
                         .expect("--send-file requires a filename")
                         .to_string(),
                 );
+            }
+            "--seed" => {
+                i += 1;
+                seed_hex = Some(args.get(i).expect("--seed requires hex string").to_string());
+            }
+            "--mnemonic" => {
+                // Consume all remaining words until next flag or end
+                i += 1;
+                let mut words = Vec::new();
+                while i < args.len() && !args[i].starts_with('-') {
+                    words.push(args[i].clone());
+                    i += 1;
+                }
+                i -= 1; // back up since outer loop will increment
+                mnemonic = Some(words.join(" "));
             }
             "--record" => {
                 i += 1;
@@ -98,6 +142,8 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --send-file <file>     Send a raw PCM file (48kHz mono s16le)");
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
+                eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
+                eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
                 eprintln!();
                 eprintln!("Default relay: 127.0.0.1:4433");
@@ -127,6 +173,8 @@ fn parse_args() -> CliArgs {
         send_file,
         record_file,
         echo_test_secs,
+        seed_hex,
+        mnemonic,
     }
 }
 
@@ -135,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
     let cli = parse_args();
+    let _seed = cli.resolve_seed();
 
     info!(
         relay = %cli.relay_addr,

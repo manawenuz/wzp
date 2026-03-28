@@ -1,0 +1,3 @@
+[submodule "deps/featherchat"]
+	path = deps/featherchat
+	url = ssh://git@git.manko.yoga:222/manawenuz/featherChat.git
