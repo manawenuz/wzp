@@ -591,6 +591,16 @@ pub enum SignalMessage {
     },
     /// Acknowledge a transfer request.
     TransferAck,
+
+    /// Presence update from a peer relay (gossip protocol).
+    /// Sent periodically over probe connections to share which fingerprints
+    /// are connected to the sending relay.
+    PresenceUpdate {
+        /// Fingerprints currently connected to the sending relay.
+        fingerprints: Vec<String>,
+        /// Address of the sending relay (e.g., "192.168.1.10:4433").
+        relay_addr: String,
+    },
 }
 
 /// Reasons for ending a call.
@@ -774,6 +784,40 @@ mod tests {
         let json = serde_json::to_string(&ack).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, SignalMessage::TransferAck));
+    }
+
+    #[test]
+    fn presence_update_signal_roundtrip() {
+        let msg = SignalMessage::PresenceUpdate {
+            fingerprints: vec!["aabb".to_string(), "ccdd".to_string()],
+            relay_addr: "10.0.0.1:4433".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::PresenceUpdate { fingerprints, relay_addr } => {
+                assert_eq!(fingerprints.len(), 2);
+                assert!(fingerprints.contains(&"aabb".to_string()));
+                assert!(fingerprints.contains(&"ccdd".to_string()));
+                assert_eq!(relay_addr, "10.0.0.1:4433");
+            }
+            _ => panic!("expected PresenceUpdate variant"),
+        }
+
+        // Empty fingerprints list
+        let msg_empty = SignalMessage::PresenceUpdate {
+            fingerprints: vec![],
+            relay_addr: "10.0.0.2:4433".to_string(),
+        };
+        let json = serde_json::to_string(&msg_empty).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::PresenceUpdate { fingerprints, relay_addr } => {
+                assert!(fingerprints.is_empty());
+                assert_eq!(relay_addr, "10.0.0.2:4433");
+            }
+            _ => panic!("expected PresenceUpdate variant"),
+        }
     }
 
     #[test]

@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "warzone-protocol"
-version = "0.0.21"
+version = "0.0.38"
 dependencies = [
  "base64",
  "bincode",

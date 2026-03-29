@@ -77,7 +77,9 @@ Based on featherChat commit 65f6390 — FUTURE_TASKS.md with WZP integration ite
 ### WZP-FC-7. Missed call notifications — TODO (0.5d)
 ### WZP-FC-8. Cross-project identity verification — DONE (15 tests, 26dc848)
 ### WZP-FC-9. HKDF salt investigation — DONE (no mismatch)
-### WZP-FC-10. Web bridge shared auth — TODO (1-2d)
+### WZP-FC-10. Web bridge shared auth — DONE
+- FC: GET /v1/wzp/relay-config, CORS layer, service token
+- WZP: web bridge --auth-url validates browser tokens via FC
 ### FC-CRATE-1. Standalone warzone-protocol — DONE (v0.0.21, 4a4fa9f)
 
 ---

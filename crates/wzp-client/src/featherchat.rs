@@ -104,6 +104,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::Unmute => CallSignalType::Unmute,
         SignalMessage::Transfer { .. } => CallSignalType::Transfer,
         SignalMessage::TransferAck => CallSignalType::Offer, // reuse
+        SignalMessage::PresenceUpdate { .. } => CallSignalType::Offer, // reuse
     }
 }
 

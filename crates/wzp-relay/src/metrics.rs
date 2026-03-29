@@ -201,11 +201,19 @@ impl RelayMetrics {
     }
 }
 
-/// Start an HTTP server serving GET /metrics and GET /mesh on the given port.
-pub async fn serve_metrics(port: u16, metrics: Arc<RelayMetrics>) {
-    use axum::{routing::get, Router};
+/// Start an HTTP server serving GET /metrics, GET /mesh, and presence endpoints on the given port.
+pub async fn serve_metrics(
+    port: u16,
+    metrics: Arc<RelayMetrics>,
+    presence: Option<Arc<tokio::sync::Mutex<crate::presence::PresenceRegistry>>>,
+) {
+    use axum::{extract::Path, routing::get, Router};
 
     let metrics_clone = metrics.clone();
+    let presence_all = presence.clone();
+    let presence_lookup = presence.clone();
+    let presence_peers = presence;
+
     let app = Router::new()
         .route(
             "/metrics",
@@ -219,6 +227,66 @@ pub async fn serve_metrics(port: u16, metrics: Arc<RelayMetrics>) {
             get(move || {
                 let m = metrics_clone.clone();
                 async move { crate::probe::mesh_summary(m.registry()) }
+            }),
+        )
+        .route(
+            "/presence",
+            get(move || {
+                let reg = presence_all.clone();
+                async move {
+                    match reg {
+                        Some(r) => {
+                            let r = r.lock().await;
+                            let entries: Vec<serde_json::Value> = r.all_known().into_iter().map(|(fp, loc)| {
+                                serde_json::json!({ "fingerprint": fp, "location": loc })
+                            }).collect();
+                            serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
+                        }
+                        None => "[]".to_string(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/presence/:fingerprint",
+            get(move |Path(fingerprint): Path<String>| {
+                let reg = presence_lookup.clone();
+                async move {
+                    match reg {
+                        Some(r) => {
+                            let r = r.lock().await;
+                            match r.lookup(&fingerprint) {
+                                Some(loc) => serde_json::to_string_pretty(
+                                    &serde_json::json!({ "fingerprint": fingerprint, "location": loc })
+                                ).unwrap_or_else(|_| "{}".to_string()),
+                                None => serde_json::json!({ "fingerprint": fingerprint, "location": null }).to_string(),
+                            }
+                        }
+                        None => serde_json::json!({ "fingerprint": fingerprint, "location": null }).to_string(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/peers",
+            get(move || {
+                let reg = presence_peers.clone();
+                async move {
+                    match reg {
+                        Some(r) => {
+                            let r = r.lock().await;
+                            let peers: Vec<serde_json::Value> = r.peers().iter().map(|(addr, peer)| {
+                                serde_json::json!({
+                                    "addr": addr.to_string(),
+                                    "fingerprints": peer.fingerprints.iter().collect::<Vec<_>>(),
+                                    "rtt_ms": peer.rtt_ms,
+                                })
+                            }).collect();
+                            serde_json::to_string_pretty(&peers).unwrap_or_else(|_| "[]".to_string())
+                        }
+                        None => "[]".to_string(),
+                    }
+                }
             }),
         );
 

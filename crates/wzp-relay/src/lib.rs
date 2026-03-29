@@ -12,6 +12,7 @@ pub mod config;
 pub mod handshake;
 pub mod metrics;
 pub mod pipeline;
+pub mod presence;
 pub mod probe;
 pub mod room;
 pub mod session_mgr;

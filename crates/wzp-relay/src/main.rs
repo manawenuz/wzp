@@ -19,6 +19,7 @@ use wzp_proto::MediaTransport;
 use wzp_relay::config::RelayConfig;
 use wzp_relay::metrics::RelayMetrics;
 use wzp_relay::pipeline::{PipelineConfig, RelayPipeline};
+use wzp_relay::presence::PresenceRegistry;
 use wzp_relay::room::{self, RoomManager};
 use wzp_relay::session_mgr::SessionManager;
 
@@ -176,11 +177,15 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // Presence registry
+    let presence = Arc::new(Mutex::new(PresenceRegistry::new()));
+
     // Prometheus metrics
     let metrics = Arc::new(RelayMetrics::new());
     if let Some(port) = config.metrics_port {
         let m = metrics.clone();
-        tokio::spawn(wzp_relay::metrics::serve_metrics(port, m));
+        let p = Some(presence.clone());
+        tokio::spawn(wzp_relay::metrics::serve_metrics(port, m, p));
     }
 
     // Generate ephemeral relay identity for crypto handshake
@@ -214,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
         let mesh = wzp_relay::probe::ProbeMesh::new(
             config.probe_targets.clone(),
             metrics.registry(),
+            Some(presence.clone()),
         );
         info!(
             targets = mesh.target_count(),
@@ -244,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         let relay_seed_bytes = relay_seed.0;
         let metrics = metrics.clone();
         let trunking_enabled = config.trunking_enabled;
+        let presence = presence.clone();
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -259,9 +266,9 @@ async fn main() -> anyhow::Result<()> {
             let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
             // Probe connections use SNI "_probe" to identify themselves.
-            // They skip auth + handshake and just do Ping->Pong.
+            // They skip auth + handshake and just do Ping->Pong + presence gossip.
             if room_name == "_probe" {
-                info!(%addr, "probe connection detected, entering Ping/Pong responder");
+                info!(%addr, "probe connection detected, entering Ping/Pong + presence responder");
                 loop {
                     match transport.recv_signal().await {
                         Ok(Some(wzp_proto::SignalMessage::Ping { timestamp_ms })) => {
@@ -272,8 +279,30 @@ async fn main() -> anyhow::Result<()> {
                                 break;
                             }
                         }
+                        Ok(Some(wzp_proto::SignalMessage::PresenceUpdate { fingerprints, relay_addr })) => {
+                            // A peer relay is telling us which fingerprints it has
+                            let peer_addr: std::net::SocketAddr = relay_addr.parse().unwrap_or(addr);
+                            let fps: std::collections::HashSet<String> = fingerprints.into_iter().collect();
+                            {
+                                let mut reg = presence.lock().await;
+                                reg.update_peer(peer_addr, fps);
+                            }
+                            // Reply with our own local fingerprints
+                            let local_fps: Vec<String> = {
+                                let reg = presence.lock().await;
+                                reg.local_fingerprints().into_iter().collect()
+                            };
+                            let reply = wzp_proto::SignalMessage::PresenceUpdate {
+                                fingerprints: local_fps,
+                                relay_addr: addr.to_string(),
+                            };
+                            if let Err(e) = transport.send_signal(&reply).await {
+                                error!(%addr, "presence reply send error: {e}");
+                                break;
+                            }
+                        }
                         Ok(Some(_)) => {
-                            // Ignore non-Ping signals on probe connections
+                            // Ignore other signals on probe connections
                         }
                         Ok(None) => {
                             info!(%addr, "probe connection closed");
@@ -351,6 +380,12 @@ async fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
+
+            // Register in presence registry
+            if let Some(ref fp) = authenticated_fp {
+                let mut reg = presence.lock().await;
+                reg.register_local(fp, None, Some(room_name.clone()));
+            }
 
             info!(%addr, room = %room_name, "client joining");
 
@@ -431,7 +466,11 @@ async fn main() -> anyhow::Result<()> {
                     trunking_enabled,
                 ).await;
 
-                // Participant disconnected — clean up per-session metrics
+                // Participant disconnected — clean up presence + per-session metrics
+                if let Some(ref fp) = authenticated_fp {
+                    let mut reg = presence.lock().await;
+                    reg.unregister_local(fp);
+                }
                 metrics.remove_session_metrics(&session_id_str);
                 metrics.active_sessions.dec();
                 {
