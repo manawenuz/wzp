@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod presence;
 pub mod probe;
+pub mod relay_link;
 pub mod room;
 pub mod route;
 pub mod session_mgr;

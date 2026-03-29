@@ -613,6 +613,21 @@ pub enum SignalMessage {
         found: bool,
         relay_chain: Vec<String>,
     },
+
+    /// Request to set up a forwarding session for a specific fingerprint.
+    /// Sent over a relay link (`_relay` SNI) to ask the peer relay to
+    /// create a room and forward media for the given session.
+    SessionForward {
+        session_id: String,
+        target_fingerprint: String,
+        source_relay: String,
+    },
+    /// Confirm that the forwarding session has been set up on the peer relay.
+    /// The `room_name` tells the source relay which room to address media to.
+    SessionForwardAck {
+        session_id: String,
+        room_name: String,
+    },
 }
 
 /// Reasons for ending a call.
