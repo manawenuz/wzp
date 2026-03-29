@@ -180,12 +180,16 @@ async fn main() -> anyhow::Result<()> {
     // Presence registry
     let presence = Arc::new(Mutex::new(PresenceRegistry::new()));
 
+    // Route resolver
+    let route_resolver = Arc::new(wzp_relay::route::RouteResolver::new(config.listen_addr));
+
     // Prometheus metrics
     let metrics = Arc::new(RelayMetrics::new());
     if let Some(port) = config.metrics_port {
         let m = metrics.clone();
         let p = Some(presence.clone());
-        tokio::spawn(wzp_relay::metrics::serve_metrics(port, m, p));
+        let rr = Some(route_resolver.clone());
+        tokio::spawn(wzp_relay::metrics::serve_metrics(port, m, p, rr));
     }
 
     // Generate ephemeral relay identity for crypto handshake
@@ -251,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
         let metrics = metrics.clone();
         let trunking_enabled = config.trunking_enabled;
         let presence = presence.clone();
+        let route_resolver = route_resolver.clone();
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -298,6 +303,39 @@ async fn main() -> anyhow::Result<()> {
                             };
                             if let Err(e) = transport.send_signal(&reply).await {
                                 error!(%addr, "presence reply send error: {e}");
+                                break;
+                            }
+                        }
+                        Ok(Some(wzp_proto::SignalMessage::RouteQuery { fingerprint, ttl })) => {
+                            // Look up the fingerprint in our local registry
+                            let reg = presence.lock().await;
+                            let route = route_resolver.resolve(&reg, &fingerprint);
+                            drop(reg);
+
+                            let (found, relay_chain) = match route {
+                                wzp_relay::route::Route::Local => {
+                                    (true, vec![route_resolver.local_addr().to_string()])
+                                }
+                                wzp_relay::route::Route::DirectPeer(peer_addr) => {
+                                    (true, vec![route_resolver.local_addr().to_string(), peer_addr.to_string()])
+                                }
+                                _ => {
+                                    // Not found locally; if ttl > 0 we could forward
+                                    // to other peers (future multi-hop). For now, reply not found.
+                                    if ttl > 0 {
+                                        // TODO: forward RouteQuery to other peers with ttl-1
+                                    }
+                                    (false, vec![])
+                                }
+                            };
+
+                            let reply = wzp_proto::SignalMessage::RouteResponse {
+                                fingerprint,
+                                found,
+                                relay_chain,
+                            };
+                            if let Err(e) = transport.send_signal(&reply).await {
+                                error!(%addr, "route response send error: {e}");
                                 break;
                             }
                         }

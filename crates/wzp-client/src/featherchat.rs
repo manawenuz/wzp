@@ -105,6 +105,8 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::Transfer { .. } => CallSignalType::Transfer,
         SignalMessage::TransferAck => CallSignalType::Offer, // reuse
         SignalMessage::PresenceUpdate { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::RouteQuery { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::RouteResponse { .. } => CallSignalType::Offer, // reuse
     }
 }
 

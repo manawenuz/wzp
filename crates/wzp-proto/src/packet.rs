@@ -601,6 +601,18 @@ pub enum SignalMessage {
         /// Address of the sending relay (e.g., "192.168.1.10:4433").
         relay_addr: String,
     },
+
+    /// Ask a peer relay to look up a fingerprint in its registry.
+    RouteQuery {
+        fingerprint: String,
+        ttl: u8,
+    },
+    /// Response to a route query.
+    RouteResponse {
+        fingerprint: String,
+        found: bool,
+        relay_chain: Vec<String>,
+    },
 }
 
 /// Reasons for ending a call.

@@ -201,18 +201,20 @@ impl RelayMetrics {
     }
 }
 
-/// Start an HTTP server serving GET /metrics, GET /mesh, and presence endpoints on the given port.
+/// Start an HTTP server serving GET /metrics, GET /mesh, presence, and route endpoints on the given port.
 pub async fn serve_metrics(
     port: u16,
     metrics: Arc<RelayMetrics>,
     presence: Option<Arc<tokio::sync::Mutex<crate::presence::PresenceRegistry>>>,
+    route_resolver: Option<Arc<crate::route::RouteResolver>>,
 ) {
     use axum::{extract::Path, routing::get, Router};
 
     let metrics_clone = metrics.clone();
     let presence_all = presence.clone();
     let presence_lookup = presence.clone();
-    let presence_peers = presence;
+    let presence_peers = presence.clone();
+    let presence_route = presence;
 
     let app = Router::new()
         .route(
@@ -285,6 +287,32 @@ pub async fn serve_metrics(
                             serde_json::to_string_pretty(&peers).unwrap_or_else(|_| "[]".to_string())
                         }
                         None => "[]".to_string(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/route/:fingerprint",
+            get(move |Path(fingerprint): Path<String>| {
+                let reg = presence_route.clone();
+                let resolver = route_resolver.clone();
+                async move {
+                    match (reg, resolver) {
+                        (Some(r), Some(res)) => {
+                            let r = r.lock().await;
+                            let route = res.resolve(&r, &fingerprint);
+                            let json = res.route_json(&fingerprint, &route);
+                            serde_json::to_string_pretty(&json)
+                                .unwrap_or_else(|_| "{}".to_string())
+                        }
+                        _ => {
+                            serde_json::json!({
+                                "fingerprint": fingerprint,
+                                "route": "not_found",
+                                "relay_chain": [],
+                            })
+                            .to_string()
+                        }
                     }
                 }
             }),

@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod presence;
 pub mod probe;
 pub mod room;
+pub mod route;
 pub mod session_mgr;
 pub mod trunk;
 
