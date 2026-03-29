@@ -12,6 +12,7 @@
 //! - Identity = 32-byte seed → HKDF → Ed25519 (signing) + X25519 (encryption)
 //! - Fingerprint = SHA-256(Ed25519 pub)[:16]
 
+pub mod bandwidth;
 pub mod codec_id;
 pub mod error;
 pub mod jitter;
@@ -27,6 +28,7 @@ pub use packet::{
     HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader, QualityReport,
     SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL, FRAME_TYPE_MINI,
 };
+pub use bandwidth::{BandwidthEstimator, CongestionState};
 pub use quality::{AdaptiveQualityController, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;
