@@ -46,6 +46,23 @@ impl MediaHeader {
     /// Header size in bytes on the wire.
     pub const WIRE_SIZE: usize = 12;
 
+    /// Create a default header for raw PCM relay (used by WebSocket bridge).
+    pub fn default_pcm() -> Self {
+        Self {
+            version: 0,
+            is_repair: false,
+            codec_id: CodecId::Opus24k,
+            has_quality_report: false,
+            fec_ratio_encoded: 0,
+            seq: 0,
+            timestamp: 0,
+            fec_block: 0,
+            fec_symbol: 0,
+            reserved: 0,
+            csrc_count: 0,
+        }
+    }
+
     /// Encode the FEC ratio float (0.0-2.0+) to a 7-bit value (0-127).
     pub fn encode_fec_ratio(ratio: f32) -> u8 {
         // Map 0.0-2.0 to 0-127, clamping at 127
