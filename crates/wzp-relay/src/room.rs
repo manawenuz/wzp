@@ -27,11 +27,51 @@ fn next_id() -> ParticipantId {
     NEXT_PARTICIPANT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// How to send data to a participant — either via QUIC transport or WebSocket channel.
+#[derive(Clone)]
+pub enum ParticipantSender {
+    Quic(Arc<wzp_transport::QuinnTransport>),
+    WebSocket(tokio::sync::mpsc::Sender<Bytes>),
+}
+
+impl ParticipantSender {
+    /// Send raw bytes to this participant.
+    pub async fn send_raw(&self, data: &[u8]) -> Result<(), String> {
+        match self {
+            ParticipantSender::WebSocket(tx) => {
+                tx.try_send(Bytes::copy_from_slice(data))
+                    .map_err(|e| format!("ws send: {e}"))
+            }
+            ParticipantSender::Quic(transport) => {
+                let pkt = wzp_proto::MediaPacket {
+                    header: wzp_proto::packet::MediaHeader::default_pcm(),
+                    payload: Bytes::copy_from_slice(data),
+                    quality_report: None,
+                };
+                transport.send_media(&pkt).await.map_err(|e| format!("quic send: {e}"))
+            }
+        }
+    }
+
+    /// Check if this is a QUIC participant.
+    pub fn is_quic(&self) -> bool {
+        matches!(self, ParticipantSender::Quic(_))
+    }
+
+    /// Get the QUIC transport if this is a QUIC participant.
+    pub fn as_quic(&self) -> Option<&Arc<wzp_transport::QuinnTransport>> {
+        match self {
+            ParticipantSender::Quic(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
 /// A participant in a room.
 struct Participant {
     id: ParticipantId,
     _addr: std::net::SocketAddr,
-    transport: Arc<wzp_transport::QuinnTransport>,
+    sender: ParticipantSender,
 }
 
 /// A room holding multiple participants.
@@ -46,10 +86,10 @@ impl Room {
         }
     }
 
-    fn add(&mut self, addr: std::net::SocketAddr, transport: Arc<wzp_transport::QuinnTransport>) -> ParticipantId {
+    fn add(&mut self, addr: std::net::SocketAddr, sender: ParticipantSender) -> ParticipantId {
         let id = next_id();
         info!(room_size = self.participants.len() + 1, participant = id, %addr, "joined room");
-        self.participants.push(Participant { id, _addr: addr, transport });
+        self.participants.push(Participant { id, _addr: addr, sender });
         id
     }
 
@@ -58,11 +98,11 @@ impl Room {
         info!(room_size = self.participants.len(), participant = id, "left room");
     }
 
-    fn others(&self, exclude_id: ParticipantId) -> Vec<Arc<wzp_transport::QuinnTransport>> {
+    fn others(&self, exclude_id: ParticipantId) -> Vec<ParticipantSender> {
         self.participants
             .iter()
             .filter(|p| p.id != exclude_id)
-            .map(|p| p.transport.clone())
+            .map(|p| p.sender.clone())
             .collect()
     }
 
@@ -130,7 +170,7 @@ impl RoomManager {
         &mut self,
         room_name: &str,
         addr: std::net::SocketAddr,
-        transport: Arc<wzp_transport::QuinnTransport>,
+        sender: ParticipantSender,
         fingerprint: Option<&str>,
     ) -> Result<ParticipantId, String> {
         if !self.is_authorized(room_name, fingerprint) {
@@ -138,7 +178,18 @@ impl RoomManager {
             return Err("not authorized for this room".to_string());
         }
         let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
-        Ok(room.add(addr, transport))
+        Ok(room.add(addr, sender))
+    }
+
+    /// Join a room via WebSocket. Convenience wrapper around `join()`.
+    pub fn join_ws(
+        &mut self,
+        room_name: &str,
+        addr: std::net::SocketAddr,
+        sender: tokio::sync::mpsc::Sender<Bytes>,
+        fingerprint: Option<&str>,
+    ) -> Result<ParticipantId, String> {
+        self.join(room_name, addr, ParticipantSender::WebSocket(sender), fingerprint)
     }
 
     /// Leave a room. Removes the room if empty.
@@ -152,12 +203,12 @@ impl RoomManager {
         }
     }
 
-    /// Get transports for all OTHER participants in a room.
+    /// Get senders for all OTHER participants in a room.
     pub fn others(
         &self,
         room_name: &str,
         participant_id: ParticipantId,
-    ) -> Vec<Arc<wzp_transport::QuinnTransport>> {
+    ) -> Vec<ParticipantSender> {
         self.rooms
             .get(room_name)
             .map(|r| r.others(participant_id))
@@ -305,10 +356,14 @@ async fn run_participant_plain(
         // Forward to all others
         let pkt_bytes = pkt.payload.len() as u64;
         for other in &others {
-            // Best-effort: if one send fails, continue to others
-            if let Err(e) = other.send_media(&pkt).await {
-                // Don't log every failure — they'll be cleaned up when their recv loop breaks
-                let _ = e;
+            match other {
+                ParticipantSender::Quic(t) => {
+                    let _ = t.send_media(&pkt).await;
+                }
+                ParticipantSender::WebSocket(_) => {
+                    // WS clients receive raw payload bytes
+                    let _ = other.send_raw(&pkt.payload).await;
+                }
             }
         }
 
@@ -390,12 +445,20 @@ async fn run_participant_trunked(
 
                 let pkt_bytes = pkt.payload.len() as u64;
                 for other in &others {
-                    let peer_addr = other.connection().remote_address();
-                    let fwd = forwarders
-                        .entry(peer_addr)
-                        .or_insert_with(|| TrunkedForwarder::new(other.clone(), sid_bytes));
-                    if let Err(e) = fwd.send(&pkt).await {
-                        let _ = e;
+                    match other {
+                        ParticipantSender::Quic(t) => {
+                            let peer_addr = t.connection().remote_address();
+                            let fwd = forwarders
+                                .entry(peer_addr)
+                                .or_insert_with(|| TrunkedForwarder::new(t.clone(), sid_bytes));
+                            if let Err(e) = fwd.send(&pkt).await {
+                                let _ = e;
+                            }
+                        }
+                        ParticipantSender::WebSocket(_) => {
+                            // WS clients bypass trunking — send raw payload directly
+                            let _ = other.send_raw(&pkt.payload).await;
+                        }
                     }
                 }
 

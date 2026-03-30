@@ -19,6 +19,7 @@ pub mod room;
 pub mod route;
 pub mod session_mgr;
 pub mod trunk;
+pub mod ws;
 
 pub use config::RelayConfig;
 pub use handshake::accept_handshake;

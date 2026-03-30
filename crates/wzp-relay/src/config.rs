@@ -39,6 +39,11 @@ pub struct RelayConfig {
     /// reducing per-packet QUIC datagram overhead.
     #[serde(default)]
     pub trunking_enabled: bool,
+    /// Port for the WebSocket listener (browser clients connect here).
+    /// If None, WebSocket support is disabled.
+    pub ws_port: Option<u16>,
+    /// Directory to serve static files from (HTML/JS/WASM for web clients).
+    pub static_dir: Option<String>,
 }
 
 impl Default for RelayConfig {
@@ -55,6 +60,8 @@ impl Default for RelayConfig {
             probe_targets: Vec::new(),
             probe_mesh: false,
             trunking_enabled: false,
+            ws_port: None,
+            static_dir: None,
         }
     }
 }

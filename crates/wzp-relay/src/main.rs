@@ -68,6 +68,19 @@ fn parse_args() -> RelayConfig {
             "--trunking" => {
                 config.trunking_enabled = true;
             }
+            "--ws-port" => {
+                i += 1;
+                config.ws_port = Some(
+                    args.get(i).expect("--ws-port requires a port number")
+                        .parse().expect("invalid --ws-port number"),
+                );
+            }
+            "--static-dir" => {
+                i += 1;
+                config.static_dir = Some(
+                    args.get(i).expect("--static-dir requires a directory path").to_string(),
+                );
+            }
             "--mesh-status" => {
                 // Print mesh table from a fresh registry and exit.
                 // In practice this is useful after the relay has been running;
@@ -89,6 +102,8 @@ fn parse_args() -> RelayConfig {
                 eprintln!("  --probe-mesh           Enable mesh mode (mark config flag, probes all --probe targets).");
                 eprintln!("  --mesh-status          Print mesh health table and exit (diagnostic).");
                 eprintln!("  --trunking             Enable trunk batching for outgoing media in room mode.");
+                eprintln!("  --ws-port <port>       WebSocket listener port for browser clients (e.g., 8080).");
+                eprintln!("  --static-dir <dir>     Directory to serve static files from (HTML/JS/WASM).");
                 eprintln!();
                 eprintln!("Room mode (default):");
                 eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
@@ -231,6 +246,20 @@ async fn main() -> anyhow::Result<()> {
             "spawning probe mesh"
         );
         tokio::spawn(async move { mesh.run_all().await });
+    }
+
+    // WebSocket server for browser clients
+    if let Some(ws_port) = config.ws_port {
+        let ws_state = wzp_relay::ws::WsState {
+            room_mgr: room_mgr.clone(),
+            session_mgr: session_mgr.clone(),
+            auth_url: config.auth_url.clone(),
+            metrics: metrics.clone(),
+            presence: presence.clone(),
+        };
+        let static_dir = config.static_dir.clone();
+        tokio::spawn(wzp_relay::ws::run_ws_server(ws_port, ws_state, static_dir));
+        info!(ws_port, "WebSocket listener enabled for browser clients");
     }
 
     if let Some(ref url) = config.auth_url {
@@ -473,7 +502,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let participant_id = {
                     let mut mgr = room_mgr.lock().await;
-                    match mgr.join(&room_name, addr, transport.clone(), authenticated_fp.as_deref()) {
+                    match mgr.join(&room_name, addr, room::ParticipantSender::Quic(transport.clone()), authenticated_fp.as_deref()) {
                         Ok(id) => {
                             metrics.active_rooms.set(mgr.list().len() as i64);
                             id
