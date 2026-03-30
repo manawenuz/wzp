@@ -4262,6 +4262,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wzp-wasm"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "hkdf",
+ "js-sys",
+ "rand 0.8.5",
+ "raptorq",
+ "sha2",
+ "wasm-bindgen",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "wzp-web"
 version = "0.1.0"
 dependencies = [

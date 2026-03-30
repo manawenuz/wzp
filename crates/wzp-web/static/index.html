@@ -10,6 +10,10 @@
   .container { text-align: center; max-width: 420px; padding: 2rem; }
   h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #00d4ff; }
   .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  .variant-badge { display: inline-block; background: #2a2a4a; border: 1px solid #444; color: #00d4ff; font-size: 0.65rem; padding: 0.15rem 0.5rem; border-radius: 4px; margin-left: 0.4rem; vertical-align: middle; font-family: monospace; letter-spacing: 0.05em; }
+  .variant-selector { margin-bottom: 1.2rem; display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
+  .variant-selector label { font-size: 0.75rem; color: #888; cursor: pointer; display: flex; align-items: center; gap: 0.25rem; }
+  .variant-selector input[type="radio"] { accent-color: #00d4ff; }
   .room-input { margin-bottom: 1.5rem; }
   .room-input input { background: #2a2a4a; border: 1px solid #444; color: #e0e0e0; padding: 0.6rem 1rem; font-size: 1rem; border-radius: 8px; width: 200px; text-align: center; }
   .room-input input:focus { outline: none; border-color: #00d4ff; }
@@ -31,15 +35,22 @@
 </head>
 <body>
 <div class="container">
-  <h1>WarzonePhone</h1>
+  <h1>WarzonePhone <span class="variant-badge" id="variantBadge">PURE</span></h1>
   <p class="subtitle">Lossy VoIP Protocol</p>
+
+  <div class="variant-selector">
+    <label><input type="radio" name="variant" value="pure"> Pure JS</label>
+    <label><input type="radio" name="variant" value="hybrid"> Hybrid</label>
+    <label><input type="radio" name="variant" value="full"> Full WASM</label>
+  </div>
+
   <div class="room-input">
     <label for="room">Room</label>
     <input type="text" id="room" placeholder="enter room name" value="">
   </div>
-  <button id="callBtn" onclick="toggleCall()">Connect</button>
+  <button id="callBtn">Connect</button>
   <div class="controls" id="controls" style="display:none;">
-    <label><input type="checkbox" id="pttMode" onchange="togglePTT()"> Radio mode (push-to-talk)</label>
+    <label><input type="checkbox" id="pttMode"> Radio mode (push-to-talk)</label>
   </div>
   <button id="pttBtn">Hold to Talk</button>
   <div class="level"><div class="level-bar" id="levelBar"></div></div>
@@ -47,302 +58,126 @@
   <div class="stats" id="stats"></div>
 </div>
 
+<script src="js/wzp-core.js"></script>
 <script>
-const SAMPLE_RATE = 48000;
-const FRAME_SIZE = 960;
-
-let ws = null;
-let audioCtx = null;
-let mediaStream = null;
-let captureNode = null;
-let playbackNode = null;
-let active = false;
-let transmitting = true; // in open-mic mode, always transmitting
-let pttMode = false;
-let framesSent = 0;
-let framesRecv = 0;
-let startTime = 0;
-let statsInterval = null;
-
-// Use room from URL path or input field
-function getRoom() {
-  const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
-  if (path && path !== 'index.html') return path;
-  const hash = location.hash.replace('#', '');
-  if (hash) return hash;
-  return document.getElementById('room').value.trim() || 'default';
-}
-
-// Pre-fill room input from URL on page load
+// ---------------------------------------------------------------------------
+// Load the selected variant script dynamically
+// ---------------------------------------------------------------------------
 (function() {
-  const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
-  if (path && path !== 'index.html') {
-    document.getElementById('room').value = path;
-  }
+  var variant = WZPCore.detectVariant();
+  var scriptMap = {
+    pure:   'js/wzp-pure.js',
+    hybrid: 'js/wzp-hybrid.js',
+    full:   'js/wzp-full.js',
+  };
+  var src = scriptMap[variant] || scriptMap.pure;
+  var s = document.createElement('script');
+  s.src = src;
+  s.onload = function() { wzpBoot(); };
+  s.onerror = function() {
+    WZPCore.updateStatus('Failed to load variant: ' + variant);
+  };
+  document.body.appendChild(s);
 })();
 
-function setStatus(msg) { document.getElementById('status').textContent = msg; }
-function setStats(msg) { document.getElementById('stats').textContent = msg; }
+// ---------------------------------------------------------------------------
+// Boot: wire UI to the loaded client variant
+// ---------------------------------------------------------------------------
+function wzpBoot() {
+  var client = null;
+  var capture = null;
+  var playback = null;
+  var transmitting = true;
 
-function toggleCall() {
-  if (active) stopCall();
-  else startCall();
-}
+  var ui = WZPCore.initUI({
+    onConnect: function(room) {
+      doConnect(room);
+    },
+    onDisconnect: function() {
+      doDisconnect();
+    },
+    onTransmit: function(tx) {
+      transmitting = tx;
+    },
+  });
 
-async function startCall() {
-  const btn = document.getElementById('callBtn');
-  const room = getRoom();
-  if (!room) { setStatus('Enter a room name'); return; }
+  async function doConnect(room) {
+    WZPCore.updateStatus('Requesting microphone...');
 
-  btn.disabled = true;
-  setStatus('Requesting microphone...');
+    var audioCtx;
+    try {
+      audioCtx = await WZPCore.startAudioContext();
+    } catch (e) {
+      WZPCore.updateStatus('Audio init failed: ' + e.message);
+      ui.setConnected(false);
+      return;
+    }
 
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    // Build WebSocket URL
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var wsUrl = proto + '//' + location.host + '/ws/' + encodeURIComponent(room);
+
+    // Create client (currently always WZPPureClient; future: switch on variant)
+    client = new WZPPureClient({
+      wsUrl: wsUrl,
+      room: room,
+      onAudio: function(pcm) {
+        if (playback) playback.play(pcm);
+      },
+      onStatus: function(msg) {
+        WZPCore.updateStatus(msg);
+      },
+      onStats: function(stats) {
+        WZPCore.updateStats(stats);
+      },
     });
-  } catch(e) {
-    setStatus('Mic access denied: ' + e.message);
-    btn.disabled = false;
-    return;
-  }
 
-  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-
-  // Connect WebSocket with room name
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = proto + '//' + location.host + '/ws/' + encodeURIComponent(room);
-  setStatus('Connecting to room: ' + room + '...');
-
-  ws = new WebSocket(wsUrl);
-  ws.binaryType = 'arraybuffer';
-
-  ws.onopen = async () => {
-    setStatus('Connected to room: ' + room);
-    btn.textContent = 'Disconnect';
-    btn.classList.add('active');
-    btn.disabled = false;
-    active = true;
-    framesSent = 0;
-    framesRecv = 0;
-    startTime = Date.now();
-    showControls(true);
-    await startAudioCapture();
-    await startAudioPlayback();
-    startStatsUpdate();
-  };
-
-  ws.onmessage = (event) => {
-    const pcmData = new Int16Array(event.data);
-    framesRecv++;
-    playAudio(pcmData);
-  };
-
-  ws.onclose = () => {
-    if (active) {
-      setStatus('Disconnected — reconnecting to ' + room + '...');
-      setTimeout(() => { if (active) { cleanupAudio(); startCall(); } }, 1000);
-    } else {
-      setStatus('Disconnected');
+    try {
+      await client.connect();
+    } catch (e) {
+      WZPCore.updateStatus('Connection failed: ' + e.message);
+      ui.setConnected(false);
+      return;
     }
-  };
 
-  ws.onerror = () => {
-    if (active) {
-      setStatus('Error — reconnecting...');
-      setTimeout(() => { if (active) { cleanupAudio(); startCall(); } }, 1000);
+    // Start audio capture and playback
+    try {
+      capture = await WZPCore.connectCapture(audioCtx, function(pcmBuffer) {
+        if (!transmitting) return;
+        var pcm = new Int16Array(pcmBuffer);
+        WZPCore.updateLevel(pcm);
+        if (client) client.sendAudio(pcmBuffer);
+      });
+
+      playback = await WZPCore.connectPlayback(audioCtx);
+    } catch (e) {
+      WZPCore.updateStatus('Audio error: ' + e.message);
+      if (client) client.disconnect();
+      client = null;
+      ui.setConnected(false);
+      return;
     }
-  };
-}
 
-function stopCall() {
-  active = false;
-  const btn = document.getElementById('callBtn');
-  btn.textContent = 'Connect';
-  btn.classList.remove('active');
-  btn.disabled = false;
-  showControls(false);
-  cleanupAudio();
-  if (ws) { ws.close(); ws = null; }
-  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
-  setStatus('');
-  setStats('');
-}
-
-function cleanupAudio() {
-  if (captureNode) { captureNode.disconnect(); captureNode = null; }
-  if (playbackNode) { playbackNode.disconnect(); playbackNode = null; }
-  if (audioCtx) { audioCtx.close(); audioCtx = null; workletLoaded = false; }
-  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
-}
-
-let workletLoaded = false;
-
-async function loadWorkletModule() {
-  if (workletLoaded) return true;
-  if (typeof AudioWorkletNode === 'undefined' || !audioCtx.audioWorklet) {
-    console.warn('AudioWorklet API not supported in this browser — using ScriptProcessorNode fallback');
-    return false;
+    ui.setConnected(true);
   }
-  try {
-    await audioCtx.audioWorklet.addModule('audio-processor.js');
-    workletLoaded = true;
-    return true;
-  } catch(e) {
-    console.warn('AudioWorklet module failed to load — using ScriptProcessorNode fallback:', e);
-    return false;
-  }
-}
 
-async function startAudioCapture() {
-  const source = audioCtx.createMediaStreamSource(mediaStream);
-  const hasWorklet = await loadWorkletModule();
+  function doDisconnect() {
+    if (capture) { capture.stop(); capture = null; }
+    if (playback) { playback.stop(); playback = null; }
+    if (client) { client.disconnect(); client = null; }
 
-  if (hasWorklet) {
-    captureNode = new AudioWorkletNode(audioCtx, 'wzp-capture-processor');
-    captureNode.port.onmessage = (e) => {
-      if (!active || !ws || ws.readyState !== WebSocket.OPEN || !transmitting) return;
-      ws.send(e.data);
-      framesSent++;
-
-      // Level meter from the PCM data
-      const pcm = new Int16Array(e.data);
-      let max = 0;
-      for (let i = 0; i < pcm.length; i += 16) max = Math.max(max, Math.abs(pcm[i]));
-      document.getElementById('levelBar').style.width = (max / 32768 * 100) + '%';
-    };
-    source.connect(captureNode);
-    captureNode.connect(audioCtx.destination); // needed to keep worklet alive
-  } else {
-    // Fallback to ScriptProcessorNode (deprecated but widely supported)
-    console.warn('Capture: using ScriptProcessorNode fallback');
-    captureNode = audioCtx.createScriptProcessor(4096, 1, 1);
-    let acc = new Float32Array(0);
-    captureNode.onaudioprocess = (ev) => {
-      if (!active || !ws || ws.readyState !== WebSocket.OPEN || !transmitting) return;
-      const input = ev.inputBuffer.getChannelData(0);
-      const n = new Float32Array(acc.length + input.length);
-      n.set(acc); n.set(input, acc.length); acc = n;
-      while (acc.length >= FRAME_SIZE) {
-        const frame = acc.slice(0, FRAME_SIZE); acc = acc.slice(FRAME_SIZE);
-        const pcm = new Int16Array(FRAME_SIZE);
-        for (let i = 0; i < FRAME_SIZE; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(frame[i] * 32767)));
-        let max = 0;
-        for (let i = 0; i < pcm.length; i += 16) max = Math.max(max, Math.abs(pcm[i]));
-        document.getElementById('levelBar').style.width = (max / 32768 * 100) + '%';
-        ws.send(pcm.buffer);
-        framesSent++;
-      }
-    };
-    source.connect(captureNode);
-    captureNode.connect(audioCtx.destination);
-  }
-}
-
-async function startAudioPlayback() {
-  const hasWorklet = await loadWorkletModule();
-
-  if (hasWorklet) {
-    playbackNode = new AudioWorkletNode(audioCtx, 'wzp-playback-processor');
-    playbackNode.connect(audioCtx.destination);
-  } else {
-    console.warn('Playback: using scheduled BufferSource fallback');
-    playbackNode = null; // will use createBufferSource fallback in playAudio()
-  }
-}
-
-let nextPlayTime = 0;
-
-function playAudio(pcmInt16) {
-  if (!audioCtx) return;
-
-  if (playbackNode && playbackNode.port) {
-    // AudioWorklet path — send Int16 PCM directly to the worklet for conversion
-    playbackNode.port.postMessage(pcmInt16.buffer, [pcmInt16.buffer]);
-  } else {
-    // Fallback: scheduled BufferSource (convert Int16 -> Float32 on main thread)
-    const floatData = new Float32Array(pcmInt16.length);
-    for (let i = 0; i < pcmInt16.length; i++) {
-      floatData[i] = pcmInt16[i] / 32768.0;
+    var audioCtx = WZPCore.getAudioContext();
+    if (audioCtx && audioCtx.state !== 'closed') {
+      audioCtx.close();
     }
-    const buffer = audioCtx.createBuffer(1, floatData.length, SAMPLE_RATE);
-    buffer.getChannelData(0).set(floatData);
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioCtx.destination);
-    const now = audioCtx.currentTime;
-    if (nextPlayTime < now || nextPlayTime > now + 1.0) {
-      nextPlayTime = now + 0.02;
-    }
-    source.start(nextPlayTime);
-    nextPlayTime += buffer.duration;
+
+    WZPCore.updateStatus('');
+    WZPCore.updateStats('');
+    document.getElementById('levelBar').style.width = '0%';
+
+    ui.setConnected(false);
   }
 }
-
-function startStatsUpdate() {
-  statsInterval = setInterval(() => {
-    if (!active) { clearInterval(statsInterval); return; }
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    setStats(elapsed + 's | sent: ' + framesSent + ' | recv: ' + framesRecv);
-  }, 1000);
-}
-
-// --- Push-to-talk ---
-
-function togglePTT() {
-  pttMode = document.getElementById('pttMode').checked;
-  const btn = document.getElementById('pttBtn');
-  if (pttMode) {
-    transmitting = false;
-    btn.style.display = 'block';
-  } else {
-    transmitting = true;
-    btn.style.display = 'none';
-  }
-}
-
-// PTT button — hold to talk (mouse + touch)
-document.getElementById('pttBtn').addEventListener('mousedown', () => { startTransmit(); });
-document.getElementById('pttBtn').addEventListener('mouseup', () => { stopTransmit(); });
-document.getElementById('pttBtn').addEventListener('mouseleave', () => { stopTransmit(); });
-document.getElementById('pttBtn').addEventListener('touchstart', (e) => { e.preventDefault(); startTransmit(); });
-document.getElementById('pttBtn').addEventListener('touchend', (e) => { e.preventDefault(); stopTransmit(); });
-
-// Spacebar PTT
-document.addEventListener('keydown', (e) => { if (pttMode && active && e.code === 'Space' && !e.repeat) { e.preventDefault(); startTransmit(); } });
-document.addEventListener('keyup', (e) => { if (pttMode && active && e.code === 'Space') { e.preventDefault(); stopTransmit(); } });
-
-function startTransmit() {
-  if (!pttMode || !active) return;
-  transmitting = true;
-  document.getElementById('pttBtn').classList.add('transmitting');
-  document.getElementById('pttBtn').textContent = 'Transmitting...';
-}
-
-function stopTransmit() {
-  if (!pttMode) return;
-  transmitting = false;
-  document.getElementById('pttBtn').classList.remove('transmitting');
-  document.getElementById('pttBtn').textContent = 'Hold to Talk';
-}
-
-// Show controls when connected
-function showControls(show) {
-  document.getElementById('controls').style.display = show ? 'flex' : 'none';
-  if (!show) {
-    document.getElementById('pttBtn').style.display = 'none';
-    pttMode = false;
-    transmitting = true;
-  }
-}
-
-// Set room from URL on load
-window.addEventListener('load', () => {
-  const room = getRoom();
-  if (room && room !== 'default') {
-    document.getElementById('room').value = room;
-  }
-});
 </script>
 </body>
 </html>
