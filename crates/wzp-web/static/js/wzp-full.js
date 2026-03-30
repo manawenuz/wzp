@@ -34,12 +34,14 @@ class WZPFullClient {
    */
   constructor(options) {
     this.url = options.url;
+    this.wsUrl = options.wsUrl;      // WS fallback URL
     this.room = options.room;
     this.onAudio = options.onAudio || null;
     this.onStatus = options.onStatus || null;
     this.onStats = options.onStats || null;
 
     this.wt = null;                  // WebTransport instance
+    this.ws = null;                  // WebSocket fallback
     this.datagramWriter = null;      // WritableStreamDefaultWriter
     this.datagramReader = null;      // ReadableStreamDefaultReader
     this.cryptoSession = null;       // WzpCryptoSession (WASM)
@@ -48,6 +50,7 @@ class WZPFullClient {
     this.sequence = 0;
     this._wasmModule = null;
     this._connected = false;
+    this._useWebTransport = false;   // true if WT connected, false = WS fallback
     this._startTime = 0;
     this._statsInterval = null;
     this._recvLoopRunning = false;
@@ -61,49 +64,45 @@ class WZPFullClient {
   async connect() {
     if (this._connected) return;
 
-    // --- Guard: WebTransport support ---
-    if (typeof WebTransport === 'undefined') {
-      throw new Error(
-        'WebTransport is not supported in this browser. ' +
-        'Use the hybrid (?variant=hybrid) or pure (?variant=pure) variant instead.'
-      );
-    }
-
     this._status('Loading WASM module...');
 
-    // 1. Load WASM
+    // 1. Load WASM (FEC + crypto)
     this._wasmModule = await import(WZP_WASM_PATH);
     await this._wasmModule.default();
 
-    this._status('Connecting via WebTransport to ' + this.url + '...');
-
-    // 2. WebTransport connection
-    //    The URL should include the room, e.g. https://host:port/room
-    const wtUrl = this.url + '/' + encodeURIComponent(this.room);
-    this.wt = new WebTransport(wtUrl);
-
-    this.wt.closed.then(() => {
-      const wasConnected = this._connected;
-      this._cleanup();
-      if (wasConnected) {
-        this._status('WebTransport closed');
+    // 2. Try WebTransport first, fall back to WebSocket
+    let wtSuccess = false;
+    if (typeof WebTransport !== 'undefined' && this.url) {
+      try {
+        this._status('Trying WebTransport...');
+        const wtUrl = this.url + '/' + encodeURIComponent(this.room);
+        this.wt = new WebTransport(wtUrl);
+        await Promise.race([
+          this.wt.ready,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
+        ]);
+        this.datagramWriter = this.wt.datagrams.writable.getWriter();
+        this.datagramReader = this.wt.datagrams.readable.getReader();
+        this._status('Performing key exchange...');
+        await this._performKeyExchange();
+        wtSuccess = true;
+        this._useWebTransport = true;
+      } catch (e) {
+        console.warn('[wzp-full] WebTransport failed, falling back to WebSocket:', e.message);
+        if (this.wt) { try { this.wt.close(); } catch (_) {} }
+        this.wt = null;
+        this.datagramWriter = null;
+        this.datagramReader = null;
       }
-    }).catch((err) => {
-      this._cleanup();
-      this._status('WebTransport error: ' + err.message);
-    });
+    }
 
-    await this.wt.ready;
+    if (!wtSuccess) {
+      // WebSocket fallback (same as hybrid — WASM loaded but uses WS transport)
+      this._useWebTransport = false;
+      await this._connectWebSocket();
+    }
 
-    // 3. Get datagram streams (unreliable, QUIC DATAGRAM frames)
-    this.datagramWriter = this.wt.datagrams.writable.getWriter();
-    this.datagramReader = this.wt.datagrams.readable.getReader();
-
-    // 4. Key exchange over a bidirectional stream
-    this._status('Performing key exchange...');
-    await this._performKeyExchange();
-
-    // 5. Initialise FEC (5 source symbols per block, 256-byte symbols)
+    // 3. Initialise FEC
     this.fecEncoder = new this._wasmModule.WzpFecEncoder(5, 256);
     this.fecDecoder = new this._wasmModule.WzpFecDecoder(5, 256);
 
@@ -113,10 +112,50 @@ class WZPFullClient {
     this._startTime = Date.now();
     this._startStatsTimer();
 
-    // 6. Start receive loop (runs until disconnect)
-    this._recvLoop();
+    // 4. Start receive loop (WebTransport only — WS uses onmessage)
+    if (this._useWebTransport) {
+      this._recvLoop();
+      this._status('Connected to room: ' + this.room + ' (WebTransport, encrypted, FEC active)');
+    } else {
+      this._status('Connected to room: ' + this.room + ' (WebSocket fallback, WASM FEC loaded)');
+    }
+  }
 
-    this._status('Connected to room: ' + this.room + ' (encrypted, FEC active)');
+  /**
+   * WebSocket fallback connection (used when WebTransport unavailable).
+   */
+  async _connectWebSocket() {
+    return new Promise((resolve, reject) => {
+      this._status('Connecting via WebSocket (fallback)...');
+      this.ws = new WebSocket(this.wsUrl);
+      this.ws.binaryType = 'arraybuffer';
+
+      this.ws.onopen = () => {
+        this._status('WebSocket connected to room: ' + this.room);
+        resolve();
+      };
+
+      this.ws.onmessage = (event) => {
+        if (!(event.data instanceof ArrayBuffer)) return;
+        const pcm = new Int16Array(event.data);
+        this.stats.recv++;
+        if (this.onAudio) this.onAudio(pcm);
+      };
+
+      this.ws.onclose = () => {
+        if (this._connected) {
+          this._cleanup();
+          this._status('Disconnected');
+        }
+      };
+
+      this.ws.onerror = () => {
+        if (!this._connected) {
+          this._cleanup();
+          reject(new Error('WebSocket connection failed'));
+        }
+      };
+    });
   }
 
   /**
@@ -127,6 +166,10 @@ class WZPFullClient {
     if (this.wt) {
       try { this.wt.close(); } catch (_) { /* ignore */ }
       this.wt = null;
+    }
+    if (this.ws) {
+      try { this.ws.close(); } catch (_) { /* ignore */ }
+      this.ws = null;
     }
     this._cleanup();
   }
@@ -139,7 +182,19 @@ class WZPFullClient {
    * @param {ArrayBuffer} pcmBuffer  960-sample Int16 PCM (1920 bytes)
    */
   async sendAudio(pcmBuffer) {
-    if (!this._connected || !this.datagramWriter || !this.cryptoSession) return;
+    if (!this._connected) return;
+
+    // WebSocket fallback: send raw PCM like pure/hybrid
+    if (!this._useWebTransport) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(pcmBuffer);
+        this.sequence++;
+        this.stats.sent++;
+      }
+      return;
+    }
+
+    if (!this.datagramWriter || !this.cryptoSession) return;
 
     const pcmBytes = new Uint8Array(pcmBuffer);
 

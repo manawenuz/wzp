@@ -117,8 +117,9 @@ function wzpBoot() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var wsUrl = proto + '//' + location.host + '/ws/' + encodeURIComponent(room);
 
-    // Create client (currently always WZPPureClient; future: switch on variant)
-    client = new WZPPureClient({
+    // Create client based on selected variant
+    var variant = WZPCore.detectVariant();
+    var clientOpts = {
       wsUrl: wsUrl,
       room: room,
       onAudio: function(pcm) {
@@ -130,7 +131,17 @@ function wzpBoot() {
       onStats: function(stats) {
         WZPCore.updateStats(stats);
       },
-    });
+    };
+
+    if (variant === 'full' && typeof WZPFullClient !== 'undefined') {
+      // Full variant: add WebTransport URL, falls back to WS if WT unavailable
+      clientOpts.url = location.origin.replace('http', 'https');
+      client = new WZPFullClient(clientOpts);
+    } else if (variant === 'hybrid' && typeof WZPHybridClient !== 'undefined') {
+      client = new WZPHybridClient(clientOpts);
+    } else {
+      client = new WZPPureClient(clientOpts);
+    }
 
     try {
       await client.connect();
