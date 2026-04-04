@@ -14,4 +14,4 @@ pub mod commands;
 pub mod engine;
 pub mod pipeline;
 pub mod stats;
-// pub mod jni_bridge;  // Added later by Agent 4
+pub mod jni_bridge;

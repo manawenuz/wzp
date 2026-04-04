@@ -46,6 +46,10 @@ struct EngineState {
     running: AtomicBool,
     muted: AtomicBool,
     speaker: AtomicBool,
+    /// Whether acoustic echo cancellation is enabled (default: true).
+    aec_enabled: AtomicBool,
+    /// Whether automatic gain control is enabled (default: true).
+    agc_enabled: AtomicBool,
     stats: Mutex<CallStats>,
     command_tx: std::sync::mpsc::Sender<EngineCommand>,
     command_rx: Mutex<Option<std::sync::mpsc::Receiver<EngineCommand>>>,
@@ -76,6 +80,8 @@ impl WzpEngine {
             running: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             speaker: AtomicBool::new(false),
+            aec_enabled: AtomicBool::new(true),
+            agc_enabled: AtomicBool::new(true),
             stats: Mutex::new(CallStats::default()),
             command_tx: tx,
             command_rx: Mutex::new(Some(rx)),
@@ -182,6 +188,11 @@ impl WzpEngine {
 
                 info!("codec thread started");
 
+                // Track the last-applied AEC/AGC state so we only call
+                // set_*_enabled when the value actually changes.
+                let mut prev_aec = true;
+                let mut prev_agc = true;
+
                 let mut capture_buf = vec![0i16; FRAME_SAMPLES];
                 #[allow(unused_assignments)]
                 let mut recv_buf: Vec<u8> = Vec::new();
@@ -213,6 +224,18 @@ impl WzpEngine {
                                 break;
                             }
                         }
+                    }
+
+                    // Sync AEC/AGC enabled flags from shared state.
+                    let cur_aec = state.aec_enabled.load(Ordering::Relaxed);
+                    if cur_aec != prev_aec {
+                        pipeline.set_aec_enabled(cur_aec);
+                        prev_aec = cur_aec;
+                    }
+                    let cur_agc = state.agc_enabled.load(Ordering::Relaxed);
+                    if cur_agc != prev_agc {
+                        pipeline.set_agc_enabled(cur_agc);
+                        prev_agc = cur_agc;
                     }
 
                     if !state.running.load(Ordering::Relaxed) {
@@ -317,6 +340,16 @@ impl WzpEngine {
             .state
             .command_tx
             .send(EngineCommand::SetSpeaker(enabled));
+    }
+
+    /// Enable or disable acoustic echo cancellation.
+    pub fn set_aec_enabled(&self, enabled: bool) {
+        self.state.aec_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Enable or disable automatic gain control.
+    pub fn set_agc_enabled(&self, enabled: bool) {
+        self.state.agc_enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Force a specific quality profile (overrides adaptive logic).

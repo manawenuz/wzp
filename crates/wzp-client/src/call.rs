@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tracing::{debug, info, warn};
 
-use wzp_codec::{ComfortNoise, NoiseSupressor, SilenceDetector};
+use wzp_codec::{AutoGainControl, ComfortNoise, EchoCanceller, NoiseSupressor, SilenceDetector};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
 use wzp_proto::packet::{MediaHeader, MediaPacket, MiniFrameContext};
@@ -207,6 +207,10 @@ pub struct CallEncoder {
     frame_in_block: u8,
     /// Timestamp counter (ms).
     timestamp_ms: u32,
+    /// Acoustic echo canceller (removes speaker echo from mic signal).
+    aec: EchoCanceller,
+    /// Automatic gain control (normalises mic level).
+    agc: AutoGainControl,
     /// Silence detector for suppression.
     silence_detector: SilenceDetector,
     /// Whether silence suppression is enabled.
@@ -237,6 +241,8 @@ impl CallEncoder {
             block_id: 0,
             frame_in_block: 0,
             timestamp_ms: 0,
+            aec: EchoCanceller::new(48000, 100), // 100 ms echo tail
+            agc: AutoGainControl::new(),
             silence_detector: SilenceDetector::new(
                 config.silence_threshold_rms,
                 config.silence_hangover_frames,
@@ -274,15 +280,21 @@ impl CallEncoder {
     /// Input: 48kHz mono PCM, frame size depends on profile (960 for 20ms, 1920 for 40ms).
     /// Output: one or more MediaPackets to send.
     pub fn encode_frame(&mut self, pcm: &[i16]) -> Result<Vec<MediaPacket>, anyhow::Error> {
-        // Noise suppression: denoise the PCM before silence detection and encoding.
-        let pcm = if self.denoiser.is_enabled() {
-            let mut buf = pcm.to_vec();
-            self.denoiser.process(&mut buf);
-            buf
-        } else {
-            pcm.to_vec()
-        };
-        let pcm = &pcm[..];
+        // Copy PCM into a mutable buffer for the processing pipeline.
+        let mut pcm_buf = pcm.to_vec();
+
+        // Step 1: Echo cancellation (far-end reference must have been fed already).
+        self.aec.process_frame(&mut pcm_buf);
+
+        // Step 2: Automatic gain control (normalise mic level).
+        self.agc.process_frame(&mut pcm_buf);
+
+        // Step 3: Noise suppression (RNNoise).
+        if self.denoiser.is_enabled() {
+            self.denoiser.process(&mut pcm_buf);
+        }
+
+        let pcm = &pcm_buf[..];
 
         // Silence suppression: skip encoding silent frames, periodically send CN.
         if self.suppression_enabled && self.silence_detector.is_silent(pcm) {
@@ -399,6 +411,24 @@ impl CallEncoder {
         self.profile = profile;
         self.frame_in_block = 0;
         Ok(())
+    }
+
+    /// Feed decoded playout audio as the echo reference signal.
+    ///
+    /// Must be called with each decoded frame BEFORE the corresponding
+    /// microphone frame is processed.
+    pub fn feed_aec_farend(&mut self, farend: &[i16]) {
+        self.aec.feed_farend(farend);
+    }
+
+    /// Enable or disable acoustic echo cancellation.
+    pub fn set_aec_enabled(&mut self, enabled: bool) {
+        self.aec.set_enabled(enabled);
+    }
+
+    /// Enable or disable automatic gain control.
+    pub fn set_agc_enabled(&mut self, enabled: bool) {
+        self.agc.set_enabled(enabled);
     }
 }
 

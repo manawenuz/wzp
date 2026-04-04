@@ -5,7 +5,7 @@
 //! exclusively by the codec thread.
 
 use tracing::{debug, warn};
-use wzp_codec::{AdaptiveDecoder, AdaptiveEncoder};
+use wzp_codec::{AdaptiveDecoder, AdaptiveEncoder, AutoGainControl, EchoCanceller};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
 use wzp_proto::quality::AdaptiveQualityController;
@@ -38,6 +38,12 @@ pub struct Pipeline {
     fec_decoder: RaptorQFecDecoder,
     jitter_buffer: JitterBuffer,
     quality_ctrl: AdaptiveQualityController,
+    /// Acoustic echo canceller applied before encoding.
+    aec: EchoCanceller,
+    /// Automatic gain control applied before encoding.
+    agc: AutoGainControl,
+    /// Last decoded PCM frame, used as the AEC far-end reference.
+    last_decoded_farend: Option<Vec<i16>>,
     // Pre-allocated scratch buffers
     capture_buf: Vec<i16>,
     #[allow(dead_code)]
@@ -70,6 +76,9 @@ impl Pipeline {
             fec_decoder,
             jitter_buffer,
             quality_ctrl,
+            aec: EchoCanceller::new(48000, 100), // 100 ms echo tail
+            agc: AutoGainControl::new(),
+            last_decoded_farend: None,
             capture_buf: vec![0i16; FRAME_SAMPLES],
             playout_buf: vec![0i16; FRAME_SAMPLES],
             encode_out: vec![0u8; MAX_ENCODED_BYTES],
@@ -91,7 +100,17 @@ impl Pipeline {
             }
             &self.capture_buf[..]
         } else {
-            pcm
+            // Feed the last decoded playout as AEC far-end reference.
+            if let Some(ref farend) = self.last_decoded_farend {
+                self.aec.feed_farend(farend);
+            }
+
+            // Apply AEC + AGC to the captured PCM.
+            let len = pcm.len().min(self.capture_buf.len());
+            self.capture_buf[..len].copy_from_slice(&pcm[..len]);
+            self.aec.process_frame(&mut self.capture_buf[..len]);
+            self.agc.process_frame(&mut self.capture_buf[..len]);
+            &self.capture_buf[..len]
         };
 
         match self.encoder.encode(input, &mut self.encode_out) {
@@ -135,8 +154,10 @@ impl Pipeline {
     /// Decode the next frame from the jitter buffer.
     ///
     /// Returns decoded PCM samples, or `None` if the buffer is not ready.
+    /// Decoded PCM is also stored as the AEC far-end reference for the next
+    /// encode cycle.
     pub fn decode_frame(&mut self) -> Option<Vec<i16>> {
-        match self.jitter_buffer.pop() {
+        let result = match self.jitter_buffer.pop() {
             PlayoutResult::Packet(pkt) => {
                 let mut pcm = vec![0i16; FRAME_SAMPLES];
                 match self.decoder.decode(&pkt.payload, &mut pcm) {
@@ -160,7 +181,14 @@ impl Pipeline {
                 self.underruns += 1;
                 None
             }
+        };
+
+        // Save decoded PCM as far-end reference for AEC.
+        if let Some(ref pcm) = result {
+            self.last_decoded_farend = Some(pcm.clone());
         }
+
+        result
     }
 
     /// Generate packet loss concealment output.
@@ -220,5 +248,15 @@ impl Pipeline {
             jitter_depth: self.jitter_buffer.stats().current_depth,
             quality_tier: self.quality_ctrl.tier() as u8,
         }
+    }
+
+    /// Enable or disable acoustic echo cancellation.
+    pub fn set_aec_enabled(&mut self, enabled: bool) {
+        self.aec.set_enabled(enabled);
+    }
+
+    /// Enable or disable automatic gain control.
+    pub fn set_agc_enabled(&mut self, enabled: bool) {
+        self.agc.set_enabled(enabled);
     }
 }
