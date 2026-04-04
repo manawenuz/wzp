@@ -13,7 +13,7 @@
         android:name=".WzpApplication"
         android:label="WZ Phone"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Material3.DayNight">
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
             android:name=".ui.call.CallActivity"

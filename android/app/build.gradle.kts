@@ -13,11 +13,31 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        ndk { abiFilters += listOf("arm64-v8a") }
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("${project.rootDir}/keystore/wzp-release.jks")
+            storePassword = "wzphone2024"
+            keyAlias = "wzp-release"
+            keyPassword = "wzphone2024"
+        }
+        getByName("debug") {
+            storeFile = file("${project.rootDir}/keystore/wzp-debug.jks")
+            storePassword = "android"
+            keyAlias = "wzp-debug"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
+        }
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -46,7 +66,7 @@ tasks.register<Exec>("cargoNdkBuild") {
     workingDir = file("${project.rootDir}/..")
     commandLine(
         "cargo", "ndk",
-        "-t", "arm64-v8a", "-t", "armeabi-v7a",
+        "-t", "arm64-v8a",
         "-o", "${project.projectDir}/src/main/jniLibs",
         "build", "--release", "-p", "wzp-android"
     )

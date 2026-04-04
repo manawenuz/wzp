@@ -186,7 +186,7 @@ private fun AudioLevelBar(framesEncoded: Long) {
         )
         Spacer(modifier = Modifier.height(4.dp))
         LinearProgressIndicator(
-            progress = { level },
+            progress = level,
             modifier = Modifier
                 .fillMaxWidth(0.6f)
                 .height(6.dp)

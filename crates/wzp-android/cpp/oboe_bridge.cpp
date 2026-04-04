@@ -79,7 +79,7 @@ public:
             oboe::AudioStream* stream,
             void* audioData,
             int32_t numFrames) override {
-        if (!g_running.load(std::std::memory_order_relaxed) || !g_rings) {
+        if (!g_running.load(std::memory_order_relaxed) || !g_rings) {
             return oboe::DataCallbackResult::Stop;
         }
 
@@ -98,7 +98,7 @@ public:
         auto result = stream->calculateLatencyMillis();
         if (result) {
             g_capture_latency_ms.store(static_cast<float>(result.value()),
-                                        std::std::memory_order_relaxed);
+                                        std::memory_order_relaxed);
         }
 
         return oboe::DataCallbackResult::Continue;
@@ -115,7 +115,7 @@ public:
             oboe::AudioStream* stream,
             void* audioData,
             int32_t numFrames) override {
-        if (!g_running.load(std::std::memory_order_relaxed) || !g_rings) {
+        if (!g_running.load(std::memory_order_relaxed) || !g_rings) {
             memset(audioData, 0, numFrames * sizeof(int16_t));
             return oboe::DataCallbackResult::Stop;
         }
@@ -140,7 +140,7 @@ public:
         auto result = stream->calculateLatencyMillis();
         if (result) {
             g_playout_latency_ms.store(static_cast<float>(result.value()),
-                                        std::std::memory_order_relaxed);
+                                        std::memory_order_relaxed);
         }
 
         return oboe::DataCallbackResult::Continue;
@@ -155,7 +155,7 @@ static PlayoutCallback g_playout_cb;
 // ---------------------------------------------------------------------------
 
 int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
-    if (g_running.load(std::std::memory_order_relaxed)) {
+    if (g_running.load(std::memory_order_relaxed)) {
         LOGW("wzp_oboe_start: already running");
         return -1;
     }
@@ -200,13 +200,13 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         return -3;
     }
 
-    g_running.store(true, std::std::memory_order_release);
+    g_running.store(true, std::memory_order_release);
 
     // Start both streams
     result = g_capture_stream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start capture: %s", oboe::convertToText(result));
-        g_running.store(false, std::std::memory_order_release);
+        g_running.store(false, std::memory_order_release);
         g_capture_stream->close();
         g_playout_stream->close();
         g_capture_stream.reset();
@@ -217,7 +217,7 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     result = g_playout_stream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start playout: %s", oboe::convertToText(result));
-        g_running.store(false, std::std::memory_order_release);
+        g_running.store(false, std::memory_order_release);
         g_capture_stream->requestStop();
         g_capture_stream->close();
         g_playout_stream->close();
@@ -232,7 +232,7 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
 }
 
 void wzp_oboe_stop(void) {
-    g_running.store(false, std::std::memory_order_release);
+    g_running.store(false, std::memory_order_release);
 
     if (g_capture_stream) {
         g_capture_stream->requestStop();
@@ -250,15 +250,15 @@ void wzp_oboe_stop(void) {
 }
 
 float wzp_oboe_capture_latency_ms(void) {
-    return g_capture_latency_ms.load(std::std::memory_order_relaxed);
+    return g_capture_latency_ms.load(std::memory_order_relaxed);
 }
 
 float wzp_oboe_playout_latency_ms(void) {
-    return g_playout_latency_ms.load(std::std::memory_order_relaxed);
+    return g_playout_latency_ms.load(std::memory_order_relaxed);
 }
 
 int wzp_oboe_is_running(void) {
-    return g_running.load(std::std::memory_order_relaxed) ? 1 : 0;
+    return g_running.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 #else
