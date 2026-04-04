@@ -9,6 +9,7 @@ members = [
     "crates/wzp-relay",
     "crates/wzp-client",
     "crates/wzp-web",
+    "crates/wzp-android",
 ]
 
 [workspace.package]

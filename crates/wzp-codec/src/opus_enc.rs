@@ -40,6 +40,11 @@ impl OpusEncoder {
             .set_signal(Signal::Voice)
             .map_err(|e| CodecError::EncodeFailed(format!("set signal: {e}")))?;
 
+        // Default complexity 7 — good quality/CPU trade-off for VoIP
+        enc.inner
+            .set_complexity(7)
+            .map_err(|e| CodecError::EncodeFailed(format!("set complexity: {e}")))?;
+
         Ok(enc)
     }
 
@@ -55,6 +60,21 @@ impl OpusEncoder {
     /// Expected number of PCM samples per frame at current settings.
     pub fn frame_samples(&self) -> usize {
         (48_000 * self.frame_duration_ms as usize) / 1000
+    }
+
+    /// Set the encoder complexity (0-10). Higher values produce better quality
+    /// at the cost of more CPU. Default is 7.
+    pub fn set_complexity(&mut self, complexity: i32) {
+        let c = (complexity as u8).min(10);
+        let _ = self.inner.set_complexity(c);
+    }
+
+    /// Hint the encoder about expected packet loss percentage (0-100).
+    ///
+    /// Higher values cause the encoder to use more redundancy to survive
+    /// packet loss, at the expense of slightly higher bitrate.
+    pub fn set_expected_loss(&mut self, loss_pct: u8) {
+        let _ = self.inner.set_packet_loss_perc(loss_pct.min(100));
     }
 }
 

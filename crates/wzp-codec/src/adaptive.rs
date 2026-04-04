@@ -14,7 +14,7 @@ use crate::codec2_dec::Codec2Decoder;
 use crate::codec2_enc::Codec2Encoder;
 use crate::opus_dec::OpusDecoder;
 use crate::opus_enc::OpusEncoder;
-use crate::resample;
+use crate::resample::{Downsampler48to8, Upsampler8to48};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -54,6 +54,7 @@ pub struct AdaptiveEncoder {
     opus: OpusEncoder,
     codec2: Codec2Encoder,
     active: CodecId,
+    downsampler: Downsampler48to8,
 }
 
 impl AdaptiveEncoder {
@@ -66,6 +67,7 @@ impl AdaptiveEncoder {
             opus,
             codec2,
             active: profile.codec,
+            downsampler: Downsampler48to8::new(),
         })
     }
 }
@@ -74,7 +76,7 @@ impl AudioEncoder for AdaptiveEncoder {
     fn encode(&mut self, pcm: &[i16], out: &mut [u8]) -> Result<usize, CodecError> {
         if is_codec2(self.active) {
             // Downsample 48 kHz → 8 kHz then encode via Codec2.
-            let pcm_8k = resample::resample_48k_to_8k(pcm);
+            let pcm_8k = self.downsampler.process(pcm);
             self.codec2.encode(&pcm_8k, out)
         } else {
             self.opus.encode(pcm, out)
@@ -126,6 +128,7 @@ pub struct AdaptiveDecoder {
     opus: OpusDecoder,
     codec2: Codec2Decoder,
     active: CodecId,
+    upsampler: Upsampler8to48,
 }
 
 impl AdaptiveDecoder {
@@ -138,6 +141,7 @@ impl AdaptiveDecoder {
             opus,
             codec2,
             active: profile.codec,
+            upsampler: Upsampler8to48::new(),
         })
     }
 }
@@ -149,7 +153,7 @@ impl AudioDecoder for AdaptiveDecoder {
             let c2_samples = self.codec2_frame_samples();
             let mut buf_8k = vec![0i16; c2_samples];
             let n = self.codec2.decode(encoded, &mut buf_8k)?;
-            let pcm_48k = resample::resample_8k_to_48k(&buf_8k[..n]);
+            let pcm_48k = self.upsampler.process(&buf_8k[..n]);
             let out_len = pcm_48k.len().min(pcm.len());
             pcm[..out_len].copy_from_slice(&pcm_48k[..out_len]);
             Ok(out_len)
@@ -163,7 +167,7 @@ impl AudioDecoder for AdaptiveDecoder {
             let c2_samples = self.codec2_frame_samples();
             let mut buf_8k = vec![0i16; c2_samples];
             let n = self.codec2.decode_lost(&mut buf_8k)?;
-            let pcm_48k = resample::resample_8k_to_48k(&buf_8k[..n]);
+            let pcm_48k = self.upsampler.process(&buf_8k[..n]);
             let out_len = pcm_48k.len().min(pcm.len());
             pcm[..out_len].copy_from_slice(&pcm_48k[..out_len]);
             Ok(out_len)

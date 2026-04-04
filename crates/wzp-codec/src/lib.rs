@@ -10,6 +10,8 @@
 //! trait-object encoders/decoders that handle adaptive switching internally.
 
 pub mod adaptive;
+pub mod aec;
+pub mod agc;
 pub mod codec2_dec;
 pub mod codec2_enc;
 pub mod denoise;
@@ -19,6 +21,8 @@ pub mod resample;
 pub mod silence;
 
 pub use adaptive::{AdaptiveDecoder, AdaptiveEncoder};
+pub use aec::EchoCanceller;
+pub use agc::AutoGainControl;
 pub use denoise::NoiseSupressor;
 pub use silence::{ComfortNoise, SilenceDetector};
 pub use wzp_proto::{AudioDecoder, AudioEncoder, CodecId, QualityProfile};

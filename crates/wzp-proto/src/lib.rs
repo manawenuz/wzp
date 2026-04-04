@@ -29,6 +29,6 @@ pub use packet::{
     SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL, FRAME_TYPE_MINI,
 };
 pub use bandwidth::{BandwidthEstimator, CongestionState};
-pub use quality::{AdaptiveQualityController, Tier};
+pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;
