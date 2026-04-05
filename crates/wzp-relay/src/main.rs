@@ -502,14 +502,21 @@ async fn main() -> anyhow::Result<()> {
 
                 let participant_id = {
                     let mut mgr = room_mgr.lock().await;
-                    match mgr.join(&room_name, addr, room::ParticipantSender::Quic(transport.clone()), authenticated_fp.as_deref()) {
-                        Ok(id) => {
+                    match mgr.join(
+                        &room_name,
+                        addr,
+                        room::ParticipantSender::Quic(transport.clone()),
+                        authenticated_fp.as_deref(),
+                        None, // alias — TODO: accept from client
+                    ) {
+                        Ok((id, update, senders)) => {
                             metrics.active_rooms.set(mgr.list().len() as i64);
+                            drop(mgr); // release lock before async broadcast
+                            room::broadcast_signal(&senders, &update).await;
                             id
                         }
                         Err(e) => {
                             error!(%addr, room = %room_name, "room join denied: {e}");
-                            // Clean up the session we just created
                             metrics.active_sessions.dec();
                             let mut smgr = session_mgr.lock().await;
                             smgr.remove_session(session_id);

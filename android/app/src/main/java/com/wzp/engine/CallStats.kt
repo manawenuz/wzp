@@ -1,5 +1,6 @@
 package com.wzp.engine
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -32,6 +33,10 @@ data class CallStats(
     val fecRecovered: Long = 0,
     /** Current mic audio level (RMS, 0-32767). */
     val audioLevel: Int = 0,
+    /** Number of participants in the room. */
+    val roomParticipantCount: Int = 0,
+    /** Participants in the room (fingerprint + optional alias). */
+    val roomParticipants: List<RoomMember> = emptyList(),
 ) {
     /** Human-readable quality label. */
     val qualityLabel: String
@@ -43,6 +48,17 @@ data class CallStats(
         }
 
     companion object {
+        private fun parseParticipants(arr: JSONArray?): List<RoomMember> {
+            if (arr == null) return emptyList()
+            return (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                RoomMember(
+                    fingerprint = o.optString("fingerprint", ""),
+                    alias = o.optString("alias", null)
+                )
+            }
+        }
+
         /** Deserialise from the JSON string produced by the native engine. */
         fun fromJson(json: String): CallStats {
             return try {
@@ -59,11 +75,22 @@ data class CallStats(
                     framesDecoded = obj.optLong("frames_decoded", 0),
                     underruns = obj.optLong("underruns", 0),
                     fecRecovered = obj.optLong("fec_recovered", 0),
-                    audioLevel = obj.optInt("audio_level", 0)
+                    audioLevel = obj.optInt("audio_level", 0),
+                    roomParticipantCount = obj.optInt("room_participant_count", 0),
+                    roomParticipants = parseParticipants(obj.optJSONArray("room_participants"))
                 )
             } catch (e: Exception) {
                 CallStats()
             }
         }
     }
+}
+
+data class RoomMember(
+    val fingerprint: String,
+    val alias: String? = null
+) {
+    /** Short display name: alias if set, otherwise first 8 chars of fingerprint. */
+    val displayName: String
+        get() = alias ?: fingerprint.take(8)
 }

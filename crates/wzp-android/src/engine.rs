@@ -529,10 +529,45 @@ async fn run_call(
         }
     };
 
+    // Signal recv task — listens for RoomUpdate and other signaling messages
+    let transport_signal = transport.clone();
+    let state_signal = state.clone();
+    let signal_task = async {
+        loop {
+            match transport_signal.recv_signal().await {
+                Ok(Some(SignalMessage::RoomUpdate { count, participants })) => {
+                    info!(count, "RoomUpdate received");
+                    let members: Vec<crate::stats::RoomMember> = participants
+                        .iter()
+                        .map(|p| crate::stats::RoomMember {
+                            fingerprint: p.fingerprint.clone(),
+                            alias: p.alias.clone(),
+                        })
+                        .collect();
+                    let mut stats = state_signal.stats.lock().unwrap();
+                    stats.room_participant_count = count;
+                    stats.room_participants = members;
+                }
+                Ok(Some(msg)) => {
+                    info!("signal received: {:?}", std::mem::discriminant(&msg));
+                }
+                Ok(None) => {
+                    info!("signal stream closed");
+                    break;
+                }
+                Err(e) => {
+                    warn!("signal recv error: {e}");
+                    break;
+                }
+            }
+        }
+    };
+
     tokio::select! {
         _ = send_task => {}
         _ = recv_task => {}
         _ = stats_task => {}
+        _ = signal_task => {}
     }
 
     transport.close().await.ok();

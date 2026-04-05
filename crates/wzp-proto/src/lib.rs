@@ -26,7 +26,7 @@ pub use codec_id::{CodecId, QualityProfile};
 pub use error::*;
 pub use packet::{
     HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader, QualityReport,
-    SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL, FRAME_TYPE_MINI,
+    RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL, FRAME_TYPE_MINI,
 };
 pub use bandwidth::{BandwidthEstimator, CongestionState};
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};

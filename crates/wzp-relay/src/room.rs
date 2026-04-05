@@ -67,11 +67,24 @@ impl ParticipantSender {
     }
 }
 
+/// Broadcast a signal message to a list of participant senders.
+pub async fn broadcast_signal(senders: &[ParticipantSender], msg: &wzp_proto::SignalMessage) {
+    for sender in senders {
+        if let ParticipantSender::Quic(t) = sender {
+            if let Err(e) = t.send_signal(msg).await {
+                warn!("broadcast_signal error: {e}");
+            }
+        }
+    }
+}
+
 /// A participant in a room.
 struct Participant {
     id: ParticipantId,
     _addr: std::net::SocketAddr,
     sender: ParticipantSender,
+    fingerprint: Option<String>,
+    alias: Option<String>,
 }
 
 /// A room holding multiple participants.
@@ -86,10 +99,16 @@ impl Room {
         }
     }
 
-    fn add(&mut self, addr: std::net::SocketAddr, sender: ParticipantSender) -> ParticipantId {
+    fn add(
+        &mut self,
+        addr: std::net::SocketAddr,
+        sender: ParticipantSender,
+        fingerprint: Option<String>,
+        alias: Option<String>,
+    ) -> ParticipantId {
         let id = next_id();
         info!(room_size = self.participants.len() + 1, participant = id, %addr, "joined room");
-        self.participants.push(Participant { id, _addr: addr, sender });
+        self.participants.push(Participant { id, _addr: addr, sender, fingerprint, alias });
         id
     }
 
@@ -104,6 +123,22 @@ impl Room {
             .filter(|p| p.id != exclude_id)
             .map(|p| p.sender.clone())
             .collect()
+    }
+
+    /// Build a RoomUpdate participant list.
+    fn participant_list(&self) -> Vec<wzp_proto::packet::RoomParticipant> {
+        self.participants
+            .iter()
+            .map(|p| wzp_proto::packet::RoomParticipant {
+                fingerprint: p.fingerprint.clone().unwrap_or_default(),
+                alias: p.alias.clone(),
+            })
+            .collect()
+    }
+
+    /// Get all senders (for broadcasting to everyone including the joiner).
+    fn all_senders(&self) -> Vec<ParticipantSender> {
+        self.participants.iter().map(|p| p.sender.clone()).collect()
     }
 
     fn is_empty(&self) -> bool {
@@ -165,20 +200,27 @@ impl RoomManager {
         }
     }
 
-    /// Join a room. Returns the participant ID or an error if unauthorized.
+    /// Join a room. Returns (participant_id, room_update_msg, all_senders) for broadcasting.
     pub fn join(
         &mut self,
         room_name: &str,
         addr: std::net::SocketAddr,
         sender: ParticipantSender,
         fingerprint: Option<&str>,
-    ) -> Result<ParticipantId, String> {
+        alias: Option<&str>,
+    ) -> Result<(ParticipantId, wzp_proto::SignalMessage, Vec<ParticipantSender>), String> {
         if !self.is_authorized(room_name, fingerprint) {
             warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
             return Err("not authorized for this room".to_string());
         }
         let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
-        Ok(room.add(addr, sender))
+        let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()));
+        let update = wzp_proto::SignalMessage::RoomUpdate {
+            count: room.len() as u32,
+            participants: room.participant_list(),
+        };
+        let senders = room.all_senders();
+        Ok((id, update, senders))
     }
 
     /// Join a room via WebSocket. Convenience wrapper around `join()`.
@@ -189,17 +231,27 @@ impl RoomManager {
         sender: tokio::sync::mpsc::Sender<Bytes>,
         fingerprint: Option<&str>,
     ) -> Result<ParticipantId, String> {
-        self.join(room_name, addr, ParticipantSender::WebSocket(sender), fingerprint)
+        let (id, _update, _senders) = self.join(room_name, addr, ParticipantSender::WebSocket(sender), fingerprint, None)?;
+        Ok(id)
     }
 
-    /// Leave a room. Removes the room if empty.
-    pub fn leave(&mut self, room_name: &str, participant_id: ParticipantId) {
+    /// Leave a room. Returns (room_update_msg, remaining_senders) for broadcasting, or None if room is now empty.
+    pub fn leave(&mut self, room_name: &str, participant_id: ParticipantId) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
         if let Some(room) = self.rooms.get_mut(room_name) {
             room.remove(participant_id);
             if room.is_empty() {
                 self.rooms.remove(room_name);
                 info!(room = room_name, "room closed (empty)");
+                return None;
             }
+            let update = wzp_proto::SignalMessage::RoomUpdate {
+                count: room.len() as u32,
+                participants: room.participant_list(),
+            };
+            let senders = room.all_senders();
+            Some((update, senders))
+        } else {
+            None
         }
     }
 
@@ -386,9 +438,12 @@ async fn run_participant_plain(
         }
     }
 
-    // Clean up
+    // Clean up — leave room and broadcast update to remaining participants
     let mut mgr = room_mgr.lock().await;
-    mgr.leave(&room_name, participant_id);
+    if let Some((update, senders)) = mgr.leave(&room_name, participant_id) {
+        drop(mgr); // release lock before async broadcast
+        broadcast_signal(&senders, &update).await;
+    }
 }
 
 /// Trunked forwarding loop — batches outgoing packets per peer.
@@ -497,7 +552,10 @@ async fn run_participant_trunked(
     }
 
     let mut mgr = room_mgr.lock().await;
-    mgr.leave(&room_name, participant_id);
+    if let Some((update, senders)) = mgr.leave(&room_name, participant_id) {
+        drop(mgr);
+        broadcast_signal(&senders, &update).await;
+    }
 }
 
 /// Parse up to the first 2 bytes of a hex session-id string into `[u8; 2]`.

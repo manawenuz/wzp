@@ -228,6 +228,22 @@ fun InCallScreen(
 
                 QualityIndicator(qualityTier, stats.qualityLabel)
 
+                if (stats.roomParticipantCount > 0) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "${stats.roomParticipantCount} in room",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    stats.roomParticipants.forEach { member ->
+                        Text(
+                            text = member.displayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(32.dp))
 
                 AudioLevelBar(stats.audioLevel)

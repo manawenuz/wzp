@@ -53,4 +53,15 @@ pub struct CallStats {
     pub fec_recovered: u64,
     /// Current mic audio level (RMS of i16 samples, 0-32767).
     pub audio_level: u32,
+    /// Number of participants in the room (from last RoomUpdate).
+    pub room_participant_count: u32,
+    /// Participant list (fingerprint + optional alias) serialized as JSON array.
+    pub room_participants: Vec<RoomMember>,
+}
+
+/// A room member entry, serialized into the stats JSON.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RoomMember {
+    pub fingerprint: String,
+    pub alias: Option<String>,
 }

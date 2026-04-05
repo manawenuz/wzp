@@ -645,6 +645,23 @@ pub enum SignalMessage {
         session_id: String,
         room_name: String,
     },
+
+    /// Room membership update — sent by relay to all participants when someone joins or leaves.
+    RoomUpdate {
+        /// Current participant count.
+        count: u32,
+        /// List of participants currently in the room.
+        participants: Vec<RoomParticipant>,
+    },
+}
+
+/// A participant entry in a RoomUpdate message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoomParticipant {
+    /// Identity fingerprint (hex string, stable across reconnects if seed is persisted).
+    pub fingerprint: String,
+    /// Optional display name set by the client.
+    pub alias: Option<String>,
 }
 
 /// Reasons for ending a call.
