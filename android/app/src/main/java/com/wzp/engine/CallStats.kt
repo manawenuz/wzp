@@ -27,7 +27,11 @@ data class CallStats(
     /** Total frames decoded since call start. */
     val framesDecoded: Long = 0,
     /** Number of playout underruns (buffer empty when audio was needed). */
-    val underruns: Long = 0
+    val underruns: Long = 0,
+    /** Frames recovered by FEC. */
+    val fecRecovered: Long = 0,
+    /** Current mic audio level (RMS, 0-32767). */
+    val audioLevel: Int = 0
 ) {
     /** Human-readable quality label. */
     val qualityLabel: String
@@ -53,7 +57,9 @@ data class CallStats(
                     jitterBufferDepth = obj.optInt("jitter_buffer_depth", 0),
                     framesEncoded = obj.optLong("frames_encoded", 0),
                     framesDecoded = obj.optLong("frames_decoded", 0),
-                    underruns = obj.optLong("underruns", 0)
+                    underruns = obj.optLong("underruns", 0),
+                    fecRecovered = obj.optLong("fec_recovered", 0),
+                    audioLevel = obj.optInt("audio_level", 0)
                 )
             } catch (e: Exception) {
                 CallStats()

@@ -1,7 +1,9 @@
 package com.wzp.ui.call
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.wzp.audio.AudioPipeline
 import com.wzp.engine.CallStats
 import com.wzp.engine.WzpCallback
 import com.wzp.engine.WzpEngine
@@ -17,9 +19,11 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private var engine: WzpEngine? = null
     private var engineInitialized = false
+    private var audioPipeline: AudioPipeline? = null
+    private var audioStarted = false
 
     private val _callState = MutableStateFlow(0)
-    val callState: StateFlow<Int> = _callState.asStateFlow()
+    val callState: StateFlow<Int> get() = _callState.asStateFlow()
 
     private val _isMuted = MutableStateFlow(false)
     val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
@@ -36,16 +40,26 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    private val _roomName = MutableStateFlow(DEFAULT_ROOM)
+    val roomName: StateFlow<String> = _roomName.asStateFlow()
+
     private var statsJob: Job? = null
 
     companion object {
-        const val DEFAULT_RELAY = "172.16.81.175:4433"
+        const val DEFAULT_RELAY = "pangolin.manko.yoga:4433"
         const val DEFAULT_ROOM = "android"
+    }
+
+    /** Must be called once with Activity context before startCall. */
+    fun setContext(context: Context) {
+        if (audioPipeline == null) {
+            audioPipeline = AudioPipeline(context.applicationContext)
+        }
     }
 
     fun startCall(
         relayAddr: String = DEFAULT_RELAY,
-        room: String = DEFAULT_ROOM
+        room: String = _roomName.value
     ) {
         try {
             if (engine == null) {
@@ -58,9 +72,6 @@ class CallViewModel : ViewModel(), WzpCallback {
             _callState.value = 1 // Connecting
             startStatsPolling()
 
-            // startCall blocks (runs tokio on calling thread), so dispatch
-            // to a background coroutine. Using Dispatchers.IO which uses
-            // Java threads (not native pthread_create).
             viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     val result = engine?.startCall(relayAddr, room) ?: -1
@@ -80,6 +91,7 @@ class CallViewModel : ViewModel(), WzpCallback {
     }
 
     fun stopCall() {
+        stopAudio()
         stopStatsPolling()
         try {
             engine?.stopCall()
@@ -101,10 +113,25 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     fun clearError() { _errorMessage.value = null }
 
+    fun setRoomName(name: String) { _roomName.value = name }
+
     // WzpCallback
     override fun onCallStateChanged(state: Int) { _callState.value = state }
     override fun onQualityTierChanged(tier: Int) { _qualityTier.value = tier }
     override fun onError(code: Int, message: String) { _errorMessage.value = "Error $code: $message" }
+
+    private fun startAudio() {
+        if (audioStarted) return
+        val e = engine ?: return
+        audioPipeline?.start(e)
+        audioStarted = true
+    }
+
+    private fun stopAudio() {
+        if (!audioStarted) return
+        audioPipeline?.stop()
+        audioStarted = false
+    }
 
     private fun startStatsPolling() {
         statsJob?.cancel()
@@ -113,7 +140,16 @@ class CallViewModel : ViewModel(), WzpCallback {
                 try {
                     val json = engine?.getStats() ?: "{}"
                     if (json.isNotEmpty()) {
-                        _stats.value = CallStats.fromJson(json)
+                        val s = CallStats.fromJson(json)
+                        _stats.value = s
+                        // Sync call state from native engine stats
+                        if (s.state != 0) {
+                            _callState.value = s.state
+                        }
+                        // Start audio pipeline when call becomes active
+                        if (s.state == 2 && !audioStarted) {
+                            startAudio()
+                        }
                     }
                 } catch (_: Exception) {}
                 delay(500L)
@@ -128,6 +164,7 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     override fun onCleared() {
         super.onCleared()
+        stopAudio()
         stopStatsPolling()
         try {
             engine?.stopCall()

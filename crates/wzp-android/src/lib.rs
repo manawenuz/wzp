@@ -10,6 +10,7 @@
 //! allowing `cargo check` and unit tests on the host.
 
 pub mod audio_android;
+pub mod audio_ring;
 pub mod commands;
 pub mod engine;
 pub mod pipeline;

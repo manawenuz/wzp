@@ -21,6 +21,7 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,6 +49,7 @@ fun InCallScreen(
     val stats by viewModel.stats.collectAsState()
     val qualityTier by viewModel.qualityTier.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val roomName by viewModel.roomName.collectAsState()
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -83,11 +85,13 @@ fun InCallScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Room: ${CallViewModel.DEFAULT_ROOM}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = roomName,
+                    onValueChange = { viewModel.setRoomName(it) },
+                    label = { Text("Room") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(0.6f)
                 )
 
                 Spacer(modifier = Modifier.height(32.dp))
@@ -132,7 +136,7 @@ fun InCallScreen(
 
                 Spacer(modifier = Modifier.height(32.dp))
 
-                AudioLevelBar(stats.framesEncoded)
+                AudioLevelBar(stats.audioLevel)
 
                 Spacer(modifier = Modifier.weight(1f))
 
@@ -222,9 +226,11 @@ private fun QualityIndicator(tier: Int, label: String) {
 }
 
 @Composable
-private fun AudioLevelBar(framesEncoded: Long) {
-    val level = if (framesEncoded > 0) {
-        ((framesEncoded % 100).toFloat() / 100f).coerceIn(0.05f, 1f)
+private fun AudioLevelBar(audioLevel: Int) {
+    // audioLevel is RMS of i16 samples (0-32767).
+    // Map to 0.0-1.0 with a log-ish curve for better visual feel.
+    val level = if (audioLevel > 0) {
+        (audioLevel.toFloat() / 8000f).coerceIn(0.02f, 1f)
     } else {
         0f
     }
@@ -351,7 +357,7 @@ private fun StatsOverlay(stats: CallStats) {
             ) {
                 StatItem("Enc", "${stats.framesEncoded}")
                 StatItem("Dec", "${stats.framesDecoded}")
-                StatItem("JB", "${stats.jitterBufferDepth}")
+                StatItem("FEC", "${stats.fecRecovered}")
                 StatItem("Under", "${stats.underruns}")
             }
         }

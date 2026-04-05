@@ -39,6 +39,8 @@ class CallActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        viewModel.setContext(this)
+
         setContent {
             WzpTheme {
                 InCallScreen(

@@ -174,6 +174,56 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeForceProfile(
     }));
 }
 
+/// Write captured PCM samples from Kotlin AudioRecord into the engine's capture ring.
+/// pcm is a Java short[] array.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeWriteAudio(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    pcm: jni::objects::JShortArray,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let len = env.get_array_length(&pcm).unwrap_or(0) as usize;
+        if len == 0 {
+            return 0;
+        }
+        let mut buf = vec![0i16; len];
+        // GetShortArrayRegion copies Java array into our buffer
+        if env.get_short_array_region(&pcm, 0, &mut buf).is_err() {
+            return 0;
+        }
+        h.engine.write_audio(&buf) as jint
+    }));
+    result.unwrap_or(0)
+}
+
+/// Read decoded PCM samples from the engine's playout ring for Kotlin AudioTrack.
+/// pcm is a Java short[] array to fill. Returns number of samples actually read.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeReadAudio(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    pcm: jni::objects::JShortArray,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let len = env.get_array_length(&pcm).unwrap_or(0) as usize;
+        if len == 0 {
+            return 0;
+        }
+        let mut buf = vec![0i16; len];
+        let read = h.engine.read_audio(&mut buf);
+        if read > 0 {
+            let _ = env.set_short_array_region(&pcm, 0, &buf[..read]);
+        }
+        read as jint
+    }));
+    result.unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeDestroy(
     _env: JNIEnv,

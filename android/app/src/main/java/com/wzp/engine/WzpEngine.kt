@@ -97,6 +97,24 @@ class WzpEngine(private val callback: WzpCallback) {
         }
     }
 
+    /**
+     * Write captured PCM samples into the engine's capture ring buffer.
+     * Called from the AudioRecord capture thread.
+     */
+    fun writeAudio(pcm: ShortArray): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeWriteAudio(nativeHandle, pcm)
+    }
+
+    /**
+     * Read decoded PCM samples from the engine's playout ring buffer.
+     * Called from the AudioTrack playout thread.
+     */
+    fun readAudio(pcm: ShortArray): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeReadAudio(nativeHandle, pcm)
+    }
+
     // -- JNI native methods --------------------------------------------------
 
     private external fun nativeInit(): Long
@@ -108,6 +126,8 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeSetSpeaker(handle: Long, speaker: Boolean)
     private external fun nativeGetStats(handle: Long): String?
     private external fun nativeForceProfile(handle: Long, profile: Int)
+    private external fun nativeWriteAudio(handle: Long, pcm: ShortArray): Int
+    private external fun nativeReadAudio(handle: Long, pcm: ShortArray): Int
     private external fun nativeDestroy(handle: Long)
 
     companion object {

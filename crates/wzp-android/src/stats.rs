@@ -1,19 +1,29 @@
 //! Call statistics for the Android engine.
 
 /// State of the call.
-#[derive(Clone, Debug, Default, serde::Serialize, PartialEq, Eq)]
+/// Serializes as integer for easy parsing on the Kotlin side:
+/// 0=Idle, 1=Connecting, 2=Active, 3=Reconnecting, 4=Closed
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CallState {
-    /// Engine is idle, no active call.
     #[default]
     Idle,
-    /// Establishing connection to the relay.
     Connecting,
-    /// Call is active with audio flowing.
     Active,
-    /// Temporarily lost connection, attempting to recover.
     Reconnecting,
-    /// Call has ended.
     Closed,
+}
+
+impl serde::Serialize for CallState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let n: u8 = match self {
+            CallState::Idle => 0,
+            CallState::Connecting => 1,
+            CallState::Active => 2,
+            CallState::Reconnecting => 3,
+            CallState::Closed => 4,
+        };
+        serializer.serialize_u8(n)
+    }
 }
 
 /// Aggregated call statistics, serializable for JNI bridge.
@@ -39,4 +49,8 @@ pub struct CallStats {
     pub frames_decoded: u64,
     /// Number of playout underruns (buffer empty when audio needed).
     pub underruns: u64,
+    /// Frames recovered by FEC.
+    pub fec_recovered: u64,
+    /// Current mic audio level (RMS of i16 samples, 0-32767).
+    pub audio_level: u32,
 }
