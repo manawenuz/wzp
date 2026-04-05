@@ -7,49 +7,46 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Targets to build (comma-separated: amd64,arm64,armv7,mac-arm64)'
+        description: 'Targets to build (comma-separated: amd64,arm64,armv7)'
         required: false
         default: 'amd64'
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTUP_HOME: /tmp/rustup
+  CARGO_HOME: /tmp/cargo
 
 jobs:
-  # Always builds on push tags. On manual dispatch, reads inputs.
   build-amd64:
     if: >-
       github.event_name == 'push' ||
       contains(github.event.inputs.targets, 'amd64')
     runs-on: ubuntu-latest
-    container:
-      image: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: apt-get update && apt-get install -y cmake pkg-config libasound2-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-amd64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-amd64-
+      - name: Install Rust and dependencies
+        run: |
+          apt-get update && apt-get install -y curl cmake pkg-config libasound2-dev build-essential
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
       - name: Build headless binaries
-        run: cargo build --release --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo build --release --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
 
       - name: Build audio client
         run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
           cargo build --release --bin wzp-client --features audio
           cp target/release/wzp-client target/release/wzp-client-audio
           cargo build --release --bin wzp-client
 
       - name: Run tests
-        run: cargo test --workspace --lib
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo test --workspace --lib
 
       - name: Package
         run: |
@@ -73,33 +70,25 @@ jobs:
       github.event_name == 'push' ||
       contains(github.event.inputs.targets, 'arm64')
     runs-on: ubuntu-latest
-    container:
-      image: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cross-compilation tools
+      - name: Install Rust and cross-compilation tools
         run: |
           dpkg --add-architecture arm64
           apt-get update
-          apt-get install -y cmake pkg-config gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          apt-get install -y curl cmake pkg-config gcc-aarch64-linux-gnu libc6-dev-arm64-cross build-essential
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+          export PATH="$CARGO_HOME/bin:$PATH"
           rustup target add aarch64-unknown-linux-gnu
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-arm64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-arm64-
+          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
       - name: Build
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
         run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
           cargo build --release --target aarch64-unknown-linux-gnu \
             --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
 
@@ -124,33 +113,25 @@ jobs:
       github.event_name == 'push' ||
       contains(github.event.inputs.targets, 'armv7')
     runs-on: ubuntu-latest
-    container:
-      image: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cross-compilation tools
+      - name: Install Rust and cross-compilation tools
         run: |
           dpkg --add-architecture armhf
           apt-get update
-          apt-get install -y cmake pkg-config gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          apt-get install -y curl cmake pkg-config gcc-arm-linux-gnueabihf libc6-dev-armhf-cross build-essential
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+          export PATH="$CARGO_HOME/bin:$PATH"
           rustup target add armv7-unknown-linux-gnueabihf
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-armv7-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-armv7-
+          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
       - name: Build
         env:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
           CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
         run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
           cargo build --release --target armv7-unknown-linux-gnueabihf \
             --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
 
@@ -170,7 +151,6 @@ jobs:
           name: wzp-linux-armv7
           path: dist/wzp-linux-armv7.tar.gz
 
-  # Release job — creates a release with all artifacts when a tag is pushed
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-amd64]
