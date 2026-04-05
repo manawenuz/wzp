@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,8 +14,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
@@ -21,12 +26,18 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import com.wzp.engine.CallStats
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun InCallScreen(
     viewModel: CallViewModel,
@@ -51,6 +63,10 @@ fun InCallScreen(
     val errorMessage by viewModel.errorMessage.collectAsState()
     val roomName by viewModel.roomName.collectAsState()
     val selectedServer by viewModel.selectedServer.collectAsState()
+    val servers by viewModel.servers.collectAsState()
+    val preferIPv6 by viewModel.preferIPv6.collectAsState()
+
+    var showAddServerDialog by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -59,12 +75,12 @@ fun InCallScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
+                .padding(24.dp)
+                .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(modifier = Modifier.height(48.dp))
 
-            // App title
             Text(
                 text = "WZ Phone",
                 style = MaterialTheme.typography.headlineMedium.copy(
@@ -78,8 +94,7 @@ fun InCallScreen(
             CallStateLabel(callState)
 
             if (callState == 0) {
-                // Idle — show connect button
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(32.dp))
 
                 // Server selector
                 Text(
@@ -88,16 +103,16 @@ fun InCallScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(4.dp))
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    CallViewModel.SERVERS.forEachIndexed { idx, (_, label) ->
+                    servers.forEachIndexed { idx, entry ->
                         val isSelected = selectedServer == idx
                         FilledTonalIconButton(
                             onClick = { viewModel.selectServer(idx) },
                             modifier = Modifier
-                                .padding(horizontal = 4.dp)
+                                .padding(2.dp)
                                 .height(36.dp)
                                 .width(140.dp),
                             shape = RoundedCornerShape(8.dp),
@@ -111,13 +126,56 @@ fun InCallScreen(
                             }
                         ) {
                             Text(
-                                text = label,
+                                text = entry.label,
                                 style = MaterialTheme.typography.labelSmall,
                                 maxLines = 1
                             )
                         }
                     }
+                    // + Add button
+                    OutlinedButton(
+                        onClick = { showAddServerDialog = true },
+                        modifier = Modifier
+                            .padding(2.dp)
+                            .height(36.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("+", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
+
+                // IPv4/IPv6 preference
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "IPv4",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (!preferIPv6) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Switch(
+                        checked = preferIPv6,
+                        onCheckedChange = { viewModel.setPreferIPv6(it) },
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+                    Text(
+                        text = "IPv6",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (preferIPv6) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Selected server address
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = servers.getOrNull(selectedServer)?.address ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
@@ -149,7 +207,6 @@ fun InCallScreen(
                     )
                 }
 
-                // Show error if any
                 errorMessage?.let { err ->
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
@@ -172,7 +229,7 @@ fun InCallScreen(
 
                 AudioLevelBar(stats.audioLevel)
 
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(48.dp))
 
                 ControlRow(
                     isMuted = isMuted,
@@ -181,7 +238,6 @@ fun InCallScreen(
                     onToggleSpeaker = viewModel::toggleSpeaker,
                     onHangUp = {
                         viewModel.stopCall()
-                        // Don't finish activity — go back to idle
                     }
                 )
 
@@ -193,6 +249,71 @@ fun InCallScreen(
             }
         }
     }
+
+    if (showAddServerDialog) {
+        AddServerDialog(
+            onDismiss = { showAddServerDialog = false },
+            onAdd = { host, port, label ->
+                viewModel.addServer("$host:$port", label)
+                showAddServerDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun AddServerDialog(
+    onDismiss: () -> Unit,
+    onAdd: (host: String, port: String, label: String) -> Unit
+) {
+    var host by remember { mutableStateOf("") }
+    var port by remember { mutableStateOf("4433") }
+    var label by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Server") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = { host = it },
+                    label = { Text("Host (IP or domain)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = port,
+                    onValueChange = { port = it },
+                    label = { Text("Port") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("Label (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (host.isNotBlank()) {
+                        val displayLabel = label.ifBlank { host }
+                        onAdd(host.trim(), port.trim(), displayLabel)
+                    }
+                }
+            ) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 @Composable
@@ -261,8 +382,6 @@ private fun QualityIndicator(tier: Int, label: String) {
 
 @Composable
 private fun AudioLevelBar(audioLevel: Int) {
-    // audioLevel is RMS of i16 samples (0-32767).
-    // Map to 0.0-1.0 with a log-ish curve for better visual feel.
     val level = if (audioLevel > 0) {
         (audioLevel.toFloat() / 8000f).coerceIn(0.02f, 1f)
     } else {

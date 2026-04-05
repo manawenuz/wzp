@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use tracing::{error, info, warn};
+use wzp_codec::agc::AutoGainControl;
 use wzp_codec::opus_dec::OpusDecoder;
 use wzp_codec::opus_enc::OpusEncoder;
 use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
@@ -275,10 +276,14 @@ async fn run_call(
     let mut fec_enc = wzp_fec::create_encoder(&profile);
     let mut fec_dec = wzp_fec::create_decoder(&profile);
 
+    // AGC: normalize volume on both capture and playout paths
+    let mut capture_agc = AutoGainControl::new();
+    let mut playout_agc = AutoGainControl::new();
+
     info!(
         fec_ratio = profile.fec_ratio,
         frames_per_block = profile.frames_per_block,
-        "codec + FEC initialized (48kHz mono, 20ms frames, RaptorQ)"
+        "codec + FEC + AGC initialized (48kHz mono, 20ms frames)"
     );
 
     let seq = AtomicU16::new(0);
@@ -309,6 +314,9 @@ async fn run_call(
             if read < FRAME_SAMPLES {
                 continue;
             }
+
+            // AGC: normalize capture volume before encoding
+            capture_agc.process_frame(&mut capture_buf);
 
             // Opus encode
             let encoded_len = match encoder.encode(&capture_buf, &mut encode_buf) {
@@ -440,12 +448,15 @@ async fn run_call(
                     if !is_repair {
                         match decoder.decode(&pkt.payload, &mut decode_buf) {
                             Ok(samples) => {
+                                // AGC on playout — normalizes received audio volume
+                                playout_agc.process_frame(&mut decode_buf[..samples]);
                                 state.playout_ring.write(&decode_buf[..samples]);
                                 frames_decoded += 1;
                             }
                             Err(e) => {
                                 warn!("opus decode error: {e}");
                                 if let Ok(samples) = decoder.decode_lost(&mut decode_buf) {
+                                    playout_agc.process_frame(&mut decode_buf[..samples]);
                                     state.playout_ring.write(&decode_buf[..samples]);
                                 }
                             }
