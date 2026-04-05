@@ -33,6 +33,16 @@ impl QuinnTransport {
         &self.connection
     }
 
+    /// Feed an external RTT observation (e.g. from QUIC path stats) into the path monitor.
+    pub fn feed_rtt(&self, rtt_ms: u32) {
+        self.path_monitor.lock().unwrap().observe_rtt(rtt_ms);
+    }
+
+    /// Get raw packet counts from path monitor (sent, received).
+    pub fn monitor_counts(&self) -> (u64, u64) {
+        self.path_monitor.lock().unwrap().counts()
+    }
+
     /// Get the maximum datagram payload size, if datagrams are supported.
     pub fn max_datagram_size(&self) -> Option<usize> {
         datagram::max_datagram_payload(&self.connection)

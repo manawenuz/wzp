@@ -41,6 +41,7 @@ class CallService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                onStopFromNotification?.invoke()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -150,6 +151,9 @@ class CallService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_STOP = "com.wzp.service.STOP"
         private const val MAX_CALL_DURATION_MS = 4L * 60 * 60 * 1000 // 4 hours
+
+        /** Called when the user taps "End Call" in the notification. */
+        var onStopFromNotification: (() -> Unit)? = null
 
         /** Start the foreground call service. */
         fun start(context: Context) {

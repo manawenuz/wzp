@@ -11,6 +11,7 @@ import android.media.MediaRecorder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.wzp.engine.WzpEngine
+import kotlin.math.pow
 
 /**
  * Audio pipeline that captures mic audio and plays received audio using
@@ -36,6 +37,12 @@ class AudioPipeline(private val context: Context) {
 
     @Volatile
     private var running = false
+    /** Playout (incoming voice) gain in dB. 0 = unity. */
+    @Volatile
+    var playoutGainDb: Float = 0f
+    /** Capture (mic) gain in dB. 0 = unity. */
+    @Volatile
+    var captureGainDb: Float = 0f
     private var captureThread: Thread? = null
     private var playoutThread: Thread? = null
 
@@ -45,14 +52,20 @@ class AudioPipeline(private val context: Context) {
 
         captureThread = Thread({
             runCapture(engine)
+            // Park thread forever — exiting triggers a libcrypto TLS destructor
+            // crash (SIGSEGV in OPENSSL_free) on Android when a JNI-calling thread exits.
+            parkThread()
         }, "wzp-capture").apply {
+            isDaemon = true
             priority = Thread.MAX_PRIORITY
             start()
         }
 
         playoutThread = Thread({
             runPlayout(engine)
+            parkThread()
         }, "wzp-playout").apply {
+            isDaemon = true
             priority = Thread.MAX_PRIORITY
             start()
         }
@@ -62,11 +75,26 @@ class AudioPipeline(private val context: Context) {
 
     fun stop() {
         running = false
-        captureThread?.join(1000)
-        playoutThread?.join(1000)
+        // Don't join — threads are parked as daemons to avoid native TLS crash
         captureThread = null
         playoutThread = null
         Log.i(TAG, "audio pipeline stopped")
+    }
+
+    private fun applyGain(pcm: ShortArray, count: Int, db: Float) {
+        if (db == 0f) return
+        val linear = 10f.pow(db / 20f)
+        for (i in 0 until count) {
+            pcm[i] = (pcm[i] * linear).toInt().coerceIn(-32000, 32000).toShort()
+        }
+    }
+
+    private fun parkThread() {
+        try {
+            Thread.sleep(Long.MAX_VALUE)
+        } catch (_: InterruptedException) {
+            // process exiting
+        }
     }
 
     private fun runCapture(engine: WzpEngine) {
@@ -107,6 +135,7 @@ class AudioPipeline(private val context: Context) {
             while (running) {
                 val read = recorder.read(pcm, 0, FRAME_SAMPLES)
                 if (read > 0) {
+                    applyGain(pcm, read, captureGainDb)
                     engine.writeAudio(pcm)
                 } else if (read < 0) {
                     Log.e(TAG, "AudioRecord.read error: $read")
@@ -157,6 +186,7 @@ class AudioPipeline(private val context: Context) {
             while (running) {
                 val read = engine.readAudio(pcm)
                 if (read >= FRAME_SAMPLES) {
+                    applyGain(pcm, read, playoutGainDb)
                     track.write(pcm, 0, read)
                 } else {
                     // Not enough decoded audio — write silence to keep stream alive

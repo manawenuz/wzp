@@ -31,7 +31,7 @@ data class CallStats(
     /** Frames recovered by FEC. */
     val fecRecovered: Long = 0,
     /** Current mic audio level (RMS, 0-32767). */
-    val audioLevel: Int = 0
+    val audioLevel: Int = 0,
 ) {
     /** Human-readable quality label. */
     val qualityLabel: String

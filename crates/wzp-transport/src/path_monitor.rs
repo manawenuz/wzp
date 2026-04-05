@@ -136,6 +136,11 @@ impl PathMonitor {
         }
     }
 
+    /// Get raw packet counts for debugging.
+    pub fn counts(&self) -> (u64, u64) {
+        (self.total_sent, self.total_received)
+    }
+
     /// Estimate bandwidth in kbps from bytes received over time.
     fn estimate_bandwidth_kbps(&self) -> u32 {
         if let (Some(first), Some(last)) = (self.first_recv_time_ms, self.last_recv_time_ms) {

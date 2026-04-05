@@ -1,10 +1,13 @@
 package com.wzp.ui.call
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.wzp.audio.AudioPipeline
+import com.wzp.audio.AudioRouteManager
 import com.wzp.engine.CallStats
+import com.wzp.service.CallService
 import com.wzp.engine.WzpCallback
 import com.wzp.engine.WzpEngine
 import kotlinx.coroutines.Job
@@ -25,9 +28,9 @@ class CallViewModel : ViewModel(), WzpCallback {
     private var engine: WzpEngine? = null
     private var engineInitialized = false
     private var audioPipeline: AudioPipeline? = null
+    private var audioRouteManager: AudioRouteManager? = null
     private var audioStarted = false
-    private var acquireWakeLocks: (() -> Unit)? = null
-    private var releaseWakeLocks: (() -> Unit)? = null
+    private var appContext: Context? = null
 
     private val _callState = MutableStateFlow(0)
     val callState: StateFlow<Int> get() = _callState.asStateFlow()
@@ -59,9 +62,16 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _preferIPv6 = MutableStateFlow(false)
     val preferIPv6: StateFlow<Boolean> = _preferIPv6.asStateFlow()
 
+    private val _playoutGainDb = MutableStateFlow(0f)
+    val playoutGainDb: StateFlow<Float> = _playoutGainDb.asStateFlow()
+
+    private val _captureGainDb = MutableStateFlow(0f)
+    val captureGainDb: StateFlow<Float> = _captureGainDb.asStateFlow()
+
     private var statsJob: Job? = null
 
     companion object {
+        private const val TAG = "WzpCall"
         val DEFAULT_SERVERS = listOf(
             ServerEntry("172.16.81.175:4433", "LAN (172.16.81.175)"),
             ServerEntry("193.180.213.68:4433", "Pangolin (IP)"),
@@ -70,14 +80,14 @@ class CallViewModel : ViewModel(), WzpCallback {
     }
 
     fun setContext(context: Context) {
+        val appCtx = context.applicationContext
+        appContext = appCtx
         if (audioPipeline == null) {
-            audioPipeline = AudioPipeline(context.applicationContext)
+            audioPipeline = AudioPipeline(appCtx)
         }
-    }
-
-    fun setWakeLockCallbacks(acquire: () -> Unit, release: () -> Unit) {
-        acquireWakeLocks = acquire
-        releaseWakeLocks = release
+        if (audioRouteManager == null) {
+            audioRouteManager = AudioRouteManager(appCtx)
+        }
     }
 
     fun selectServer(index: Int) {
@@ -107,6 +117,16 @@ class CallViewModel : ViewModel(), WzpCallback {
     }
 
     fun setRoomName(name: String) { _roomName.value = name }
+
+    fun setPlayoutGainDb(db: Float) {
+        _playoutGainDb.value = db
+        audioPipeline?.playoutGainDb = db
+    }
+
+    fun setCaptureGainDb(db: Float) {
+        _captureGainDb.value = db
+        audioPipeline?.captureGainDb = db
+    }
 
     /**
      * Resolve DNS hostname to IP address on the Kotlin/Android side,
@@ -143,52 +163,74 @@ class CallViewModel : ViewModel(), WzpCallback {
         }
     }
 
+    /** Tear down engine and audio. Pass stopService=true to also stop the foreground service. */
+    private fun teardown(stopService: Boolean = true) {
+        Log.i(TAG, "teardown: stopping audio, stopService=$stopService")
+        CallService.onStopFromNotification = null
+        stopAudio()
+        stopStatsPolling()
+        Log.i(TAG, "teardown: stopping engine")
+        try { engine?.stopCall() } catch (e: Exception) { Log.w(TAG, "stopCall err: $e") }
+        try { engine?.destroy() } catch (e: Exception) { Log.w(TAG, "destroy err: $e") }
+        engine = null
+        engineInitialized = false
+        _callState.value = 0
+        if (stopService) {
+            try { appContext?.let { CallService.stop(it) } } catch (_: Exception) {}
+        }
+        Log.i(TAG, "teardown: done")
+    }
+
     fun startCall() {
         val serverEntry = _servers.value[_selectedServer.value]
         val room = _roomName.value
+        Log.i(TAG, "startCall: server=${serverEntry.address} room=$room")
         try {
-            if (engine == null) {
-                engine = WzpEngine(this)
-            }
-            if (!engineInitialized) {
-                engine?.init()
-                engineInitialized = true
-            }
+            // Teardown previous call but don't stop the service (we're about to restart it)
+            teardown(stopService = false)
+
+            Log.i(TAG, "startCall: creating engine")
+            engine = WzpEngine(this)
+            engine!!.init()
+            engineInitialized = true
             _callState.value = 1
             _errorMessage.value = null
-            acquireWakeLocks?.invoke()
+            try { appContext?.let { CallService.start(it) } } catch (e: Exception) {
+                Log.w(TAG, "service start err: $e")
+            }
             startStatsPolling()
 
             viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     val relay = resolveToIp(serverEntry.address)
+                    Log.i(TAG, "startCall: resolved=$relay, calling engine.startCall")
                     val result = engine?.startCall(relay, room) ?: -1
+                    Log.i(TAG, "startCall: engine returned $result")
+                    // Only wire up notification callback after engine is running
+                    CallService.onStopFromNotification = { stopCall() }
                     if (result != 0) {
                         _callState.value = 0
                         _errorMessage.value = "Failed to start call (code $result)"
-                        releaseWakeLocks?.invoke()
+                        appContext?.let { CallService.stop(it) }
                     }
                 } catch (e: Exception) {
+                    Log.e(TAG, "startCall IO error", e)
                     _callState.value = 0
                     _errorMessage.value = "Engine error: ${e.message}"
-                    releaseWakeLocks?.invoke()
+                    appContext?.let { CallService.stop(it) }
                 }
             }
         } catch (e: Exception) {
+            Log.e(TAG, "startCall error", e)
             _callState.value = 0
             _errorMessage.value = "Engine error: ${e.message}"
-            releaseWakeLocks?.invoke()
+            appContext?.let { CallService.stop(it) }
         }
     }
 
     fun stopCall() {
-        stopAudio()
-        stopStatsPolling()
-        try {
-            engine?.stopCall()
-        } catch (_: Exception) {}
-        _callState.value = 0
-        releaseWakeLocks?.invoke()
+        Log.i(TAG, "stopCall")
+        teardown()
     }
 
     fun toggleMute() {
@@ -200,7 +242,7 @@ class CallViewModel : ViewModel(), WzpCallback {
     fun toggleSpeaker() {
         val newSpeaker = !_isSpeaker.value
         _isSpeaker.value = newSpeaker
-        try { engine?.setSpeaker(newSpeaker) } catch (_: Exception) {}
+        audioRouteManager?.setSpeaker(newSpeaker)
     }
 
     fun clearError() { _errorMessage.value = null }
@@ -213,13 +255,24 @@ class CallViewModel : ViewModel(), WzpCallback {
     private fun startAudio() {
         if (audioStarted) return
         val e = engine ?: return
-        audioPipeline?.start(e)
+        val ctx = appContext ?: return
+        // Create a fresh pipeline each call to avoid stale threads
+        audioPipeline = AudioPipeline(ctx).also {
+            it.playoutGainDb = _playoutGainDb.value
+            it.captureGainDb = _captureGainDb.value
+            it.start(e)
+        }
+        audioRouteManager?.register()
         audioStarted = true
     }
 
     private fun stopAudio() {
         if (!audioStarted) return
         audioPipeline?.stop()
+        audioPipeline = null
+        audioRouteManager?.unregister()
+        audioRouteManager?.setSpeaker(false)
+        _isSpeaker.value = false
         audioStarted = false
     }
 
@@ -230,6 +283,7 @@ class CallViewModel : ViewModel(), WzpCallback {
                 try {
                     val json = engine?.getStats() ?: "{}"
                     if (json.isNotEmpty()) {
+                        Log.d(TAG, "raw: $json")
                         val s = CallStats.fromJson(json)
                         _stats.value = s
                         if (s.state != 0) {
@@ -252,14 +306,7 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     override fun onCleared() {
         super.onCleared()
-        stopAudio()
-        stopStatsPolling()
-        releaseWakeLocks?.invoke()
-        try {
-            engine?.stopCall()
-            engine?.destroy()
-        } catch (_: Exception) {}
-        engine = null
-        engineInitialized = false
+        Log.i(TAG, "onCleared")
+        teardown()
     }
 }

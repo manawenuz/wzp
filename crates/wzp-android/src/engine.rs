@@ -162,7 +162,6 @@ impl WzpEngine {
         if let Some(start) = self.call_start {
             stats.duration_secs = start.elapsed().as_secs_f64();
         }
-        // Include current audio level
         stats.audio_level = self.state.audio_level_rms.load(Ordering::Relaxed);
         stats
     }
@@ -506,15 +505,25 @@ async fn run_call(
         }
     };
 
-    // Stats task
+    // Stats task — polls path quality + quinn RTT every 500ms
+    let transport_stats = transport.clone();
     let stats_task = async {
         loop {
             if !state.running.load(Ordering::Relaxed) {
                 break;
             }
+            // Feed quinn's QUIC-level RTT into our path monitor
+            let quic_rtt_ms = transport_stats.connection().stats().path.rtt.as_millis() as u32;
+            if quic_rtt_ms > 0 {
+                transport_stats.feed_rtt(quic_rtt_ms);
+            }
+            let pq = transport_stats.path_quality();
             {
                 let mut stats = state.stats.lock().unwrap();
                 stats.frames_encoded = seq.load(Ordering::Relaxed) as u64;
+                stats.loss_pct = pq.loss_pct;
+                stats.rtt_ms = quic_rtt_ms;
+                stats.jitter_ms = pq.jitter_ms;
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }

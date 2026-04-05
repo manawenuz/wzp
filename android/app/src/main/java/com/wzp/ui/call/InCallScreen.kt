@@ -28,6 +28,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -65,6 +66,8 @@ fun InCallScreen(
     val selectedServer by viewModel.selectedServer.collectAsState()
     val servers by viewModel.servers.collectAsState()
     val preferIPv6 by viewModel.preferIPv6.collectAsState()
+    val playoutGainDb by viewModel.playoutGainDb.collectAsState()
+    val captureGainDb by viewModel.captureGainDb.collectAsState()
 
     var showAddServerDialog by remember { mutableStateOf(false) }
 
@@ -229,7 +232,22 @@ fun InCallScreen(
 
                 AudioLevelBar(stats.audioLevel)
 
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Gain sliders
+                GainSlider(
+                    label = "Voice Volume",
+                    gainDb = playoutGainDb,
+                    onGainChange = { viewModel.setPlayoutGainDb(it) }
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                GainSlider(
+                    label = "Mic Gain",
+                    gainDb = captureGainDb,
+                    onGainChange = { viewModel.setCaptureGainDb(it) }
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
 
                 ControlRow(
                     isMuted = isMuted,
@@ -407,6 +425,29 @@ private fun AudioLevelBar(audioLevel: Int) {
 }
 
 @Composable
+private fun GainSlider(label: String, gainDb: Float, onGainChange: (Float) -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth(0.8f),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        val sign = if (gainDb >= 0) "+" else ""
+        Text(
+            text = "$label: ${sign}${"%.0f".format(gainDb)} dB",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Slider(
+            value = gainDb,
+            onValueChange = { onGainChange(Math.round(it).toFloat()) },
+            valueRange = -20f..20f,
+            steps = 0,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
 private fun ControlRow(
     isMuted: Boolean,
     isSpeaker: Boolean,
@@ -490,7 +531,7 @@ private fun StatsOverlay(stats: CallStats) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "Network Stats",
+                text = "Stats",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -508,10 +549,9 @@ private fun StatsOverlay(stats: CallStats) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                StatItem("Enc", "${stats.framesEncoded}")
-                StatItem("Dec", "${stats.framesDecoded}")
+                StatItem("Sent", "${stats.framesEncoded}")
+                StatItem("Recv", "${stats.framesDecoded}")
                 StatItem("FEC", "${stats.fecRecovered}")
-                StatItem("Under", "${stats.underruns}")
             }
         }
     }
