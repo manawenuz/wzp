@@ -4,6 +4,12 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
 
     if target.contains("android") {
+        // Override broken static getauxval from compiler-rt that crashes
+        // in shared libraries. Must be compiled first to take link priority.
+        cc::Build::new()
+            .file("cpp/getauxval_fix.c")
+            .compile("getauxval_fix");
+
         let oboe_dir = fetch_oboe();
         match oboe_dir {
             Some(oboe_path) => {
