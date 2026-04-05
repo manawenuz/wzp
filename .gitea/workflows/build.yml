@@ -64,10 +64,24 @@ jobs:
           cp -r crates/wzp-web/static dist/wzp-linux-amd64/
           cd dist && tar czf wzp-linux-amd64.tar.gz wzp-linux-amd64/
 
-      - name: Print artifact info
+      - name: Upload to release
         run: |
-          echo "Artifact built: $(ls -lh dist/wzp-linux-amd64.tar.gz)"
-          echo "SHA256: $(sha256sum dist/wzp-linux-amd64.tar.gz)"
+          API="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
+          TOKEN="${{ github.token }}"
+          TAG="build-$(date +%Y%m%d-%H%M%S)"
+          SHA=$(git rev-parse --short HEAD)
+          # Create release
+          RELEASE=$(curl -sS -X POST "$API/releases" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (amd64)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
+          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          # Upload artifact
+          curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-amd64.tar.gz" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @dist/wzp-linux-amd64.tar.gz
+          echo "Release created: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
 
   build-arm64:
     if: >-
@@ -113,10 +127,22 @@ jobs:
           cp -r crates/wzp-web/static dist/wzp-linux-arm64/
           cd dist && tar czf wzp-linux-arm64.tar.gz wzp-linux-arm64/
 
-      - name: Print artifact info
+      - name: Upload to release
         run: |
-          echo "Artifact built: $(ls -lh dist/wzp-linux-arm64.tar.gz)"
-          echo "SHA256: $(sha256sum dist/wzp-linux-arm64.tar.gz)"
+          API="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
+          TOKEN="${{ github.token }}"
+          TAG="build-arm64-$(date +%Y%m%d-%H%M%S)"
+          SHA=$(git rev-parse --short HEAD)
+          RELEASE=$(curl -sS -X POST "$API/releases" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (arm64)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
+          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-arm64.tar.gz" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @dist/wzp-linux-arm64.tar.gz
+          echo "Release created: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
 
   build-armv7:
     if: >-
@@ -162,7 +188,19 @@ jobs:
           cp -r crates/wzp-web/static dist/wzp-linux-armv7/
           cd dist && tar czf wzp-linux-armv7.tar.gz wzp-linux-armv7/
 
-      - name: Print artifact info
+      - name: Upload to release
         run: |
-          echo "Artifact built: $(ls -lh dist/wzp-linux-armv7.tar.gz)"
-          echo "SHA256: $(sha256sum dist/wzp-linux-armv7.tar.gz)"
+          API="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
+          TOKEN="${{ github.token }}"
+          TAG="build-armv7-$(date +%Y%m%d-%H%M%S)"
+          SHA=$(git rev-parse --short HEAD)
+          RELEASE=$(curl -sS -X POST "$API/releases" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (armv7)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
+          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-armv7.tar.gz" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @dist/wzp-linux-armv7.tar.gz
+          echo "Release created: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
