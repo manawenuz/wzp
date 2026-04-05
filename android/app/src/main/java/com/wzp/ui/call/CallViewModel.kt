@@ -39,7 +39,7 @@ class CallViewModel : ViewModel(), WzpCallback {
     private var statsJob: Job? = null
 
     companion object {
-        const val DEFAULT_RELAY = "172.16.81.125:4433"
+        const val DEFAULT_RELAY = "172.16.81.175:4433"
         const val DEFAULT_ROOM = "android"
     }
 

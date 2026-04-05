@@ -72,7 +72,8 @@ tasks.register<Exec>("cargoNdkBuild") {
     )
 }
 
-tasks.named("preBuild") { dependsOn("cargoNdkBuild") }
+// Skip cargo-ndk in CI/Docker — .so is pre-built into jniLibs
+// tasks.named("preBuild") { dependsOn("cargoNdkBuild") }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
