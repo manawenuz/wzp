@@ -161,7 +161,6 @@ def main():
     parser.add_argument("--unfiltered", action="store_true", help="Capture all logcat, filter in Python")
     args = parser.parse_args()
 
-    log_buffer.maxlen  # already set at top, but update if needed
     global log_buffer
     log_buffer = deque(maxlen=args.lines)
 
