@@ -24,7 +24,8 @@ jobs:
       - name: Checkout
         run: |
           apt-get update && apt-get install -y git curl
-          git clone --depth 1 --branch ${{ github.ref_name }} ${{ github.server_url }}/${{ github.repository }}.git .
+          CLONE_URL=$(echo "${{ github.server_url }}/${{ github.repository }}.git" | sed "s|://|://${{ github.token }}@|")
+          git clone --depth 1 --branch ${{ github.ref_name }} "$CLONE_URL" .
 
       - name: Install Rust and dependencies
         run: |
@@ -74,7 +75,8 @@ jobs:
       - name: Checkout
         run: |
           apt-get update && apt-get install -y git curl
-          git clone --depth 1 --branch ${{ github.ref_name }} ${{ github.server_url }}/${{ github.repository }}.git .
+          CLONE_URL=$(echo "${{ github.server_url }}/${{ github.repository }}.git" | sed "s|://|://${{ github.token }}@|")
+          git clone --depth 1 --branch ${{ github.ref_name }} "$CLONE_URL" .
 
       - name: Install Rust and cross-compilation tools
         run: |
@@ -119,7 +121,8 @@ jobs:
       - name: Checkout
         run: |
           apt-get update && apt-get install -y git curl
-          git clone --depth 1 --branch ${{ github.ref_name }} ${{ github.server_url }}/${{ github.repository }}.git .
+          CLONE_URL=$(echo "${{ github.server_url }}/${{ github.repository }}.git" | sed "s|://|://${{ github.token }}@|")
+          git clone --depth 1 --branch ${{ github.ref_name }} "$CLONE_URL" .
 
       - name: Install Rust and cross-compilation tools
         run: |
