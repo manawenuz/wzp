@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          apt-get update && apt-get install -y git curl
+          apt-get update && apt-get install -y git curl jq
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
@@ -75,7 +75,7 @@ jobs:
             -H "Authorization: token $TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (amd64)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
-          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
           # Upload artifact
           curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-amd64.tar.gz" \
             -H "Authorization: token $TOKEN" \
@@ -91,7 +91,7 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          apt-get update && apt-get install -y git curl
+          apt-get update && apt-get install -y git curl jq
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
@@ -137,7 +137,7 @@ jobs:
             -H "Authorization: token $TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (arm64)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
-          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
           curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-arm64.tar.gz" \
             -H "Authorization: token $TOKEN" \
             -H "Content-Type: application/octet-stream" \
@@ -152,7 +152,7 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          apt-get update && apt-get install -y git curl
+          apt-get update && apt-get install -y git curl jq
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
@@ -198,7 +198,7 @@ jobs:
             -H "Authorization: token $TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (armv7)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
-          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
           curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-armv7.tar.gz" \
             -H "Authorization: token $TOKEN" \
             -H "Content-Type: application/octet-stream" \
