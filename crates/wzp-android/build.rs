@@ -13,6 +13,7 @@ fn main() {
                 cc::Build::new()
                     .cpp(true)
                     .std("c++17")
+                    .cpp_link_stdlib(Some("c++_static"))
                     .file("cpp/oboe_bridge.cpp")
                     .include("cpp")
                     .include(oboe_path.join("include"))
@@ -24,6 +25,7 @@ fn main() {
                 cc::Build::new()
                     .cpp(true)
                     .std("c++17")
+                    .cpp_link_stdlib(Some("c++_static"))
                     .file("cpp/oboe_stub.cpp")
                     .include("cpp")
                     .compile("oboe_bridge");
