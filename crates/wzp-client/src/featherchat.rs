@@ -115,6 +115,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wzp_proto::QualityProfile;
 
     #[test]
     fn payload_roundtrip() {
