@@ -25,6 +25,9 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 anyhow = "1"
 libc = "0.2"
+jni = { version = "0.21", default-features = false }
+rand = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [build-dependencies]
 cc = "1"

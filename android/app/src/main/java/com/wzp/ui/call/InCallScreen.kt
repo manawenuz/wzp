@@ -14,9 +14,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -29,7 +30,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -37,11 +37,6 @@ import androidx.compose.ui.unit.sp
 import com.wzp.engine.CallStats
 import kotlin.math.roundToInt
 
-/**
- * Main in-call Compose screen.
- *
- * Displays call duration, quality indicator, audio controls, and live statistics.
- */
 @Composable
 fun InCallScreen(
     viewModel: CallViewModel,
@@ -52,6 +47,7 @@ fun InCallScreen(
     val isSpeaker by viewModel.isSpeaker.collectAsState()
     val stats by viewModel.stats.collectAsState()
     val qualityTier by viewModel.qualityTier.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -65,63 +61,121 @@ fun InCallScreen(
         ) {
             Spacer(modifier = Modifier.height(48.dp))
 
-            // -- Call state label ---------------------------------------------
-            CallStateLabel(callState)
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // -- Duration -----------------------------------------------------
-            DurationDisplay(stats.durationSecs)
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // -- Quality indicator --------------------------------------------
-            QualityIndicator(qualityTier, stats.qualityLabel)
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // -- Audio level placeholder bar ----------------------------------
-            AudioLevelBar(stats.framesEncoded)
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            // -- Control buttons ----------------------------------------------
-            ControlRow(
-                isMuted = isMuted,
-                isSpeaker = isSpeaker,
-                onToggleMute = viewModel::toggleMute,
-                onToggleSpeaker = viewModel::toggleSpeaker,
-                onHangUp = onHangUp
+            // App title
+            Text(
+                text = "WZ Phone",
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontWeight = FontWeight.Bold
+                ),
+                color = MaterialTheme.colorScheme.primary
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // -- Stats overlay ------------------------------------------------
-            StatsOverlay(stats)
+            CallStateLabel(callState)
 
-            Spacer(modifier = Modifier.height(16.dp))
+            if (callState == 0) {
+                // Idle — show connect button
+                Spacer(modifier = Modifier.height(48.dp))
+
+                Text(
+                    text = "Relay: ${CallViewModel.DEFAULT_RELAY}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Room: ${CallViewModel.DEFAULT_ROOM}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                Button(
+                    onClick = { viewModel.startCall() },
+                    modifier = Modifier
+                        .size(120.dp)
+                        .clip(CircleShape),
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF4CAF50)
+                    )
+                ) {
+                    Text(
+                        text = "CALL",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = Color.White
+                    )
+                }
+
+                // Show error if any
+                errorMessage?.let { err ->
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = err,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            } else {
+                // In-call UI
+                Spacer(modifier = Modifier.height(16.dp))
+
+                DurationDisplay(stats.durationSecs)
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                QualityIndicator(qualityTier, stats.qualityLabel)
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                AudioLevelBar(stats.framesEncoded)
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                ControlRow(
+                    isMuted = isMuted,
+                    isSpeaker = isSpeaker,
+                    onToggleMute = viewModel::toggleMute,
+                    onToggleSpeaker = viewModel::toggleSpeaker,
+                    onHangUp = {
+                        viewModel.stopCall()
+                        // Don't finish activity — go back to idle
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                StatsOverlay(stats)
+
+                Spacer(modifier = Modifier.height(16.dp))
+            }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
 @Composable
 private fun CallStateLabel(state: Int) {
     val label = when (state) {
-        0 -> "Idle"
+        0 -> "Ready to connect"
         1 -> "Connecting..."
         2 -> "Active"
         3 -> "Reconnecting..."
         4 -> "Call Ended"
         else -> "Unknown"
     }
+    val color = when (state) {
+        2 -> Color(0xFF4CAF50)
+        1, 3 -> Color(0xFFFFC107)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Text(
         text = label,
         style = MaterialTheme.typography.titleMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+        color = color
     )
 }
 
@@ -143,12 +197,11 @@ private fun DurationDisplay(durationSecs: Double) {
 @Composable
 private fun QualityIndicator(tier: Int, label: String) {
     val dotColor = when (tier) {
-        0 -> Color(0xFF4CAF50) // green
-        1 -> Color(0xFFFFC107) // yellow
-        2 -> Color(0xFFF44336) // red
+        0 -> Color(0xFF4CAF50)
+        1 -> Color(0xFFFFC107)
+        2 -> Color(0xFFF44336)
         else -> Color.Gray
     }
-
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -170,14 +223,11 @@ private fun QualityIndicator(tier: Int, label: String) {
 
 @Composable
 private fun AudioLevelBar(framesEncoded: Long) {
-    // Placeholder: derive a fake "level" from frame count to show the bar is alive.
-    // In production this would be driven by actual RMS audio levels from the engine.
     val level = if (framesEncoded > 0) {
         ((framesEncoded % 100).toFloat() / 100f).coerceIn(0.05f, 1f)
     } else {
         0f
     }
-
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = "Audio Level",
@@ -210,7 +260,6 @@ private fun ControlRow(
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Mute button
         FilledTonalIconButton(
             onClick = onToggleMute,
             modifier = Modifier.size(56.dp),
@@ -231,7 +280,6 @@ private fun ControlRow(
             )
         }
 
-        // Hang up button
         FilledIconButton(
             onClick = onHangUp,
             modifier = Modifier.size(72.dp),
@@ -249,7 +297,6 @@ private fun ControlRow(
             )
         }
 
-        // Speaker button
         FilledTonalIconButton(
             onClick = onToggleSpeaker,
             modifier = Modifier.size(56.dp),
@@ -304,7 +351,7 @@ private fun StatsOverlay(stats: CallStats) {
             ) {
                 StatItem("Enc", "${stats.framesEncoded}")
                 StatItem("Dec", "${stats.framesDecoded}")
-                StatItem("JB Depth", "${stats.jitterBufferDepth}")
+                StatItem("JB", "${stats.jitterBufferDepth}")
                 StatItem("Under", "${stats.underruns}")
             }
         }

@@ -18,7 +18,6 @@ class CallViewModel : ViewModel(), WzpCallback {
     private var engine: WzpEngine? = null
     private var engineInitialized = false
 
-    // Observable state
     private val _callState = MutableStateFlow(0)
     val callState: StateFlow<Int> = _callState.asStateFlow()
 
@@ -39,7 +38,15 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private var statsJob: Job? = null
 
-    fun startCall(relayAddr: String, room: String, seedHex: String, token: String) {
+    companion object {
+        const val DEFAULT_RELAY = "172.16.81.125:4433"
+        const val DEFAULT_ROOM = "android"
+    }
+
+    fun startCall(
+        relayAddr: String = DEFAULT_RELAY,
+        room: String = DEFAULT_ROOM
+    ) {
         try {
             if (engine == null) {
                 engine = WzpEngine(this)
@@ -48,14 +55,16 @@ class CallViewModel : ViewModel(), WzpCallback {
                 engine?.init()
                 engineInitialized = true
             }
-            val result = engine?.startCall(relayAddr, room, seedHex, token) ?: -1
+            _callState.value = 1 // Connecting
+            val result = engine?.startCall(relayAddr, room) ?: -1
             if (result == 0) {
-                _callState.value = 1 // Connecting
                 startStatsPolling()
             } else {
+                _callState.value = 0
                 _errorMessage.value = "Failed to start call (code $result)"
             }
         } catch (e: Exception) {
+            _callState.value = 0
             _errorMessage.value = "Engine error: ${e.message}"
         }
     }
@@ -94,8 +103,7 @@ class CallViewModel : ViewModel(), WzpCallback {
                 try {
                     val json = engine?.getStats() ?: "{}"
                     if (json.isNotEmpty()) {
-                        val parsed = CallStats.fromJson(json)
-                        _stats.value = parsed
+                        _stats.value = CallStats.fromJson(json)
                     }
                 } catch (_: Exception) {}
                 delay(500L)

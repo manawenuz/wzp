@@ -10,13 +10,13 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
-        android:name=".WzpApplication"
+        android:name="com.wzp.WzpApplication"
         android:label="WZ Phone"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
-            android:name=".ui.call.CallActivity"
+            android:name="com.wzp.ui.call.CallActivity"
             android:exported="true"
             android:launchMode="singleTask">
             <intent-filter>
@@ -26,7 +26,7 @@
         </activity>
 
         <service
-            android:name=".service.CallService"
+            android:name="com.wzp.service.CallService"
             android:foregroundServiceType="phoneCall"
             android:exported="false" />
     </application>

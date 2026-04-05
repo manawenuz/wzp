@@ -32,12 +32,12 @@ class WzpEngine(private val callback: WzpCallback) {
      * Start a call.
      *
      * @param relayAddr relay server address (host:port)
-     * @param room      room identifier
-     * @param seedHex   64-char hex-encoded 32-byte identity seed
-     * @param token     authentication token
+     * @param room      room identifier (used as QUIC SNI)
+     * @param seedHex   64-char hex-encoded 32-byte identity seed (empty = random)
+     * @param token     authentication token (empty = no auth)
      * @return 0 on success, negative error code on failure
      */
-    fun startCall(relayAddr: String, room: String, seedHex: String, token: String): Int {
+    fun startCall(relayAddr: String, room: String, seedHex: String = "", token: String = ""): Int {
         check(nativeHandle != 0L) { "Engine not initialized" }
         val result = nativeStartCall(nativeHandle, relayAddr, room, seedHex, token)
         if (result == 0) {

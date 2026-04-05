@@ -45,7 +45,6 @@ class CallActivity : ComponentActivity() {
                     viewModel = viewModel,
                     onHangUp = {
                         viewModel.stopCall()
-                        finish()
                     }
                 )
             }
