@@ -4,12 +4,6 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
 
     if target.contains("android") {
-        // Compile a getauxval override FIRST so it takes precedence over the
-        // broken static stub from compiler-rt/CRT that crashes in shared libs.
-        cc::Build::new()
-            .file("cpp/getauxval_fix.c")
-            .compile("getauxval_fix");
-
         let oboe_dir = fetch_oboe();
         match oboe_dir {
             Some(oboe_path) => {
@@ -19,6 +13,8 @@ fn main() {
                 build
                     .cpp(true)
                     .std("c++17")
+                    // Use shared libc++ — avoids pulling in static libc stubs
+                    // that crash in shared libraries (getauxval, pthread_create, etc.)
                     .cpp_link_stdlib(Some("c++_shared"))
                     .include("cpp")
                     .include(oboe_path.join("include"))
@@ -44,15 +40,15 @@ fn main() {
             }
         }
 
-        // Use libc++_shared.so (dynamic) instead of static linking.
+        // Dynamic C++ runtime — libc++_shared.so must be in jniLibs alongside
+        // libwzp_android.so. We copy it there from the NDK sysroot.
         //
-        // Static libc++ pulls in getauxval.o from libc.a, which has a
-        // stub that reads from __libc_auxv (only initialized for executables,
-        // not shared libs). This causes SIGSEGV when ring/cpufeatures calls
-        // getauxval at load time. Using the shared library avoids this.
-        //
-        // libc++_shared.so must be bundled in the APK alongside libwzp_android.so.
-        // build.rs copies it to jniLibs/ automatically.
+        // WHY NOT STATIC: libc++_static.a + libc++abi.a transitively pull in
+        // object files from libc.a (static libc) which contain broken stubs for
+        // getauxval, __init_tcb, pthread_create, etc. These stubs only work in
+        // statically-linked executables. In shared libraries loaded by dlopen(),
+        // they SIGSEGV because the static libc init hasn't run.
+        // Google's official recommendation: use libc++_shared.so for native libs.
         if let Ok(ndk) = std::env::var("ANDROID_NDK_HOME") {
             let arch = if target.contains("aarch64") {
                 "aarch64-linux-android"
@@ -63,23 +59,32 @@ fn main() {
             } else {
                 "aarch64-linux-android"
             };
-            let lib_dir = format!("{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{arch}");
+            let lib_dir = format!(
+                "{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{arch}"
+            );
             println!("cargo:rustc-link-search=native={lib_dir}");
 
-            // Copy libc++_shared.so next to libwzp_android.so
+            // Copy libc++_shared.so to the jniLibs directory
             let shared_so = format!("{lib_dir}/libc++_shared.so");
-            let shared_path = std::path::Path::new(&shared_so);
-            if shared_path.exists() {
-                // Output to the jniLibs directory (one level up from OUT_DIR)
-                let out_dir = std::env::var("OUT_DIR").unwrap();
-                // Also copy to a known location that Gradle cargoNdkBuild uses
-                let jni_dir = format!("{}/../../../jniLibs/arm64-v8a", out_dir);
-                let _ = std::fs::create_dir_all(&jni_dir);
-                let _ = std::fs::copy(shared_path, format!("{jni_dir}/libc++_shared.so"));
-                println!("cargo:warning=Copied libc++_shared.so to jniLibs");
+            if std::path::Path::new(&shared_so).exists() {
+                let jni_abi = if target.contains("aarch64") {
+                    "arm64-v8a"
+                } else if target.contains("armv7") {
+                    "armeabi-v7a"
+                } else {
+                    "arm64-v8a"
+                };
+                // Try to copy to the Gradle jniLibs directory
+                let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+                let jni_dir = format!(
+                    "{manifest}/../../android/app/src/main/jniLibs/{jni_abi}"
+                );
+                if let Ok(_) = std::fs::create_dir_all(&jni_dir) {
+                    let _ = std::fs::copy(&shared_so, format!("{jni_dir}/libc++_shared.so"));
+                    println!("cargo:warning=Copied libc++_shared.so to {jni_dir}");
+                }
             }
         }
-        println!("cargo:rustc-link-lib=c++_shared");
 
         // Oboe needs liblog and libOpenSLES from Android
         println!("cargo:rustc-link-lib=log");
@@ -111,7 +116,7 @@ fn add_cpp_files_recursive(build: &mut cc::Build, dir: &std::path::Path) {
     }
 }
 
-/// Try to find or fetch Oboe headers.
+/// Try to find or fetch Oboe headers + source.
 fn fetch_oboe() -> Option<PathBuf> {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let oboe_dir = out_dir.join("oboe");

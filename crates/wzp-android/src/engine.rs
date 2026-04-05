@@ -106,9 +106,9 @@ impl WzpEngine {
             };
         }
 
-        // Create tokio runtime
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+        // Create tokio runtime — use current_thread to avoid pthread_create
+        // issues on Android (SEGV_ACCERR in __init_tcb with multi_thread).
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .thread_name("wzp-net")
             .enable_all()
             .build()?;
