@@ -56,12 +56,22 @@ class CallViewModel : ViewModel(), WzpCallback {
                 engineInitialized = true
             }
             _callState.value = 1 // Connecting
-            val result = engine?.startCall(relayAddr, room) ?: -1
-            if (result == 0) {
-                startStatsPolling()
-            } else {
-                _callState.value = 0
-                _errorMessage.value = "Failed to start call (code $result)"
+            startStatsPolling()
+
+            // startCall blocks (runs tokio on calling thread), so dispatch
+            // to a background coroutine. Using Dispatchers.IO which uses
+            // Java threads (not native pthread_create).
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val result = engine?.startCall(relayAddr, room) ?: -1
+                    if (result != 0) {
+                        _callState.value = 0
+                        _errorMessage.value = "Failed to start call (code $result)"
+                    }
+                } catch (e: Exception) {
+                    _callState.value = 0
+                    _errorMessage.value = "Engine error: ${e.message}"
+                }
             }
         } catch (e: Exception) {
             _callState.value = 0
