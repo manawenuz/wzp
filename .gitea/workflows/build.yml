@@ -24,8 +24,11 @@ jobs:
       - name: Checkout
         run: |
           apt-get update && apt-get install -y git curl
-          CLONE_URL=$(echo "${{ github.server_url }}/${{ github.repository }}.git" | sed "s|://|://${{ github.token }}@|")
-          git clone --depth 1 --branch ${{ github.ref_name }} "$CLONE_URL" .
+          AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
+          git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
+          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/".insteadOf "ssh://git@git.manko.yoga:222/"
+          git submodule update --init --depth 1
 
       - name: Install Rust and dependencies
         run: |
@@ -75,8 +78,11 @@ jobs:
       - name: Checkout
         run: |
           apt-get update && apt-get install -y git curl
-          CLONE_URL=$(echo "${{ github.server_url }}/${{ github.repository }}.git" | sed "s|://|://${{ github.token }}@|")
-          git clone --depth 1 --branch ${{ github.ref_name }} "$CLONE_URL" .
+          AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
+          git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
+          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/".insteadOf "ssh://git@git.manko.yoga:222/"
+          git submodule update --init --depth 1
 
       - name: Install Rust and cross-compilation tools
         run: |
@@ -121,8 +127,11 @@ jobs:
       - name: Checkout
         run: |
           apt-get update && apt-get install -y git curl
-          CLONE_URL=$(echo "${{ github.server_url }}/${{ github.repository }}.git" | sed "s|://|://${{ github.token }}@|")
-          git clone --depth 1 --branch ${{ github.ref_name }} "$CLONE_URL" .
+          AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
+          git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
+          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/".insteadOf "ssh://git@git.manko.yoga:222/"
+          git submodule update --init --depth 1
 
       - name: Install Rust and cross-compilation tools
         run: |
