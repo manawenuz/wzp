@@ -50,6 +50,7 @@ fun InCallScreen(
     val qualityTier by viewModel.qualityTier.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val roomName by viewModel.roomName.collectAsState()
+    val selectedServer by viewModel.selectedServer.collectAsState()
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -80,11 +81,44 @@ fun InCallScreen(
                 // Idle — show connect button
                 Spacer(modifier = Modifier.height(48.dp))
 
+                // Server selector
                 Text(
-                    text = "Relay: ${CallViewModel.DEFAULT_RELAY}",
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = "Server",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CallViewModel.SERVERS.forEachIndexed { idx, (_, label) ->
+                        val isSelected = selectedServer == idx
+                        FilledTonalIconButton(
+                            onClick = { viewModel.selectServer(idx) },
+                            modifier = Modifier
+                                .padding(horizontal = 4.dp)
+                                .height(36.dp)
+                                .width(140.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = if (isSelected) {
+                                IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            } else {
+                                IconButtonDefaults.filledTonalIconButtonColors()
+                            }
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = roomName,
@@ -94,7 +128,7 @@ fun InCallScreen(
                     modifier = Modifier.fillMaxWidth(0.6f)
                 )
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(24.dp))
 
                 Button(
                     onClick = { viewModel.startCall() },
