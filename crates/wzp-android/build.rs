@@ -36,6 +36,21 @@ fn main() {
         //   libc++_static.a  — STL (containers, strings, algorithms)
         //   libc++abi.a      — ABI (RTTI, exceptions, typeinfo vtables)
         // Both are required; cc crate's cpp_link_stdlib only handles the first.
+        //
+        // We also need to tell the linker where to find them in the NDK sysroot.
+        if let Ok(ndk) = std::env::var("ANDROID_NDK_HOME") {
+            let arch = if target.contains("aarch64") {
+                "aarch64-linux-android"
+            } else if target.contains("armv7") {
+                "arm-linux-androideabi"
+            } else if target.contains("x86_64") {
+                "x86_64-linux-android"
+            } else {
+                "aarch64-linux-android"
+            };
+            let lib_dir = format!("{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{arch}");
+            println!("cargo:rustc-link-search=native={lib_dir}");
+        }
         println!("cargo:rustc-link-lib=static=c++_static");
         println!("cargo:rustc-link-lib=static=c++abi");
     } else {
