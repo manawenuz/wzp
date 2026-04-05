@@ -32,7 +32,7 @@ jobs:
 
       - name: Install Rust and dependencies
         run: |
-          apt-get install -y cmake pkg-config libasound2-dev build-essential
+          apt-get install -y cmake pkg-config libasound2-dev libssl-dev build-essential
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
@@ -88,7 +88,7 @@ jobs:
         run: |
           dpkg --add-architecture arm64
           apt-get update
-          apt-get install -y cmake pkg-config gcc-aarch64-linux-gnu libc6-dev-arm64-cross build-essential
+          apt-get install -y cmake pkg-config gcc-aarch64-linux-gnu libc6-dev-arm64-cross libssl-dev build-essential
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add aarch64-unknown-linux-gnu
@@ -137,7 +137,7 @@ jobs:
         run: |
           dpkg --add-architecture armhf
           apt-get update
-          apt-get install -y cmake pkg-config gcc-arm-linux-gnueabihf libc6-dev-armhf-cross build-essential
+          apt-get install -y cmake pkg-config gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libssl-dev build-essential
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add armv7-unknown-linux-gnueabihf
