@@ -27,7 +27,9 @@ jobs:
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/".insteadOf "ssh://git@git.manko.yoga:222/"
+          apt-get install -y openssh-client
+          mkdir -p ~/.ssh && ssh-keyscan -p 2222 git.tbs.amn.gg >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."ssh://git@git.tbs.amn.gg:2222/manawenuz/".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/"
           git submodule update --init --depth 1
 
       - name: Install Rust and dependencies
@@ -81,7 +83,9 @@ jobs:
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/".insteadOf "ssh://git@git.manko.yoga:222/"
+          apt-get install -y openssh-client
+          mkdir -p ~/.ssh && ssh-keyscan -p 2222 git.tbs.amn.gg >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."ssh://git@git.tbs.amn.gg:2222/manawenuz/".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/"
           git submodule update --init --depth 1
 
       - name: Install Rust and cross-compilation tools
@@ -130,7 +134,9 @@ jobs:
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/".insteadOf "ssh://git@git.manko.yoga:222/"
+          apt-get install -y openssh-client
+          mkdir -p ~/.ssh && ssh-keyscan -p 2222 git.tbs.amn.gg >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."ssh://git@git.tbs.amn.gg:2222/manawenuz/".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/"
           git submodule update --init --depth 1
 
       - name: Install Rust and cross-compilation tools
