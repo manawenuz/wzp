@@ -27,7 +27,7 @@ jobs:
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
+          git config --global url."https://git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
           git submodule update --init --depth 1
 
       - name: Install Rust and dependencies
@@ -81,7 +81,7 @@ jobs:
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
+          git config --global url."https://git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
           git submodule update --init --depth 1
 
       - name: Install Rust and cross-compilation tools
@@ -130,7 +130,7 @@ jobs:
           AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
           AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
           git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://${{ github.token }}@git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
+          git config --global url."https://git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
           git submodule update --init --depth 1
 
       - name: Install Rust and cross-compilation tools
