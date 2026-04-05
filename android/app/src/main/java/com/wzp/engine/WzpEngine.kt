@@ -72,7 +72,12 @@ class WzpEngine(private val callback: WzpCallback) {
      * @return JSON-serialised [CallStats], or `"{}"` if the engine is not initialised.
      */
     fun getStats(): String {
-        return if (nativeHandle != 0L) nativeGetStats(nativeHandle) else "{}"
+        if (nativeHandle == 0L) return "{}"
+        return try {
+            nativeGetStats(nativeHandle) ?: "{}"
+        } catch (_: Exception) {
+            "{}"
+        }
     }
 
     /**
@@ -101,7 +106,7 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeStopCall(handle: Long)
     private external fun nativeSetMute(handle: Long, muted: Boolean)
     private external fun nativeSetSpeaker(handle: Long, speaker: Boolean)
-    private external fun nativeGetStats(handle: Long): String
+    private external fun nativeGetStats(handle: Long): String?
     private external fun nativeForceProfile(handle: Long, profile: Int)
     private external fun nativeDestroy(handle: Long)
 

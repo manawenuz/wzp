@@ -109,13 +109,9 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeInit(
     _class: *mut c_void,
 ) -> JLong {
     let result = panic::catch_unwind(|| {
-        // Initialise tracing once (ignore errors if already set).
-        #[cfg(target_os = "android")]
-        {
-            let _ = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::INFO)
-                .try_init();
-        }
+        // Note: tracing on Android requires android_logger or similar.
+        // fmt() subscriber writes to stdout which doesn't exist on Android.
+        // Skip tracing init here — add android_logger later.
 
         let handle = Box::new(EngineHandle {
             engine: WzpEngine::new(),

@@ -13,21 +13,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-/**
- * ViewModel managing the call lifecycle and exposing observable state to the UI.
- *
- * Owns the [WzpEngine] instance, implements [WzpCallback] to receive engine events,
- * and polls call statistics every 500 ms while the call is active.
- */
 class CallViewModel : ViewModel(), WzpCallback {
 
-    // -- Engine ---------------------------------------------------------------
+    private var engine: WzpEngine? = null
+    private var engineInitialized = false
 
-    private val engine = WzpEngine(this)
-
-    // -- Observable state -----------------------------------------------------
-
-    private val _callState = MutableStateFlow(0) // CallStateConstants.IDLE
+    // Observable state
+    private val _callState = MutableStateFlow(0)
     val callState: StateFlow<Int> = _callState.asStateFlow()
 
     private val _isMuted = MutableStateFlow(false)
@@ -45,79 +37,68 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
-    // -- Stats polling --------------------------------------------------------
-
     private var statsJob: Job? = null
 
-    // -- Public API -----------------------------------------------------------
-
-    /**
-     * Initialise the native engine and start a call.
-     *
-     * @param relayAddr relay server address (host:port)
-     * @param room      room identifier
-     * @param seedHex   64-char hex-encoded 32-byte identity seed
-     * @param token     authentication token
-     */
     fun startCall(relayAddr: String, room: String, seedHex: String, token: String) {
-        engine.init()
-        val result = engine.startCall(relayAddr, room, seedHex, token)
-        if (result == 0) {
-            startStatsPolling()
+        try {
+            if (engine == null) {
+                engine = WzpEngine(this)
+            }
+            if (!engineInitialized) {
+                engine?.init()
+                engineInitialized = true
+            }
+            val result = engine?.startCall(relayAddr, room, seedHex, token) ?: -1
+            if (result == 0) {
+                _callState.value = 1 // Connecting
+                startStatsPolling()
+            } else {
+                _errorMessage.value = "Failed to start call (code $result)"
+            }
+        } catch (e: Exception) {
+            _errorMessage.value = "Engine error: ${e.message}"
         }
     }
 
-    /** End the current call and clean up resources. */
     fun stopCall() {
         stopStatsPolling()
-        engine.stopCall()
+        try {
+            engine?.stopCall()
+        } catch (_: Exception) {}
+        _callState.value = 0
     }
 
-    /** Toggle microphone mute. */
     fun toggleMute() {
         val newMuted = !_isMuted.value
         _isMuted.value = newMuted
-        engine.setMute(newMuted)
+        try { engine?.setMute(newMuted) } catch (_: Exception) {}
     }
 
-    /** Toggle speaker (loudspeaker) mode. */
     fun toggleSpeaker() {
         val newSpeaker = !_isSpeaker.value
         _isSpeaker.value = newSpeaker
-        engine.setSpeaker(newSpeaker)
+        try { engine?.setSpeaker(newSpeaker) } catch (_: Exception) {}
     }
 
-    /** Clear the current error message. */
-    fun clearError() {
-        _errorMessage.value = null
-    }
+    fun clearError() { _errorMessage.value = null }
 
-    // -- WzpCallback ----------------------------------------------------------
-
-    override fun onCallStateChanged(state: Int) {
-        _callState.value = state
-    }
-
-    override fun onQualityTierChanged(tier: Int) {
-        _qualityTier.value = tier
-    }
-
-    override fun onError(code: Int, message: String) {
-        _errorMessage.value = "Error $code: $message"
-    }
-
-    // -- Stats polling --------------------------------------------------------
+    // WzpCallback
+    override fun onCallStateChanged(state: Int) { _callState.value = state }
+    override fun onQualityTierChanged(tier: Int) { _qualityTier.value = tier }
+    override fun onError(code: Int, message: String) { _errorMessage.value = "Error $code: $message" }
 
     private fun startStatsPolling() {
         statsJob?.cancel()
         statsJob = viewModelScope.launch {
             while (isActive) {
-                val json = engine.getStats()
-                val parsed = CallStats.fromJson(json)
-                _stats.value = parsed
-                _callState.value = parsed.state
-                _qualityTier.value = parsed.qualityTier
-                delay(STATS_POLL_INTERVAL_MS)
+                try {
+                    val json = engine?.getStats() ?: "{}"
+                    if (json.isNotEmpty()) {
+                        val parsed = CallStats.fromJson(json)
+                        _stats.value = parsed
+                    }
+                } catch (_: Exception) {}
+                delay(500L)
             }
         }
     }
@@ -127,16 +108,14 @@ class CallViewModel : ViewModel(), WzpCallback {
         statsJob = null
     }
 
-    // -- Cleanup --------------------------------------------------------------
-
     override fun onCleared() {
         super.onCleared()
         stopStatsPolling()
-        engine.stopCall()
-        engine.destroy()
-    }
-
-    companion object {
-        private const val STATS_POLL_INTERVAL_MS = 500L
+        try {
+            engine?.stopCall()
+            engine?.destroy()
+        } catch (_: Exception) {}
+        engine = null
+        engineInitialized = false
     }
 }
