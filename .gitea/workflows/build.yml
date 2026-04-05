@@ -20,6 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Init submodules
+        run: |
+          git config --global url."https://git.manko.yoga/".insteadOf "ssh://git@git.manko.yoga:222/"
+          git submodule update --init --recursive
+
       - name: Install Rust + dependencies
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
