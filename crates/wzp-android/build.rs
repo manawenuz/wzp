@@ -13,7 +13,7 @@ fn main() {
                 cc::Build::new()
                     .cpp(true)
                     .std("c++17")
-                    .cpp_link_stdlib(Some("c++_static"))
+                    .cpp_link_stdlib(None)
                     .file("cpp/oboe_bridge.cpp")
                     .include("cpp")
                     .include(oboe_path.join("include"))
@@ -25,12 +25,19 @@ fn main() {
                 cc::Build::new()
                     .cpp(true)
                     .std("c++17")
-                    .cpp_link_stdlib(Some("c++_static"))
+                    .cpp_link_stdlib(None)
                     .file("cpp/oboe_stub.cpp")
                     .include("cpp")
                     .compile("oboe_bridge");
             }
         }
+
+        // Android NDK splits the static C++ runtime into two archives:
+        //   libc++_static.a  — STL (containers, strings, algorithms)
+        //   libc++abi.a      — ABI (RTTI, exceptions, typeinfo vtables)
+        // Both are required; cc crate's cpp_link_stdlib only handles the first.
+        println!("cargo:rustc-link-lib=static=c++_static");
+        println!("cargo:rustc-link-lib=static=c++abi");
     } else {
         // Non-Android: always use stub
         cc::Build::new()
