@@ -35,11 +35,16 @@ static INIT_LOGGING: Once = Once::new();
 /// Safe to call multiple times — only the first call takes effect.
 fn init_logging() {
     INIT_LOGGING.call_once(|| {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        if let Ok(layer) = tracing_android::layer("wzp_android") {
-            let _ = tracing_subscriber::registry().with(layer).try_init();
-        }
+        // Wrap in catch_unwind — sharded_slab allocation inside
+        // tracing_subscriber::registry() can crash on some Android
+        // devices if scudo malloc fails during early initialization.
+        let _ = std::panic::catch_unwind(|| {
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            if let Ok(layer) = tracing_android::layer("wzp_android") {
+                let _ = tracing_subscriber::registry().with(layer).try_init();
+            }
+        });
     });
 }
 
