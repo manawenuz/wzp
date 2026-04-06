@@ -15,8 +15,13 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import com.wzp.ui.settings.SettingsScreen
 
 /**
  * Main activity hosting the in-call Compose UI.
@@ -43,12 +48,19 @@ class CallActivity : ComponentActivity() {
 
         setContent {
             WzpTheme {
-                InCallScreen(
-                    viewModel = viewModel,
-                    onHangUp = {
-                        viewModel.stopCall()
-                    }
-                )
+                var showSettings by remember { mutableStateOf(false) }
+                if (showSettings) {
+                    SettingsScreen(
+                        viewModel = viewModel,
+                        onBack = { showSettings = false }
+                    )
+                } else {
+                    InCallScreen(
+                        viewModel = viewModel,
+                        onHangUp = { viewModel.stopCall() },
+                        onOpenSettings = { showSettings = true }
+                    )
+                }
             }
         }
 

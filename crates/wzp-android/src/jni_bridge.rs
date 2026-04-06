@@ -54,12 +54,14 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
     room_j: JString,
     seed_hex_j: JString,
     token_j: JString,
+    alias_j: JString,
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
         let room: String = env.get_string(&room_j).map(|s| s.into()).unwrap_or_default();
         let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
         let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
+        let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
 
         let h = unsafe { handle_ref(handle) };
 
@@ -83,6 +85,7 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
             room,
             auth_token: if token.is_empty() { Vec::new() } else { token.into_bytes() },
             identity_seed,
+            alias: if alias.is_empty() { None } else { Some(alias) },
         };
 
         match h.engine.start_call(config) {
