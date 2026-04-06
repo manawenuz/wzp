@@ -138,7 +138,16 @@ class DebugReporter(private val context: Context) {
                     line.contains("AudioFlinger") ||
                     line.contains("DebugReporter") ||
                     line.contains("QUIC") ||
-                    line.contains("quinn")
+                    line.contains("quinn") ||
+                    line.contains("send task") ||
+                    line.contains("recv task") ||
+                    line.contains("send stats") ||
+                    line.contains("recv stats") ||
+                    line.contains("send_media") ||
+                    line.contains("FEC block") ||
+                    line.contains("recv gap") ||
+                    line.contains("frames_dropped") ||
+                    line.contains("opus")
                 }
                 .joinToString("\n")
         } catch (e: Exception) {
