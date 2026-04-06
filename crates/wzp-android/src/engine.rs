@@ -149,14 +149,18 @@ impl WzpEngine {
 
     pub fn stop_call(&mut self) {
         self.state.running.store(false, Ordering::Release);
-        // Close QUIC connection immediately so the relay detects disconnect
-        // and removes us from the room (broadcasts RoomUpdate to others).
+        // Close QUIC connection first — queues a CONNECTION_CLOSE frame.
+        // Quinn needs the tokio runtime alive to actually send it on the wire,
+        // so we use shutdown_timeout() to give it time to flush.
         if let Some(transport) = self.state.quic_transport.lock().unwrap().take() {
             transport.close_now();
         }
         let _ = self.state.command_tx.send(EngineCommand::Stop);
         if let Some(rt) = self.tokio_runtime.take() {
-            rt.shutdown_background();
+            // Give quinn up to 500ms to send the CONNECTION_CLOSE frame.
+            // The desktop client uses 2s, but we keep it short on Android
+            // to avoid blocking the UI thread.
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
         }
         self.call_start = None;
     }
