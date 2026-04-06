@@ -335,14 +335,14 @@ async fn main() -> anyhow::Result<()> {
     let _crypto_session = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
-        None, // alias — desktop client doesn't set one yet
+        cli.alias.as_deref(),
     ).await?;
     info!("crypto handshake complete");
 
     if cli.live {
         #[cfg(feature = "audio")]
         {
-            return run_live(transport, cli.alias).await;
+            return run_live(transport).await;
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -606,19 +606,11 @@ async fn run_file_mode(
 #[cfg(feature = "audio")]
 async fn run_live(
     transport: Arc<wzp_transport::QuinnTransport>,
-    alias: Option<String>,
 ) -> anyhow::Result<()> {
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use wzp_client::audio_io::{AudioCapture, AudioPlayback};
     use wzp_client::call::JitterTelemetry;
-
-    // Send alias to relay so other participants can see our display name
-    if let Some(ref name) = alias {
-        let msg = wzp_proto::SignalMessage::SetAlias { alias: name.clone() };
-        transport.send_signal(&msg).await?;
-        info!(alias = %name, "alias sent to relay");
-    }
 
     let capture = AudioCapture::start()?;
     let playback = AudioPlayback::start()?;
