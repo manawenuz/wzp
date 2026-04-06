@@ -12,6 +12,7 @@ const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
 const connectError = document.getElementById("connect-error")!;
 const roomName = document.getElementById("room-name")!;
 const callTimer = document.getElementById("call-timer")!;
+const callStatus = document.getElementById("call-status")!;
 const levelBar = document.getElementById("level-bar")!;
 const participantsDiv = document.getElementById("participants")!;
 const micBtn = document.getElementById("mic-btn")!;
@@ -39,15 +40,21 @@ const sClearRecent = document.getElementById("s-clear-recent")!;
 
 let statusInterval: number | null = null;
 let myFingerprint = "";
+let userDisconnected = false; // true when user clicks hangup (no auto-reconnect)
 
 // ── Settings persistence ──
+interface RecentRoom {
+  relay: string;
+  room: string;
+}
+
 interface Settings {
   relay: string;
   room: string;
   alias: string;
   osAec: boolean;
   agc: boolean;
-  recentRooms: string[];
+  recentRooms: RecentRoom[];
 }
 
 function loadSettings(): Settings {
@@ -61,7 +68,14 @@ function loadSettings(): Settings {
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
-    if (raw) return { ...defaults, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Migrate old string[] recentRooms to RecentRoom[]
+      if (parsed.recentRooms && parsed.recentRooms.length > 0 && typeof parsed.recentRooms[0] === "string") {
+        parsed.recentRooms = parsed.recentRooms.map((r: string) => ({ relay: parsed.relay || defaults.relay, room: r }));
+      }
+      return { ...defaults, ...parsed };
+    }
   } catch {}
   return defaults;
 }
@@ -72,13 +86,15 @@ function saveSettings() {
   s.room = roomInput.value;
   s.alias = aliasInput.value;
   s.osAec = osAecCheckbox.checked;
-  // Add room to recent list (dedup, max 5)
+  // Add (relay, room) pair to recent list (dedup, max 5)
+  const relay = relayInput.value.trim();
   const room = roomInput.value.trim();
   if (room) {
-    s.recentRooms = [room, ...s.recentRooms.filter((r) => r !== room)].slice(
-      0,
-      5
-    );
+    const entry: RecentRoom = { relay, room };
+    s.recentRooms = [
+      entry,
+      ...s.recentRooms.filter((r) => !(r.relay === relay && r.room === room)),
+    ].slice(0, 5);
   }
   localStorage.setItem("wzp-settings", JSON.stringify(s));
 }
@@ -92,52 +108,54 @@ function applySettings() {
   renderRecentRooms(s.recentRooms);
 }
 
-function renderRecentRooms(rooms: string[]) {
+function renderRecentRooms(rooms: RecentRoom[]) {
   recentRoomsDiv.innerHTML = rooms
     .map(
       (r) =>
-        `<span class="recent-room" data-room="${escapeHtml(r)}">${escapeHtml(r)}</span>`
+        `<span class="recent-room" data-relay="${escapeHtml(r.relay)}" data-room="${escapeHtml(r.room)}">${escapeHtml(r.room)}</span>`
     )
     .join("");
   recentRoomsDiv.querySelectorAll(".recent-room").forEach((el) => {
     el.addEventListener("click", () => {
-      roomInput.value = (el as HTMLElement).dataset.room || "";
+      const ds = (el as HTMLElement).dataset;
+      roomInput.value = ds.room || "";
+      relayInput.value = ds.relay || relayInput.value;
     });
   });
 }
 
 applySettings();
 
-// Click fingerprint to copy
-myFingerprintEl.addEventListener("click", () => {
-  if (myFingerprint) {
-    navigator.clipboard.writeText(myFingerprint).then(() => {
-      const orig = myFingerprintEl.textContent;
-      myFingerprintEl.textContent = "Copied!";
-      setTimeout(() => { myFingerprintEl.textContent = orig; }, 1000);
-    });
-  }
-});
-myFingerprintEl.style.cursor = "pointer";
+// ── Load fingerprint at startup (no connection needed) ──
+(async () => {
+  try {
+    const fp: string = await invoke("get_identity");
+    myFingerprint = fp;
+    myFingerprintEl.textContent = `ID: ${fp}`;
+  } catch {}
+})();
 
-sFingerprint.addEventListener("click", () => {
+// Click fingerprint to copy
+myFingerprintEl.addEventListener("click", copyFingerprint);
+myFingerprintEl.style.cursor = "pointer";
+sFingerprint.addEventListener("click", copyFingerprint);
+sFingerprint.style.cursor = "pointer";
+
+function copyFingerprint() {
   if (myFingerprint) {
     navigator.clipboard.writeText(myFingerprint).then(() => {
-      const orig = sFingerprint.textContent;
-      sFingerprint.textContent = "Copied!";
-      setTimeout(() => { sFingerprint.textContent = orig; }, 1000);
+      const el = document.activeElement === sFingerprint ? sFingerprint : myFingerprintEl;
+      const orig = el.textContent;
+      el.textContent = "Copied!";
+      setTimeout(() => { el.textContent = orig; }, 1000);
     });
   }
-});
-sFingerprint.style.cursor = "pointer";
+}
 
 // ── Connect ──
 connectBtn.addEventListener("click", doConnect);
-// Enter key to connect
 [relayInput, roomInput, aliasInput].forEach((el) =>
-  el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") doConnect();
-  })
+  el.addEventListener("keydown", (e) => { if (e.key === "Enter") doConnect(); })
 );
 
 async function doConnect() {
@@ -145,6 +163,7 @@ async function doConnect() {
   connectBtn.disabled = true;
   connectBtn.textContent = "Connecting...";
   saveSettings();
+  userDisconnected = false;
 
   try {
     await invoke("connect", {
@@ -165,6 +184,7 @@ function showCallScreen() {
   connectScreen.classList.add("hidden");
   callScreen.classList.remove("hidden");
   roomName.textContent = roomInput.value;
+  callStatus.className = "status-dot";
   statusInterval = window.setInterval(pollStatus, 250);
 }
 
@@ -198,13 +218,12 @@ spkBtn.addEventListener("click", async () => {
 });
 
 hangupBtn.addEventListener("click", async () => {
-  try {
-    await invoke("disconnect");
-  } catch {}
+  userDisconnected = true;
+  try { await invoke("disconnect"); } catch {}
   showConnectScreen();
 });
 
-// Keyboard shortcuts (only when in call, and not typing in an input)
+// Keyboard shortcuts (only in call, not in inputs)
 document.addEventListener("keydown", (e) => {
   if (callScreen.classList.contains("hidden")) return;
   if ((e.target as HTMLElement).tagName === "INPUT") return;
@@ -214,7 +233,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ── Status polling ──
-interface CallStatus {
+interface CallStatusI {
   active: boolean;
   mic_muted: boolean;
   spk_muted: boolean;
@@ -232,18 +251,43 @@ function formatDuration(secs: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 5;
+
 async function pollStatus() {
   try {
-    const st: CallStatus = await invoke("get_status");
+    const st: CallStatusI = await invoke("get_status");
     if (!st.active) {
+      // Connection dropped — try auto-reconnect unless user hung up
+      if (!userDisconnected && reconnectAttempts < MAX_RECONNECT) {
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
+        callStatus.className = "status-dot reconnecting";
+        statsDiv.textContent = `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT})...`;
+        setTimeout(async () => {
+          try {
+            await invoke("connect", {
+              relay: relayInput.value,
+              room: roomInput.value,
+              alias: aliasInput.value,
+              osAec: osAecCheckbox.checked,
+            });
+            reconnectAttempts = 0;
+            callStatus.className = "status-dot";
+          } catch {
+            // Will retry on next poll
+          }
+        }, delay);
+        return;
+      }
+      reconnectAttempts = 0;
       showConnectScreen();
       return;
     }
 
-    myFingerprint = st.fingerprint;
-    myFingerprintEl.textContent = st.fingerprint
-      ? `ID: ${st.fingerprint}`
-      : "";
+    reconnectAttempts = 0;
+
+    if (st.fingerprint) myFingerprint = st.fingerprint;
 
     // Mute state
     micBtn.classList.toggle("muted", st.mic_muted);
@@ -254,15 +298,14 @@ async function pollStatus() {
     // Timer
     callTimer.textContent = formatDuration(st.call_duration_secs);
 
-    // Audio level (RMS 0–32767 → percentage, log scale)
+    // Audio level
     const rms = st.audio_level;
     const pct = rms > 0 ? Math.min(100, (Math.log(rms) / Math.log(32767)) * 100) : 0;
     levelBar.style.width = `${pct}%`;
 
     // Participants
     if (st.participants.length === 0) {
-      participantsDiv.innerHTML =
-        '<div class="participants-empty">Waiting for participants...</div>';
+      participantsDiv.innerHTML = '<div class="participants-empty">Waiting for participants...</div>';
     } else {
       participantsDiv.innerHTML = st.participants
         .map((p) => {
@@ -282,7 +325,6 @@ async function pollStatus() {
         .join("");
     }
 
-    // Stats
     statsDiv.textContent = `TX: ${st.encode_fps} | RX: ${st.recv_fps}`;
   } catch {}
 }
@@ -297,27 +339,19 @@ function escapeHtml(s: string): string {
 listen("call-event", (event: any) => {
   const { kind } = event.payload;
   if (kind === "room-update") pollStatus();
+  if (kind === "disconnected") {
+    if (!userDisconnected) pollStatus(); // triggers reconnect
+  }
 });
 
 // ── Settings panel ──
-// Load fingerprint into settings when status is available
-async function refreshFingerprint() {
-  try {
-    const st: CallStatus = await invoke("get_status");
-    if (st.fingerprint) {
-      myFingerprint = st.fingerprint;
-      myFingerprintEl.textContent = `ID: ${st.fingerprint}`;
-    }
-  } catch {}
-}
-
 function openSettings() {
   const s = loadSettings();
   sRelay.value = s.relay;
   sRoom.value = s.room;
   sAlias.value = s.alias;
   sOsAec.checked = s.osAec;
-  sFingerprint.textContent = myFingerprint || "(connect to see)";
+  sFingerprint.textContent = myFingerprint || "(loading...)";
   renderSettingsRecentRooms(s.recentRooms);
   settingsPanel.classList.remove("hidden");
 }
@@ -326,7 +360,7 @@ function closeSettings() {
   settingsPanel.classList.add("hidden");
 }
 
-function renderSettingsRecentRooms(rooms: string[]) {
+function renderSettingsRecentRooms(rooms: RecentRoom[]) {
   if (rooms.length === 0) {
     sRecentRooms.innerHTML = '<span style="color:var(--text-dim);font-size:12px">No recent rooms</span>';
     return;
@@ -335,7 +369,7 @@ function renderSettingsRecentRooms(rooms: string[]) {
     .map(
       (r, i) => `
       <div class="recent-room-item">
-        <span>${escapeHtml(r)}</span>
+        <span>${escapeHtml(r.room)} <small style="color:var(--text-dim)">${escapeHtml(r.relay)}</small></span>
         <button class="remove" data-idx="${i}">&times;</button>
       </div>`
     )
@@ -354,10 +388,7 @@ function renderSettingsRecentRooms(rooms: string[]) {
 settingsBtnHome.addEventListener("click", openSettings);
 settingsBtnCall.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
-
-settingsPanel.addEventListener("click", (e) => {
-  if (e.target === settingsPanel) closeSettings();
-});
+settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel) closeSettings(); });
 
 settingsSave.addEventListener("click", () => {
   const s = loadSettings();
@@ -366,7 +397,6 @@ settingsSave.addEventListener("click", () => {
   s.alias = sAlias.value;
   s.osAec = sOsAec.checked;
   localStorage.setItem("wzp-settings", JSON.stringify(s));
-  // Sync back to main form
   relayInput.value = s.relay;
   roomInput.value = s.room;
   aliasInput.value = s.alias;
@@ -383,17 +413,12 @@ sClearRecent.addEventListener("click", () => {
   renderRecentRooms([]);
 });
 
-// Cmd+, (macOS) or Ctrl+, (Windows/Linux) opens settings
+// Cmd+, / Ctrl+, opens settings, Escape closes
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ",") {
     e.preventDefault();
-    if (settingsPanel.classList.contains("hidden")) {
-      openSettings();
-    } else {
-      closeSettings();
-    }
+    settingsPanel.classList.contains("hidden") ? openSettings() : closeSettings();
   }
-  // Escape closes settings
   if (e.key === "Escape" && !settingsPanel.classList.contains("hidden")) {
     closeSettings();
   }

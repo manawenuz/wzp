@@ -37,6 +37,30 @@ struct AppState {
     engine: Mutex<Option<CallEngine>>,
 }
 
+/// Read fingerprint from ~/.wzp/identity without connecting.
+#[tauri::command]
+fn get_identity() -> Result<String, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let path = std::path::PathBuf::from(home).join(".wzp").join("identity");
+    if path.exists() {
+        if let Ok(hex) = std::fs::read_to_string(&path) {
+            if let Ok(seed) = wzp_crypto::Seed::from_hex(hex.trim()) {
+                let fp = seed.derive_identity().public_identity().fingerprint;
+                return Ok(fp.to_string());
+            }
+        }
+    }
+    // No identity yet — generate one so we can show the fingerprint
+    let seed = wzp_crypto::Seed::generate();
+    let fp = seed.derive_identity().public_identity().fingerprint;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let hex: String = seed.0.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(&path, hex).ok();
+    Ok(fp.to_string())
+}
+
 #[tauri::command]
 async fn connect(
     state: tauri::State<'_, Arc<AppState>>,
@@ -86,8 +110,7 @@ async fn disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<String, St
 async fn toggle_mic(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
     if let Some(ref engine) = *engine_lock {
-        let muted = engine.toggle_mic();
-        Ok(muted)
+        Ok(engine.toggle_mic())
     } else {
         Err("not connected".into())
     }
@@ -97,8 +120,7 @@ async fn toggle_mic(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, Stri
 async fn toggle_speaker(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
     if let Some(ref engine) = *engine_lock {
-        let muted = engine.toggle_speaker();
-        Ok(muted)
+        Ok(engine.toggle_speaker())
     } else {
         Err("not connected".into())
     }
@@ -153,6 +175,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            get_identity,
             connect,
             disconnect,
             toggle_mic,

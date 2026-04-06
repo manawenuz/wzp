@@ -201,6 +201,16 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   50% { opacity: 0.4; }
 }
 
+.status-dot.reconnecting {
+  background: var(--yellow);
+  animation: blink 0.5s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.1; }
+}
+
 .call-timer {
   font-size: 14px;
   color: var(--text-dim);
