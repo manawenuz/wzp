@@ -25,7 +25,7 @@ wzp-codec = { path = "../../crates/wzp-codec" }
 wzp-fec = { path = "../../crates/wzp-fec" }
 wzp-crypto = { path = "../../crates/wzp-crypto" }
 wzp-transport = { path = "../../crates/wzp-transport" }
-wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
+wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 
 # Platform-specific
 [target.'cfg(target_os = "macos")'.dependencies]

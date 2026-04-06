@@ -2,8 +2,9 @@
 //! into a clean async interface for Tauri commands.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::Mutex;
 use tracing::{error, info};
@@ -25,6 +26,9 @@ pub struct EngineStatus {
     pub participants: Vec<ParticipantInfo>,
     pub frames_sent: u64,
     pub frames_received: u64,
+    pub audio_level: u32,
+    pub call_duration_secs: f64,
+    pub fingerprint: String,
 }
 
 pub struct CallEngine {
@@ -32,9 +36,12 @@ pub struct CallEngine {
     mic_muted: Arc<AtomicBool>,
     spk_muted: Arc<AtomicBool>,
     participants: Arc<Mutex<Vec<ParticipantInfo>>>,
-    frames_sent: Arc<std::sync::atomic::AtomicU64>,
-    frames_received: Arc<std::sync::atomic::AtomicU64>,
+    frames_sent: Arc<AtomicU64>,
+    frames_received: Arc<AtomicU64>,
+    audio_level: Arc<AtomicU32>,
     transport: Arc<wzp_transport::QuinnTransport>,
+    start_time: Instant,
+    fingerprint: String,
 }
 
 impl CallEngine {
@@ -80,6 +87,7 @@ impl CallEngine {
         };
 
         let fp = seed.derive_identity().public_identity().fingerprint;
+        let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
 
         // Connect
@@ -100,27 +108,69 @@ impl CallEngine {
         info!("connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));
 
-        // Audio I/O
-        // TODO: support VPIO on macOS when os_aec is true
-        let capture = AudioCapture::start()?;
-        let playback = AudioPlayback::start()?;
-        let capture_ring = capture.ring().clone();
-        let playout_ring = playback.ring().clone();
-        std::mem::forget(capture);
-        std::mem::forget(playback);
+        // Audio I/O — VPIO (OS AEC) on macOS, plain CPAL otherwise
+        #[cfg(target_os = "macos")]
+        let _vpio_handle;
+        let (capture_ring, playout_ring) = if _os_aec {
+            #[cfg(target_os = "macos")]
+            {
+                // Try VPIO; fall back to CPAL if it fails
+                match wzp_client::audio_vpio::VpioAudio::start() {
+                    Ok(v) => {
+                        let cr = v.capture_ring().clone();
+                        let pr = v.playout_ring().clone();
+                        _vpio_handle = Some(v);
+                        info!("using VoiceProcessingIO (OS AEC)");
+                        (cr, pr)
+                    }
+                    Err(e) => {
+                        info!("VPIO failed ({e}), falling back to CPAL");
+                        _vpio_handle = None;
+                        let capture = AudioCapture::start()?;
+                        let playback = AudioPlayback::start()?;
+                        let cr = capture.ring().clone();
+                        let pr = playback.ring().clone();
+                        std::mem::forget(capture);
+                        std::mem::forget(playback);
+                        (cr, pr)
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                info!("OS AEC not available on this platform, using CPAL");
+                let capture = AudioCapture::start()?;
+                let playback = AudioPlayback::start()?;
+                let cr = capture.ring().clone();
+                let pr = playback.ring().clone();
+                std::mem::forget(capture);
+                std::mem::forget(playback);
+                (cr, pr)
+            }
+        } else {
+            let capture = AudioCapture::start()?;
+            let playback = AudioPlayback::start()?;
+            let cr = capture.ring().clone();
+            let pr = playback.ring().clone();
+            std::mem::forget(capture);
+            std::mem::forget(playback);
+            (cr, pr)
+        };
 
         let running = Arc::new(AtomicBool::new(true));
         let mic_muted = Arc::new(AtomicBool::new(false));
         let spk_muted = Arc::new(AtomicBool::new(false));
         let participants: Arc<Mutex<Vec<ParticipantInfo>>> = Arc::new(Mutex::new(vec![]));
-        let frames_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let frames_received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let frames_sent = Arc::new(AtomicU64::new(0));
+        let frames_received = Arc::new(AtomicU64::new(0));
+        let audio_level = Arc::new(AtomicU32::new(0));
 
         // Send task
         let send_t = transport.clone();
         let send_r = running.clone();
         let send_mic = mic_muted.clone();
         let send_fs = frames_sent.clone();
+        let send_level = audio_level.clone();
         tokio::spawn(async move {
             let config = CallConfig {
                 noise_suppression: false,
@@ -140,6 +190,14 @@ impl CallEngine {
                     continue;
                 }
                 capture_ring.read(&mut buf);
+
+                // Compute RMS audio level for UI meter
+                if !buf.is_empty() {
+                    let sum_sq: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
+                    let rms = (sum_sq / buf.len() as f64).sqrt() as u32;
+                    send_level.store(rms, Ordering::Relaxed);
+                }
+
                 if send_mic.load(Ordering::Relaxed) {
                     buf.fill(0);
                 }
@@ -248,7 +306,10 @@ impl CallEngine {
             participants,
             frames_sent,
             frames_received,
+            audio_level,
             transport,
+            start_time: Instant::now(),
+            fingerprint,
         })
     }
 
@@ -278,6 +339,9 @@ impl CallEngine {
                 .collect(),
             frames_sent: self.frames_sent.load(Ordering::Relaxed),
             frames_received: self.frames_received.load(Ordering::Relaxed),
+            audio_level: self.audio_level.load(Ordering::Relaxed),
+            call_duration_secs: self.start_time.elapsed().as_secs_f64(),
+            fingerprint: self.fingerprint.clone(),
         }
     }
 

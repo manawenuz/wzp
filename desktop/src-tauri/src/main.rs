@@ -28,6 +28,9 @@ struct CallStatus {
     participants: Vec<Participant>,
     encode_fps: u64,
     recv_fps: u64,
+    audio_level: u32,
+    call_duration_secs: f64,
+    fingerprint: String,
 }
 
 struct AppState {
@@ -120,6 +123,9 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
                 .collect(),
             encode_fps: status.frames_sent,
             recv_fps: status.frames_received,
+            audio_level: status.audio_level,
+            call_duration_secs: status.call_duration_secs,
+            fingerprint: status.fingerprint,
         })
     } else {
         Ok(CallStatus {
@@ -129,6 +135,9 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
             participants: vec![],
             encode_fps: 0,
             recv_fps: 0,
+            audio_level: 0,
+            call_duration_secs: 0.0,
+            fingerprint: String::new(),
         })
     }
 }
