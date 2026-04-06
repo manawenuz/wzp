@@ -9,12 +9,12 @@
 #
 # Why these specific versions:
 #
-#   cmake 3.25.1 (Debian 12 system package)
-#     cmake 3.27+ rewrote Platform/Android-Determine.cmake with bugs:
-#     can't find make during cross-compilation, armv7/aarch64 flag conflicts.
-#     cmake 3.25 is the last version where Android cross-compilation works
-#     without workarounds. Do NOT use pip cmake — it bundles its own modules
-#     that have the same bugs.
+#   cmake 3.25-3.28 (system package from apt)
+#     cmake 3.25 (Debian 12) and 3.28 (Ubuntu 24.04) both work.
+#     cmake 3.31+ has armv7/aarch64 flag conflicts in Android-Determine.cmake.
+#     cmake 4.x drops cmake_minimum_required < 3.5.
+#     Do NOT use pip cmake — it bundles its own modules with different bugs.
+#     CRITICAL: must set ANDROID_NDK=$ANDROID_NDK_HOME (cmake checks ANDROID_NDK).
 #
 #   NDK 26.1.10909125 (r26b)
 #     NDK 27+ ships a newer libc++_shared.so with different scudo allocator
@@ -102,8 +102,8 @@ echo "  make:   $(make --version | head -1)"
 
 CMAKE_MAJOR=$(cmake --version | head -1 | grep -oP '\d+' | head -1)
 CMAKE_MINOR=$(cmake --version | head -1 | grep -oP '\d+' | sed -n '2p')
-if [ "$CMAKE_MAJOR" -gt 3 ] || { [ "$CMAKE_MAJOR" -eq 3 ] && [ "$CMAKE_MINOR" -gt 26 ]; }; then
-    err "cmake $(cmake --version | head -1) is too new! Need cmake <= 3.26.x (Debian 12 ships 3.25.1). cmake 3.27+ has Android cross-compilation bugs."
+if [ "$CMAKE_MAJOR" -gt 3 ] || { [ "$CMAKE_MAJOR" -eq 3 ] && [ "$CMAKE_MINOR" -gt 30 ]; }; then
+    err "cmake $(cmake --version | head -1) is too new! Need cmake <= 3.28.x. cmake 3.31+ has Android cross-compilation bugs."
 fi
 
 # ---------------------------------------------------------------------------
