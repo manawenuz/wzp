@@ -89,11 +89,7 @@ body {
   border-color: var(--accent);
 }
 
-/* ── Relay dropdown ── */
-.relay-dropdown-wrap {
-  position: relative;
-}
-
+/* ── Relay button ── */
 .relay-selected {
   display: flex;
   align-items: center;
@@ -129,54 +125,6 @@ body {
 .dot.yellow { background: var(--yellow); }
 .dot.red { background: var(--red); }
 .dot.gray { background: #555; }
-
-.relay-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  background: var(--surface);
-  border: 1px solid #444;
-  border-radius: 8px;
-  overflow: hidden;
-  z-index: 50;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-}
-
-.relay-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background 0.1s;
-}
-
-.relay-menu-item:hover { background: var(--surface2); }
-.relay-menu-item.active { background: var(--primary); }
-
-.relay-menu-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-
-.relay-menu-item .relay-info { flex: 1; min-width: 0; overflow: hidden; }
-.relay-menu-item .relay-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.relay-menu-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; overflow: hidden; text-overflow: ellipsis; }
-.relay-menu-item .relay-rtt { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
-
-.relay-manage-btn {
-  display: block;
-  width: 100%;
-  padding: 10px;
-  background: none;
-  border: none;
-  border-top: 1px solid #333;
-  color: var(--accent);
-  font-size: 13px;
-  cursor: pointer;
-  text-align: center;
-}
-
-.relay-manage-btn:hover { background: var(--surface2); }
 
 /* ── Relay dialog ── */
 #relay-dialog {
@@ -214,6 +162,10 @@ body {
 }
 
 .relay-dialog-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.relay-dialog-item { cursor: pointer; transition: background 0.1s; }
+.relay-dialog-item:hover { background: var(--surface2); }
+.relay-dialog-item.selected { background: var(--primary); border: 1px solid var(--accent); }
+
 .relay-dialog-item .relay-info { flex: 1; min-width: 0; overflow: hidden; }
 .relay-dialog-item .relay-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .relay-dialog-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; overflow: hidden; text-overflow: ellipsis; }

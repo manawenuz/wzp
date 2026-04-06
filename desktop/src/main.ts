@@ -23,13 +23,10 @@ const statsDiv = document.getElementById("stats")!;
 const myFingerprintEl = document.getElementById("my-fingerprint")!;
 const recentRoomsDiv = document.getElementById("recent-rooms")!;
 
-// Relay dropdown
+// Relay button
 const relaySelected = document.getElementById("relay-selected")!;
 const relayDot = document.getElementById("relay-dot")!;
 const relayLabel = document.getElementById("relay-label")!;
-const relayMenu = document.getElementById("relay-menu")!;
-const relayList = document.getElementById("relay-list")!;
-const relayManageBtn = document.getElementById("relay-manage-btn")!;
 
 // Relay dialog
 const relayDialog = document.getElementById("relay-dialog")!;
@@ -126,7 +123,7 @@ function applySettings() {
   aliasInput.value = s.alias;
   osAecCheckbox.checked = s.osAec;
   renderRecentRooms(s.recentRooms);
-  renderRelayDropdown();
+  renderRelayButton();
 }
 
 // ── Relay dropdown ──
@@ -143,7 +140,7 @@ function rttText(rtt: number | null | undefined): string {
   return `${rtt}ms`;
 }
 
-function renderRelayDropdown() {
+function renderRelayButton() {
   const s = loadSettings();
   const sel = s.relays[s.selectedRelay];
   if (sel) {
@@ -153,46 +150,9 @@ function renderRelayDropdown() {
     relayDot.className = "dot gray";
     relayLabel.textContent = "No relay configured";
   }
-  // Menu items
-  relayList.innerHTML = s.relays
-    .map((r, i) => `
-      <div class="relay-menu-item ${i === s.selectedRelay ? "active" : ""}" data-idx="${i}">
-        <span class="dot ${dotClass(r.rtt)}"></span>
-        <div class="relay-info">
-          <div class="relay-name">${escapeHtml(r.name)}</div>
-          <div class="relay-addr">${escapeHtml(r.address)}</div>
-        </div>
-        <span class="relay-rtt">${rttText(r.rtt)}</span>
-      </div>`)
-    .join("");
-
-  relayList.querySelectorAll(".relay-menu-item").forEach((el) => {
-    el.addEventListener("click", () => {
-      const idx = parseInt((el as HTMLElement).dataset.idx || "0");
-      const s = loadSettings();
-      s.selectedRelay = idx;
-      saveSettingsObj(s);
-      relayMenu.classList.add("hidden");
-      renderRelayDropdown();
-    });
-  });
 }
 
-relaySelected.addEventListener("click", (e) => {
-  e.stopPropagation();
-  relayMenu.classList.toggle("hidden");
-});
-
-document.addEventListener("click", () => {
-  relayMenu.classList.add("hidden");
-});
-
-relayMenu.addEventListener("click", (e) => e.stopPropagation());
-
-relayManageBtn.addEventListener("click", () => {
-  relayMenu.classList.add("hidden");
-  openRelayDialog();
-});
+relaySelected.addEventListener("click", () => openRelayDialog());
 
 // ── Relay manage dialog ──
 function openRelayDialog() {
@@ -204,14 +164,14 @@ function openRelayDialog() {
 
 function closeRelayDialog() {
   relayDialog.classList.add("hidden");
-  renderRelayDropdown();
+  renderRelayButton();
 }
 
 function renderRelayDialogList() {
   const s = loadSettings();
   relayDialogList.innerHTML = s.relays
     .map((r, i) => `
-      <div class="relay-dialog-item" data-idx="${i}">
+      <div class="relay-dialog-item ${i === s.selectedRelay ? "selected" : ""}" data-idx="${i}">
         <span class="dot ${dotClass(r.rtt)}"></span>
         <div class="relay-info">
           <div class="relay-name">${escapeHtml(r.name)}</div>
@@ -222,6 +182,19 @@ function renderRelayDialogList() {
       </div>`)
     .join("");
 
+  // Click item to select
+  relayDialogList.querySelectorAll(".relay-dialog-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const idx = parseInt((el as HTMLElement).dataset.idx || "0");
+      const s = loadSettings();
+      s.selectedRelay = idx;
+      saveSettingsObj(s);
+      renderRelayDialogList();
+      renderRelayButton();
+    });
+  });
+
+  // Click × to delete
   relayDialogList.querySelectorAll(".remove").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -231,6 +204,7 @@ function renderRelayDialogList() {
       if (s.selectedRelay >= s.relays.length) s.selectedRelay = Math.max(0, s.relays.length - 1);
       saveSettingsObj(s);
       renderRelayDialogList();
+      renderRelayButton();
     });
   });
 }
@@ -264,7 +238,7 @@ async function pingAllRelays() {
     }
   }
   saveSettingsObj(s);
-  renderRelayDropdown();
+  renderRelayButton();
   // Also update dialog if open
   if (!relayDialog.classList.contains("hidden")) {
     renderRelayDialogList();
@@ -286,7 +260,7 @@ function renderRecentRooms(rooms: RecentRoom[]) {
       if (idx >= 0) {
         s.selectedRelay = idx;
         saveSettingsObj(s);
-        renderRelayDropdown();
+        renderRelayButton();
       }
     });
   });
