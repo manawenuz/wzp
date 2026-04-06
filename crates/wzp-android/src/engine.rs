@@ -67,6 +67,9 @@ pub(crate) struct EngineState {
     pub playout_ring: AudioRing,
     /// Current audio level (RMS) for UI display, updated by capture path.
     pub audio_level_rms: AtomicU32,
+    /// QUIC transport handle — stored so stop_call() can close it immediately,
+    /// triggering relay-side leave + RoomUpdate broadcast.
+    pub quic_transport: Mutex<Option<Arc<wzp_transport::QuinnTransport>>>,
 }
 
 pub struct WzpEngine {
@@ -87,6 +90,7 @@ impl WzpEngine {
             capture_ring: AudioRing::new(),
             playout_ring: AudioRing::new(),
             audio_level_rms: AtomicU32::new(0),
+            quic_transport: Mutex::new(None),
         });
         Self {
             state,
@@ -145,6 +149,11 @@ impl WzpEngine {
 
     pub fn stop_call(&mut self) {
         self.state.running.store(false, Ordering::Release);
+        // Close QUIC connection immediately so the relay detects disconnect
+        // and removes us from the room (broadcasts RoomUpdate to others).
+        if let Some(transport) = self.state.quic_transport.lock().unwrap().take() {
+            transport.close_now();
+        }
         let _ = self.state.command_tx.send(EngineCommand::Stop);
         if let Some(rt) = self.tokio_runtime.take() {
             rt.shutdown_background();
@@ -222,6 +231,9 @@ async fn run_call(
     info!("QUIC connected to relay");
 
     let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
+
+    // Store transport handle so stop_call() can close the connection immediately
+    *state.quic_transport.lock().unwrap() = Some(transport.clone());
 
     // Crypto handshake
     let mut kx = WarzoneKeyExchange::from_identity_seed(identity_seed);
