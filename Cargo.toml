@@ -54,6 +54,12 @@ wzp-crypto = { path = "crates/wzp-crypto" }
 wzp-transport = { path = "crates/wzp-transport" }
 wzp-client = { path = "crates/wzp-client" }
 
+# Fast dev profile: optimized but with debug info and incremental compilation.
+# Use with: cargo run --profile dev-fast
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+
 # Optimize heavy compute deps even in debug builds —
 # real-time audio needs < 20ms per frame, impossible unoptimized.
 [profile.dev.package.nnnoiseless]

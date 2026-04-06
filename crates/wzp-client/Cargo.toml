@@ -23,6 +23,7 @@ serde_json = "1"
 chrono = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 cpal = { version = "0.15", optional = true }
+libc = "0.2"
 
 [features]
 default = []

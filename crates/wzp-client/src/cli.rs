@@ -375,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
         {
             let audio_opts = AudioOpts {
                 no_denoise: cli.no_denoise || cli.direct_playout,
-                no_aec: cli.no_aec,
+                no_aec: cli.no_aec || cli.direct_playout, // AEC disabled by default — macOS has built-in AEC
                 no_agc: cli.no_agc,
                 no_fec: cli.no_fec,
                 no_silence: cli.no_silence || cli.direct_playout,
@@ -642,6 +642,41 @@ async fn run_file_mode(
 ///   QUIC → recv task → jitter buffer → decode tick (20ms) → AudioRing → CPAL playback callback
 ///
 /// All lock-free: CPAL callbacks use atomic ring buffers, no Mutex on the audio path.
+/// RAII guard for terminal raw mode. Restores on drop.
+struct RawModeGuard {
+    orig: libc::termios,
+}
+
+impl RawModeGuard {
+    fn enter() -> Option<Self> {
+        unsafe {
+            let mut orig: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut orig) != 0 {
+                return None;
+            }
+            let mut raw = orig;
+            // ICANON: character-at-a-time input
+            // ECHO: don't echo typed characters
+            // ISIG: let us handle Ctrl+C as a byte
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+            // IXON: disable Ctrl+S/Ctrl+Q flow control so we receive them
+            raw.c_iflag &= !libc::IXON;
+            raw.c_cc[libc::VMIN] = 1;
+            raw.c_cc[libc::VTIME] = 0;
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+            Some(Self { orig })
+        }
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.orig);
+        }
+    }
+}
+
 struct AudioOpts {
     no_denoise: bool,
     no_aec: bool,
@@ -674,6 +709,8 @@ async fn run_live(
     let farend_ring = StdArc::new(AudioRing::new());
 
     let running = StdArc::new(AtomicBool::new(true));
+    let mic_muted = StdArc::new(AtomicBool::new(false));
+    let spk_muted = StdArc::new(AtomicBool::new(false));
 
     // --- Signal handler: set running=false on first Ctrl+C, force-quit on second ---
     let signal_running = running.clone();
@@ -709,6 +746,7 @@ async fn run_live(
     // --- Send task: poll capture ring → encode → send via async ---
     let send_transport = transport.clone();
     let send_running = running.clone();
+    let send_mic_muted = mic_muted.clone();
     let no_aec = opts.no_aec;
     let no_agc = opts.no_agc;
     let _no_fec = opts.no_fec;
@@ -743,6 +781,11 @@ async fn run_live(
             let read = capture_ring.read(&mut capture_buf);
             if read < FRAME_SAMPLES {
                 continue;
+            }
+
+            // Mic mute: zero out capture buffer (still encode + send silence to keep stream alive)
+            if send_mic_muted.load(Ordering::Relaxed) {
+                capture_buf.fill(0);
             }
 
             // Feed AEC far-end reference: what was played through the speaker.
@@ -781,6 +824,7 @@ async fn run_live(
     // --- Recv + playout ---
     let recv_transport = transport.clone();
     let recv_running = running.clone();
+    let recv_spk_muted = spk_muted.clone();
     let direct_playout = opts.direct_playout;
 
     // Direct playout: decode on recv, write straight to playout ring (like Android).
@@ -826,13 +870,18 @@ async fn run_live(
                                             if !no_agc {
                                                 playout_agc.process_frame(&mut pcm_buf[..n]);
                                             }
-                                            playout_ring.write(&pcm_buf[..n]);
-                                            // Feed far-end ring for AEC
+                                            // Always feed AEC (even when speaker muted)
                                             farend_ring.write(&pcm_buf[..n]);
+                                            // Speaker mute: don't write to playout ring
+                                            if !recv_spk_muted.load(Ordering::Relaxed) {
+                                                playout_ring.write(&pcm_buf[..n]);
+                                            }
                                         }
                                         Err(e) => {
                                             if let Ok(n) = dec.decode_lost(&mut pcm_buf) {
-                                                playout_ring.write(&pcm_buf[..n]);
+                                                if !recv_spk_muted.load(Ordering::Relaxed) {
+                                                    playout_ring.write(&pcm_buf[..n]);
+                                                }
                                             }
                                             if packets_received < 10 {
                                                 warn!("decode error: {e}");
@@ -924,9 +973,15 @@ async fn run_live(
             )
             .await;
             match result {
-                Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate { count, participants }))) => {
-                    info!(count, "room update");
-                    for p in &participants {
+                Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate { participants, .. }))) => {
+                    // Dedup by (fingerprint, alias) — same peer may appear multiple times
+                    let mut seen = std::collections::HashSet::new();
+                    let unique: Vec<_> = participants
+                        .iter()
+                        .filter(|p| seen.insert((&p.fingerprint, &p.alias)))
+                        .collect();
+                    info!(count = unique.len(), "room update");
+                    for p in &unique {
                         let name = p
                             .alias
                             .as_deref()
@@ -955,12 +1010,68 @@ async fn run_live(
         }
     };
 
+    // --- Keyboard task: Ctrl+M = toggle mic mute, Ctrl+S = toggle speaker mute ---
+    let kb_running = running.clone();
+    let kb_mic = mic_muted.clone();
+    let kb_spk = spk_muted.clone();
+    let keyboard_task = async move {
+        use tokio::io::AsyncReadExt;
+
+        // Put terminal in raw mode so we get individual keypresses
+        let _raw_guard = RawModeGuard::enter();
+
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1];
+        loop {
+            if !kb_running.load(Ordering::Relaxed) {
+                break;
+            }
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                stdin.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(1)) => match buf[0] {
+                    b'm' | b'M' | 0x0D => {
+                        // 'm' or Ctrl+M
+                        let was = kb_mic.fetch_xor(true, Ordering::SeqCst);
+                        let state = if !was { "MUTED" } else { "unmuted" };
+                        eprintln!("\r[mic {state}]");
+                    }
+                    b's' | b'S' | 0x13 => {
+                        // 's' or Ctrl+S
+                        let was = kb_spk.fetch_xor(true, Ordering::SeqCst);
+                        let state = if !was { "MUTED" } else { "unmuted" };
+                        eprintln!("\r[speaker {state}]");
+                    }
+                    0x03 => {
+                        // Ctrl+C
+                        eprintln!();
+                        info!("Ctrl+C received, shutting down...");
+                        kb_running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    b'q' | b'Q' => {
+                        eprintln!("\r[quit]");
+                        kb_running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    _ => {}
+                },
+                Ok(Ok(_)) | Ok(Err(_)) => break,
+                Err(_) => {} // timeout
+            }
+        }
+    };
+
     // --- Run all tasks, exit when any finishes (or running flag cleared by Ctrl+C) ---
     tokio::select! {
         _ = send_task => info!("send task ended"),
         _ = recv_task => info!("recv task ended"),
         _ = playout_task => info!("playout task ended"),
         _ = signal_task => info!("signal task ended"),
+        _ = keyboard_task => info!("keyboard task ended"),
     }
 
     running.store(false, Ordering::SeqCst);

@@ -241,7 +241,7 @@ impl CallEncoder {
             block_id: 0,
             frame_in_block: 0,
             timestamp_ms: 0,
-            aec: EchoCanceller::new(48000, 100), // 100 ms echo tail
+            aec: EchoCanceller::new(48000, 30), // 30ms echo tail (laptop/phone)
             agc: AutoGainControl::new(),
             silence_detector: SilenceDetector::new(
                 config.silence_threshold_rms,
