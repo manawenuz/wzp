@@ -108,10 +108,8 @@ body {
 
 .relay-selected:hover { border-color: var(--accent); }
 
-.relay-selected .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.relay-lock {
+  font-size: 14px;
   flex-shrink: 0;
 }
 
@@ -170,6 +168,17 @@ body {
 .relay-dialog-item .relay-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .relay-dialog-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; overflow: hidden; text-overflow: ellipsis; }
 .relay-dialog-item .relay-rtt { font-size: 11px; color: var(--text-dim); margin-right: 4px; }
+
+.relay-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.relay-lock-icon { font-size: 16px; }
+.relay-meta .relay-rtt { font-size: 10px; color: var(--text-dim); }
 
 .relay-dialog-item .remove {
   background: none;
@@ -254,7 +263,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .identity-info {
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .fp-display {

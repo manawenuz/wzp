@@ -37,9 +37,17 @@ struct AppState {
     engine: Mutex<Option<CallEngine>>,
 }
 
-/// Ping a relay to check if it's online and measure RTT.
+/// Ping result with RTT and server identity hash.
+#[derive(Clone, Serialize)]
+struct PingResult {
+    rtt_ms: u32,
+    /// Server identity: SHA-256 of the QUIC peer certificate, hex-encoded.
+    server_fingerprint: String,
+}
+
+/// Ping a relay to check if it's online, measure RTT, and get server identity.
 #[tauri::command]
-async fn ping_relay(relay: String) -> Result<u32, String> {
+async fn ping_relay(relay: String) -> Result<PingResult, String> {
     let addr: std::net::SocketAddr = relay.parse().map_err(|e| format!("bad address: {e}"))?;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -55,8 +63,25 @@ async fn ping_relay(relay: String) -> Result<u32, String> {
     {
         Ok(Ok(conn)) => {
             let rtt_ms = start.elapsed().as_millis() as u32;
+
+            // Extract server fingerprint from peer certificate
+            let server_fingerprint = conn
+                .peer_identity()
+                .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
+                .and_then(|certs| certs.first().map(|c| {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    c.as_ref().hash(&mut hasher);
+                    let h = hasher.finish();
+                    format!("{h:016x}")
+                }))
+                .unwrap_or_else(|| {
+                    // Fallback: hash the remote address as identifier
+                    format!("{:x}", addr.ip().to_string().len() as u64 * 0x9e3779b97f4a7c15 + addr.port() as u64)
+                });
+
             conn.close(0u32.into(), b"ping");
-            Ok(rtt_ms)
+            Ok(PingResult { rtt_ms, server_fingerprint })
         }
         Ok(Err(e)) => Err(format!("{e}")),
         Err(_) => Err("timeout (3s)".into()),

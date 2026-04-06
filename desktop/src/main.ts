@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { generateIdenticon, createIdenticonEl } from "./identicon";
 
 // ── Elements ──
 const connectScreen = document.getElementById("connect-screen")!;
@@ -21,6 +22,7 @@ const spkIcon = document.getElementById("spk-icon")!;
 const hangupBtn = document.getElementById("hangup-btn")!;
 const statsDiv = document.getElementById("stats")!;
 const myFingerprintEl = document.getElementById("my-fingerprint")!;
+const myIdenticonEl = document.getElementById("my-identicon")!;
 const recentRoomsDiv = document.getElementById("recent-rooms")!;
 
 // Relay button
@@ -58,17 +60,16 @@ let userDisconnected = false;
 interface RelayServer {
   name: string;
   address: string;
-  rtt?: number | null; // null = unknown, -1 = offline
+  rtt?: number | null;
+  serverFingerprint?: string | null;    // from ping
+  knownFingerprint?: string | null;     // saved TOFU fingerprint
 }
 
-interface RecentRoom {
-  relay: string;
-  room: string;
-}
+interface RecentRoom { relay: string; room: string; }
 
 interface Settings {
   relays: RelayServer[];
-  selectedRelay: number; // index into relays
+  selectedRelay: number;
   room: string;
   alias: string;
   osAec: boolean;
@@ -79,24 +80,18 @@ interface Settings {
 function loadSettings(): Settings {
   const defaults: Settings = {
     relays: [{ name: "Default", address: "193.180.213.68:4433" }],
-    selectedRelay: 0,
-    room: "android",
-    alias: "",
-    osAec: true,
-    agc: true,
-    recentRooms: [],
+    selectedRelay: 0, room: "android", alias: "",
+    osAec: true, agc: true, recentRooms: [],
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
     if (raw) {
       const parsed = JSON.parse(raw);
-      // Migrate: old format had relay as string
       if (parsed.relay && !parsed.relays) {
         parsed.relays = [{ name: "Default", address: parsed.relay }];
         parsed.selectedRelay = 0;
         delete parsed.relay;
       }
-      // Migrate: old recentRooms as string[]
       if (parsed.recentRooms?.length > 0 && typeof parsed.recentRooms[0] === "string") {
         const addr = parsed.relays?.[0]?.address || defaults.relays[0].address;
         parsed.recentRooms = parsed.recentRooms.map((r: string) => ({ relay: addr, room: r }));
@@ -116,7 +111,46 @@ function getSelectedRelay(): RelayServer | undefined {
   return s.relays[s.selectedRelay];
 }
 
-// ── Apply settings to form ──
+// ── Helpers ──
+function escapeHtml(s: string): string {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Lock status ──
+type LockStatus = "verified" | "new" | "changed" | "offline" | "unknown";
+
+function lockStatus(relay: RelayServer): LockStatus {
+  if (relay.rtt === undefined || relay.rtt === null) return "unknown";
+  if (relay.rtt < 0) return "offline";
+  if (!relay.serverFingerprint) return "new";
+  if (!relay.knownFingerprint) return "new"; // first time
+  if (relay.serverFingerprint === relay.knownFingerprint) return "verified";
+  return "changed";
+}
+
+function lockIcon(status: LockStatus): string {
+  switch (status) {
+    case "verified": return "🔒";
+    case "new": return "🔓";
+    case "changed": return "⚠️";
+    case "offline": return "🔴";
+    case "unknown": return "⚪";
+  }
+}
+
+function lockColor(status: LockStatus): string {
+  switch (status) {
+    case "verified": return "var(--green)";
+    case "new": return "var(--yellow)";
+    case "changed": return "var(--red)";
+    case "offline": return "var(--red)";
+    case "unknown": return "var(--text-dim)";
+  }
+}
+
+// ── Apply settings ──
 function applySettings() {
   const s = loadSettings();
   roomInput.value = s.room;
@@ -126,35 +160,25 @@ function applySettings() {
   renderRelayButton();
 }
 
-// ── Relay dropdown ──
-function dotClass(rtt: number | null | undefined): string {
-  if (rtt === undefined || rtt === null) return "gray";
-  if (rtt < 0) return "red";
-  if (rtt > 200) return "yellow";
-  return "green";
-}
-
-function rttText(rtt: number | null | undefined): string {
-  if (rtt === undefined || rtt === null) return "";
-  if (rtt < 0) return "offline";
-  return `${rtt}ms`;
-}
-
+// ── Relay button ──
 function renderRelayButton() {
   const s = loadSettings();
   const sel = s.relays[s.selectedRelay];
   if (sel) {
-    relayDot.className = `dot ${dotClass(sel.rtt)}`;
+    const ls = lockStatus(sel);
+    relayDot.textContent = lockIcon(ls);
+    relayDot.className = "relay-lock";
     relayLabel.textContent = `${sel.name} (${sel.address})`;
   } else {
-    relayDot.className = "dot gray";
+    relayDot.textContent = "⚪";
+    relayDot.className = "relay-lock";
     relayLabel.textContent = "No relay configured";
   }
 }
 
 relaySelected.addEventListener("click", () => openRelayDialog());
 
-// ── Relay manage dialog ──
+// ── Relay dialog ──
 function openRelayDialog() {
   renderRelayDialogList();
   relayAddName.value = "";
@@ -169,43 +193,73 @@ function closeRelayDialog() {
 
 function renderRelayDialogList() {
   const s = loadSettings();
-  relayDialogList.innerHTML = s.relays
-    .map((r, i) => `
-      <div class="relay-dialog-item ${i === s.selectedRelay ? "selected" : ""}" data-idx="${i}">
-        <span class="dot ${dotClass(r.rtt)}"></span>
-        <div class="relay-info">
-          <div class="relay-name">${escapeHtml(r.name)}</div>
-          <div class="relay-addr">${escapeHtml(r.address)}</div>
-        </div>
-        <span class="relay-rtt">${rttText(r.rtt)}</span>
-        <button class="remove" data-idx="${i}">&times;</button>
-      </div>`)
-    .join("");
+  relayDialogList.innerHTML = "";
+  s.relays.forEach((r, i) => {
+    const item = document.createElement("div");
+    item.className = `relay-dialog-item ${i === s.selectedRelay ? "selected" : ""}`;
 
-  // Click item to select
-  relayDialogList.querySelectorAll(".relay-dialog-item").forEach((el) => {
-    el.addEventListener("click", () => {
-      const idx = parseInt((el as HTMLElement).dataset.idx || "0");
-      const s = loadSettings();
-      s.selectedRelay = idx;
-      saveSettingsObj(s);
-      renderRelayDialogList();
-      renderRelayButton();
-    });
-  });
+    const ls = lockStatus(r);
+    const fp = r.serverFingerprint || r.address;
 
-  // Click × to delete
-  relayDialogList.querySelectorAll(".remove").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
+    // Identicon
+    const icon = createIdenticonEl(fp, 32, true);
+    icon.title = r.serverFingerprint
+      ? `Server: ${r.serverFingerprint}\nClick to copy`
+      : `No fingerprint yet`;
+    item.appendChild(icon);
+
+    // Info
+    const info = document.createElement("div");
+    info.className = "relay-info";
+    info.innerHTML = `
+      <div class="relay-name">${escapeHtml(r.name)}</div>
+      <div class="relay-addr">${escapeHtml(r.address)}</div>
+    `;
+    item.appendChild(info);
+
+    // Lock + RTT
+    const meta = document.createElement("div");
+    meta.className = "relay-meta";
+    const rttStr = r.rtt !== undefined && r.rtt !== null
+      ? (r.rtt < 0 ? "offline" : `${r.rtt}ms`)
+      : "";
+    meta.innerHTML = `
+      <span class="relay-lock-icon" style="color:${lockColor(ls)}">${lockIcon(ls)}</span>
+      <span class="relay-rtt">${rttStr}</span>
+    `;
+    item.appendChild(meta);
+
+    // Delete button
+    const del = document.createElement("button");
+    del.className = "remove";
+    del.textContent = "×";
+    del.addEventListener("click", (e) => {
       e.stopPropagation();
-      const idx = parseInt((btn as HTMLElement).dataset.idx || "0");
       const s = loadSettings();
-      s.relays.splice(idx, 1);
+      s.relays.splice(i, 1);
       if (s.selectedRelay >= s.relays.length) s.selectedRelay = Math.max(0, s.relays.length - 1);
       saveSettingsObj(s);
       renderRelayDialogList();
       renderRelayButton();
     });
+    item.appendChild(del);
+
+    // Click to select
+    item.addEventListener("click", () => {
+      const s = loadSettings();
+      s.selectedRelay = i;
+
+      // TOFU: if first time seeing this server, trust its fingerprint
+      if (r.serverFingerprint && !r.knownFingerprint) {
+        s.relays[i].knownFingerprint = r.serverFingerprint;
+      }
+
+      saveSettingsObj(s);
+      renderRelayDialogList();
+      renderRelayButton();
+    });
+
+    relayDialogList.appendChild(item);
   });
 }
 
@@ -225,24 +279,29 @@ relayAddBtn.addEventListener("click", () => {
 relayDialogClose.addEventListener("click", closeRelayDialog);
 relayDialog.addEventListener("click", (e) => { if (e.target === relayDialog) closeRelayDialog(); });
 
-// ── Ping all relays ──
+// ── Ping ──
+interface PingResult { rtt_ms: number; server_fingerprint: string; }
+
 async function pingAllRelays() {
   const s = loadSettings();
   for (let i = 0; i < s.relays.length; i++) {
     const r = s.relays[i];
     try {
-      const rtt: number = await invoke("ping_relay", { relay: r.address });
-      r.rtt = rtt;
+      const result: PingResult = await invoke("ping_relay", { relay: r.address });
+      r.rtt = result.rtt_ms;
+      r.serverFingerprint = result.server_fingerprint;
+
+      // TOFU: auto-save fingerprint on first contact
+      if (!r.knownFingerprint) {
+        r.knownFingerprint = result.server_fingerprint;
+      }
     } catch {
       r.rtt = -1;
     }
   }
   saveSettingsObj(s);
   renderRelayButton();
-  // Also update dialog if open
-  if (!relayDialog.classList.contains("hidden")) {
-    renderRelayDialogList();
-  }
+  if (!relayDialog.classList.contains("hidden")) renderRelayDialogList();
 }
 
 // ── Recent rooms ──
@@ -254,14 +313,9 @@ function renderRecentRooms(rooms: RecentRoom[]) {
     el.addEventListener("click", () => {
       const ds = (el as HTMLElement).dataset;
       roomInput.value = ds.room || "";
-      // Select matching relay
       const s = loadSettings();
       const idx = s.relays.findIndex((r) => r.address === ds.relay);
-      if (idx >= 0) {
-        s.selectedRelay = idx;
-        saveSettingsObj(s);
-        renderRelayButton();
-      }
+      if (idx >= 0) { s.selectedRelay = idx; saveSettingsObj(s); renderRelayButton(); }
     });
   });
 }
@@ -270,29 +324,27 @@ function renderRecentRooms(rooms: RecentRoom[]) {
 applySettings();
 setTimeout(pingAllRelays, 300);
 
-// Load fingerprint at startup
+// Load fingerprint + render identicon
 (async () => {
   try {
     const fp: string = await invoke("get_identity");
     myFingerprint = fp;
-    myFingerprintEl.textContent = `ID: ${fp}`;
+    myFingerprintEl.textContent = fp;
+    myFingerprintEl.style.cursor = "pointer";
+    myFingerprintEl.addEventListener("click", () => {
+      navigator.clipboard.writeText(fp).then(() => {
+        const orig = myFingerprintEl.textContent;
+        myFingerprintEl.textContent = "Copied!";
+        setTimeout(() => { myFingerprintEl.textContent = orig; }, 1000);
+      });
+    });
+
+    // Identicon next to fingerprint
+    const icon = createIdenticonEl(fp, 28, true);
+    myIdenticonEl.innerHTML = "";
+    myIdenticonEl.appendChild(icon);
   } catch {}
 })();
-
-// Click fingerprint to copy
-function copyFingerprint(el: HTMLElement) {
-  if (myFingerprint) {
-    navigator.clipboard.writeText(myFingerprint).then(() => {
-      const orig = el.textContent;
-      el.textContent = "Copied!";
-      setTimeout(() => { el.textContent = orig; }, 1000);
-    });
-  }
-}
-myFingerprintEl.addEventListener("click", () => copyFingerprint(myFingerprintEl));
-myFingerprintEl.style.cursor = "pointer";
-sFingerprint.addEventListener("click", () => copyFingerprint(sFingerprint));
-sFingerprint.style.cursor = "pointer";
 
 // ── Connect ──
 connectBtn.addEventListener("click", doConnect);
@@ -302,24 +354,29 @@ connectBtn.addEventListener("click", doConnect);
 
 async function doConnect() {
   const relay = getSelectedRelay();
-  if (!relay) {
-    connectError.textContent = "No relay selected";
-    return;
+  if (!relay) { connectError.textContent = "No relay selected"; return; }
+
+  // Warn on fingerprint mismatch
+  const ls = lockStatus(relay);
+  if (ls === "changed") {
+    if (!confirm(`Server fingerprint has changed!\n\nKnown: ${relay.knownFingerprint}\nNew: ${relay.serverFingerprint}\n\nThis could indicate a man-in-the-middle attack. Continue?`)) {
+      return;
+    }
+    // User accepted — update known fingerprint
+    const s = loadSettings();
+    s.relays[s.selectedRelay].knownFingerprint = relay.serverFingerprint;
+    saveSettingsObj(s);
   }
-  if (relay.rtt !== undefined && relay.rtt !== null && relay.rtt < 0) {
-    connectError.textContent = "Relay is offline";
-    return;
-  }
+
+  if (ls === "offline") { connectError.textContent = "Relay is offline"; return; }
+
   connectError.textContent = "";
   connectBtn.disabled = true;
   connectBtn.textContent = "Connecting...";
   userDisconnected = false;
 
-  // Save recent room
   const s = loadSettings();
-  s.room = roomInput.value;
-  s.alias = aliasInput.value;
-  s.osAec = osAecCheckbox.checked;
+  s.room = roomInput.value; s.alias = aliasInput.value; s.osAec = osAecCheckbox.checked;
   const room = roomInput.value.trim();
   if (room) {
     const entry: RecentRoom = { relay: relay.address, room };
@@ -329,10 +386,8 @@ async function doConnect() {
 
   try {
     await invoke("connect", {
-      relay: relay.address,
-      room: roomInput.value,
-      alias: aliasInput.value,
-      osAec: osAecCheckbox.checked,
+      relay: relay.address, room: roomInput.value,
+      alias: aliasInput.value, osAec: osAecCheckbox.checked,
     });
     showCallScreen();
   } catch (e: any) {
@@ -361,21 +416,11 @@ function showConnectScreen() {
 
 // ── Mute / hangup ──
 micBtn.addEventListener("click", async () => {
-  try {
-    const muted: boolean = await invoke("toggle_mic");
-    micBtn.classList.toggle("muted", muted);
-    micIcon.textContent = muted ? "Mic Off" : "Mic";
-  } catch {}
+  try { const m: boolean = await invoke("toggle_mic"); micBtn.classList.toggle("muted", m); micIcon.textContent = m ? "Mic Off" : "Mic"; } catch {}
 });
-
 spkBtn.addEventListener("click", async () => {
-  try {
-    const muted: boolean = await invoke("toggle_speaker");
-    spkBtn.classList.toggle("muted", muted);
-    spkIcon.textContent = muted ? "Spk Off" : "Spk";
-  } catch {}
+  try { const m: boolean = await invoke("toggle_speaker"); spkBtn.classList.toggle("muted", m); spkIcon.textContent = m ? "Spk Off" : "Spk"; } catch {}
 });
-
 hangupBtn.addEventListener("click", async () => {
   userDisconnected = true;
   try { await invoke("disconnect"); } catch {}
@@ -392,15 +437,10 @@ document.addEventListener("keydown", (e) => {
 
 // ── Status polling ──
 interface CallStatusI {
-  active: boolean;
-  mic_muted: boolean;
-  spk_muted: boolean;
+  active: boolean; mic_muted: boolean; spk_muted: boolean;
   participants: { fingerprint: string; alias: string | null }[];
-  encode_fps: number;
-  recv_fps: number;
-  audio_level: number;
-  call_duration_secs: number;
-  fingerprint: string;
+  encode_fps: number; recv_fps: number; audio_level: number;
+  call_duration_secs: number; fingerprint: string;
 }
 
 function formatDuration(secs: number): string {
@@ -410,35 +450,28 @@ function formatDuration(secs: number): string {
 }
 
 let reconnectAttempts = 0;
-const MAX_RECONNECT = 5;
 
 async function pollStatus() {
   try {
     const st: CallStatusI = await invoke("get_status");
     if (!st.active) {
-      if (!userDisconnected && reconnectAttempts < MAX_RECONNECT) {
+      if (!userDisconnected && reconnectAttempts < 5) {
         reconnectAttempts++;
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
         callStatus.className = "status-dot reconnecting";
-        statsDiv.textContent = `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT})...`;
+        statsDiv.textContent = `Reconnecting (${reconnectAttempts}/5)...`;
         const relay = getSelectedRelay();
         if (relay) {
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
           setTimeout(async () => {
             try {
-              await invoke("connect", {
-                relay: relay.address, room: roomInput.value,
-                alias: aliasInput.value, osAec: osAecCheckbox.checked,
-              });
-              reconnectAttempts = 0;
-              callStatus.className = "status-dot";
+              await invoke("connect", { relay: relay.address, room: roomInput.value, alias: aliasInput.value, osAec: osAecCheckbox.checked });
+              reconnectAttempts = 0; callStatus.className = "status-dot";
             } catch {}
           }, delay);
         }
         return;
       }
-      reconnectAttempts = 0;
-      showConnectScreen();
-      return;
+      reconnectAttempts = 0; showConnectScreen(); return;
     }
 
     reconnectAttempts = 0;
@@ -448,40 +481,43 @@ async function pollStatus() {
     micIcon.textContent = st.mic_muted ? "Mic Off" : "Mic";
     spkBtn.classList.toggle("muted", st.spk_muted);
     spkIcon.textContent = st.spk_muted ? "Spk Off" : "Spk";
-
     callTimer.textContent = formatDuration(st.call_duration_secs);
 
     const rms = st.audio_level;
     const pct = rms > 0 ? Math.min(100, (Math.log(rms) / Math.log(32767)) * 100) : 0;
     levelBar.style.width = `${pct}%`;
 
+    // Participants with identicons
     if (st.participants.length === 0) {
       participantsDiv.innerHTML = '<div class="participants-empty">Waiting for participants...</div>';
     } else {
-      participantsDiv.innerHTML = st.participants.map((p) => {
+      participantsDiv.innerHTML = "";
+      st.participants.forEach((p) => {
         const name = p.alias || "Anonymous";
-        const initial = name.charAt(0).toUpperCase();
-        const fp = p.fingerprint ? p.fingerprint.substring(0, 16) : "";
-        const isMe = p.fingerprint && myFingerprint.includes(p.fingerprint);
-        return `
-          <div class="participant">
-            <div class="avatar ${isMe ? "me" : ""}">${initial}</div>
-            <div class="info">
-              <div class="name">${escapeHtml(name)} ${isMe ? '<span class="you-badge">you</span>' : ""}</div>
-              <div class="fp">${escapeHtml(fp)}</div>
-            </div>
-          </div>`;
-      }).join("");
+        const fp = p.fingerprint || "";
+        const isMe = fp && myFingerprint.includes(fp);
+
+        const row = document.createElement("div");
+        row.className = "participant";
+
+        // Identicon avatar
+        const icon = createIdenticonEl(fp || name, 36, true);
+        if (isMe) icon.style.outline = "2px solid var(--accent)";
+        row.appendChild(icon);
+
+        const info = document.createElement("div");
+        info.className = "info";
+        info.innerHTML = `
+          <div class="name">${escapeHtml(name)} ${isMe ? '<span class="you-badge">you</span>' : ""}</div>
+          <div class="fp">${escapeHtml(fp ? fp.substring(0, 16) : "")}</div>
+        `;
+        row.appendChild(info);
+        participantsDiv.appendChild(row);
+      });
     }
 
     statsDiv.textContent = `TX: ${st.encode_fps} | RX: ${st.recv_fps}`;
   } catch {}
-}
-
-function escapeHtml(s: string): string {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
 }
 
 listen("call-event", (event: any) => {
@@ -490,17 +526,14 @@ listen("call-event", (event: any) => {
   if (kind === "disconnected" && !userDisconnected) pollStatus();
 });
 
-// ── Settings panel ──
+// ── Settings ──
 function openSettings() {
   const s = loadSettings();
-  sRoom.value = s.room;
-  sAlias.value = s.alias;
-  sOsAec.checked = s.osAec;
+  sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
   sFingerprint.textContent = myFingerprint || "(loading...)";
   renderSettingsRecentRooms(s.recentRooms);
   settingsPanel.classList.remove("hidden");
 }
-
 function closeSettings() { settingsPanel.classList.add("hidden"); }
 
 function renderSettingsRecentRooms(rooms: RecentRoom[]) {
@@ -511,7 +544,7 @@ function renderSettingsRecentRooms(rooms: RecentRoom[]) {
   sRecentRooms.innerHTML = rooms.map((r, i) => `
     <div class="recent-room-item">
       <span>${escapeHtml(r.room)} <small style="color:var(--text-dim)">${escapeHtml(r.relay)}</small></span>
-      <button class="remove" data-idx="${i}">&times;</button>
+      <button class="remove" data-idx="${i}">×</button>
     </div>`).join("");
   sRecentRooms.querySelectorAll(".remove").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -531,13 +564,9 @@ settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel)
 
 settingsSave.addEventListener("click", () => {
   const s = loadSettings();
-  s.room = sRoom.value;
-  s.alias = sAlias.value;
-  s.osAec = sOsAec.checked;
+  s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked;
   saveSettingsObj(s);
-  roomInput.value = s.room;
-  aliasInput.value = s.alias;
-  osAecCheckbox.checked = s.osAec;
+  roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec;
   renderRecentRooms(s.recentRooms);
   closeSettings();
 });
