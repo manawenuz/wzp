@@ -10,6 +10,8 @@
 pub mod audio_io;
 #[cfg(feature = "audio")]
 pub mod audio_ring;
+#[cfg(feature = "vpio")]
+pub mod audio_vpio;
 pub mod bench;
 pub mod call;
 pub mod drift_test;

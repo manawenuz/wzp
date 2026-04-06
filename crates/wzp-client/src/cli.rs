@@ -53,6 +53,8 @@ struct CliArgs {
     no_fec: bool,
     no_silence: bool,
     direct_playout: bool,
+    aec_delay_ms: Option<u32>,
+    os_aec: bool,
     token: Option<String>,
     _metrics_file: Option<String>,
 }
@@ -130,6 +132,8 @@ fn parse_args() -> CliArgs {
     let mut no_fec = false;
     let mut no_silence = false;
     let mut direct_playout = false;
+    let mut aec_delay_ms = None;
+    let mut os_aec = false;
     let mut token = None;
     let mut metrics_file = None;
     let mut relay_str = None;
@@ -181,6 +185,16 @@ fn parse_args() -> CliArgs {
             "--no-fec" => no_fec = true,
             "--no-silence" => no_silence = true,
             "--direct-playout" | "--android" => direct_playout = true,
+            "--os-aec" => os_aec = true,
+            "--aec-delay" => {
+                i += 1;
+                aec_delay_ms = Some(
+                    args.get(i)
+                        .expect("--aec-delay requires milliseconds")
+                        .parse()
+                        .expect("--aec-delay value must be a number"),
+                );
+            }
             "--alias" => {
                 i += 1;
                 alias = Some(args.get(i).expect("--alias requires a name").to_string());
@@ -246,7 +260,9 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --no-fec              Disable forward error correction");
                 eprintln!("  --no-silence          Disable silence suppression");
                 eprintln!("  --direct-playout      Bypass jitter buffer (decode on recv, like Android)");
-                eprintln!("  --android             Alias for --no-denoise --no-aec --no-silence --direct-playout");
+                eprintln!("  --aec-delay <ms>      AEC far-end delay compensation (default: 40ms)");
+                eprintln!("  --os-aec              Use macOS VoiceProcessingIO for hardware AEC (requires --vpio feature)");
+                eprintln!("  --android             Alias for --no-denoise --no-silence --direct-playout");
                 eprintln!("  --token <token>        featherChat bearer token for relay auth");
                 eprintln!("  --metrics-file <path>  Write JSONL telemetry to file (1 line/sec)");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
@@ -292,6 +308,8 @@ fn parse_args() -> CliArgs {
         no_fec,
         no_silence,
         direct_playout,
+        aec_delay_ms,
+        os_aec,
         token,
         _metrics_file: metrics_file,
     }
@@ -375,11 +393,13 @@ async fn main() -> anyhow::Result<()> {
         {
             let audio_opts = AudioOpts {
                 no_denoise: cli.no_denoise || cli.direct_playout,
-                no_aec: cli.no_aec || cli.direct_playout, // AEC disabled by default — macOS has built-in AEC
+                no_aec: cli.no_aec,
                 no_agc: cli.no_agc,
                 no_fec: cli.no_fec,
                 no_silence: cli.no_silence || cli.direct_playout,
                 direct_playout: cli.direct_playout,
+                aec_delay_ms: cli.aec_delay_ms,
+                os_aec: cli.os_aec,
             };
             return run_live(transport, audio_opts).await;
         }
@@ -684,6 +704,8 @@ struct AudioOpts {
     no_fec: bool,
     no_silence: bool,
     direct_playout: bool,
+    aec_delay_ms: Option<u32>,
+    os_aec: bool,
 }
 
 #[cfg(feature = "audio")]
@@ -697,15 +719,32 @@ async fn run_live(
     use wzp_client::audio_ring::AudioRing;
     use wzp_client::call::JitterTelemetry;
 
-    let capture = AudioCapture::start()?;
-    let playback = AudioPlayback::start()?;
-    info!("audio I/O started (lock-free ring buffers) — press Ctrl+C to stop");
+    // Audio I/O: either VPIO (OS-level AEC) or separate CPAL streams.
+    #[cfg(feature = "vpio")]
+    let vpio;
+    let (capture_ring, playout_ring) = if opts.os_aec {
+        #[cfg(feature = "vpio")]
+        {
+            vpio = wzp_client::audio_vpio::VpioAudio::start()?;
+            (vpio.capture_ring().clone(), vpio.playout_ring().clone())
+        }
+        #[cfg(not(feature = "vpio"))]
+        {
+            anyhow::bail!("--os-aec requires the 'vpio' feature (build with: cargo build --features audio,vpio)");
+        }
+    } else {
+        let capture = AudioCapture::start()?;
+        let playback = AudioPlayback::start()?;
+        let cr = capture.ring().clone();
+        let pr = playback.ring().clone();
+        // Keep handles alive (streams stop when dropped)
+        std::mem::forget(capture);
+        std::mem::forget(playback);
+        (cr, pr)
+    };
+    info!(os_aec = opts.os_aec, "audio I/O started — press Ctrl+C to stop");
 
-    let capture_ring = capture.ring().clone();
-    let playout_ring = playback.ring().clone();
-
-    // Far-end reference ring: recv task writes decoded audio here,
-    // send task reads it to feed the AEC echo canceller.
+    // Far-end reference ring (only used when NOT using OS AEC).
     let farend_ring = StdArc::new(AudioRing::new());
 
     let running = StdArc::new(AtomicBool::new(true));
@@ -728,6 +767,7 @@ async fn run_live(
     let config = CallConfig {
         noise_suppression: !opts.no_denoise,
         suppression_enabled: !opts.no_silence,
+        aec_delay_ms: opts.aec_delay_ms.unwrap_or(40),
         ..CallConfig::default()
     };
     {
@@ -747,7 +787,7 @@ async fn run_live(
     let send_transport = transport.clone();
     let send_running = running.clone();
     let send_mic_muted = mic_muted.clone();
-    let no_aec = opts.no_aec;
+    let no_aec = opts.no_aec || opts.os_aec; // OS AEC replaces software AEC
     let no_agc = opts.no_agc;
     let _no_fec = opts.no_fec;
     let send_farend = farend_ring.clone();
@@ -1075,8 +1115,7 @@ async fn run_live(
     }
 
     running.store(false, Ordering::SeqCst);
-    capture.stop();
-    playback.stop();
+    // Audio streams stop when their handles are dropped (via mem::forget above or VPIO drop).
 
     // Give transport 2s to close gracefully, then bail
     match tokio::time::timeout(std::time::Duration::from_secs(2), transport.close()).await {

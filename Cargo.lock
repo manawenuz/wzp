@@ -4212,6 +4212,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "coreaudio-rs",
  "cpal",
  "libc",
  "rustls",

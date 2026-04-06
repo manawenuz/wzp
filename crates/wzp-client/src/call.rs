@@ -42,6 +42,9 @@ pub struct CallConfig {
     /// When enabled, only every 50th frame carries a full 12-byte MediaHeader;
     /// intermediate frames use a compact 4-byte MiniHeader.
     pub mini_frames_enabled: bool,
+    /// AEC far-end delay compensation in milliseconds (default: 40).
+    /// Compensates for the round-trip audio latency from playout to mic capture.
+    pub aec_delay_ms: u32,
     /// Enable adaptive jitter buffer (default: true).
     ///
     /// When true, the jitter buffer target depth is automatically adjusted
@@ -63,6 +66,7 @@ impl Default for CallConfig {
             noise_suppression: true,
             mini_frames_enabled: true,
             adaptive_jitter: true,
+            aec_delay_ms: 40,
         }
     }
 }
@@ -241,7 +245,7 @@ impl CallEncoder {
             block_id: 0,
             frame_in_block: 0,
             timestamp_ms: 0,
-            aec: EchoCanceller::new(48000, 30), // 30ms echo tail (laptop/phone)
+            aec: EchoCanceller::with_delay(48000, 60, config.aec_delay_ms),
             agc: AutoGainControl::new(),
             silence_detector: SilenceDetector::new(
                 config.silence_threshold_rms,
