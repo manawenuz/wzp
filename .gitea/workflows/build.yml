@@ -42,11 +42,15 @@ jobs:
           source "$HOME/.cargo/env"
           cargo test --workspace --lib
 
-      - name: Package + upload
+      - name: Upload to rustypaste
+        env:
+          PASTE_AUTH: ${{ secrets.PASTE_AUTH }}
+          PASTE_URL: ${{ secrets.PASTE_URL }}
         run: |
-          mkdir -p dist
-          tar czf dist/wzp-linux-amd64.tar.gz \
+          tar czf /tmp/wzp-linux-amd64.tar.gz \
             -C target/release wzp-relay wzp-client wzp-web wzp-bench
-          echo "Build artifacts:"
-          ls -lh dist/
-          ls -lh target/release/wzp-relay target/release/wzp-client
+          ls -lh /tmp/wzp-linux-amd64.tar.gz
+          LINK=$(curl -sF "file=@/tmp/wzp-linux-amd64.tar.gz" \
+            -H "Authorization: ${PASTE_AUTH}" \
+            "https://${PASTE_URL}")
+          echo "Download: ${LINK}"
