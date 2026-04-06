@@ -158,9 +158,9 @@ body {
 
 .relay-menu-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
-.relay-menu-item .relay-info { flex: 1; min-width: 0; }
-.relay-menu-item .relay-name { font-weight: 500; }
-.relay-menu-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; }
+.relay-menu-item .relay-info { flex: 1; min-width: 0; overflow: hidden; }
+.relay-menu-item .relay-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-menu-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; overflow: hidden; text-overflow: ellipsis; }
 .relay-menu-item .relay-rtt { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 
 .relay-manage-btn {
@@ -192,7 +192,8 @@ body {
 }
 
 .relay-dialog-card {
-  max-width: 420px;
+  max-width: 360px;
+  width: 100%;
 }
 
 .relay-dialog-list {
@@ -213,9 +214,9 @@ body {
 }
 
 .relay-dialog-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.relay-dialog-item .relay-info { flex: 1; }
-.relay-dialog-item .relay-name { font-size: 13px; font-weight: 500; }
-.relay-dialog-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; }
+.relay-dialog-item .relay-info { flex: 1; min-width: 0; overflow: hidden; }
+.relay-dialog-item .relay-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-dialog-item .relay-addr { font-size: 11px; color: var(--text-dim); font-family: monospace; overflow: hidden; text-overflow: ellipsis; }
 .relay-dialog-item .relay-rtt { font-size: 11px; color: var(--text-dim); margin-right: 4px; }
 
 .relay-dialog-item .remove {
@@ -231,8 +232,16 @@ body {
 
 .relay-add-row {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
   margin-top: 12px;
+  border-top: 1px solid #333;
+  padding-top: 12px;
+}
+
+.relay-add-inputs {
+  display: flex;
+  gap: 6px;
 }
 
 .relay-add-row input {
@@ -244,9 +253,15 @@ body {
   font-size: 13px;
   outline: none;
   flex: 1;
+  min-width: 0;
 }
 
 .relay-add-row input:focus { border-color: var(--accent); }
+
+.relay-add-row .primary {
+  padding: 10px;
+  font-size: 14px;
+}
 
 .form-row {
   display: flex;
