@@ -339,6 +339,12 @@ async fn run_call(
                 continue;
             }
 
+            // Mute: zero out the buffer so Opus encodes silence.
+            // We still read from the ring to prevent it from filling up.
+            if state.muted.load(Ordering::Relaxed) {
+                capture_buf.fill(0);
+            }
+
             // AGC: normalize capture volume before encoding
             capture_agc.process_frame(&mut capture_buf);
 

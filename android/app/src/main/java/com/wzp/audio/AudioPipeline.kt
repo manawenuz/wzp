@@ -8,6 +8,8 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.wzp.engine.WzpEngine
@@ -127,8 +129,34 @@ class AudioPipeline(private val context: Context) {
             return
         }
 
+        // Attach hardware AEC if available
+        var aec: AcousticEchoCanceler? = null
+        if (AcousticEchoCanceler.isAvailable()) {
+            try {
+                aec = AcousticEchoCanceler.create(recorder.audioSessionId)
+                aec?.enabled = true
+                Log.i(TAG, "AEC enabled (session=${recorder.audioSessionId})")
+            } catch (e: Exception) {
+                Log.w(TAG, "AEC init failed: ${e.message}")
+            }
+        } else {
+            Log.w(TAG, "AEC not available on this device")
+        }
+
+        // Attach hardware noise suppressor if available
+        var ns: NoiseSuppressor? = null
+        if (NoiseSuppressor.isAvailable()) {
+            try {
+                ns = NoiseSuppressor.create(recorder.audioSessionId)
+                ns?.enabled = true
+                Log.i(TAG, "NoiseSuppressor enabled")
+            } catch (e: Exception) {
+                Log.w(TAG, "NoiseSuppressor init failed: ${e.message}")
+            }
+        }
+
         recorder.startRecording()
-        Log.i(TAG, "capture started: ${SAMPLE_RATE}Hz mono, buf=$bufSize")
+        Log.i(TAG, "capture started: ${SAMPLE_RATE}Hz mono, buf=$bufSize, aec=${aec?.enabled}, ns=${ns?.enabled}")
 
         val pcm = ShortArray(FRAME_SAMPLES)
         try {
@@ -144,6 +172,8 @@ class AudioPipeline(private val context: Context) {
             }
         } finally {
             recorder.stop()
+            aec?.release()
+            ns?.release()
             recorder.release()
             Log.i(TAG, "capture stopped")
         }
