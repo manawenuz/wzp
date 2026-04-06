@@ -29,6 +29,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_IDENTITY_SEED = "identity_seed_hex"
         private const val KEY_AEC_ENABLED = "aec_enabled"
         private const val KEY_RECENT_ROOMS = "recent_rooms"
+        private const val TOFU_PREFIX = "tofu_"
     }
 
     // --- Servers ---
@@ -167,5 +168,15 @@ class SettingsRepository(context: Context) {
 
     fun clearRecentRooms() {
         prefs.edit().remove(KEY_RECENT_ROOMS).apply()
+    }
+
+    // --- Server fingerprint TOFU ---
+
+    fun saveServerFingerprint(address: String, fingerprint: String) {
+        prefs.edit().putString("$TOFU_PREFIX$address", fingerprint).apply()
+    }
+
+    fun loadServerFingerprint(address: String): String? {
+        return prefs.getString("$TOFU_PREFIX$address", null)
     }
 }

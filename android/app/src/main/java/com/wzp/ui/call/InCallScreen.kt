@@ -48,6 +48,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wzp.engine.CallStats
+import com.wzp.ui.call.LockStatus
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -118,18 +119,31 @@ fun InCallScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(4.dp))
+                val pingResults by viewModel.pingResults.collectAsState()
+
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center
                 ) {
                     servers.forEachIndexed { idx, entry ->
                         val isSelected = selectedServer == idx
+                        val ping = pingResults[entry.address]
+                        val lockStatus = viewModel.lockStatus(entry.address)
+                        val lockIcon = when (lockStatus) {
+                            LockStatus.VERIFIED -> "\uD83D\uDD12" // 🔒
+                            LockStatus.NEW -> "\uD83D\uDD13"      // 🔓
+                            LockStatus.CHANGED -> "⚠\uFE0F"       // ⚠️
+                            LockStatus.OFFLINE -> "\uD83D\uDD34"   // 🔴
+                            LockStatus.UNKNOWN -> ""
+                        }
+                        val rttText = ping?.let { "${it.rttMs}ms" } ?: ""
+
                         FilledTonalIconButton(
                             onClick = { viewModel.selectServer(idx) },
                             modifier = Modifier
                                 .padding(2.dp)
-                                .height(36.dp)
-                                .width(140.dp),
+                                .height(40.dp)
+                                .width(160.dp),
                             shape = RoundedCornerShape(8.dp),
                             colors = if (isSelected) {
                                 IconButtonDefaults.filledTonalIconButtonColors(
@@ -140,11 +154,28 @@ fun InCallScreen(
                                 IconButtonDefaults.filledTonalIconButtonColors()
                             }
                         ) {
-                            Text(
-                                text = entry.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (lockIcon.isNotEmpty()) {
+                                    Text(text = lockIcon, fontSize = 12.sp)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Text(
+                                    text = entry.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                                if (rttText.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = rttText,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                        color = when {
+                                            (ping?.rttMs ?: 0) > 200 -> Color(0xFFFACC15) // yellow
+                                            else -> Color(0xFF4ADE80) // green
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                     // + Add button
@@ -152,11 +183,16 @@ fun InCallScreen(
                         onClick = { showAddServerDialog = true },
                         modifier = Modifier
                             .padding(2.dp)
-                            .height(36.dp),
+                            .height(40.dp),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text("+", style = MaterialTheme.typography.labelMedium)
                     }
+                }
+
+                // Ping button
+                TextButton(onClick = { viewModel.pingAllServers() }) {
+                    Text("Ping All", style = MaterialTheme.typography.labelSmall)
                 }
 
                 // IPv4/IPv6 preference

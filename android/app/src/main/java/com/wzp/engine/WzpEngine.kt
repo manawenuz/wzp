@@ -158,6 +158,15 @@ class WzpEngine(private val callback: WzpCallback) {
         init {
             System.loadLibrary("wzp_android")
         }
+
+        /**
+         * Ping a relay server. Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}`
+         * or null if unreachable. Does not require an engine instance.
+         */
+        fun pingRelay(address: String): String? = nativePingRelay(address)
+
+        @JvmStatic
+        private external fun nativePingRelay(relay: String): String?
     }
 }
 

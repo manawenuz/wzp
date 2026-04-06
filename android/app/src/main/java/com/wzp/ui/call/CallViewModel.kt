@@ -12,6 +12,7 @@ import com.wzp.engine.CallStats
 import com.wzp.service.CallService
 import com.wzp.engine.WzpCallback
 import com.wzp.engine.WzpEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,12 +20,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 
 data class ServerEntry(val address: String, val label: String)
+
+data class PingResult(
+    val rttMs: Int,
+    val serverFingerprint: String,
+)
+
+enum class LockStatus { UNKNOWN, OFFLINE, NEW, VERIFIED, CHANGED }
 
 class CallViewModel : ViewModel(), WzpCallback {
 
@@ -72,6 +82,13 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private val _recentRooms = MutableStateFlow<List<com.wzp.data.SettingsRepository.RecentRoom>>(emptyList())
     val recentRooms: StateFlow<List<com.wzp.data.SettingsRepository.RecentRoom>> = _recentRooms.asStateFlow()
+
+    /** Ping results keyed by server address. */
+    private val _pingResults = MutableStateFlow<Map<String, PingResult>>(emptyMap())
+    val pingResults: StateFlow<Map<String, PingResult>> = _pingResults.asStateFlow()
+
+    /** Known server fingerprints (TOFU). */
+    private val _knownFingerprints = MutableStateFlow<Map<String, String>>(emptyMap())
 
     private val _playoutGainDb = MutableStateFlow(0f)
     val playoutGainDb: StateFlow<Float> = _playoutGainDb.asStateFlow()
@@ -184,6 +201,51 @@ class CallViewModel : ViewModel(), WzpCallback {
         _selectedServer.value = selected.coerceIn(0, servers.lastIndex)
         settings?.saveServers(servers)
         settings?.saveSelectedServer(_selectedServer.value)
+    }
+
+    /** Ping all servers in background, update results. */
+    fun pingAllServers() {
+        viewModelScope.launch {
+            val results = mutableMapOf<String, PingResult>()
+            val known = mutableMapOf<String, String>()
+            _servers.value.forEach { server ->
+                val pr = withContext(Dispatchers.IO) {
+                    try {
+                        val json = WzpEngine.pingRelay(server.address) ?: return@withContext null
+                        val obj = JSONObject(json)
+                        PingResult(
+                            rttMs = obj.getInt("rtt_ms"),
+                            serverFingerprint = obj.optString("server_fingerprint", ""),
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "ping ${server.address} failed: ${e.message}")
+                        null
+                    }
+                }
+                if (pr != null) {
+                    results[server.address] = pr
+                    // TOFU: save fingerprint on first contact
+                    if (pr.serverFingerprint.isNotEmpty()) {
+                        val saved = settings?.loadServerFingerprint(server.address)
+                        if (saved == null) {
+                            settings?.saveServerFingerprint(server.address, pr.serverFingerprint)
+                        }
+                        known[server.address] = saved ?: pr.serverFingerprint
+                    }
+                }
+            }
+            _pingResults.value = results
+            _knownFingerprints.value = known
+        }
+    }
+
+    /** Get lock status for a server. */
+    fun lockStatus(address: String): LockStatus {
+        val pr = _pingResults.value[address] ?: return LockStatus.UNKNOWN
+        val known = _knownFingerprints.value[address]
+        if (pr.serverFingerprint.isEmpty()) return LockStatus.NEW
+        if (known == null) return LockStatus.NEW
+        return if (pr.serverFingerprint == known) LockStatus.VERIFIED else LockStatus.CHANGED
     }
 
     fun setRoomName(name: String) {
