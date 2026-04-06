@@ -653,6 +653,11 @@ pub enum SignalMessage {
         /// List of participants currently in the room.
         participants: Vec<RoomParticipant>,
     },
+
+    /// Set or update the client's display name.
+    /// Sent by client after joining; relay updates the participant entry and
+    /// re-broadcasts a RoomUpdate to all participants.
+    SetAlias { alias: String },
 }
 
 /// A participant entry in a RoomUpdate message.

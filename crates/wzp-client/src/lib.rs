@@ -8,6 +8,8 @@
 
 #[cfg(feature = "audio")]
 pub mod audio_io;
+#[cfg(feature = "audio")]
+pub mod audio_ring;
 pub mod bench;
 pub mod call;
 pub mod drift_test;

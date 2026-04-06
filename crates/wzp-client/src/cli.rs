@@ -45,12 +45,22 @@ struct CliArgs {
     seed_hex: Option<String>,
     mnemonic: Option<String>,
     room: Option<String>,
+    raw_room: bool,
+    alias: Option<String>,
     token: Option<String>,
     _metrics_file: Option<String>,
 }
 
+/// Default identity file path: ~/.wzp/identity
+fn default_identity_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".wzp").join("identity")
+}
+
 impl CliArgs {
-    /// Resolve the identity seed from --seed, --mnemonic, or generate a new one.
+    /// Resolve the identity seed from --seed, --mnemonic, or persistent file.
+    ///
+    /// Priority: --seed > --mnemonic > ~/.wzp/identity > generate + save.
     pub fn resolve_seed(&self) -> wzp_crypto::Seed {
         if let Some(ref hex_str) = self.seed_hex {
             let seed = wzp_crypto::Seed::from_hex(hex_str).expect("invalid --seed hex");
@@ -65,10 +75,30 @@ impl CliArgs {
             info!(fingerprint = %fp, "identity from --mnemonic");
             seed
         } else {
+            let path = default_identity_path();
+            // Try loading existing identity
+            if path.exists() {
+                if let Ok(hex_str) = std::fs::read_to_string(&path) {
+                    let hex_str = hex_str.trim();
+                    if let Ok(seed) = wzp_crypto::Seed::from_hex(hex_str) {
+                        let id = seed.derive_identity();
+                        let fp = id.public_identity().fingerprint;
+                        info!(fingerprint = %fp, path = %path.display(), "loaded persistent identity");
+                        return seed;
+                    }
+                }
+            }
+            // Generate new and save
             let seed = wzp_crypto::Seed::generate();
             let id = seed.derive_identity();
             let fp = id.public_identity().fingerprint;
-            info!(fingerprint = %fp, "generated ephemeral identity");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            // Encode seed as hex manually (avoid dep on `hex` crate in binary)
+            let hex_str: String = seed.0.iter().map(|b| format!("{b:02x}")).collect();
+            std::fs::write(&path, hex_str).ok();
+            info!(fingerprint = %fp, path = %path.display(), "generated and saved new identity");
             seed
         }
     }
@@ -86,6 +116,8 @@ fn parse_args() -> CliArgs {
     let mut seed_hex = None;
     let mut mnemonic = None;
     let mut room = None;
+    let mut raw_room = false;
+    let mut alias = None;
     let mut token = None;
     let mut metrics_file = None;
     let mut relay_str = None;
@@ -129,6 +161,11 @@ fn parse_args() -> CliArgs {
             "--room" => {
                 i += 1;
                 room = Some(args.get(i).expect("--room requires a name").to_string());
+            }
+            "--raw-room" => raw_room = true,
+            "--alias" => {
+                i += 1;
+                alias = Some(args.get(i).expect("--alias requires a name").to_string());
             }
             "--token" => {
                 i += 1;
@@ -183,10 +220,13 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
                 eprintln!("  --room <name>          Room name (hashed for privacy before sending)");
+                eprintln!("  --raw-room             Send room name as-is (no hash, for Android compat)");
+                eprintln!("  --alias <name>         Display name shown to other participants");
                 eprintln!("  --token <token>        featherChat bearer token for relay auth");
                 eprintln!("  --metrics-file <path>  Write JSONL telemetry to file (1 line/sec)");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
                 eprintln!();
+                eprintln!("Identity is auto-saved to ~/.wzp/identity on first run.");
                 eprintln!("Default relay: 127.0.0.1:4433");
                 std::process::exit(0);
             }
@@ -219,6 +259,8 @@ fn parse_args() -> CliArgs {
         seed_hex,
         mnemonic,
         room,
+        raw_room,
+        alias,
         token,
         _metrics_file: metrics_file,
     }
@@ -250,8 +292,14 @@ async fn main() -> anyhow::Result<()> {
         "WarzonePhone client"
     );
 
-    // Hash room name for SNI privacy (or "default" if none specified)
+    // Compute SNI from room name.
+    // --raw-room sends the name as-is (for Android compat — Android doesn't hash).
+    // Default behaviour hashes for privacy.
     let sni = match &cli.room {
+        Some(name) if cli.raw_room => {
+            info!(room = %name, "using raw room name as SNI (no hash)");
+            name.clone()
+        }
         Some(name) => {
             let hashed = wzp_crypto::hash_room_name(name);
             info!(room = %name, hashed = %hashed, "room name hashed for SNI");
@@ -293,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.live {
         #[cfg(feature = "audio")]
         {
-            return run_live(transport).await;
+            return run_live(transport, cli.alias).await;
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -548,78 +596,233 @@ async fn run_file_mode(
 }
 
 /// Live mode: capture from mic, encode, send; receive, decode, play.
+///
+/// Architecture (mirrors wzp-android/engine.rs):
+///   CPAL capture callback → AudioRing → send task (5ms poll) → QUIC
+///   QUIC → recv task → jitter buffer → decode tick (20ms) → AudioRing → CPAL playback callback
+///
+/// All lock-free: CPAL callbacks use atomic ring buffers, no Mutex on the audio path.
 #[cfg(feature = "audio")]
-async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
+async fn run_live(
+    transport: Arc<wzp_transport::QuinnTransport>,
+    alias: Option<String>,
+) -> anyhow::Result<()> {
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use wzp_client::audio_io::{AudioCapture, AudioPlayback};
+    use wzp_client::call::JitterTelemetry;
+
+    // Send alias to relay so other participants can see our display name
+    if let Some(ref name) = alias {
+        let msg = wzp_proto::SignalMessage::SetAlias { alias: name.clone() };
+        transport.send_signal(&msg).await?;
+        info!(alias = %name, "alias sent to relay");
+    }
 
     let capture = AudioCapture::start()?;
     let playback = AudioPlayback::start()?;
-    info!("Audio I/O started — press Ctrl+C to stop");
+    info!("audio I/O started (lock-free ring buffers) — press Ctrl+C to stop");
 
+    let capture_ring = capture.ring().clone();
+    let playout_ring = playback.ring().clone();
+
+    let running = StdArc::new(AtomicBool::new(true));
+
+    // --- Signal handler: set running=false on first Ctrl+C, force-quit on second ---
+    let signal_running = running.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        eprintln!(); // newline after ^C
+        info!("Ctrl+C received, shutting down...");
+        signal_running.store(false, Ordering::SeqCst);
+
+        tokio::signal::ctrl_c().await.ok();
+        eprintln!("\nForce quit");
+        std::process::exit(1);
+    });
+
+    let config = CallConfig::default();
+
+    // --- Send task: poll capture ring → encode → send via async ---
     let send_transport = transport.clone();
-    let rt_handle = tokio::runtime::Handle::current();
-    let send_handle = std::thread::Builder::new()
-        .name("wzp-send-loop".into())
-        .spawn(move || {
-            let config = CallConfig::default();
-            let mut encoder = CallEncoder::new(&config);
-            loop {
-                let frame = match capture.read_frame() {
-                    Some(f) => f,
-                    None => break,
-                };
-                let packets = match encoder.encode_frame(&frame) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("encode error: {e}");
-                        continue;
-                    }
-                };
-                for pkt in &packets {
-                    if let Err(e) = rt_handle.block_on(send_transport.send_media(pkt)) {
-                        error!("send error: {e}");
-                        return;
-                    }
+    let send_running = running.clone();
+    let send_task = async move {
+        let mut encoder = CallEncoder::new(&config);
+        let mut capture_buf = vec![0i16; FRAME_SAMPLES];
+        let mut frames_sent: u64 = 0;
+
+        loop {
+            if !send_running.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let avail = capture_ring.available();
+            if avail < FRAME_SAMPLES {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                continue;
+            }
+
+            let read = capture_ring.read(&mut capture_buf);
+            if read < FRAME_SAMPLES {
+                continue;
+            }
+
+            let packets = match encoder.encode_frame(&capture_buf) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("encode error: {e}");
+                    continue;
+                }
+            };
+
+            for pkt in &packets {
+                if let Err(e) = send_transport.send_media(pkt).await {
+                    error!("send error: {e}");
+                    return;
                 }
             }
-        })?;
 
+            frames_sent += 1;
+            if frames_sent == 1 || frames_sent % 500 == 0 {
+                info!(frames_sent, "send progress");
+            }
+        }
+    };
+
+    // --- Recv task: receive packets → ingest into jitter buffer ---
+    // Uses timeout so it can check the running flag and exit on Ctrl+C.
     let recv_transport = transport.clone();
-    let recv_handle = tokio::spawn(async move {
-        let config = CallConfig::default();
-        let mut decoder = CallDecoder::new(&config);
-        let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
+    let recv_running = running.clone();
+    let config = CallConfig::default();
+    let decoder = StdArc::new(tokio::sync::Mutex::new(CallDecoder::new(&config)));
+    let decoder_recv = decoder.clone();
+
+    let recv_task = async move {
+        let mut packets_received: u64 = 0;
         loop {
-            match recv_transport.recv_media().await {
-                Ok(Some(pkt)) => {
-                    let is_repair = pkt.header.is_repair;
-                    decoder.ingest(pkt);
-                    // Only decode for source packets (1 source = 1 audio frame).
-                    // Repair packets feed the FEC decoder but don't produce audio.
-                    if !is_repair {
-                        if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
-                            playback.write_frame(&pcm_buf);
-                        }
+            if !recv_running.load(Ordering::Relaxed) {
+                break;
+            }
+            // Timeout so we can check running flag periodically
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                recv_transport.recv_media(),
+            )
+            .await;
+            match result {
+                Ok(Ok(Some(pkt))) => {
+                    let mut dec = decoder_recv.lock().await;
+                    dec.ingest(pkt);
+                    packets_received += 1;
+                    if packets_received == 1 || packets_received % 500 == 0 {
+                        info!(packets_received, depth = dec.stats().current_depth, "recv progress");
                     }
                 }
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     info!("connection closed");
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("recv error: {e}");
                     break;
                 }
+                Err(_) => {} // timeout — loop and check running flag
             }
         }
-    });
+    };
 
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
+    // --- Playout tick: decode from jitter buffer at steady 20ms intervals ---
+    let playout_running = running.clone();
+    let decoder_playout = decoder.clone();
+    let playout_task = async move {
+        let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut telemetry = JitterTelemetry::new(5);
+        loop {
+            interval.tick().await;
+            if !playout_running.load(Ordering::Relaxed) {
+                break;
+            }
 
-    recv_handle.abort();
-    drop(send_handle);
-    transport.close().await?;
-    info!("done");
+            let mut dec = decoder_playout.lock().await;
+
+            // Drain ready frames from jitter buffer into playout ring.
+            let mut decoded_this_tick = 0;
+            while let Some(n) = dec.decode_next(&mut pcm_buf) {
+                playout_ring.write(&pcm_buf[..n]);
+                decoded_this_tick += 1;
+                if decoded_this_tick >= 2 {
+                    break; // Don't drain too aggressively in one tick
+                }
+            }
+
+            telemetry.maybe_log(dec.stats());
+        }
+    };
+
+    // --- Signal task: listen for RoomUpdate and display presence ---
+    let signal_transport = transport.clone();
+    let signal_running = running.clone();
+    let signal_task = async move {
+        loop {
+            if !signal_running.load(Ordering::Relaxed) {
+                break;
+            }
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                signal_transport.recv_signal(),
+            )
+            .await;
+            match result {
+                Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate { count, participants }))) => {
+                    info!(count, "room update");
+                    for p in &participants {
+                        let name = p
+                            .alias
+                            .as_deref()
+                            .unwrap_or("(no alias)");
+                        let fp = if p.fingerprint.is_empty() {
+                            "(no fingerprint)"
+                        } else {
+                            &p.fingerprint
+                        };
+                        info!("  participant: {name} [{fp}]");
+                    }
+                }
+                Ok(Ok(Some(msg))) => {
+                    info!("signal: {:?}", std::mem::discriminant(&msg));
+                }
+                Ok(Ok(None)) => {
+                    info!("signal stream closed");
+                    break;
+                }
+                Ok(Err(e)) => {
+                    error!("signal recv error: {e}");
+                    break;
+                }
+                Err(_) => {} // timeout — loop and check running flag
+            }
+        }
+    };
+
+    // --- Run all tasks, exit when any finishes (or running flag cleared by Ctrl+C) ---
+    tokio::select! {
+        _ = send_task => info!("send task ended"),
+        _ = recv_task => info!("recv task ended"),
+        _ = playout_task => info!("playout task ended"),
+        _ = signal_task => info!("signal task ended"),
+    }
+
+    running.store(false, Ordering::SeqCst);
+    capture.stop();
+    playback.stop();
+
+    // Give transport 2s to close gracefully, then bail
+    match tokio::time::timeout(std::time::Duration::from_secs(2), transport.close()).await {
+        Ok(Ok(())) => info!("done"),
+        Ok(Err(e)) => info!("close error (non-fatal): {e}"),
+        Err(_) => info!("close timed out, exiting anyway"),
+    }
     Ok(())
 }
