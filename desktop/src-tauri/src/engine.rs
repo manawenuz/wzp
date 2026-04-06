@@ -171,6 +171,7 @@ impl CallEngine {
         let send_mic = mic_muted.clone();
         let send_fs = frames_sent.clone();
         let send_level = audio_level.clone();
+        let send_drops = Arc::new(AtomicU64::new(0));
         tokio::spawn(async move {
             let config = CallConfig {
                 noise_suppression: false,
@@ -205,8 +206,11 @@ impl CallEngine {
                     Ok(pkts) => {
                         for pkt in &pkts {
                             if let Err(e) = send_t.send_media(pkt).await {
-                                error!("send: {e}");
-                                return;
+                                // Transient congestion (Blocked) — drop packet, keep going
+                                send_drops.fetch_add(1, Ordering::Relaxed);
+                                if send_drops.load(Ordering::Relaxed) <= 3 {
+                                    tracing::warn!("send_media error (dropping packet): {e}");
+                                }
                             }
                         }
                         send_fs.fetch_add(1, Ordering::Relaxed);
@@ -249,8 +253,12 @@ impl CallEngine {
                     }
                     Ok(Ok(None)) => break,
                     Ok(Err(e)) => {
-                        error!("recv: {e}");
-                        break;
+                        let msg = e.to_string();
+                        if msg.contains("closed") || msg.contains("reset") {
+                            error!("recv fatal: {e}");
+                            break;
+                        }
+                        // Transient error — continue
                     }
                     Err(_) => {}
                 }

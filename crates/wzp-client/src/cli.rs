@@ -450,8 +450,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
             }
             total_bytes += pkt.payload.len() as u64;
             if let Err(e) = transport.send_media(pkt).await {
-                error!("send error: {e}");
-                break;
+                warn!("send_media error (dropping packet): {e}");
             }
         }
         if (i + 1) % 50 == 0 {
@@ -536,8 +535,7 @@ async fn run_file_mode(
                     total_source += 1;
                 }
                 if let Err(e) = send_transport.send_media(pkt).await {
-                    error!("send error: {e}");
-                    return;
+                    warn!("send_media error (dropping packet): {e}");
                 }
             }
             if (frame_idx + 1) % 250 == 0 {
@@ -824,6 +822,9 @@ async fn run_live(
         let mut capture_buf = vec![0i16; FRAME_SAMPLES];
         let mut farend_buf = vec![0i16; FRAME_SAMPLES];
         let mut frames_sent: u64 = 0;
+        let mut frames_dropped: u64 = 0;
+        let mut send_errors: u64 = 0;
+        let mut last_send_err = std::time::Instant::now();
         let mut polls: u64 = 0;
         let mut last_diag = std::time::Instant::now();
 
@@ -873,13 +874,23 @@ async fn run_live(
             };
             let encode_us = t0.elapsed().as_micros();
 
+            let mut dropped = false;
             for pkt in &packets {
                 if let Err(e) = send_transport.send_media(pkt).await {
-                    error!("send error: {e}");
-                    return;
+                    send_errors += 1;
+                    frames_dropped += 1;
+                    dropped = true;
+                    if send_errors <= 3 || last_send_err.elapsed().as_secs() >= 1 {
+                        warn!(send_errors, frames_dropped,
+                              "send_media error (dropping packet): {e}");
+                        last_send_err = std::time::Instant::now();
+                    }
                 }
             }
 
+            if !dropped {
+                send_errors = 0; // reset on success
+            }
             frames_sent += 1;
             if frames_sent <= 5 || frames_sent % 500 == 0 {
                 info!(frames_sent, encode_us, pkts = packets.len(), "send progress");
@@ -904,6 +915,7 @@ async fn run_live(
 
         async move {
             let mut packets_received: u64 = 0;
+            let mut recv_errors: u64 = 0;
             let mut timeouts: u64 = 0;
             // For direct playout: raw Opus decoder + AGC
             let mut opus_dec = if direct_playout {
@@ -972,8 +984,15 @@ async fn run_live(
                         break;
                     }
                     Ok(Err(e)) => {
-                        error!("recv error: {e}");
-                        break;
+                        let msg = e.to_string();
+                        if msg.contains("closed") || msg.contains("reset") {
+                            error!("recv fatal: {e}");
+                            break;
+                        }
+                        recv_errors += 1;
+                        if recv_errors <= 3 {
+                            warn!("recv error (continuing): {e}");
+                        }
                     }
                     Err(_) => {
                         timeouts += 1;
