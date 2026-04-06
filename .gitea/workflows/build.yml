@@ -32,16 +32,6 @@ jobs:
           apt-get update && apt-get install -y cmake pkg-config libasound2-dev ninja-build
           rustc --version
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-amd64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-amd64-
-
       - name: Build relay + tools
         run: |
           source "$HOME/.cargo/env"
@@ -52,36 +42,11 @@ jobs:
           source "$HOME/.cargo/env"
           cargo test --workspace --lib
 
-      - name: Package
+      - name: Package + upload
         run: |
-          mkdir -p dist/wzp-linux-amd64
-          cp target/release/wzp-relay dist/wzp-linux-amd64/
-          cp target/release/wzp-client dist/wzp-linux-amd64/
-          cp target/release/wzp-web dist/wzp-linux-amd64/
-          cp target/release/wzp-bench dist/wzp-linux-amd64/
-          cp -r crates/wzp-web/static dist/wzp-linux-amd64/ 2>/dev/null || true
-          cd dist && tar czf wzp-linux-amd64.tar.gz wzp-linux-amd64/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wzp-linux-amd64
-          path: dist/wzp-linux-amd64.tar.gz
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-amd64]
-    runs-on: ubuntu-latest
-    container:
-      image: catthehacker/ubuntu:act-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*.tar.gz
-          generate_release_notes: true
+          mkdir -p dist
+          tar czf dist/wzp-linux-amd64.tar.gz \
+            -C target/release wzp-relay wzp-client wzp-web wzp-bench
+          echo "Build artifacts:"
+          ls -lh dist/
+          ls -lh target/release/wzp-relay target/release/wzp-client
