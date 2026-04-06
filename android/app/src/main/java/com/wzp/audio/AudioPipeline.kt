@@ -60,6 +60,16 @@ class AudioPipeline(private val context: Context) {
     var debugRecording: Boolean = true
     private var captureThread: Thread? = null
     private var playoutThread: Thread? = null
+
+    // DirectByteBuffers for zero-copy JNI audio transfer.
+    // Allocated as class fields (NOT locals) because ART's JIT OSR
+    // can null local variables when it replaces the stack frame mid-loop.
+    // These survive OSR because they're on the heap.
+    private val captureDirectBuf: ByteBuffer =
+        ByteBuffer.allocateDirect(FRAME_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
+    private val playoutDirectBuf: ByteBuffer =
+        ByteBuffer.allocateDirect(FRAME_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
+
     /** Latch counted down by each audio thread after exiting its loop.
      *  stop() does NOT wait on this — teardown waits via awaitDrain(). */
     private var drainLatch: CountDownLatch? = null
@@ -224,7 +234,10 @@ class AudioPipeline(private val context: Context) {
                 val read = recorder.read(pcm, 0, FRAME_SAMPLES)
                 if (read > 0) {
                     applyGain(pcm, read, captureGainDb)
-                    engine.writeAudio(pcm)
+                    // Zero-copy write via DirectByteBuffer (class field, survives JIT OSR)
+                    captureDirectBuf.clear()
+                    captureDirectBuf.asShortBuffer().put(pcm, 0, read)
+                    engine.writeAudioDirect(captureDirectBuf, read)
 
                     // Debug: write raw PCM + RMS
                     if (pcmOut != null) {
@@ -303,8 +316,12 @@ class AudioPipeline(private val context: Context) {
         }
         try {
             while (running) {
-                val read = engine.readAudio(pcm)
+                // Zero-copy read via DirectByteBuffer (class field, survives JIT OSR)
+                playoutDirectBuf.clear()
+                val read = engine.readAudioDirect(playoutDirectBuf, FRAME_SAMPLES)
                 if (read >= FRAME_SAMPLES) {
+                    playoutDirectBuf.rewind()
+                    playoutDirectBuf.asShortBuffer().get(pcm, 0, read)
                     applyGain(pcm, read, playoutGainDb)
                     track.write(pcm, 0, read)
 
