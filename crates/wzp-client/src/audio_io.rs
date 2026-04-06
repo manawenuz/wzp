@@ -56,7 +56,7 @@ impl AudioCapture {
                     let config = StreamConfig {
                         channels: 1,
                         sample_rate: SampleRate(48_000),
-                        buffer_size: cpal::BufferSize::Fixed(FRAME_SAMPLES as u32),
+                        buffer_size: cpal::BufferSize::Default,
                     };
 
                     let use_f32 = !supports_i16_input(&device)?;
@@ -65,17 +65,21 @@ impl AudioCapture {
                         warn!("input stream error: {e}");
                     };
 
+                    let logged_cb_size = Arc::new(AtomicBool::new(false));
+
                     let stream = if use_f32 {
                         let ring = ring_cb.clone();
                         let running = running_clone.clone();
+                        let logged = logged_cb_size.clone();
                         device.build_input_stream(
                             &config,
                             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                                 if !running.load(Ordering::Relaxed) {
                                     return;
                                 }
-                                // Batch convert f32 → i16, then write entire slice to ring.
-                                // Stack alloc for typical callback sizes (≤ 960 samples).
+                                if !logged.swap(true, Ordering::Relaxed) {
+                                    eprintln!("[audio] capture callback: {} f32 samples", data.len());
+                                }
                                 let mut tmp = [0i16; FRAME_SAMPLES];
                                 for chunk in data.chunks(FRAME_SAMPLES) {
                                     let n = chunk.len();
@@ -91,11 +95,15 @@ impl AudioCapture {
                     } else {
                         let ring = ring_cb.clone();
                         let running = running_clone.clone();
+                        let logged = logged_cb_size.clone();
                         device.build_input_stream(
                             &config,
                             move |data: &[i16], _: &cpal::InputCallbackInfo| {
                                 if !running.load(Ordering::Relaxed) {
                                     return;
+                                }
+                                if !logged.swap(true, Ordering::Relaxed) {
+                                    eprintln!("[audio] capture callback: {} i16 samples", data.len());
                                 }
                                 ring.write(data);
                             },
@@ -183,7 +191,7 @@ impl AudioPlayback {
                     let config = StreamConfig {
                         channels: 1,
                         sample_rate: SampleRate(48_000),
-                        buffer_size: cpal::BufferSize::Fixed(FRAME_SAMPLES as u32),
+                        buffer_size: cpal::BufferSize::Default,
                     };
 
                     let use_f32 = !supports_i16_output(&device)?;
