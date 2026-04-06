@@ -1,0 +1,36 @@
+[package]
+name = "wzp-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "WarzonePhone Desktop — encrypted VoIP client"
+default-run = "wzp-desktop"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# WarzonePhone crates
+wzp-proto = { path = "../../crates/wzp-proto" }
+wzp-codec = { path = "../../crates/wzp-codec" }
+wzp-fec = { path = "../../crates/wzp-fec" }
+wzp-crypto = { path = "../../crates/wzp-crypto" }
+wzp-transport = { path = "../../crates/wzp-transport" }
+wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
+
+# Platform-specific
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = "0.11"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

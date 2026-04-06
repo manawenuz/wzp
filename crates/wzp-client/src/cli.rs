@@ -720,17 +720,43 @@ async fn run_live(
     use wzp_client::call::JitterTelemetry;
 
     // Audio I/O: either VPIO (OS-level AEC) or separate CPAL streams.
-    #[cfg(feature = "vpio")]
+    #[cfg(all(target_os = "macos", feature = "vpio"))]
     let vpio;
     let (capture_ring, playout_ring) = if opts.os_aec {
-        #[cfg(feature = "vpio")]
+        #[cfg(all(target_os = "macos", feature = "vpio"))]
         {
             vpio = wzp_client::audio_vpio::VpioAudio::start()?;
             (vpio.capture_ring().clone(), vpio.playout_ring().clone())
         }
-        #[cfg(not(feature = "vpio"))]
+        #[cfg(all(target_os = "macos", not(feature = "vpio")))]
         {
             anyhow::bail!("--os-aec requires the 'vpio' feature (build with: cargo build --features audio,vpio)");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            warn!("--os-aec on Windows is experimental and not yet tested");
+            warn!("Windows Voice Capture DSP (MFT) AEC is not yet implemented");
+            warn!("falling back to CPAL without AEC — please report issues");
+            let capture = AudioCapture::start()?;
+            let playback = AudioPlayback::start()?;
+            let cr = capture.ring().clone();
+            let pr = playback.ring().clone();
+            std::mem::forget(capture);
+            std::mem::forget(playback);
+            (cr, pr)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            warn!("--os-aec on Linux is experimental and not yet tested");
+            warn!("PipeWire/PulseAudio echo-cancel module AEC is not yet implemented");
+            warn!("falling back to CPAL without AEC — please report issues");
+            let capture = AudioCapture::start()?;
+            let playback = AudioPlayback::start()?;
+            let cr = capture.ring().clone();
+            let pr = playback.ring().clone();
+            std::mem::forget(capture);
+            std::mem::forget(playback);
+            (cr, pr)
         }
     } else {
         let capture = AudioCapture::start()?;

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WarzonePhone</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Connect screen -->
+      <div id="connect-screen">
+        <h1>WarzonePhone</h1>
+        <div class="form">
+          <label>Relay
+            <input id="relay" type="text" value="193.180.213.68:4433" />
+          </label>
+          <label>Room
+            <input id="room" type="text" value="android" />
+          </label>
+          <label>Alias
+            <input id="alias" type="text" placeholder="your name" />
+          </label>
+          <label class="checkbox">
+            <input id="os-aec" type="checkbox" checked />
+            OS Echo Cancellation
+          </label>
+          <button id="connect-btn" class="primary">Connect</button>
+          <p id="connect-error" class="error"></p>
+        </div>
+      </div>
+
+      <!-- In-call screen -->
+      <div id="call-screen" class="hidden">
+        <div class="call-header">
+          <div id="room-name" class="room-name"></div>
+          <div id="call-status" class="status">Connected</div>
+        </div>
+
+        <div id="participants" class="participants"></div>
+
+        <div class="controls">
+          <button id="mic-btn" class="control-btn" title="Toggle Mic (m)">
+            <span class="icon">🎙</span>
+            <span class="label">Mic</span>
+          </button>
+          <button id="spk-btn" class="control-btn" title="Toggle Speaker (s)">
+            <span class="icon">🔊</span>
+            <span class="label">Speaker</span>
+          </button>
+          <button id="hangup-btn" class="control-btn hangup" title="Hang Up (q)">
+            <span class="icon">📞</span>
+            <span class="label">End</span>
+          </button>
+        </div>
+
+        <div id="stats" class="stats"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

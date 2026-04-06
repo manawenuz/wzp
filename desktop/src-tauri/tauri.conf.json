@@ -1,0 +1,33 @@
+{
+  "productName": "WarzonePhone",
+  "version": "0.1.0",
+  "identifier": "com.wzp.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "WarzonePhone",
+        "width": 400,
+        "height": 640,
+        "resizable": true,
+        "minWidth": 360,
+        "minHeight": 500
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}
