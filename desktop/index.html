@@ -14,9 +14,16 @@
         <p class="subtitle">Encrypted Voice</p>
         <div class="form">
           <label>Relay
-            <div class="relay-row">
-              <input id="relay" type="text" value="193.180.213.68:4433" />
-              <span id="relay-status" class="relay-status"></span>
+            <div class="relay-dropdown-wrap">
+              <button id="relay-selected" class="relay-selected" type="button">
+                <span id="relay-dot" class="dot"></span>
+                <span id="relay-label">Select relay...</span>
+                <span class="arrow">&#9662;</span>
+              </button>
+              <div id="relay-menu" class="relay-menu hidden">
+                <div id="relay-list"></div>
+                <button id="relay-manage-btn" class="relay-manage-btn" type="button">Manage Relays...</button>
+              </div>
             </div>
           </label>
           <label>Room
@@ -53,14 +60,10 @@
             <span id="call-timer" class="call-timer">0:00</span>
           </div>
         </div>
-
-        <!-- Audio level meter -->
         <div class="level-meter">
           <div id="level-bar" class="level-bar-fill"></div>
         </div>
-
         <div id="participants" class="participants"></div>
-
         <div class="controls">
           <button id="mic-btn" class="control-btn" title="Toggle Mic (m)">
             <span class="icon" id="mic-icon">Mic</span>
@@ -72,23 +75,18 @@
             <span class="icon" id="spk-icon">Spk</span>
           </button>
         </div>
-
         <div id="stats" class="stats"></div>
       </div>
 
-      <!-- Settings panel (overlay) -->
+      <!-- Settings panel -->
       <div id="settings-panel" class="hidden">
         <div class="settings-card">
           <div class="settings-header">
             <h2>Settings</h2>
             <button id="settings-close" class="icon-btn">&times;</button>
           </div>
-
           <div class="settings-section">
             <h3>Connection</h3>
-            <label>Default Relay
-              <input id="s-relay" type="text" />
-            </label>
             <label>Default Room
               <input id="s-room" type="text" />
             </label>
@@ -96,7 +94,6 @@
               <input id="s-alias" type="text" />
             </label>
           </div>
-
           <div class="settings-section">
             <h3>Audio</h3>
             <label class="checkbox">
@@ -108,7 +105,6 @@
               Automatic Gain Control
             </label>
           </div>
-
           <div class="settings-section">
             <h3>Identity</h3>
             <div class="setting-row">
@@ -120,14 +116,28 @@
               <span class="fp-display">~/.wzp/identity</span>
             </div>
           </div>
-
           <div class="settings-section">
             <h3>Recent Rooms</h3>
             <div id="s-recent-rooms" class="recent-rooms-list"></div>
             <button id="s-clear-recent" class="secondary-btn">Clear History</button>
           </div>
-
           <button id="settings-save" class="primary">Save</button>
+        </div>
+      </div>
+
+      <!-- Manage Relays dialog -->
+      <div id="relay-dialog" class="hidden">
+        <div class="settings-card relay-dialog-card">
+          <div class="settings-header">
+            <h2>Manage Relays</h2>
+            <button id="relay-dialog-close" class="icon-btn">&times;</button>
+          </div>
+          <div id="relay-dialog-list" class="relay-dialog-list"></div>
+          <div class="relay-add-row">
+            <input id="relay-add-name" type="text" placeholder="Name (e.g. EU-1)" />
+            <input id="relay-add-addr" type="text" placeholder="host:port" />
+            <button id="relay-add-btn" class="secondary-btn">Add</button>
+          </div>
         </div>
       </div>
     </div>
