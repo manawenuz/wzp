@@ -24,7 +24,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -69,6 +68,8 @@ fun InCallScreen(
     val preferIPv6 by viewModel.preferIPv6.collectAsState()
     val playoutGainDb by viewModel.playoutGainDb.collectAsState()
     val captureGainDb by viewModel.captureGainDb.collectAsState()
+    val debugReportAvailable by viewModel.debugReportAvailable.collectAsState()
+    val debugReportStatus by viewModel.debugReportStatus.collectAsState()
 
     var showAddServerDialog by remember { mutableStateOf(false) }
 
@@ -226,6 +227,17 @@ fun InCallScreen(
                         text = err,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
+                    )
+                }
+
+                // Debug report card — shown after call ends
+                if (debugReportAvailable || debugReportStatus != null) {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    DebugReportCard(
+                        available = debugReportAvailable,
+                        status = debugReportStatus,
+                        onSend = { viewModel.sendDebugReport() },
+                        onDismiss = { viewModel.dismissDebugReport() }
                     )
                 }
             } else {
@@ -442,15 +454,20 @@ private fun AudioLevelBar(audioLevel: Int) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.height(4.dp))
-        LinearProgressIndicator(
-            progress = level,
+        Box(
             modifier = Modifier
                 .fillMaxWidth(0.6f)
                 .height(6.dp)
-                .clip(RoundedCornerShape(3.dp)),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = MaterialTheme.colorScheme.surfaceVariant,
-        )
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(level)
+                    .height(6.dp)
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
     }
 }
 
@@ -600,5 +617,72 @@ private fun StatItem(label: String, value: String) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun DebugReportCard(
+    available: Boolean,
+    status: String?,
+    onSend: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Debug Report",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Email call recordings, logs & stats for analysis",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            when {
+                status != null && status.startsWith("Error") -> {
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onSend) { Text("Retry") }
+                        TextButton(onClick = onDismiss) { Text("Dismiss") }
+                    }
+                }
+                status != null && status != "ready" -> {
+                    // Preparing zip...
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                available -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onSend) {
+                            Text("Email Report")
+                        }
+                        TextButton(onClick = onDismiss) {
+                            Text("Skip")
+                        }
+                    }
+                }
+            }
+        }
     }
 }

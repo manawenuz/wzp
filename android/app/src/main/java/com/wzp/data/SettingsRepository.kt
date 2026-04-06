@@ -27,6 +27,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_CAPTURE_GAIN = "capture_gain_db"
         private const val KEY_PREFER_IPV6 = "prefer_ipv6"
         private const val KEY_IDENTITY_SEED = "identity_seed_hex"
+        private const val KEY_AEC_ENABLED = "aec_enabled"
     }
 
     // --- Servers ---
@@ -111,6 +112,11 @@ class SettingsRepository(context: Context) {
 
     fun savePreferIPv6(prefer: Boolean) { prefs.edit().putBoolean(KEY_PREFER_IPV6, prefer).apply() }
     fun loadPreferIPv6(): Boolean = prefs.getBoolean(KEY_PREFER_IPV6, false)
+
+    // --- AEC ---
+
+    fun saveAecEnabled(enabled: Boolean) { prefs.edit().putBoolean(KEY_AEC_ENABLED, enabled).apply() }
+    fun loadAecEnabled(): Boolean = prefs.getBoolean(KEY_AEC_ENABLED, true)
 
     // --- Identity seed ---
 

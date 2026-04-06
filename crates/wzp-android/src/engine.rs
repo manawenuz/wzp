@@ -321,8 +321,18 @@ async fn run_call(
     let mut block_id: u8 = 0;
 
     // Send task: capture ring → Opus encode → FEC → MediaPackets
+    //
+    // IMPORTANT: send_media() uses quinn's send_datagram() which is
+    // synchronous and returns Err(Blocked) when the congestion window
+    // is full. We MUST NOT break on send errors — that would kill the
+    // entire call. Instead we drop the packet and keep going.
     let send_task = async {
         info!("send task started (Opus + RaptorQ FEC)");
+        let mut send_errors: u64 = 0;
+        let mut last_send_error_log = Instant::now();
+        let mut last_stats_log = Instant::now();
+        let mut frames_sent: u64 = 0;
+        let mut frames_dropped: u64 = 0;
         loop {
             if !state.running.load(Ordering::Relaxed) {
                 break;
@@ -380,11 +390,24 @@ async fn run_call(
                 quality_report: None,
             };
 
-            // Send source packet
+            // Send source packet — drop on error, never break
             if let Err(e) = transport.send_media(&source_pkt).await {
-                error!("send error: {e}");
-                break;
+                send_errors += 1;
+                frames_dropped += 1;
+                // Log first few errors, then throttle to once per second
+                if send_errors <= 3 || last_send_error_log.elapsed().as_secs() >= 1 {
+                    warn!(
+                        seq = s,
+                        send_errors,
+                        frames_dropped,
+                        "send_media error (dropping packet): {e}"
+                    );
+                    last_send_error_log = Instant::now();
+                }
+                // Don't feed to FEC either — the source is lost
+                continue;
             }
+            frames_sent += 1;
 
             // Feed encoded frame to FEC encoder
             if let Err(e) = fec_enc.add_source_symbol(encoded) {
@@ -418,9 +441,11 @@ async fn run_call(
                                 payload: Bytes::from(repair_data),
                                 quality_report: None,
                             };
-                            if let Err(e) = transport.send_media(&repair_pkt).await {
-                                error!("send repair error: {e}");
-                                break;
+                            // Drop repair packets on error — never break
+                            if let Err(_e) = transport.send_media(&repair_pkt).await {
+                                send_errors += 1;
+                                frames_dropped += 1;
+                                // Don't log every repair failure — source error log covers it
                             }
                         }
                         if repair_count > 0 && (block_id % 50 == 0 || block_id == 0) {
@@ -442,10 +467,21 @@ async fn run_call(
                 frame_in_block = 0;
             }
 
-            if s % 500 == 0 {
-                info!(seq = s, block_id, frame_in_block, "sending");
+            // Periodic stats every 5 seconds
+            if last_stats_log.elapsed().as_secs() >= 5 {
+                info!(
+                    seq = s,
+                    block_id,
+                    frames_sent,
+                    frames_dropped,
+                    send_errors,
+                    ring_avail = state.capture_ring.available(),
+                    "send stats"
+                );
+                last_stats_log = Instant::now();
             }
         }
+        info!(frames_sent, frames_dropped, send_errors, "send task ended");
     };
 
     // Pre-allocate decode buffer
@@ -455,6 +491,10 @@ async fn run_call(
     let recv_task = async {
         let mut frames_decoded: u64 = 0;
         let mut fec_recovered: u64 = 0;
+        let mut recv_errors: u64 = 0;
+        let mut last_recv_instant = Instant::now();
+        let mut max_recv_gap_ms: u64 = 0;
+        let mut last_stats_log = Instant::now();
         info!("recv task started (Opus + RaptorQ FEC)");
         loop {
             if !state.running.load(Ordering::Relaxed) {
@@ -462,6 +502,21 @@ async fn run_call(
             }
             match transport_recv.recv_media().await {
                 Ok(Some(pkt)) => {
+                    // Track recv gaps — large gaps indicate network or relay issues
+                    let recv_gap_ms = last_recv_instant.elapsed().as_millis() as u64;
+                    last_recv_instant = Instant::now();
+                    if recv_gap_ms > max_recv_gap_ms {
+                        max_recv_gap_ms = recv_gap_ms;
+                    }
+                    if recv_gap_ms > 500 {
+                        warn!(
+                            recv_gap_ms,
+                            seq = pkt.header.seq,
+                            is_repair = pkt.header.is_repair,
+                            "large recv gap — possible network stall"
+                        );
+                    }
+
                     let is_repair = pkt.header.is_repair;
                     let pkt_block = pkt.header.fec_block;
                     let pkt_symbol = pkt.header.fec_symbol;
@@ -478,7 +533,6 @@ async fn run_call(
                     if !is_repair {
                         match decoder.decode(&pkt.payload, &mut decode_buf) {
                             Ok(samples) => {
-                                // AGC on playout — normalizes received audio volume
                                 playout_agc.process_frame(&mut decode_buf[..samples]);
                                 state.playout_ring.write(&decode_buf[..samples]);
                                 frames_decoded += 1;
@@ -493,13 +547,8 @@ async fn run_call(
                         }
                     }
 
-                    // Try FEC recovery for this block
-                    // (useful when source packets were lost but repair arrived)
+                    // Try FEC recovery
                     if let Ok(Some(recovered_frames)) = fec_dec.try_decode(pkt_block) {
-                        // FEC recovered the block — any previously missing frames
-                        // are now available. In a full jitter buffer implementation,
-                        // we'd insert recovered frames at the right position.
-                        // For now, log recovery for telemetry.
                         fec_recovered += recovered_frames.len() as u64;
                         if fec_recovered % 50 == 1 {
                             info!(
@@ -516,24 +565,45 @@ async fn run_call(
                         fec_dec.expire_before(pkt_block.wrapping_sub(3));
                     }
 
-                    if frames_decoded == 1 || frames_decoded % 500 == 0 {
-                        info!(frames_decoded, fec_recovered, "recv stats");
-                    }
-
                     let mut stats = state.stats.lock().unwrap();
                     stats.frames_decoded = frames_decoded;
                     stats.fec_recovered = fec_recovered;
+                    drop(stats);
+
+                    // Periodic stats every 5 seconds
+                    if last_stats_log.elapsed().as_secs() >= 5 {
+                        info!(
+                            frames_decoded,
+                            fec_recovered,
+                            recv_errors,
+                            max_recv_gap_ms,
+                            playout_avail = state.playout_ring.available(),
+                            "recv stats"
+                        );
+                        max_recv_gap_ms = 0;
+                        last_stats_log = Instant::now();
+                    }
                 }
                 Ok(None) => {
-                    info!("relay disconnected");
+                    info!(frames_decoded, fec_recovered, "relay disconnected (stream ended)");
                     break;
                 }
                 Err(e) => {
-                    error!("recv error: {e}");
-                    break;
+                    recv_errors += 1;
+                    // Transient errors: log and keep going
+                    let msg = e.to_string();
+                    if msg.contains("closed") || msg.contains("reset") {
+                        error!(recv_errors, "recv fatal: {e}");
+                        break;
+                    }
+                    // Non-fatal: log throttled
+                    if recv_errors <= 3 || recv_errors % 50 == 0 {
+                        warn!(recv_errors, "recv error (continuing): {e}");
+                    }
                 }
             }
         }
+        info!(frames_decoded, fec_recovered, recv_errors, "recv task ended");
     };
 
     // Stats task — polls path quality + quinn RTT every 500ms

@@ -69,6 +69,7 @@ fun SettingsScreen(
     val currentPreferIPv6 by viewModel.preferIPv6.collectAsState()
     val currentPlayoutGain by viewModel.playoutGainDb.collectAsState()
     val currentCaptureGain by viewModel.captureGainDb.collectAsState()
+    val currentAecEnabled by viewModel.aecEnabled.collectAsState()
 
     // Draft state — initialized from current values
     var draftAlias by remember { mutableStateOf(currentAlias) }
@@ -79,6 +80,7 @@ fun SettingsScreen(
     var draftPreferIPv6 by remember { mutableStateOf(currentPreferIPv6) }
     var draftPlayoutGain by remember { mutableFloatStateOf(currentPlayoutGain) }
     var draftCaptureGain by remember { mutableFloatStateOf(currentCaptureGain) }
+    var draftAecEnabled by remember { mutableStateOf(currentAecEnabled) }
 
     // Track if anything changed
     val hasChanges = draftAlias != currentAlias ||
@@ -88,7 +90,8 @@ fun SettingsScreen(
             draftRoomName != currentRoomName ||
             draftPreferIPv6 != currentPreferIPv6 ||
             draftPlayoutGain != currentPlayoutGain ||
-            draftCaptureGain != currentCaptureGain
+            draftCaptureGain != currentCaptureGain ||
+            draftAecEnabled != currentAecEnabled
 
     var showAddServerDialog by remember { mutableStateOf(false) }
     var showRestoreKeyDialog by remember { mutableStateOf(false) }
@@ -130,6 +133,7 @@ fun SettingsScreen(
                         viewModel.setPreferIPv6(draftPreferIPv6)
                         viewModel.setPlayoutGainDb(draftPlayoutGain)
                         viewModel.setCaptureGainDb(draftCaptureGain)
+                        viewModel.setAecEnabled(draftAecEnabled)
                         Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
                         onBack()
                     },
@@ -203,6 +207,29 @@ fun SettingsScreen(
                 gainDb = draftCaptureGain,
                 onGainChange = { draftCaptureGain = Math.round(it).toFloat() }
             )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Echo Cancellation (AEC)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Disable if audio sounds distorted",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = draftAecEnabled,
+                    onCheckedChange = { draftAecEnabled = it }
+                )
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
             Divider()
