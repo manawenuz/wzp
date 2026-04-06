@@ -19,6 +19,8 @@ import java.io.FileOutputStream
 import java.io.OutputStreamWriter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -58,6 +60,9 @@ class AudioPipeline(private val context: Context) {
     var debugRecording: Boolean = true
     private var captureThread: Thread? = null
     private var playoutThread: Thread? = null
+    /** Latch counted down by each audio thread after exiting its loop.
+     *  stop() does NOT wait on this — teardown waits via awaitDrain(). */
+    private var drainLatch: CountDownLatch? = null
 
     private val debugDir: File by lazy {
         File(context.cacheDir, "wzp_debug").also { it.mkdirs() }
@@ -66,9 +71,11 @@ class AudioPipeline(private val context: Context) {
     fun start(engine: WzpEngine) {
         if (running) return
         running = true
+        drainLatch = CountDownLatch(2) // one for capture, one for playout
 
         captureThread = Thread({
             runCapture(engine)
+            drainLatch?.countDown() // signal: capture loop exited, no more JNI calls
             // Park thread forever — exiting triggers a libcrypto TLS destructor
             // crash (SIGSEGV in OPENSSL_free) on Android when a JNI-calling thread exits.
             parkThread()
@@ -80,6 +87,7 @@ class AudioPipeline(private val context: Context) {
 
         playoutThread = Thread({
             runPlayout(engine)
+            drainLatch?.countDown() // signal: playout loop exited
             parkThread()
         }, "wzp-playout").apply {
             isDaemon = true
@@ -92,10 +100,20 @@ class AudioPipeline(private val context: Context) {
 
     fun stop() {
         running = false
-        // Don't join — threads are parked as daemons to avoid native TLS crash
+        // Don't join threads — they are parked as daemons to avoid native TLS crash.
+        // Don't null thread refs or drainLatch — teardown() needs awaitDrain().
+        Log.i(TAG, "audio pipeline stopped (running=false)")
+    }
+
+    /** Block until both audio threads have exited their loops (max 200ms).
+     *  After this returns, no more JNI calls to the engine will be made. */
+    fun awaitDrain(): Boolean {
+        val ok = drainLatch?.await(200, TimeUnit.MILLISECONDS) ?: true
+        if (!ok) Log.w(TAG, "awaitDrain: audio threads did not drain in 200ms")
         captureThread = null
         playoutThread = null
-        Log.i(TAG, "audio pipeline stopped")
+        drainLatch = null
+        return ok
     }
 
     private fun applyGain(pcm: ShortArray, count: Int, db: Float) {

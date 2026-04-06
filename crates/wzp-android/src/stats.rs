@@ -51,6 +51,12 @@ pub struct CallStats {
     pub underruns: u64,
     /// Frames recovered by FEC.
     pub fec_recovered: u64,
+    /// Playout ring overflow count (reader was lapped by writer).
+    pub playout_overflows: u64,
+    /// Playout ring underrun count (reader found empty buffer).
+    pub playout_underruns: u64,
+    /// Capture ring overflow count.
+    pub capture_overflows: u64,
     /// Current mic audio level (RMS of i16 samples, 0-32767).
     pub audio_level: u32,
     /// Number of participants in the room (from last RoomUpdate).

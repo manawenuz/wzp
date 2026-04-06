@@ -254,8 +254,17 @@ class CallViewModel : ViewModel(), WzpCallback {
         Log.i(TAG, "teardown: stopping audio, stopService=$stopService")
         val hadCall = audioStarted
         CallService.onStopFromNotification = null
-        stopAudio()
+        stopAudio()             // sets running=false (non-blocking)
         stopStatsPolling()
+
+        // Wait for audio threads to exit their loops before destroying the engine.
+        // This guarantees no in-flight JNI calls to writeAudio/readAudio.
+        val drained = audioPipeline?.awaitDrain() ?: true
+        if (!drained) {
+            Log.w(TAG, "teardown: audio threads did not drain in time")
+        }
+        audioPipeline = null
+
         Log.i(TAG, "teardown: stopping engine")
         try { engine?.stopCall() } catch (e: Exception) { Log.w(TAG, "stopCall err: $e") }
         try { engine?.destroy() } catch (e: Exception) { Log.w(TAG, "destroy err: $e") }
@@ -399,8 +408,7 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private fun stopAudio() {
         if (!audioStarted) return
-        audioPipeline?.stop()
-        audioPipeline = null
+        audioPipeline?.stop()    // sets running=false; DON'T null — teardown needs awaitDrain()
         audioRouteManager?.unregister()
         audioRouteManager?.setSpeaker(false)
         _isSpeaker.value = false

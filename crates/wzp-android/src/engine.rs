@@ -183,6 +183,9 @@ impl WzpEngine {
             stats.duration_secs = start.elapsed().as_secs_f64();
         }
         stats.audio_level = self.state.audio_level_rms.load(Ordering::Relaxed);
+        stats.playout_overflows = self.state.playout_ring.overflow_count();
+        stats.playout_underruns = self.state.playout_ring.underrun_count();
+        stats.capture_overflows = self.state.capture_ring.overflow_count();
         stats
     }
 
@@ -476,6 +479,7 @@ async fn run_call(
                     frames_dropped,
                     send_errors,
                     ring_avail = state.capture_ring.available(),
+                    capture_overflows = state.capture_ring.overflow_count(),
                     "send stats"
                 );
                 last_stats_log = Instant::now();
@@ -578,6 +582,8 @@ async fn run_call(
                             recv_errors,
                             max_recv_gap_ms,
                             playout_avail = state.playout_ring.available(),
+                            playout_overflows = state.playout_ring.overflow_count(),
+                            playout_underruns = state.playout_ring.underrun_count(),
                             "recv stats"
                         );
                         max_recv_gap_ms = 0;
