@@ -89,6 +89,25 @@ body {
   border-color: var(--accent);
 }
 
+.relay-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.relay-row input { flex: 1; }
+
+.relay-status {
+  font-size: 11px;
+  white-space: nowrap;
+  min-width: 50px;
+  text-align: right;
+}
+
+.relay-status.online { color: var(--green); }
+.relay-status.offline { color: var(--red); }
+.relay-status.pinging { color: var(--text-dim); }
+
 .form-row {
   display: flex;
   gap: 16px;

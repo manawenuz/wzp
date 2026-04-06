@@ -18,6 +18,7 @@ const FRAME_SAMPLES: usize = 960;
 /// Wrapper to make non-Sync audio handles safe to store in shared state.
 /// The audio handle is only accessed from the thread that created it (drop),
 /// never shared across threads — Sync is safe.
+#[allow(dead_code)]
 struct SyncWrapper(Box<dyn std::any::Any + Send>);
 unsafe impl Sync for SyncWrapper {}
 

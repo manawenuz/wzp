@@ -126,6 +126,33 @@ function renderRecentRooms(rooms: RecentRoom[]) {
 
 applySettings();
 
+// ── Relay ping ──
+const relayStatusEl = document.getElementById("relay-status")!;
+let pingDebounce: number | null = null;
+
+async function pingRelay(address: string) {
+  relayStatusEl.textContent = "...";
+  relayStatusEl.className = "relay-status pinging";
+  try {
+    const rtt: number = await invoke("ping_relay", { relay: address });
+    relayStatusEl.textContent = `${rtt}ms`;
+    relayStatusEl.className = "relay-status online";
+    connectBtn.disabled = false;
+  } catch {
+    relayStatusEl.textContent = "offline";
+    relayStatusEl.className = "relay-status offline";
+  }
+}
+
+// Ping on load and when relay input changes
+relayInput.addEventListener("input", () => {
+  if (pingDebounce) clearTimeout(pingDebounce);
+  pingDebounce = window.setTimeout(() => pingRelay(relayInput.value), 500);
+});
+
+// Initial ping
+setTimeout(() => pingRelay(relayInput.value), 300);
+
 // ── Load fingerprint at startup (no connection needed) ──
 (async () => {
   try {

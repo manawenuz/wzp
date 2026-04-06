@@ -37,6 +37,32 @@ struct AppState {
     engine: Mutex<Option<CallEngine>>,
 }
 
+/// Ping a relay to check if it's online and measure RTT.
+#[tauri::command]
+async fn ping_relay(relay: String) -> Result<u32, String> {
+    let addr: std::net::SocketAddr = relay.parse().map_err(|e| format!("bad address: {e}"))?;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let endpoint = wzp_transport::create_endpoint(bind, None).map_err(|e| format!("{e}"))?;
+    let client_cfg = wzp_transport::client_config();
+
+    let start = std::time::Instant::now();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        wzp_transport::connect(&endpoint, addr, "ping", client_cfg),
+    )
+    .await
+    {
+        Ok(Ok(conn)) => {
+            let rtt_ms = start.elapsed().as_millis() as u32;
+            conn.close(0u32.into(), b"ping");
+            Ok(rtt_ms)
+        }
+        Ok(Err(e)) => Err(format!("{e}")),
+        Err(_) => Err("timeout (3s)".into()),
+    }
+}
+
 /// Read fingerprint from ~/.wzp/identity without connecting.
 #[tauri::command]
 fn get_identity() -> Result<String, String> {
@@ -175,6 +201,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            ping_relay,
             get_identity,
             connect,
             disconnect,
