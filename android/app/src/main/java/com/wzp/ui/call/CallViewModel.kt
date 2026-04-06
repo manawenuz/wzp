@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.wzp.audio.AudioPipeline
 import com.wzp.audio.AudioRouteManager
+import com.wzp.data.SettingsRepository
 import com.wzp.engine.CallStats
 import com.wzp.service.CallService
 import com.wzp.engine.WzpCallback
@@ -31,6 +32,7 @@ class CallViewModel : ViewModel(), WzpCallback {
     private var audioRouteManager: AudioRouteManager? = null
     private var audioStarted = false
     private var appContext: Context? = null
+    private var settings: SettingsRepository? = null
 
     private val _callState = MutableStateFlow(0)
     val callState: StateFlow<Int> get() = _callState.asStateFlow()
@@ -68,6 +70,12 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _captureGainDb = MutableStateFlow(0f)
     val captureGainDb: StateFlow<Float> = _captureGainDb.asStateFlow()
 
+    private val _alias = MutableStateFlow("")
+    val alias: StateFlow<String> = _alias.asStateFlow()
+
+    private val _seedHex = MutableStateFlow("")
+    val seedHex: StateFlow<String> = _seedHex.asStateFlow()
+
     private var statsJob: Job? = null
 
     companion object {
@@ -88,20 +96,43 @@ class CallViewModel : ViewModel(), WzpCallback {
         if (audioRouteManager == null) {
             audioRouteManager = AudioRouteManager(appCtx)
         }
+        if (settings == null) {
+            settings = SettingsRepository(appCtx)
+            loadSettings()
+        }
+    }
+
+    private fun loadSettings() {
+        val s = settings ?: return
+        s.loadServers()?.let { saved ->
+            if (saved.isNotEmpty()) _servers.value = saved
+        }
+        _selectedServer.value = s.loadSelectedServer().coerceIn(0, _servers.value.lastIndex)
+        _roomName.value = s.loadRoom()
+        _alias.value = s.getOrCreateAlias()
+        _preferIPv6.value = s.loadPreferIPv6()
+        _playoutGainDb.value = s.loadPlayoutGain()
+        _captureGainDb.value = s.loadCaptureGain()
+        _seedHex.value = s.getOrCreateSeedHex()
     }
 
     fun selectServer(index: Int) {
         if (index in _servers.value.indices) {
             _selectedServer.value = index
+            settings?.saveSelectedServer(index)
         }
     }
 
-    fun setPreferIPv6(prefer: Boolean) { _preferIPv6.value = prefer }
+    fun setPreferIPv6(prefer: Boolean) {
+        _preferIPv6.value = prefer
+        settings?.savePreferIPv6(prefer)
+    }
 
     fun addServer(hostPort: String, label: String) {
         val current = _servers.value.toMutableList()
         current.add(ServerEntry(hostPort, label))
         _servers.value = current
+        settings?.saveServers(current)
     }
 
     fun removeServer(index: Int) {
@@ -113,19 +144,36 @@ class CallViewModel : ViewModel(), WzpCallback {
             if (_selectedServer.value >= current.size) {
                 _selectedServer.value = 0
             }
+            settings?.saveServers(current)
+            settings?.saveSelectedServer(_selectedServer.value)
         }
     }
 
-    fun setRoomName(name: String) { _roomName.value = name }
+    fun setRoomName(name: String) {
+        _roomName.value = name
+        settings?.saveRoom(name)
+    }
 
     fun setPlayoutGainDb(db: Float) {
         _playoutGainDb.value = db
         audioPipeline?.playoutGainDb = db
+        settings?.savePlayoutGain(db)
     }
 
     fun setCaptureGainDb(db: Float) {
         _captureGainDb.value = db
         audioPipeline?.captureGainDb = db
+        settings?.saveCaptureGain(db)
+    }
+
+    fun setAlias(alias: String) {
+        _alias.value = alias
+        settings?.saveAlias(alias)
+    }
+
+    fun restoreSeed(hex: String) {
+        _seedHex.value = hex
+        settings?.saveSeedHex(hex)
     }
 
     /**
@@ -203,8 +251,10 @@ class CallViewModel : ViewModel(), WzpCallback {
             viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     val relay = resolveToIp(serverEntry.address)
-                    Log.i(TAG, "startCall: resolved=$relay, calling engine.startCall")
-                    val result = engine?.startCall(relay, room) ?: -1
+                    val seed = _seedHex.value
+                    val name = _alias.value
+                    Log.i(TAG, "startCall: resolved=$relay, alias=$name, calling engine.startCall")
+                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name) ?: -1
                     Log.i(TAG, "startCall: engine returned $result")
                     // Only wire up notification callback after engine is running
                     CallService.onStopFromNotification = { stopCall() }

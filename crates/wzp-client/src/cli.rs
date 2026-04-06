@@ -287,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
     let _crypto_session = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
+        None, // alias — desktop client doesn't set one yet
     ).await?;
     info!("crypto handshake complete");
 

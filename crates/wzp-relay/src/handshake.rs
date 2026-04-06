@@ -15,25 +15,27 @@ use wzp_proto::{MediaTransport, QualityProfile, SignalMessage};
 /// 5. Derive shared ChaCha20-Poly1305 session
 /// 6. Send `CallAnswer` back
 ///
-/// Returns the derived `CryptoSession` and the chosen `QualityProfile`.
+/// Returns the derived `CryptoSession`, the chosen `QualityProfile`, the caller's fingerprint,
+/// and the caller's alias (if provided in CallOffer).
 pub async fn accept_handshake(
     transport: &dyn MediaTransport,
     seed: &[u8; 32],
-) -> Result<(Box<dyn CryptoSession>, QualityProfile), anyhow::Error> {
+) -> Result<(Box<dyn CryptoSession>, QualityProfile, String, Option<String>), anyhow::Error> {
     // 1. Receive CallOffer
     let offer = transport
         .recv_signal()
         .await?
         .ok_or_else(|| anyhow::anyhow!("connection closed before receiving CallOffer"))?;
 
-    let (caller_identity_pub, caller_ephemeral_pub, caller_signature, supported_profiles) =
+    let (caller_identity_pub, caller_ephemeral_pub, caller_signature, supported_profiles, caller_alias) =
         match offer {
             SignalMessage::CallOffer {
                 identity_pub,
                 ephemeral_pub,
                 signature,
                 supported_profiles,
-            } => (identity_pub, ephemeral_pub, signature, supported_profiles),
+                alias,
+            } => (identity_pub, ephemeral_pub, signature, supported_profiles, alias),
             other => {
                 return Err(anyhow::anyhow!(
                     "expected CallOffer, got {:?}",
@@ -76,7 +78,13 @@ pub async fn accept_handshake(
     };
     transport.send_signal(&answer).await?;
 
-    Ok((session, chosen_profile))
+    // Derive caller fingerprint from their identity public key (first 8 bytes as hex)
+    let caller_fp = caller_identity_pub[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+
+    Ok((session, chosen_profile, caller_fp, caller_alias))
 }
 
 /// Select the best quality profile from those the caller supports.

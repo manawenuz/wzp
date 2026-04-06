@@ -54,7 +54,8 @@ import kotlin.math.roundToInt
 @Composable
 fun InCallScreen(
     viewModel: CallViewModel,
-    onHangUp: () -> Unit
+    onHangUp: () -> Unit,
+    onOpenSettings: () -> Unit = {}
 ) {
     val callState by viewModel.callState.collectAsState()
     val isMuted by viewModel.isMuted.collectAsState()
@@ -82,7 +83,16 @@ fun InCallScreen(
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(48.dp))
+            // Settings button (top-right)
+            if (callState == 0) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onOpenSettings) {
+                        Text("Settings")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(if (callState == 0) 16.dp else 48.dp))
 
             Text(
                 text = "WZ Phone",

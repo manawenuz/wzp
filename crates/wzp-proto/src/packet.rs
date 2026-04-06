@@ -548,6 +548,9 @@ pub enum SignalMessage {
         signature: Vec<u8>,
         /// Supported quality profiles.
         supported_profiles: Vec<crate::QualityProfile>,
+        /// Optional display name set by the caller.
+        #[serde(default)]
+        alias: Option<String>,
     },
 
     /// Call acceptance (analogous to Warzone's WireMessage::CallAnswer).

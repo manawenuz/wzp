@@ -431,7 +431,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Crypto handshake: verify client identity + negotiate quality profile
             let handshake_start = std::time::Instant::now();
-            let (_crypto_session, _chosen_profile) = match wzp_relay::handshake::accept_handshake(
+            let (_crypto_session, _chosen_profile, caller_fp, caller_alias) = match wzp_relay::handshake::accept_handshake(
                 &*transport,
                 &relay_seed_bytes,
             ).await {
@@ -448,10 +448,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
+            // Use the caller's identity fingerprint from the handshake
+            let participant_fp = authenticated_fp.clone().unwrap_or(caller_fp);
+
             // Register in presence registry
-            if let Some(ref fp) = authenticated_fp {
+            {
                 let mut reg = presence.lock().await;
-                reg.register_local(fp, None, Some(room_name.clone()));
+                reg.register_local(&participant_fp, None, Some(room_name.clone()));
             }
 
             info!(%addr, room = %room_name, "client joining");
@@ -506,8 +509,8 @@ async fn main() -> anyhow::Result<()> {
                         &room_name,
                         addr,
                         room::ParticipantSender::Quic(transport.clone()),
-                        authenticated_fp.as_deref(),
-                        None, // alias — TODO: accept from client
+                        Some(&participant_fp),
+                        caller_alias.as_deref(),
                     ) {
                         Ok((id, update, senders)) => {
                             metrics.active_rooms.set(mgr.list().len() as i64);

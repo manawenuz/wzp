@@ -39,6 +39,7 @@ pub struct CallStartConfig {
     pub room: String,
     pub auth_token: Vec<u8>,
     pub identity_seed: [u8; 32],
+    pub alias: Option<String>,
 }
 
 impl Default for CallStartConfig {
@@ -49,6 +50,7 @@ impl Default for CallStartConfig {
             room: String::new(),
             auth_token: Vec::new(),
             identity_seed: [0u8; 32],
+            alias: None,
         }
     }
 }
@@ -117,6 +119,7 @@ impl WzpEngine {
         let room = config.room.clone();
         let identity_seed = config.identity_seed;
         let profile = config.profile;
+        let alias = config.alias.clone();
         let state = self.state.clone();
 
         self.state.running.store(true, Ordering::Release);
@@ -124,7 +127,7 @@ impl WzpEngine {
 
         let state_clone = state.clone();
         runtime.block_on(async move {
-            if let Err(e) = run_call(relay_addr, &room, &identity_seed, profile, state_clone).await
+            if let Err(e) = run_call(relay_addr, &room, &identity_seed, profile, alias.as_deref(), state_clone).await
             {
                 error!("call failed: {e}");
             }
@@ -204,6 +207,7 @@ async fn run_call(
     room: &str,
     identity_seed: &[u8; 32],
     profile: QualityProfile,
+    alias: Option<&str>,
     state: Arc<EngineState>,
 ) -> Result<(), anyhow::Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -238,6 +242,7 @@ async fn run_call(
             QualityProfile::DEGRADED,
             QualityProfile::CATASTROPHIC,
         ],
+        alias: alias.map(|s| s.to_string()),
     };
     transport.send_signal(&offer).await?;
     info!("CallOffer sent, waiting for CallAnswer...");
