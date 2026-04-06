@@ -54,7 +54,7 @@ data class CallStats(
                 val o = arr.getJSONObject(i)
                 RoomMember(
                     fingerprint = o.optString("fingerprint", ""),
-                    alias = o.optString("alias", null)
+                    alias = if (o.isNull("alias")) null else o.optString("alias", null)
                 )
             }
         }
@@ -92,5 +92,6 @@ data class RoomMember(
 ) {
     /** Short display name: alias if set, otherwise first 8 chars of fingerprint. */
     val displayName: String
-        get() = alias ?: fingerprint.take(8)
+        get() = alias?.takeIf { it.isNotBlank() }
+            ?: fingerprint.take(8).ifEmpty { "unknown" }
 }
