@@ -15,6 +15,12 @@ use wzp_proto::MediaTransport;
 
 const FRAME_SAMPLES: usize = 960;
 
+/// Wrapper to make non-Sync audio handles safe to store in shared state.
+/// The audio handle is only accessed from the thread that created it (drop),
+/// never shared across threads — Sync is safe.
+struct SyncWrapper(Box<dyn std::any::Any + Send>);
+unsafe impl Sync for SyncWrapper {}
+
 pub struct ParticipantInfo {
     pub fingerprint: String,
     pub alias: Option<String>,
@@ -42,6 +48,9 @@ pub struct CallEngine {
     transport: Arc<wzp_transport::QuinnTransport>,
     start_time: Instant,
     fingerprint: String,
+    /// Keep audio handles alive for the duration of the call.
+    /// Wrapped in SyncWrapper because AudioUnit isn't Sync.
+    _audio_handle: SyncWrapper,
 }
 
 impl CallEngine {
@@ -108,54 +117,45 @@ impl CallEngine {
         info!("connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));
 
-        // Audio I/O — VPIO (OS AEC) on macOS, plain CPAL otherwise
-        #[cfg(target_os = "macos")]
-        let _vpio_handle;
-        let (capture_ring, playout_ring) = if _os_aec {
-            #[cfg(target_os = "macos")]
-            {
-                // Try VPIO; fall back to CPAL if it fails
-                match wzp_client::audio_vpio::VpioAudio::start() {
-                    Ok(v) => {
-                        let cr = v.capture_ring().clone();
-                        let pr = v.playout_ring().clone();
-                        _vpio_handle = Some(v);
-                        info!("using VoiceProcessingIO (OS AEC)");
-                        (cr, pr)
-                    }
-                    Err(e) => {
-                        info!("VPIO failed ({e}), falling back to CPAL");
-                        _vpio_handle = None;
-                        let capture = AudioCapture::start()?;
-                        let playback = AudioPlayback::start()?;
-                        let cr = capture.ring().clone();
-                        let pr = playback.ring().clone();
-                        std::mem::forget(capture);
-                        std::mem::forget(playback);
-                        (cr, pr)
+        // Audio I/O — VPIO (OS AEC) on macOS, plain CPAL otherwise.
+        // The audio handle must be stored in CallEngine to keep streams alive.
+        let (capture_ring, playout_ring, audio_handle): (_, _, Box<dyn std::any::Any + Send>) =
+            if _os_aec {
+                #[cfg(target_os = "macos")]
+                {
+                    match wzp_client::audio_vpio::VpioAudio::start() {
+                        Ok(v) => {
+                            let cr = v.capture_ring().clone();
+                            let pr = v.playout_ring().clone();
+                            info!("using VoiceProcessingIO (OS AEC)");
+                            (cr, pr, Box::new(v))
+                        }
+                        Err(e) => {
+                            info!("VPIO failed ({e}), falling back to CPAL");
+                            let capture = AudioCapture::start()?;
+                            let playback = AudioPlayback::start()?;
+                            let cr = capture.ring().clone();
+                            let pr = playback.ring().clone();
+                            (cr, pr, Box::new((capture, playback)))
+                        }
                     }
                 }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                info!("OS AEC not available on this platform, using CPAL");
+                #[cfg(not(target_os = "macos"))]
+                {
+                    info!("OS AEC not available on this platform, using CPAL");
+                    let capture = AudioCapture::start()?;
+                    let playback = AudioPlayback::start()?;
+                    let cr = capture.ring().clone();
+                    let pr = playback.ring().clone();
+                    (cr, pr, Box::new((capture, playback)))
+                }
+            } else {
                 let capture = AudioCapture::start()?;
                 let playback = AudioPlayback::start()?;
                 let cr = capture.ring().clone();
                 let pr = playback.ring().clone();
-                std::mem::forget(capture);
-                std::mem::forget(playback);
-                (cr, pr)
-            }
-        } else {
-            let capture = AudioCapture::start()?;
-            let playback = AudioPlayback::start()?;
-            let cr = capture.ring().clone();
-            let pr = playback.ring().clone();
-            std::mem::forget(capture);
-            std::mem::forget(playback);
-            (cr, pr)
-        };
+                (cr, pr, Box::new((capture, playback)))
+            };
 
         let running = Arc::new(AtomicBool::new(true));
         let mic_muted = Arc::new(AtomicBool::new(false));
@@ -318,6 +318,7 @@ impl CallEngine {
             transport,
             start_time: Instant::now(),
             fingerprint,
+            _audio_handle: SyncWrapper(audio_handle),
         })
     }
 
@@ -334,17 +335,20 @@ impl CallEngine {
     }
 
     pub async fn status(&self) -> EngineStatus {
-        let parts = self.participants.lock().await;
-        EngineStatus {
-            mic_muted: self.mic_muted.load(Ordering::Relaxed),
-            spk_muted: self.spk_muted.load(Ordering::Relaxed),
-            participants: parts
+        let participants = {
+            let parts = self.participants.lock().await;
+            parts
                 .iter()
                 .map(|p| ParticipantInfo {
                     fingerprint: p.fingerprint.clone(),
                     alias: p.alias.clone(),
                 })
-                .collect(),
+                .collect()
+        }; // lock dropped here
+        EngineStatus {
+            mic_muted: self.mic_muted.load(Ordering::Relaxed),
+            spk_muted: self.spk_muted.load(Ordering::Relaxed),
+            participants,
             frames_sent: self.frames_sent.load(Ordering::Relaxed),
             frames_received: self.frames_received.load(Ordering::Relaxed),
             audio_level: self.audio_level.load(Ordering::Relaxed),
