@@ -27,6 +27,7 @@
               <input id="os-aec" type="checkbox" checked />
               OS Echo Cancel
             </label>
+            <button id="settings-btn-home" class="icon-btn" title="Settings (Cmd+,)">&#9881;</button>
           </div>
           <button id="connect-btn" class="primary">Connect</button>
           <p id="connect-error" class="error"></p>
@@ -40,7 +41,10 @@
       <!-- In-call screen -->
       <div id="call-screen" class="hidden">
         <div class="call-header">
-          <div id="room-name" class="room-name"></div>
+          <div class="call-header-row">
+            <div id="room-name" class="room-name"></div>
+            <button id="settings-btn-call" class="icon-btn small" title="Settings (Cmd+,)">&#9881;</button>
+          </div>
           <div class="call-meta">
             <span id="call-status" class="status-dot"></span>
             <span id="call-timer" class="call-timer">0:00</span>
@@ -67,6 +71,61 @@
         </div>
 
         <div id="stats" class="stats"></div>
+      </div>
+
+      <!-- Settings panel (overlay) -->
+      <div id="settings-panel" class="hidden">
+        <div class="settings-card">
+          <div class="settings-header">
+            <h2>Settings</h2>
+            <button id="settings-close" class="icon-btn">&times;</button>
+          </div>
+
+          <div class="settings-section">
+            <h3>Connection</h3>
+            <label>Default Relay
+              <input id="s-relay" type="text" />
+            </label>
+            <label>Default Room
+              <input id="s-room" type="text" />
+            </label>
+            <label>Alias
+              <input id="s-alias" type="text" />
+            </label>
+          </div>
+
+          <div class="settings-section">
+            <h3>Audio</h3>
+            <label class="checkbox">
+              <input id="s-os-aec" type="checkbox" />
+              OS Echo Cancellation (macOS VoiceProcessingIO)
+            </label>
+            <label class="checkbox">
+              <input id="s-agc" type="checkbox" checked />
+              Automatic Gain Control
+            </label>
+          </div>
+
+          <div class="settings-section">
+            <h3>Identity</h3>
+            <div class="setting-row">
+              <span class="setting-label">Fingerprint</span>
+              <span id="s-fingerprint" class="fp-display-large"></span>
+            </div>
+            <div class="setting-row">
+              <span class="setting-label">Identity file</span>
+              <span class="fp-display">~/.wzp/identity</span>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Recent Rooms</h3>
+            <div id="s-recent-rooms" class="recent-rooms-list"></div>
+            <button id="s-clear-recent" class="secondary-btn">Clear History</button>
+          </div>
+
+          <button id="settings-save" class="primary">Save</button>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

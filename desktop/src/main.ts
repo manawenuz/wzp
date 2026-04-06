@@ -23,6 +23,20 @@ const statsDiv = document.getElementById("stats")!;
 const myFingerprintEl = document.getElementById("my-fingerprint")!;
 const recentRoomsDiv = document.getElementById("recent-rooms")!;
 
+const settingsPanel = document.getElementById("settings-panel")!;
+const settingsClose = document.getElementById("settings-close")!;
+const settingsSave = document.getElementById("settings-save")!;
+const settingsBtnHome = document.getElementById("settings-btn-home")!;
+const settingsBtnCall = document.getElementById("settings-btn-call")!;
+const sRelay = document.getElementById("s-relay") as HTMLInputElement;
+const sRoom = document.getElementById("s-room") as HTMLInputElement;
+const sAlias = document.getElementById("s-alias") as HTMLInputElement;
+const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
+const sAgc = document.getElementById("s-agc") as HTMLInputElement;
+const sFingerprint = document.getElementById("s-fingerprint")!;
+const sRecentRooms = document.getElementById("s-recent-rooms")!;
+const sClearRecent = document.getElementById("s-clear-recent")!;
+
 let statusInterval: number | null = null;
 let myFingerprint = "";
 
@@ -32,6 +46,7 @@ interface Settings {
   room: string;
   alias: string;
   osAec: boolean;
+  agc: boolean;
   recentRooms: string[];
 }
 
@@ -41,6 +56,7 @@ function loadSettings(): Settings {
     room: "android",
     alias: "",
     osAec: true,
+    agc: true,
     recentRooms: [],
   };
   try {
@@ -258,4 +274,93 @@ function escapeHtml(s: string): string {
 listen("call-event", (event: any) => {
   const { kind } = event.payload;
   if (kind === "room-update") pollStatus();
+});
+
+// ── Settings panel ──
+function openSettings() {
+  const s = loadSettings();
+  sRelay.value = s.relay;
+  sRoom.value = s.room;
+  sAlias.value = s.alias;
+  sOsAec.checked = s.osAec;
+  sFingerprint.textContent = myFingerprint || "(connect to see)";
+  renderSettingsRecentRooms(s.recentRooms);
+  settingsPanel.classList.remove("hidden");
+}
+
+function closeSettings() {
+  settingsPanel.classList.add("hidden");
+}
+
+function renderSettingsRecentRooms(rooms: string[]) {
+  if (rooms.length === 0) {
+    sRecentRooms.innerHTML = '<span style="color:var(--text-dim);font-size:12px">No recent rooms</span>';
+    return;
+  }
+  sRecentRooms.innerHTML = rooms
+    .map(
+      (r, i) => `
+      <div class="recent-room-item">
+        <span>${escapeHtml(r)}</span>
+        <button class="remove" data-idx="${i}">&times;</button>
+      </div>`
+    )
+    .join("");
+  sRecentRooms.querySelectorAll(".remove").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt((btn as HTMLElement).dataset.idx || "0");
+      const s = loadSettings();
+      s.recentRooms.splice(idx, 1);
+      localStorage.setItem("wzp-settings", JSON.stringify(s));
+      renderSettingsRecentRooms(s.recentRooms);
+    });
+  });
+}
+
+settingsBtnHome.addEventListener("click", openSettings);
+settingsBtnCall.addEventListener("click", openSettings);
+settingsClose.addEventListener("click", closeSettings);
+
+settingsPanel.addEventListener("click", (e) => {
+  if (e.target === settingsPanel) closeSettings();
+});
+
+settingsSave.addEventListener("click", () => {
+  const s = loadSettings();
+  s.relay = sRelay.value;
+  s.room = sRoom.value;
+  s.alias = sAlias.value;
+  s.osAec = sOsAec.checked;
+  localStorage.setItem("wzp-settings", JSON.stringify(s));
+  // Sync back to main form
+  relayInput.value = s.relay;
+  roomInput.value = s.room;
+  aliasInput.value = s.alias;
+  osAecCheckbox.checked = s.osAec;
+  renderRecentRooms(s.recentRooms);
+  closeSettings();
+});
+
+sClearRecent.addEventListener("click", () => {
+  const s = loadSettings();
+  s.recentRooms = [];
+  localStorage.setItem("wzp-settings", JSON.stringify(s));
+  renderSettingsRecentRooms([]);
+  renderRecentRooms([]);
+});
+
+// Cmd+, (macOS) or Ctrl+, (Windows/Linux) opens settings
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+    e.preventDefault();
+    if (settingsPanel.classList.contains("hidden")) {
+      openSettings();
+    } else {
+      closeSettings();
+    }
+  }
+  // Escape closes settings
+  if (e.key === "Escape" && !settingsPanel.classList.contains("hidden")) {
+    closeSettings();
+  }
 });
