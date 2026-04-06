@@ -21,9 +21,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Divider
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
-import androidx.compose.material3.Divider
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -36,9 +36,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,6 +50,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.wzp.ui.call.CallViewModel
+import com.wzp.ui.call.ServerEntry
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -55,14 +59,36 @@ fun SettingsScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val servers by viewModel.servers.collectAsState()
-    val selectedServer by viewModel.selectedServer.collectAsState()
-    val roomName by viewModel.roomName.collectAsState()
-    val preferIPv6 by viewModel.preferIPv6.collectAsState()
-    val playoutGainDb by viewModel.playoutGainDb.collectAsState()
-    val captureGainDb by viewModel.captureGainDb.collectAsState()
-    val alias by viewModel.alias.collectAsState()
-    val seedHex by viewModel.seedHex.collectAsState()
+
+    // Snapshot current values into local draft state
+    val currentAlias by viewModel.alias.collectAsState()
+    val currentSeedHex by viewModel.seedHex.collectAsState()
+    val currentServers by viewModel.servers.collectAsState()
+    val currentSelectedServer by viewModel.selectedServer.collectAsState()
+    val currentRoomName by viewModel.roomName.collectAsState()
+    val currentPreferIPv6 by viewModel.preferIPv6.collectAsState()
+    val currentPlayoutGain by viewModel.playoutGainDb.collectAsState()
+    val currentCaptureGain by viewModel.captureGainDb.collectAsState()
+
+    // Draft state — initialized from current values
+    var draftAlias by remember { mutableStateOf(currentAlias) }
+    var draftSeedHex by remember { mutableStateOf(currentSeedHex) }
+    val draftServers = remember { currentServers.toMutableStateList() }
+    var draftSelectedServer by remember { mutableIntStateOf(currentSelectedServer) }
+    var draftRoomName by remember { mutableStateOf(currentRoomName) }
+    var draftPreferIPv6 by remember { mutableStateOf(currentPreferIPv6) }
+    var draftPlayoutGain by remember { mutableFloatStateOf(currentPlayoutGain) }
+    var draftCaptureGain by remember { mutableFloatStateOf(currentCaptureGain) }
+
+    // Track if anything changed
+    val hasChanges = draftAlias != currentAlias ||
+            draftSeedHex != currentSeedHex ||
+            draftServers.toList() != currentServers ||
+            draftSelectedServer != currentSelectedServer ||
+            draftRoomName != currentRoomName ||
+            draftPreferIPv6 != currentPreferIPv6 ||
+            draftPlayoutGain != currentPlayoutGain ||
+            draftCaptureGain != currentCaptureGain
 
     var showAddServerDialog by remember { mutableStateOf(false) }
     var showRestoreKeyDialog by remember { mutableStateOf(false) }
@@ -94,8 +120,23 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.weight(1f))
-                // Balance the back button
-                Spacer(modifier = Modifier.width(64.dp))
+                // Save button — only enabled when changes exist
+                Button(
+                    onClick = {
+                        viewModel.setAlias(draftAlias)
+                        if (draftSeedHex != currentSeedHex) viewModel.restoreSeed(draftSeedHex)
+                        viewModel.applyServers(draftServers.toList(), draftSelectedServer)
+                        viewModel.setRoomName(draftRoomName)
+                        viewModel.setPreferIPv6(draftPreferIPv6)
+                        viewModel.setPlayoutGainDb(draftPlayoutGain)
+                        viewModel.setCaptureGainDb(draftCaptureGain)
+                        Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
+                        onBack()
+                    },
+                    enabled = hasChanges
+                ) {
+                    Text("Save")
+                }
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -104,8 +145,8 @@ fun SettingsScreen(
             SectionHeader("Identity")
 
             OutlinedTextField(
-                value = alias,
-                onValueChange = { viewModel.setAlias(it) },
+                value = draftAlias,
+                onValueChange = { draftAlias = it },
                 label = { Text("Display Name") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -114,7 +155,7 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Fingerprint display
-            val fingerprint = if (seedHex.length >= 16) seedHex.take(16).uppercase() else "Not generated"
+            val fingerprint = if (draftSeedHex.length >= 16) draftSeedHex.take(16).uppercase() else "Not generated"
             Text(
                 text = "Fingerprint",
                 style = MaterialTheme.typography.labelSmall,
@@ -134,7 +175,7 @@ fun SettingsScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilledTonalButton(onClick = {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("WZP Key", seedHex))
+                    clipboard.setPrimaryClip(ClipData.newPlainText("WZP Key", draftSeedHex))
                     Toast.makeText(context, "Key copied to clipboard", Toast.LENGTH_SHORT).show()
                 }) {
                     Text("Copy Key")
@@ -153,14 +194,14 @@ fun SettingsScreen(
 
             GainSlider(
                 label = "Voice Volume",
-                gainDb = playoutGainDb,
-                onGainChange = { viewModel.setPlayoutGainDb(it) }
+                gainDb = draftPlayoutGain,
+                onGainChange = { draftPlayoutGain = Math.round(it).toFloat() }
             )
             Spacer(modifier = Modifier.height(4.dp))
             GainSlider(
                 label = "Mic Gain",
-                gainDb = captureGainDb,
-                onGainChange = { viewModel.setCaptureGainDb(it) }
+                gainDb = draftCaptureGain,
+                onGainChange = { draftCaptureGain = Math.round(it).toFloat() }
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -175,11 +216,11 @@ fun SettingsScreen(
                 horizontalArrangement = Arrangement.Start,
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                servers.forEachIndexed { idx, entry ->
-                    val isSelected = selectedServer == idx
+                draftServers.forEachIndexed { idx, entry ->
+                    val isSelected = draftSelectedServer == idx
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         FilledTonalIconButton(
-                            onClick = { viewModel.selectServer(idx) },
+                            onClick = { draftSelectedServer = idx },
                             modifier = Modifier
                                 .padding(end = 2.dp)
                                 .height(36.dp)
@@ -203,7 +244,12 @@ fun SettingsScreen(
                         // Show remove button for non-default servers
                         if (idx >= 2) {
                             TextButton(
-                                onClick = { viewModel.removeServer(idx) },
+                                onClick = {
+                                    draftServers.removeAt(idx)
+                                    if (draftSelectedServer >= draftServers.size) {
+                                        draftSelectedServer = 0
+                                    }
+                                },
                                 modifier = Modifier.height(36.dp)
                             ) {
                                 Text("X", color = MaterialTheme.colorScheme.error)
@@ -224,7 +270,7 @@ fun SettingsScreen(
             // Show selected server address
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Default: ${servers.getOrNull(selectedServer)?.address ?: "none"}",
+                text = "Default: ${draftServers.getOrNull(draftSelectedServer)?.address ?: "none"}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -246,8 +292,8 @@ fun SettingsScreen(
                     modifier = Modifier.weight(1f)
                 )
                 Switch(
-                    checked = preferIPv6,
-                    onCheckedChange = { viewModel.setPreferIPv6(it) }
+                    checked = draftPreferIPv6,
+                    onCheckedChange = { draftPreferIPv6 = it }
                 )
             }
 
@@ -259,8 +305,8 @@ fun SettingsScreen(
             SectionHeader("Room")
 
             OutlinedTextField(
-                value = roomName,
-                onValueChange = { viewModel.setRoomName(it) },
+                value = draftRoomName,
+                onValueChange = { draftRoomName = it },
                 label = { Text("Default Room") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -274,7 +320,7 @@ fun SettingsScreen(
         AddServerDialog(
             onDismiss = { showAddServerDialog = false },
             onAdd = { host, port, label ->
-                viewModel.addServer("$host:$port", label)
+                draftServers.add(ServerEntry("$host:$port", label))
                 showAddServerDialog = false
             }
         )
@@ -284,9 +330,9 @@ fun SettingsScreen(
         RestoreKeyDialog(
             onDismiss = { showRestoreKeyDialog = false },
             onRestore = { hex ->
-                viewModel.restoreSeed(hex)
+                draftSeedHex = hex
                 showRestoreKeyDialog = false
-                Toast.makeText(context, "Key restored", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Key staged — press Save to apply", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -316,7 +362,7 @@ private fun GainSlider(label: String, gainDb: Float, onGainChange: (Float) -> Un
         )
         Slider(
             value = gainDb,
-            onValueChange = { onGainChange(Math.round(it).toFloat()) },
+            onValueChange = onGainChange,
             valueRange = -20f..20f,
             steps = 0,
             modifier = Modifier.fillMaxWidth()

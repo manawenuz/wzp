@@ -149,6 +149,14 @@ class CallViewModel : ViewModel(), WzpCallback {
         }
     }
 
+    /** Batch-apply servers and selection from Settings draft state. */
+    fun applyServers(servers: List<ServerEntry>, selected: Int) {
+        _servers.value = servers
+        _selectedServer.value = selected.coerceIn(0, servers.lastIndex)
+        settings?.saveServers(servers)
+        settings?.saveSelectedServer(_selectedServer.value)
+    }
+
     fun setRoomName(name: String) {
         _roomName.value = name
         settings?.saveRoom(name)
