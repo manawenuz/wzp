@@ -1,0 +1,43 @@
+name: Mirror to GitHub
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/*'
+      - 'feature/*'
+    tags:
+      - '*'
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    container:
+      image: catthehacker/ubuntu:act-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to GitHub
+        env:
+          GH_SSH_KEY: ${{ secrets.GH_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${GH_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          git remote add github git@github.com:manawenuz/wzp.git
+
+          # Push the current branch
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          if [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/}" ]; then
+            echo "Pushing tag: ${TAG}"
+            git push github "refs/tags/${TAG}" --force
+          else
+            echo "Pushing branch: ${BRANCH}"
+            git push github "HEAD:refs/heads/${BRANCH}" --force
+          fi
