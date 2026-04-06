@@ -272,7 +272,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     // Crypto handshake with relay
     let handshake_start = std::time::Instant::now();
     let bridge_seed = wzp_crypto::Seed::generate();
-    match wzp_client::handshake::perform_handshake(&*transport, &bridge_seed.0).await {
+    match wzp_client::handshake::perform_handshake(&*transport, &bridge_seed.0, None).await {
         Ok(_session) => {
             let elapsed = handshake_start.elapsed().as_secs_f64();
             state.metrics.handshake_latency.observe(elapsed);

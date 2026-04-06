@@ -33,6 +33,12 @@ impl QuinnTransport {
         &self.connection
     }
 
+    /// Close the QUIC connection immediately (synchronous, no async needed).
+    /// The relay will detect the close and remove this participant from the room.
+    pub fn close_now(&self) {
+        self.connection.close(quinn::VarInt::from_u32(0), b"hangup");
+    }
+
     /// Feed an external RTT observation (e.g. from QUIC path stats) into the path monitor.
     pub fn feed_rtt(&self, rtt_ms: u32) {
         self.path_monitor.lock().unwrap().observe_rtt(rtt_ms);

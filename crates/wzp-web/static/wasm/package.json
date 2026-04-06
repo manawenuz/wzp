@@ -1,0 +1,16 @@
+{
+  "name": "wzp-wasm",
+  "type": "module",
+  "description": "WarzonePhone WASM bindings — FEC (RaptorQ) + crypto (ChaCha20-Poly1305, X25519)",
+  "version": "0.1.0",
+  "files": [
+    "wzp_wasm_bg.wasm",
+    "wzp_wasm.js",
+    "wzp_wasm.d.ts"
+  ],
+  "main": "wzp_wasm.js",
+  "types": "wzp_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

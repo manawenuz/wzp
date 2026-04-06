@@ -126,6 +126,7 @@ mod tests {
             ephemeral_pub: [2u8; 32],
             signature: vec![3u8; 64],
             supported_profiles: vec![QualityProfile::GOOD],
+            alias: None,
         };
 
         let encoded = encode_call_payload(&signal, Some("relay.example.com:4433"), Some("myroom"));
@@ -143,6 +144,7 @@ mod tests {
             ephemeral_pub: [0; 32],
             signature: vec![],
             supported_profiles: vec![],
+            alias: None,
         };
         assert!(matches!(signal_to_call_type(&offer), CallSignalType::Offer));
 

@@ -1,6 +1,7 @@
 //! JNI bridge for Android — thin layer between Kotlin and the WzpEngine.
 
 use std::panic;
+use std::sync::Once;
 
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
@@ -28,12 +29,27 @@ fn profile_from_int(value: jint) -> QualityProfile {
     }
 }
 
+static INIT_LOGGING: Once = Once::new();
+
+/// Initialize tracing → Android logcat (tag "wzp_android").
+/// Safe to call multiple times — only the first call takes effect.
+fn init_logging() {
+    INIT_LOGGING.call_once(|| {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        if let Ok(layer) = tracing_android::layer("wzp_android") {
+            let _ = tracing_subscriber::registry().with(layer).try_init();
+        }
+    });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeInit(
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
     let result = panic::catch_unwind(|| {
+        init_logging();
         let handle = Box::new(EngineHandle {
             engine: WzpEngine::new(),
         });

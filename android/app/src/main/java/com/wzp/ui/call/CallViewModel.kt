@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.wzp.audio.AudioPipeline
 import com.wzp.audio.AudioRouteManager
 import com.wzp.data.SettingsRepository
+import com.wzp.debug.DebugReporter
 import com.wzp.engine.CallStats
 import com.wzp.service.CallService
 import com.wzp.engine.WzpCallback
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -33,6 +35,10 @@ class CallViewModel : ViewModel(), WzpCallback {
     private var audioStarted = false
     private var appContext: Context? = null
     private var settings: SettingsRepository? = null
+    private var debugReporter: DebugReporter? = null
+    private var lastStatsJson: String = "{}"
+    private var lastCallDuration: Double = 0.0
+    private var lastCallServer: String = ""
 
     private val _callState = MutableStateFlow(0)
     val callState: StateFlow<Int> get() = _callState.asStateFlow()
@@ -76,6 +82,21 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _seedHex = MutableStateFlow("")
     val seedHex: StateFlow<String> = _seedHex.asStateFlow()
 
+    private val _aecEnabled = MutableStateFlow(true)
+    val aecEnabled: StateFlow<Boolean> = _aecEnabled.asStateFlow()
+
+    /** True when a call just ended and debug report can be sent. */
+    private val _debugReportAvailable = MutableStateFlow(false)
+    val debugReportAvailable: StateFlow<Boolean> = _debugReportAvailable.asStateFlow()
+
+    /** Status: null=idle, "Preparing..."=in progress, "ready"=zip ready, "Error:..."=failed */
+    private val _debugReportStatus = MutableStateFlow<String?>(null)
+    val debugReportStatus: StateFlow<String?> = _debugReportStatus.asStateFlow()
+
+    /** The zip file ready to be emailed. Set by sendDebugReport, consumed by Activity. */
+    private val _debugZipReady = MutableStateFlow<File?>(null)
+    val debugZipReady: StateFlow<File?> = _debugZipReady.asStateFlow()
+
     private var statsJob: Job? = null
 
     companion object {
@@ -96,6 +117,9 @@ class CallViewModel : ViewModel(), WzpCallback {
         if (audioRouteManager == null) {
             audioRouteManager = AudioRouteManager(appCtx)
         }
+        if (debugReporter == null) {
+            debugReporter = DebugReporter(appCtx)
+        }
         if (settings == null) {
             settings = SettingsRepository(appCtx)
             loadSettings()
@@ -114,6 +138,7 @@ class CallViewModel : ViewModel(), WzpCallback {
         _playoutGainDb.value = s.loadPlayoutGain()
         _captureGainDb.value = s.loadCaptureGain()
         _seedHex.value = s.getOrCreateSeedHex()
+        _aecEnabled.value = s.loadAecEnabled()
     }
 
     fun selectServer(index: Int) {
@@ -149,6 +174,14 @@ class CallViewModel : ViewModel(), WzpCallback {
         }
     }
 
+    /** Batch-apply servers and selection from Settings draft state. */
+    fun applyServers(servers: List<ServerEntry>, selected: Int) {
+        _servers.value = servers
+        _selectedServer.value = selected.coerceIn(0, servers.lastIndex)
+        settings?.saveServers(servers)
+        settings?.saveSelectedServer(_selectedServer.value)
+    }
+
     fun setRoomName(name: String) {
         _roomName.value = name
         settings?.saveRoom(name)
@@ -174,6 +207,11 @@ class CallViewModel : ViewModel(), WzpCallback {
     fun restoreSeed(hex: String) {
         _seedHex.value = hex
         settings?.saveSeedHex(hex)
+    }
+
+    fun setAecEnabled(enabled: Boolean) {
+        _aecEnabled.value = enabled
+        settings?.saveAecEnabled(enabled)
     }
 
     /**
@@ -214,6 +252,7 @@ class CallViewModel : ViewModel(), WzpCallback {
     /** Tear down engine and audio. Pass stopService=true to also stop the foreground service. */
     private fun teardown(stopService: Boolean = true) {
         Log.i(TAG, "teardown: stopping audio, stopService=$stopService")
+        val hadCall = audioStarted
         CallService.onStopFromNotification = null
         stopAudio()
         stopStatsPolling()
@@ -223,6 +262,9 @@ class CallViewModel : ViewModel(), WzpCallback {
         engine = null
         engineInitialized = false
         _callState.value = 0
+        if (hadCall) {
+            _debugReportAvailable.value = true
+        }
         if (stopService) {
             try { appContext?.let { CallService.stop(it) } } catch (_: Exception) {}
         }
@@ -233,6 +275,10 @@ class CallViewModel : ViewModel(), WzpCallback {
         val serverEntry = _servers.value[_selectedServer.value]
         val room = _roomName.value
         Log.i(TAG, "startCall: server=${serverEntry.address} room=$room")
+        _debugReportAvailable.value = false
+        _debugReportStatus.value = null
+        lastCallServer = serverEntry.address
+        debugReporter?.prepareForCall()
         try {
             // Teardown previous call but don't stop the service (we're about to restart it)
             teardown(stopService = false)
@@ -297,6 +343,40 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     fun clearError() { _errorMessage.value = null }
 
+    fun sendDebugReport() {
+        val reporter = debugReporter ?: return
+        _debugReportStatus.value = "Preparing debug report..."
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val zipFile = reporter.collectZip(
+                callDurationSecs = lastCallDuration,
+                finalStatsJson = lastStatsJson,
+                aecEnabled = _aecEnabled.value,
+                alias = _alias.value,
+                server = lastCallServer,
+                room = _roomName.value
+            )
+            if (zipFile != null) {
+                _debugZipReady.value = zipFile
+                _debugReportStatus.value = "ready"
+            } else {
+                _debugReportStatus.value = "Error: failed to create zip"
+            }
+            _debugReportAvailable.value = false
+        }
+    }
+
+    /** Called by Activity after email intent is launched. */
+    fun onDebugReportSent() {
+        _debugZipReady.value = null
+        _debugReportStatus.value = null
+    }
+
+    fun dismissDebugReport() {
+        _debugReportAvailable.value = false
+        _debugReportStatus.value = null
+        _debugZipReady.value = null
+    }
+
     // WzpCallback
     override fun onCallStateChanged(state: Int) { _callState.value = state }
     override fun onQualityTierChanged(tier: Int) { _qualityTier.value = tier }
@@ -310,6 +390,7 @@ class CallViewModel : ViewModel(), WzpCallback {
         audioPipeline = AudioPipeline(ctx).also {
             it.playoutGainDb = _playoutGainDb.value
             it.captureGainDb = _captureGainDb.value
+            it.aecEnabled = _aecEnabled.value
             it.start(e)
         }
         audioRouteManager?.register()
@@ -334,7 +415,9 @@ class CallViewModel : ViewModel(), WzpCallback {
                     val json = engine?.getStats() ?: "{}"
                     if (json.isNotEmpty()) {
                         Log.d(TAG, "raw: $json")
+                        lastStatsJson = json
                         val s = CallStats.fromJson(json)
+                        lastCallDuration = s.durationSecs
                         _stats.value = s
                         if (s.state != 0) {
                             _callState.value = s.state
