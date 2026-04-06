@@ -158,20 +158,30 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Fingerprint display
+            // Fingerprint display with identicon
             val fingerprint = if (draftSeedHex.length >= 16) draftSeedHex.take(16).uppercase() else "Not generated"
             Text(
                 text = "Fingerprint",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text(
-                text = fingerprint.chunked(4).joinToString(" "),
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace
-                ),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 4.dp)
+            ) {
+                com.wzp.ui.components.Identicon(
+                    fingerprint = draftSeedHex,
+                    size = 40.dp,
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                com.wzp.ui.components.CopyableFingerprint(
+                    fingerprint = fingerprint.chunked(4).joinToString(" "),
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 

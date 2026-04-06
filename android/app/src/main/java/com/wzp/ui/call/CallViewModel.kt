@@ -70,6 +70,9 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _preferIPv6 = MutableStateFlow(false)
     val preferIPv6: StateFlow<Boolean> = _preferIPv6.asStateFlow()
 
+    private val _recentRooms = MutableStateFlow<List<com.wzp.data.SettingsRepository.RecentRoom>>(emptyList())
+    val recentRooms: StateFlow<List<com.wzp.data.SettingsRepository.RecentRoom>> = _recentRooms.asStateFlow()
+
     private val _playoutGainDb = MutableStateFlow(0f)
     val playoutGainDb: StateFlow<Float> = _playoutGainDb.asStateFlow()
 
@@ -139,6 +142,7 @@ class CallViewModel : ViewModel(), WzpCallback {
         _captureGainDb.value = s.loadCaptureGain()
         _seedHex.value = s.getOrCreateSeedHex()
         _aecEnabled.value = s.loadAecEnabled()
+        _recentRooms.value = s.loadRecentRooms()
     }
 
     fun selectServer(index: Int) {
@@ -287,6 +291,8 @@ class CallViewModel : ViewModel(), WzpCallback {
         _debugReportAvailable.value = false
         _debugReportStatus.value = null
         lastCallServer = serverEntry.address
+        settings?.addRecentRoom(serverEntry.address, room)
+        _recentRooms.value = settings?.loadRecentRooms() ?: emptyList()
         debugReporter?.prepareForCall()
         try {
             // Teardown previous call but don't stop the service (we're about to restart it)

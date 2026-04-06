@@ -42,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -200,6 +201,36 @@ fun InCallScreen(
                     modifier = Modifier.fillMaxWidth(0.6f)
                 )
 
+                // Recent rooms
+                val recentRooms by viewModel.recentRooms.collectAsState()
+                if (recentRooms.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        recentRooms.forEach { recent ->
+                            Surface(
+                                onClick = {
+                                    viewModel.setRoomName(recent.room)
+                                    // Select matching server
+                                    val idx = servers.indexOfFirst { it.address == recent.relay }
+                                    if (idx >= 0) viewModel.selectServer(idx)
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.padding(2.dp)
+                            ) {
+                                Text(
+                                    text = recent.room,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Button(
@@ -262,11 +293,33 @@ fun InCallScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     unique.forEach { member ->
-                        Text(
-                            text = member.displayName,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(vertical = 2.dp)
+                        ) {
+                            com.wzp.ui.components.Identicon(
+                                fingerprint = member.fingerprint.ifEmpty { member.displayName },
+                                size = 28.dp,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = member.displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (member.fingerprint.isNotEmpty()) {
+                                    com.wzp.ui.components.CopyableFingerprint(
+                                        fingerprint = member.fingerprint.take(16),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontSize = 9.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
