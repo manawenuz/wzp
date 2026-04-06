@@ -117,6 +117,26 @@ class WzpEngine(private val callback: WzpCallback) {
         return nativeReadAudio(nativeHandle, pcm)
     }
 
+    /**
+     * Write captured PCM from a DirectByteBuffer — zero JNI array copy.
+     * The buffer must be a direct ByteBuffer with native byte order containing i16 samples.
+     * Called from the AudioRecord capture thread.
+     */
+    fun writeAudioDirect(buffer: java.nio.ByteBuffer, sampleCount: Int): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeWriteAudioDirect(nativeHandle, buffer, sampleCount)
+    }
+
+    /**
+     * Read decoded PCM into a DirectByteBuffer — zero JNI array copy.
+     * The buffer must be a direct ByteBuffer with native byte order.
+     * Called from the AudioTrack playout thread.
+     */
+    fun readAudioDirect(buffer: java.nio.ByteBuffer, maxSamples: Int): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeReadAudioDirect(nativeHandle, buffer, maxSamples)
+    }
+
     // -- JNI native methods --------------------------------------------------
 
     private external fun nativeInit(): Long
@@ -130,6 +150,8 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeForceProfile(handle: Long, profile: Int)
     private external fun nativeWriteAudio(handle: Long, pcm: ShortArray): Int
     private external fun nativeReadAudio(handle: Long, pcm: ShortArray): Int
+    private external fun nativeWriteAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, sampleCount: Int): Int
+    private external fun nativeReadAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, maxSamples: Int): Int
     private external fun nativeDestroy(handle: Long)
 
     companion object {

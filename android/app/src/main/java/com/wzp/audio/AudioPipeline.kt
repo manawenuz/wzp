@@ -205,6 +205,8 @@ class AudioPipeline(private val context: Context) {
         Log.i(TAG, "capture started: ${SAMPLE_RATE}Hz mono, buf=$bufSize, aec=${aec?.enabled}, ns=${ns?.enabled}")
 
         val pcm = ShortArray(FRAME_SAMPLES)
+        // DirectByteBuffer for zero-copy JNI (avoids ART GC SIGBUS on Android 16)
+        val directBuf = ByteBuffer.allocateDirect(FRAME_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
         // Debug: PCM file + RMS CSV
         var pcmOut: BufferedOutputStream? = null
         var rmsCsv: OutputStreamWriter? = null
@@ -224,7 +226,10 @@ class AudioPipeline(private val context: Context) {
                 val read = recorder.read(pcm, 0, FRAME_SAMPLES)
                 if (read > 0) {
                     applyGain(pcm, read, captureGainDb)
-                    engine.writeAudio(pcm)
+                    // Zero-copy write via DirectByteBuffer (no GC array interaction)
+                    directBuf.clear()
+                    directBuf.asShortBuffer().put(pcm, 0, read)
+                    engine.writeAudioDirect(directBuf, read)
 
                     // Debug: write raw PCM + RMS
                     if (pcmOut != null) {
@@ -287,6 +292,8 @@ class AudioPipeline(private val context: Context) {
 
         val pcm = ShortArray(FRAME_SAMPLES)
         val silence = ShortArray(FRAME_SAMPLES)
+        // DirectByteBuffer for zero-copy JNI (avoids ART GC SIGBUS on Android 16)
+        val directBuf = ByteBuffer.allocateDirect(FRAME_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
         // Debug: PCM file + RMS CSV for playout
         var pcmOut: BufferedOutputStream? = null
         var rmsCsv: OutputStreamWriter? = null
@@ -303,7 +310,13 @@ class AudioPipeline(private val context: Context) {
         }
         try {
             while (running) {
-                val read = engine.readAudio(pcm)
+                // Zero-copy read via DirectByteBuffer
+                directBuf.clear()
+                val read = engine.readAudioDirect(directBuf, FRAME_SAMPLES)
+                if (read > 0) {
+                    directBuf.rewind()
+                    directBuf.asShortBuffer().get(pcm, 0, read)
+                }
                 if (read >= FRAME_SAMPLES) {
                     applyGain(pcm, read, playoutGainDb)
                     track.write(pcm, 0, read)

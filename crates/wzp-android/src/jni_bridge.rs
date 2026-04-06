@@ -214,7 +214,6 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeWriteAudio(
             return 0;
         }
         let mut buf = vec![0i16; len];
-        // GetShortArrayRegion copies Java array into our buffer
         if env.get_short_array_region(&pcm, 0, &mut buf).is_err() {
             return 0;
         }
@@ -244,6 +243,56 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeReadAudio(
             let _ = env.set_short_array_region(&pcm, 0, &buf[..read]);
         }
         read as jint
+    }));
+    result.unwrap_or(0)
+}
+
+/// Write captured PCM from a DirectByteBuffer — zero JNI array copies.
+/// The ByteBuffer must contain little-endian i16 samples.
+/// Called from the AudioRecord capture thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeWriteAudioDirect(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    buffer: jni::objects::JByteBuffer,
+    sample_count: jint,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let ptr = env.get_direct_buffer_address(&buffer).unwrap_or(std::ptr::null_mut());
+        if ptr.is_null() || sample_count <= 0 {
+            return 0;
+        }
+        let samples = unsafe {
+            std::slice::from_raw_parts(ptr as *const i16, sample_count as usize)
+        };
+        h.engine.write_audio(samples) as jint
+    }));
+    result.unwrap_or(0)
+}
+
+/// Read decoded PCM into a DirectByteBuffer — zero JNI array copies.
+/// The ByteBuffer will be filled with little-endian i16 samples.
+/// Called from the AudioTrack playout thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeReadAudioDirect(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    buffer: jni::objects::JByteBuffer,
+    max_samples: jint,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let ptr = env.get_direct_buffer_address(&buffer).unwrap_or(std::ptr::null_mut());
+        if ptr.is_null() || max_samples <= 0 {
+            return 0;
+        }
+        let samples = unsafe {
+            std::slice::from_raw_parts_mut(ptr as *mut i16, max_samples as usize)
+        };
+        h.engine.read_audio(samples) as jint
     }));
     result.unwrap_or(0)
 }
