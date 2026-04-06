@@ -41,8 +41,17 @@ fn init_logging() {
         let _ = std::panic::catch_unwind(|| {
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
+            use tracing_subscriber::EnvFilter;
             if let Ok(layer) = tracing_android::layer("wzp_android") {
-                let _ = tracing_subscriber::registry().with(layer).try_init();
+                // Filter: INFO for our crates, WARN for everything else.
+                // The jni crate emits VERBOSE logs for every method lookup
+                // (~10 lines per JNI call, 100+ calls/sec) which floods logcat
+                // and causes the system to kill the app.
+                let filter = EnvFilter::new("warn,wzp_android=info,wzp_proto=info,wzp_transport=info,wzp_codec=info,wzp_fec=info,wzp_crypto=info");
+                let _ = tracing_subscriber::registry()
+                    .with(layer)
+                    .with(filter)
+                    .try_init();
             }
         });
     });

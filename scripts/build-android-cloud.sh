@@ -196,6 +196,12 @@ do_upload() {
 do_build() {
   log "Building Rust native library (arm64-v8a, release)..."
 
+  # Clean Rust release target to force full rebuild.
+  # cargo-ndk only copies libc++_shared.so when it actually links — a partial
+  # clean that skips relinking leaves libc++_shared.so missing from jniLibs.
+  ssh_cmd "rm -rf /root/wzp-build/target/aarch64-linux-android/release \
+    /root/wzp-build/android/app/src/main/jniLibs/arm64-v8a"
+
   # ANDROID_NDK must be set (not just ANDROID_NDK_HOME) — cmake checks it
   ssh_cmd "source \$HOME/.cargo/env && \
     export ANDROID_HOME=\$HOME/android-sdk && \
