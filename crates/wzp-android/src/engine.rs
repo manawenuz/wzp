@@ -336,6 +336,12 @@ async fn run_call(
         let mut last_stats_log = Instant::now();
         let mut frames_sent: u64 = 0;
         let mut frames_dropped: u64 = 0;
+        // Per-step timing accumulators (reset every stats log)
+        let mut t_agc_us: u64 = 0;
+        let mut t_opus_us: u64 = 0;
+        let mut t_fec_us: u64 = 0;
+        let mut t_send_us: u64 = 0;
+        let mut t_frames: u64 = 0;
         loop {
             if !state.running.load(Ordering::Relaxed) {
                 break;
@@ -359,9 +365,12 @@ async fn run_call(
             }
 
             // AGC: normalize capture volume before encoding
+            let t0 = Instant::now();
             capture_agc.process_frame(&mut capture_buf);
+            t_agc_us += t0.elapsed().as_micros() as u64;
 
             // Opus encode
+            let t0 = Instant::now();
             let encoded_len = match encoder.encode(&capture_buf, &mut encode_buf) {
                 Ok(n) => n,
                 Err(e) => {
@@ -369,6 +378,7 @@ async fn run_call(
                     continue;
                 }
             };
+            t_opus_us += t0.elapsed().as_micros() as u64;
             let encoded = &encode_buf[..encoded_len];
 
             // Build source packet
@@ -394,6 +404,7 @@ async fn run_call(
             };
 
             // Send source packet — drop on error, never break
+            let t0 = Instant::now();
             if let Err(e) = transport.send_media(&source_pkt).await {
                 send_errors += 1;
                 frames_dropped += 1;
@@ -408,11 +419,14 @@ async fn run_call(
                     last_send_error_log = Instant::now();
                 }
                 // Don't feed to FEC either — the source is lost
+                t_send_us += t0.elapsed().as_micros() as u64;
                 continue;
             }
+            t_send_us += t0.elapsed().as_micros() as u64;
             frames_sent += 1;
 
             // Feed encoded frame to FEC encoder
+            let t0 = Instant::now();
             if let Err(e) = fec_enc.add_source_symbol(encoded) {
                 warn!("fec add_source error: {e}");
             }
@@ -469,9 +483,12 @@ async fn run_call(
                 block_id = block_id.wrapping_add(1);
                 frame_in_block = 0;
             }
+            t_fec_us += t0.elapsed().as_micros() as u64;
+            t_frames += 1;
 
             // Periodic stats every 5 seconds
             if last_stats_log.elapsed().as_secs() >= 5 {
+                let avg = |total: u64| if t_frames > 0 { total / t_frames } else { 0 };
                 info!(
                     seq = s,
                     block_id,
@@ -480,8 +497,14 @@ async fn run_call(
                     send_errors,
                     ring_avail = state.capture_ring.available(),
                     capture_overflows = state.capture_ring.overflow_count(),
+                    avg_agc_us = avg(t_agc_us),
+                    avg_opus_us = avg(t_opus_us),
+                    avg_fec_us = avg(t_fec_us),
+                    avg_send_us = avg(t_send_us),
+                    avg_total_us = avg(t_agc_us + t_opus_us + t_fec_us + t_send_us),
                     "send stats"
                 );
+                t_agc_us = 0; t_opus_us = 0; t_fec_us = 0; t_send_us = 0; t_frames = 0;
                 last_stats_log = Instant::now();
             }
         }
