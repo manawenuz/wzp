@@ -239,13 +239,17 @@ fun InCallScreen(
                 QualityIndicator(qualityTier, stats.qualityLabel)
 
                 if (stats.roomParticipantCount > 0) {
+                    // Dedup by fingerprint — same key = same person, even if
+                    // relay hasn't cleaned up stale entries yet.
+                    val unique = stats.roomParticipants
+                        .distinctBy { it.fingerprint.ifEmpty { it.displayName } }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "${stats.roomParticipantCount} in room",
+                        text = "${unique.size} in room",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    stats.roomParticipants.forEach { member ->
+                    unique.forEach { member ->
                         Text(
                             text = member.displayName,
                             style = MaterialTheme.typography.labelSmall,

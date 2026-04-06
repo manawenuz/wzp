@@ -148,21 +148,25 @@ impl WzpEngine {
     }
 
     pub fn stop_call(&mut self) {
+        info!("stop_call: setting running=false");
         self.state.running.store(false, Ordering::Release);
-        // Close QUIC connection first — queues a CONNECTION_CLOSE frame.
-        // Quinn needs the tokio runtime alive to actually send it on the wire,
-        // so we use shutdown_timeout() to give it time to flush.
+        // Close QUIC connection — this wakes up all blocked recv/send futures
+        // inside block_on(run_call(...)) on the JNI thread. run_call will then
+        // wait up to 500ms for the peer to acknowledge the close before returning.
         if let Some(transport) = self.state.quic_transport.lock().unwrap().take() {
+            info!("stop_call: closing QUIC connection");
             transport.close_now();
         }
         let _ = self.state.command_tx.send(EngineCommand::Stop);
+        // Note: the runtime is still blocked in block_on(run_call(...)) on the
+        // start_call thread. Once run_call exits (triggered by running=false +
+        // connection close above), block_on returns and stores the runtime in
+        // self.tokio_runtime. We don't need to shut it down here.
         if let Some(rt) = self.tokio_runtime.take() {
-            // Give quinn up to 500ms to send the CONNECTION_CLOSE frame.
-            // The desktop client uses 2s, but we keep it short on Android
-            // to avoid blocking the UI thread.
-            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+            rt.shutdown_timeout(std::time::Duration::from_millis(100));
         }
         self.call_start = None;
+        info!("stop_call: done");
     }
 
     pub fn set_mute(&self, muted: bool) {
@@ -585,12 +589,22 @@ async fn run_call(
     };
 
     tokio::select! {
-        _ = send_task => {}
-        _ = recv_task => {}
-        _ = stats_task => {}
-        _ = signal_task => {}
+        _ = send_task => info!("send task ended"),
+        _ = recv_task => info!("recv task ended"),
+        _ = stats_task => info!("stats task ended"),
+        _ = signal_task => info!("signal task ended"),
     }
 
-    transport.close().await.ok();
+    // Send CONNECTION_CLOSE and wait up to 500ms for the peer to acknowledge.
+    // This ensures the relay sees the close even if the first packet is lost.
+    info!("closing QUIC connection...");
+    transport.close_now();
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        transport.connection().closed(),
+    ).await {
+        Ok(_) => info!("QUIC connection closed cleanly"),
+        Err(_) => info!("QUIC close timed out (relay may not have ack'd)"),
+    }
     Ok(())
 }
