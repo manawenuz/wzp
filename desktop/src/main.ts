@@ -108,6 +108,29 @@ function renderRecentRooms(rooms: string[]) {
 
 applySettings();
 
+// Click fingerprint to copy
+myFingerprintEl.addEventListener("click", () => {
+  if (myFingerprint) {
+    navigator.clipboard.writeText(myFingerprint).then(() => {
+      const orig = myFingerprintEl.textContent;
+      myFingerprintEl.textContent = "Copied!";
+      setTimeout(() => { myFingerprintEl.textContent = orig; }, 1000);
+    });
+  }
+});
+myFingerprintEl.style.cursor = "pointer";
+
+sFingerprint.addEventListener("click", () => {
+  if (myFingerprint) {
+    navigator.clipboard.writeText(myFingerprint).then(() => {
+      const orig = sFingerprint.textContent;
+      sFingerprint.textContent = "Copied!";
+      setTimeout(() => { sFingerprint.textContent = orig; }, 1000);
+    });
+  }
+});
+sFingerprint.style.cursor = "pointer";
+
 // ── Connect ──
 connectBtn.addEventListener("click", doConnect);
 // Enter key to connect
@@ -277,6 +300,17 @@ listen("call-event", (event: any) => {
 });
 
 // ── Settings panel ──
+// Load fingerprint into settings when status is available
+async function refreshFingerprint() {
+  try {
+    const st: CallStatus = await invoke("get_status");
+    if (st.fingerprint) {
+      myFingerprint = st.fingerprint;
+      myFingerprintEl.textContent = `ID: ${st.fingerprint}`;
+    }
+  } catch {}
+}
+
 function openSettings() {
   const s = loadSettings();
   sRelay.value = s.relay;

@@ -333,8 +333,8 @@ impl CallEngine {
         !was
     }
 
-    pub fn status(&self) -> EngineStatus {
-        let parts = self.participants.blocking_lock();
+    pub async fn status(&self) -> EngineStatus {
+        let parts = self.participants.lock().await;
         EngineStatus {
             mic_muted: self.mic_muted.load(Ordering::Relaxed),
             spk_muted: self.spk_muted.load(Ordering::Relaxed),

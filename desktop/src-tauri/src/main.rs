@@ -108,7 +108,7 @@ async fn toggle_speaker(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, 
 async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus, String> {
     let engine_lock = state.engine.lock().await;
     if let Some(ref engine) = *engine_lock {
-        let status = engine.status();
+        let status = engine.status().await;
         Ok(CallStatus {
             active: true,
             mic_muted: status.mic_muted,
