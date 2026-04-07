@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use wzp_proto::MediaTransport;
 use wzp_relay::config::RelayConfig;
@@ -207,8 +207,39 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(wzp_relay::metrics::serve_metrics(port, m, p, rr));
     }
 
-    // Generate ephemeral relay identity for crypto handshake
-    let relay_seed = wzp_crypto::Seed::generate();
+    // Load or generate relay identity — persisted in ~/.wzp/relay-identity
+    let relay_seed = {
+        let config_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".wzp");
+        let identity_path = config_dir.join("relay-identity");
+        if identity_path.exists() {
+            if let Ok(hex) = std::fs::read_to_string(&identity_path) {
+                if let Ok(s) = wzp_crypto::Seed::from_hex(hex.trim()) {
+                    info!("loaded relay identity from {}", identity_path.display());
+                    s
+                } else {
+                    warn!("corrupt relay identity file, generating new");
+                    let s = wzp_crypto::Seed::generate();
+                    let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
+                    let _ = std::fs::write(&identity_path, &hex);
+                    s
+                }
+            } else {
+                let s = wzp_crypto::Seed::generate();
+                let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
+                let _ = std::fs::write(&identity_path, &hex);
+                s
+            }
+        } else {
+            let s = wzp_crypto::Seed::generate();
+            let _ = std::fs::create_dir_all(&config_dir);
+            let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
+            let _ = std::fs::write(&identity_path, &hex);
+            info!("generated relay identity at {}", identity_path.display());
+            s
+        }
+    };
     let relay_fp = relay_seed.derive_identity().public_identity().fingerprint;
     info!(addr = %config.listen_addr, fingerprint = %relay_fp, "WarzonePhone relay starting");
 
