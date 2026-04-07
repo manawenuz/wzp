@@ -16,8 +16,6 @@ use std::time::Instant;
 use bytes::Bytes;
 use tracing::{error, info, warn};
 use wzp_codec::agc::AutoGainControl;
-use wzp_codec::opus_dec::OpusDecoder;
-use wzp_codec::opus_enc::OpusEncoder;
 use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::{
@@ -333,11 +331,9 @@ async fn run_call(
         stats.state = CallState::Active;
     }
 
-    // Initialize Opus codec
-    let mut encoder =
-        OpusEncoder::new(profile).map_err(|e| anyhow::anyhow!("opus encoder init: {e}"))?;
-    let mut decoder =
-        OpusDecoder::new(profile).map_err(|e| anyhow::anyhow!("opus decoder init: {e}"))?;
+    // Initialize codec (Opus or Codec2 based on profile)
+    let mut encoder = wzp_codec::create_encoder(profile);
+    let mut decoder = wzp_codec::create_decoder(profile);
 
     // Initialize FEC encoder/decoder
     let mut fec_enc = wzp_fec::create_encoder(&profile);
@@ -598,6 +594,14 @@ async fn run_call(
 
                     // Source packets: decode directly
                     if !is_repair {
+                        // Switch decoder to match incoming codec if different
+                        if pkt.header.codec_id != decoder.codec_id() {
+                            let switch_profile = QualityProfile {
+                                codec: pkt.header.codec_id,
+                                ..profile
+                            };
+                            let _ = decoder.set_profile(switch_profile);
+                        }
                         match decoder.decode(&pkt.payload, &mut decode_buf) {
                             Ok(samples) => {
                                 playout_agc.process_frame(&mut decode_buf[..samples]);
