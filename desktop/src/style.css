@@ -651,3 +651,90 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .secondary-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* ── Quality slider ── */
+.quality-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.quality-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.quality-label {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.quality-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.quality-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.quality-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.quality-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--text-dim);
+  padding: 0 2px;
+}
+
+.form select {
+  background: var(--surface);
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form select:focus {
+  border-color: var(--accent);
+}
+
+.settings-section select {
+  background: var(--surface);
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+
+.settings-section select:focus {
+  border-color: var(--accent);
+}

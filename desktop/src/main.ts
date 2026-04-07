@@ -8,7 +8,6 @@ const callScreen = document.getElementById("call-screen")!;
 const roomInput = document.getElementById("room") as HTMLInputElement;
 const aliasInput = document.getElementById("alias") as HTMLInputElement;
 const osAecCheckbox = document.getElementById("os-aec") as HTMLInputElement;
-const qualitySelect = document.getElementById("quality") as HTMLSelectElement;
 const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
 const connectError = document.getElementById("connect-error")!;
 const roomName = document.getElementById("room-name")!;
@@ -49,7 +48,30 @@ const sRoom = document.getElementById("s-room") as HTMLInputElement;
 const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sAgc = document.getElementById("s-agc") as HTMLInputElement;
-const sQuality = document.getElementById("s-quality") as HTMLSelectElement;
+const sQuality = document.getElementById("s-quality") as HTMLInputElement;
+const sQualityLabel = document.getElementById("s-quality-label")!;
+
+// Quality slider config
+const QUALITY_STEPS = ["auto", "good", "degraded", "codec2-3200", "catastrophic"];
+const QUALITY_LABELS = ["Auto", "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"];
+const QUALITY_COLORS = ["#4ade80", "#4ade80", "#facc15", "#e97320", "#991b1b"];
+
+function qualityToIndex(q: string): number {
+  const idx = QUALITY_STEPS.indexOf(q);
+  return idx >= 0 ? idx : 0;
+}
+
+function updateQualityUI(index: number) {
+  sQualityLabel.textContent = QUALITY_LABELS[index];
+  sQualityLabel.style.color = QUALITY_COLORS[index];
+  const pct = index / (QUALITY_STEPS.length - 1);
+  // Gradient: green at left → yellow middle → dark red at right
+  sQuality.style.background = `linear-gradient(90deg, #4ade80 0%, #facc15 40%, #e97320 70%, #991b1b 100%)`;
+}
+
+sQuality.addEventListener("input", () => {
+  updateQualityUI(parseInt(sQuality.value));
+});
 const sFingerprint = document.getElementById("s-fingerprint")!;
 const sRecentRooms = document.getElementById("s-recent-rooms")!;
 const sClearRecent = document.getElementById("s-clear-recent")!;
@@ -159,7 +181,6 @@ function applySettings() {
   roomInput.value = s.room;
   aliasInput.value = s.alias;
   osAecCheckbox.checked = s.osAec;
-  qualitySelect.value = s.quality || "auto";
   renderRecentRooms(s.recentRooms);
   renderRelayButton();
 }
@@ -380,7 +401,7 @@ async function doConnect() {
   userDisconnected = false;
 
   const s = loadSettings();
-  s.room = roomInput.value; s.alias = aliasInput.value; s.osAec = osAecCheckbox.checked; s.quality = qualitySelect.value;
+  s.room = roomInput.value; s.alias = aliasInput.value; s.osAec = osAecCheckbox.checked;
   const room = roomInput.value.trim();
   if (room) {
     const entry: RecentRoom = { relay: relay.address, room };
@@ -392,7 +413,7 @@ async function doConnect() {
     await invoke("connect", {
       relay: relay.address, room: roomInput.value,
       alias: aliasInput.value, osAec: osAecCheckbox.checked,
-      quality: qualitySelect.value,
+      quality: s.quality || "auto",
     });
     showCallScreen();
   } catch (e: any) {
@@ -534,7 +555,10 @@ listen("call-event", (event: any) => {
 // ── Settings ──
 function openSettings() {
   const s = loadSettings();
-  sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec; sQuality.value = s.quality || "auto";
+  sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
+  const qi = qualityToIndex(s.quality || "auto");
+  sQuality.value = String(qi);
+  updateQualityUI(qi);
   sFingerprint.textContent = myFingerprint || "(loading...)";
   renderSettingsRecentRooms(s.recentRooms);
   settingsPanel.classList.remove("hidden");
@@ -569,9 +593,10 @@ settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel)
 
 settingsSave.addEventListener("click", () => {
   const s = loadSettings();
-  s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked; s.quality = sQuality.value;
+  s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked;
+  s.quality = QUALITY_STEPS[parseInt(sQuality.value)] || "auto";
   saveSettingsObj(s);
-  roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec; qualitySelect.value = s.quality;
+  roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec;
   renderRecentRooms(s.recentRooms);
   closeSettings();
 });

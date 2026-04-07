@@ -26,15 +26,6 @@
           <label>Alias
             <input id="alias" type="text" placeholder="your name" />
           </label>
-          <label>Quality
-            <select id="quality">
-              <option value="auto">Auto</option>
-              <option value="good">Opus 24k</option>
-              <option value="degraded">Opus 6k</option>
-              <option value="codec2-3200">Codec2 3.2k</option>
-              <option value="catastrophic">Codec2 1.2k</option>
-            </select>
-          </label>
           <div class="form-row">
             <label class="checkbox">
               <input id="os-aec" type="checkbox" checked />
@@ -100,15 +91,20 @@
           </div>
           <div class="settings-section">
             <h3>Audio</h3>
-            <label>Quality
-              <select id="s-quality">
-                <option value="auto">Auto (adaptive)</option>
-                <option value="good">Good — Opus 24kbps</option>
-                <option value="degraded">Degraded — Opus 6kbps</option>
-                <option value="codec2-3200">Codec2 3200bps</option>
-                <option value="catastrophic">Catastrophic — Codec2 1200bps</option>
-              </select>
-            </label>
+            <div class="quality-control">
+              <div class="quality-header">
+                <span class="setting-label">QUALITY</span>
+                <span id="s-quality-label" class="quality-label">Auto</span>
+              </div>
+              <input id="s-quality" type="range" min="0" max="4" step="1" value="0" class="quality-slider" />
+              <div class="quality-ticks">
+                <span>Auto</span>
+                <span>Opus 24k</span>
+                <span>Opus 6k</span>
+                <span>C2 3.2k</span>
+                <span>C2 1.2k</span>
+              </div>
+            </div>
             <label class="checkbox">
               <input id="s-os-aec" type="checkbox" />
               OS Echo Cancellation (macOS VoiceProcessingIO)
