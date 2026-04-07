@@ -184,6 +184,21 @@ async fn run_downstream(
     }
 }
 
+/// Detect a non-loopback IP address from local interfaces.
+/// Prefers public IPs over private (10.x, 172.16-31.x, 192.168.x).
+fn detect_public_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    // Connect to a public address to find our outbound IP (doesn't actually send anything)
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return Some(addr.ip().to_string());
+            }
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = parse_args();
@@ -242,6 +257,15 @@ async fn main() -> anyhow::Result<()> {
     };
     let relay_fp = relay_seed.derive_identity().public_identity().fingerprint;
     info!(addr = %config.listen_addr, fingerprint = %relay_fp, "WarzonePhone relay starting");
+
+    // Print federation hint with our public IP + listen port
+    let listen_port = config.listen_addr.port();
+    let public_ip = detect_public_ip();
+    if let Some(ip) = &public_ip {
+        info!("federation: to peer with this relay, add to peers config:");
+        info!("  - url: \"{ip}:{listen_port}\"");
+        info!("    fingerprint: \"{relay_fp}\"");
+    }
 
     let (server_config, _cert) = wzp_transport::server_config();
     let endpoint = wzp_transport::create_endpoint(config.listen_addr, Some(server_config))?;
