@@ -1,0 +1,74 @@
+# =============================================================================
+# WZ Phone — Android build environment (Debian 12 / Bookworm)
+#
+# Matches the bare-metal build-android.sh environment:
+#   - Debian 12 (cmake 3.25, no Android cross-compilation bugs)
+#   - JDK 17 (Gradle 8.5 + AGP 8.2.0 compatible)
+#   - NDK 26.1 (last stable before scudo/MTE crash on NDK 27+)
+#   - Rust stable with aarch64-linux-android target + cargo-ndk
+#
+# Build:  docker build -t wzp-android-builder -f Dockerfile.android-builder .
+# =============================================================================
+FROM debian:bookworm
+
+ARG NDK_VERSION=26.1.10909125
+ARG ANDROID_API=34
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    ANDROID_HOME=/opt/android-sdk \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION \
+    ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION
+
+# ── System packages ──────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        curl \
+        git \
+        libssl-dev \
+        pkg-config \
+        unzip \
+        wget \
+        zip \
+        openjdk-17-jdk-headless \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Android SDK + NDK 26.1 ──────────────────────────────────────────────────
+RUN mkdir -p $ANDROID_HOME/cmdline-tools \
+    && cd /tmp \
+    && wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip \
+    && unzip -qo cmdtools.zip -d $ANDROID_HOME/cmdline-tools \
+    && mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest \
+    && rm cmdtools.zip
+
+RUN yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 \
+    && $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+        "platforms;android-${ANDROID_API}" \
+        "build-tools;${ANDROID_API}.0.0" \
+        "ndk;${NDK_VERSION}" \
+        "platform-tools" \
+        2>&1 | grep -v '^\[' > /dev/null
+
+# Make SDK world-readable so builder user can access it
+RUN chmod -R a+rX $ANDROID_HOME
+
+# ── Builder user (1000:1000) ─────────────────────────────────────────────────
+RUN groupadd -g 1000 builder \
+    && useradd -m -u 1000 -g 1000 -s /bin/bash builder
+
+USER builder
+WORKDIR /home/builder
+
+# ── Rust toolchain ───────────────────────────────────────────────────────────
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable \
+    && . $HOME/.cargo/env \
+    && rustup target add aarch64-linux-android \
+    && cargo install cargo-ndk
+
+ENV PATH="/home/builder/.cargo/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
+
+WORKDIR /build/source
