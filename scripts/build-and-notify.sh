@@ -44,6 +44,8 @@ DO_PULL="${2:-0}"
 
 notify() { curl -s -d "$1" "$NTFY_TOPIC" > /dev/null 2>&1 || true; }
 
+trap 'notify "WZP Android build FAILED! Check /tmp/wzp-build.log"' ERR
+
 # Pull if requested
 if [ "$DO_PULL" = "1" ]; then
     echo ">>> Pulling latest..."

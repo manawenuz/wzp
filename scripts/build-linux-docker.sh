@@ -46,6 +46,8 @@ DO_CLEAN="${2:-0}"
 
 notify() { curl -s -d "$1" "$NTFY_TOPIC" > /dev/null 2>&1 || true; }
 
+trap 'notify "WZP Linux build FAILED! Check /tmp/wzp-linux-build.log"' ERR
+
 if [ "$DO_PULL" = "1" ]; then
     echo ">>> Pulling latest..."
     cd "$BASE_DIR/data/source"
