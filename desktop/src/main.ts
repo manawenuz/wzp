@@ -76,6 +76,13 @@ const sFingerprint = document.getElementById("s-fingerprint")!;
 const sRecentRooms = document.getElementById("s-recent-rooms")!;
 const sClearRecent = document.getElementById("s-clear-recent")!;
 
+// Key warning dialog
+const keyWarning = document.getElementById("key-warning")!;
+const kwOldFp = document.getElementById("kw-old-fp")!;
+const kwNewFp = document.getElementById("kw-new-fp")!;
+const kwAccept = document.getElementById("kw-accept")!;
+const kwCancel = document.getElementById("kw-cancel")!;
+
 let statusInterval: number | null = null;
 let myFingerprint = "";
 let userDisconnected = false;
@@ -377,6 +384,28 @@ connectBtn.addEventListener("click", doConnect);
   el.addEventListener("keydown", (e) => { if (e.key === "Enter") doConnect(); })
 );
 
+function showKeyWarning(oldFp: string, newFp: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    kwOldFp.textContent = oldFp;
+    kwNewFp.textContent = newFp;
+    keyWarning.classList.remove("hidden");
+
+    const cleanup = () => {
+      keyWarning.classList.add("hidden");
+      kwAccept.removeEventListener("click", onAccept);
+      kwCancel.removeEventListener("click", onCancel);
+      keyWarning.removeEventListener("click", onBackdrop);
+    };
+    const onAccept = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    const onBackdrop = (e: Event) => { if (e.target === keyWarning) { cleanup(); resolve(false); } };
+
+    kwAccept.addEventListener("click", onAccept);
+    kwCancel.addEventListener("click", onCancel);
+    keyWarning.addEventListener("click", onBackdrop);
+  });
+}
+
 async function doConnect() {
   const relay = getSelectedRelay();
   if (!relay) { connectError.textContent = "No relay selected"; return; }
@@ -384,13 +413,13 @@ async function doConnect() {
   // Warn on fingerprint mismatch
   const ls = lockStatus(relay);
   if (ls === "changed") {
-    if (!confirm(`Server fingerprint has changed!\n\nKnown: ${relay.knownFingerprint}\nNew: ${relay.serverFingerprint}\n\nThis could indicate a man-in-the-middle attack. Continue?`)) {
-      return;
-    }
+    const accepted = await showKeyWarning(relay.knownFingerprint || "", relay.serverFingerprint || "");
+    if (!accepted) return;
     // User accepted — update known fingerprint
     const s = loadSettings();
     s.relays[s.selectedRelay].knownFingerprint = relay.serverFingerprint;
     saveSettingsObj(s);
+    renderRelayButton();
   }
 
   // Don't block connect on offline — ping may have failed transiently

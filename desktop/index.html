@@ -151,6 +151,28 @@
           </div>
         </div>
       </div>
+      <!-- Key changed warning dialog -->
+      <div id="key-warning" class="hidden">
+        <div class="settings-card key-warning-card">
+          <div class="key-warning-icon">&#9888;</div>
+          <h2>Server Key Changed</h2>
+          <p class="key-warning-text">The relay's identity has changed since you last connected. This usually happens when the server was restarted, but could also indicate a security issue.</p>
+          <div class="key-warning-fps">
+            <div class="key-fp-row">
+              <span class="key-fp-label">Previously known</span>
+              <code id="kw-old-fp" class="key-fp"></code>
+            </div>
+            <div class="key-fp-row">
+              <span class="key-fp-label">New key</span>
+              <code id="kw-new-fp" class="key-fp"></code>
+            </div>
+          </div>
+          <div class="key-warning-actions">
+            <button id="kw-accept" class="primary">Accept New Key</button>
+            <button id="kw-cancel" class="secondary-btn">Cancel</button>
+          </div>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
