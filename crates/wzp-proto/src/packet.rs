@@ -656,6 +656,25 @@ pub enum SignalMessage {
         /// List of participants currently in the room.
         participants: Vec<RoomParticipant>,
     },
+
+    // ── Federation signals (relay-to-relay) ──
+
+    /// Federation: a room exists on the sending relay with active local participants.
+    FederationRoomJoin {
+        room: String,
+        participants: Vec<RoomParticipant>,
+    },
+
+    /// Federation: a room is now empty on the sending relay.
+    FederationRoomLeave {
+        room: String,
+    },
+
+    /// Federation: local participant list changed for a federated room.
+    FederationParticipantUpdate {
+        room: String,
+        participants: Vec<RoomParticipant>,
+    },
 }
 
 /// A participant entry in a RoomUpdate message.

@@ -33,6 +33,13 @@ impl QuinnTransport {
         &self.connection
     }
 
+    /// Send raw bytes as a QUIC datagram (no MediaPacket framing).
+    pub fn send_raw_datagram(&self, data: &[u8]) -> Result<(), TransportError> {
+        self.connection
+            .send_datagram(bytes::Bytes::copy_from_slice(data))
+            .map_err(|e| TransportError::Internal(format!("datagram: {e}")))
+    }
+
     /// Close the QUIC connection immediately (synchronous, no async needed).
     /// The relay will detect the close and remove this participant from the room.
     pub fn close_now(&self) {

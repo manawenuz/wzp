@@ -320,6 +320,21 @@ async fn main() -> anyhow::Result<()> {
     // Room manager (room mode only)
     let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
 
+    // Federation manager
+    let federation_mgr = if !config.peers.is_empty() {
+        let fm = Arc::new(wzp_relay::federation::FederationManager::new(
+            config.peers.clone(),
+            room_mgr.clone(),
+            endpoint.clone(),
+            tls_fp.clone(),
+        ));
+        let fm_run = fm.clone();
+        tokio::spawn(async move { fm_run.run().await });
+        Some(fm)
+    } else {
+        None
+    };
+
     // Session manager — enforces max concurrent sessions
     let session_mgr = Arc::new(Mutex::new(SessionManager::new(config.max_sessions)));
 
@@ -375,6 +390,7 @@ async fn main() -> anyhow::Result<()> {
         let trunking_enabled = config.trunking_enabled;
         let presence = presence.clone();
         let route_resolver = route_resolver.clone();
+        let federation_mgr = federation_mgr.clone();
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -479,6 +495,38 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 transport.close().await.ok();
+                return;
+            }
+
+            // Federation connections use SNI "_federation"
+            if room_name == "_federation" {
+                if let Some(ref fm) = federation_mgr {
+                    // Check if we recognize this peer by TLS fingerprint
+                    let peer_fp = wzp_transport::tls_fingerprint(
+                        &transport.connection()
+                            .peer_identity()
+                            .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
+                            .and_then(|certs| certs.first().cloned())
+                            .map(|c| c.to_vec())
+                            .unwrap_or_default()
+                    );
+                    if let Some(peer_config) = fm.find_peer_by_fingerprint(&peer_fp) {
+                        let peer_config = peer_config.clone();
+                        let fm = fm.clone();
+                        info!(%addr, label = ?peer_config.label, "inbound federation connection accepted");
+                        fm.handle_inbound(transport, peer_config).await;
+                    } else {
+                        warn!(%addr, "unknown relay wants to federate");
+                        info!("  to accept, add to relay.toml:");
+                        info!("  [[peers]]");
+                        info!("  url = \"{addr}\"");
+                        info!("  fingerprint = \"{peer_fp}\"");
+                        transport.close().await.ok();
+                    }
+                } else {
+                    info!(%addr, "federation connection rejected (no peers configured)");
+                    transport.close().await.ok();
+                }
                 return;
             }
 
