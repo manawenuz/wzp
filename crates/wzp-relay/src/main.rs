@@ -24,11 +24,34 @@ use wzp_relay::room::{self, RoomManager};
 use wzp_relay::session_mgr::SessionManager;
 
 fn parse_args() -> RelayConfig {
-    let mut config = RelayConfig::default();
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for --config first to use as base
+    let mut config_file = None;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--config" {
+            i += 1;
+            config_file = args.get(i).cloned();
+        }
+        i += 1;
+    }
+
+    let mut config = if let Some(ref path) = config_file {
+        wzp_relay::config::load_config(path)
+            .unwrap_or_else(|e| {
+                eprintln!("failed to load config from {path}: {e}");
+                std::process::exit(1);
+            })
+    } else {
+        RelayConfig::default()
+    };
+
+    // CLI flags override config file values
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--config" => { i += 1; } // already handled
             "--listen" => {
                 i += 1;
                 config.listen_addr = args.get(i).expect("--listen requires an address")
@@ -90,9 +113,10 @@ fn parse_args() -> RelayConfig {
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-relay [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]... [--probe-mesh] [--mesh-status]");
+                eprintln!("Usage: wzp-relay [--config <path>] [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]... [--probe-mesh] [--mesh-status]");
                 eprintln!();
                 eprintln!("Options:");
+                eprintln!("  --config <path>        Load configuration from TOML file (peers, listen, etc.)");
                 eprintln!("  --listen <addr>        Listen address (default: 0.0.0.0:4433)");
                 eprintln!("  --remote <addr>        Remote relay for forwarding (disables room mode)");
                 eprintln!("  --auth-url <url>       featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
@@ -258,18 +282,27 @@ async fn main() -> anyhow::Result<()> {
     let relay_fp = relay_seed.derive_identity().public_identity().fingerprint;
     info!(addr = %config.listen_addr, fingerprint = %relay_fp, "WarzonePhone relay starting");
 
-    // Print federation hint with our public IP + listen port
-    let listen_port = config.listen_addr.port();
-    let public_ip = detect_public_ip();
-    if let Some(ip) = &public_ip {
-        info!("federation: to peer with this relay, add to peers config:");
-        info!("  - url: \"{ip}:{listen_port}\"");
-        info!("    fingerprint: \"{relay_fp}\"");
-    }
-
     let (server_config, cert_der) = wzp_transport::server_config_from_seed(&relay_seed.0);
     let tls_fp = wzp_transport::tls_fingerprint(&cert_der);
     info!(tls_fingerprint = %tls_fp, "TLS certificate (deterministic from relay identity)");
+
+    // Print federation hint with our public IP + listen port + TLS fingerprint
+    let listen_port = config.listen_addr.port();
+    let public_ip = detect_public_ip();
+    if let Some(ip) = &public_ip {
+        info!("federation: to peer with this relay, add to relay.toml:");
+        info!("  [[peers]]");
+        info!("  url = \"{ip}:{listen_port}\"");
+        info!("  fingerprint = \"{tls_fp}\"");
+    }
+
+    // Log configured peers
+    if !config.peers.is_empty() {
+        info!(count = config.peers.len(), "federation peers configured");
+        for p in &config.peers {
+            info!(url = %p.url, label = ?p.label, "  peer");
+        }
+    }
     let endpoint = wzp_transport::create_endpoint(config.listen_addr, Some(server_config))?;
 
     // Forward mode

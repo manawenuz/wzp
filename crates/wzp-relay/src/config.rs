@@ -3,8 +3,24 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-/// Configuration for the relay daemon.
+/// A federated peer relay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerConfig {
+    /// Address of the peer relay (e.g., "193.180.213.68:4433").
+    pub url: String,
+    /// Expected TLS certificate fingerprint (hex, with colons).
+    pub fingerprint: String,
+    /// Optional human-readable label.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Configuration for the relay daemon.
+///
+/// All fields have defaults, so a minimal TOML file only needs the
+/// fields you want to override (e.g., just `[[peers]]`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RelayConfig {
     /// Address to listen on for incoming connections (client-facing).
     pub listen_addr: SocketAddr,
@@ -44,6 +60,9 @@ pub struct RelayConfig {
     pub ws_port: Option<u16>,
     /// Directory to serve static files from (HTML/JS/WASM for web clients).
     pub static_dir: Option<String>,
+    /// Federation peer relays.
+    #[serde(default)]
+    pub peers: Vec<PeerConfig>,
 }
 
 impl Default for RelayConfig {
@@ -62,6 +81,14 @@ impl Default for RelayConfig {
             trunking_enabled: false,
             ws_port: None,
             static_dir: None,
+            peers: Vec::new(),
         }
     }
+}
+
+/// Load relay configuration from a TOML file.
+pub fn load_config(path: &str) -> Result<RelayConfig, anyhow::Error> {
+    let content = std::fs::read_to_string(path)?;
+    let config: RelayConfig = toml::from_str(&content)?;
+    Ok(config)
 }
