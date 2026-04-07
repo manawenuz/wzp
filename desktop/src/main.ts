@@ -368,7 +368,7 @@ async function doConnect() {
     saveSettingsObj(s);
   }
 
-  if (ls === "offline") { connectError.textContent = "Relay is offline"; return; }
+  // Don't block connect on offline — ping may have failed transiently
 
   connectError.textContent = "";
   connectBtn.disabled = true;
