@@ -318,71 +318,22 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeDestroy(
     }));
 }
 
-/// Ping a relay server — returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}` or null on failure.
-/// Does NOT require an engine handle — creates a temporary QUIC connection.
+/// Ping a relay server — instance method, requires engine handle.
+/// Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}` or null on failure.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePingRelay<'a>(
     mut env: JNIEnv<'a>,
     _class: JClass,
+    handle: jlong,
     relay_j: JString,
 ) -> jstring {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
         let relay: String = env.get_string(&relay_j).map(|s| s.into()).unwrap_or_default();
-        let addr: std::net::SocketAddr = match relay.parse() {
-            Ok(a) => a,
-            Err(_) => return None,
-        };
-
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => return None,
-        };
-
-        rt.block_on(async {
-            let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
-            let endpoint = match wzp_transport::create_endpoint(bind, None) {
-                Ok(e) => e,
-                Err(_) => return None,
-            };
-            let client_cfg = wzp_transport::client_config();
-            let start = std::time::Instant::now();
-
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                wzp_transport::connect(&endpoint, addr, "ping", client_cfg),
-            )
-            .await
-            {
-                Ok(Ok(conn)) => {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    let server_fp = conn
-                        .peer_identity()
-                        .and_then(|id| {
-                            id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok()
-                        })
-                        .and_then(|certs| {
-                            certs.first().map(|c| {
-                                use std::hash::{Hash, Hasher};
-                                let mut h = std::collections::hash_map::DefaultHasher::new();
-                                c.as_ref().hash(&mut h);
-                                format!("{:016x}", h.finish())
-                            })
-                        })
-                        .unwrap_or_default();
-                    conn.close(0u32.into(), b"ping");
-                    Some(format!(
-                        r#"{{"rtt_ms":{},"server_fingerprint":"{}"}}"#,
-                        rtt_ms, server_fp
-                    ))
-                }
-                _ => None,
-            }
-        })
+        match h.engine.ping_relay(&relay) {
+            Ok(json) => Some(json),
+            Err(_) => None,
+        }
     }));
 
     let json = match result {

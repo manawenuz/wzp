@@ -169,6 +169,46 @@ impl WzpEngine {
         info!("stop_call: done");
     }
 
+    /// Ping a relay — same pattern as start_call (creates runtime on calling thread).
+    /// Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}` or error.
+    pub fn ping_relay(&self, address: &str) -> Result<String, anyhow::Error> {
+        let addr: SocketAddr = address.parse()?;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        rt.block_on(async {
+            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            let endpoint = wzp_transport::create_endpoint(bind, None)?;
+            let client_cfg = wzp_transport::client_config();
+            let start = Instant::now();
+
+            let conn = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                wzp_transport::connect(&endpoint, addr, "ping", client_cfg),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout"))??;
+
+            let rtt_ms = start.elapsed().as_millis() as u64;
+            let server_fp = conn
+                .peer_identity()
+                .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
+                .and_then(|certs| certs.first().map(|c| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    c.as_ref().hash(&mut h);
+                    format!("{:016x}", h.finish())
+                }))
+                .unwrap_or_default();
+            conn.close(0u32.into(), b"ping");
+
+            Ok(format!(r#"{{"rtt_ms":{},"server_fingerprint":"{}"}}"#, rtt_ms, server_fp))
+        })
+    }
+
     pub fn set_mute(&self, muted: bool) {
         self.state.muted.store(muted, Ordering::Relaxed);
     }

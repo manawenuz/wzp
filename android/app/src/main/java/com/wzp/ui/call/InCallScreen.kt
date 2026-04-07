@@ -90,8 +90,11 @@ fun InCallScreen(
 
     var showManageRelays by remember { mutableStateOf(false) }
 
-    // Load saved ping results from last ping-and-exit cycle
-    LaunchedEffect(Unit) { viewModel.loadSavedPingResults() }
+    // Ping servers on launch — engine init + QUIC ping, no restart needed
+    LaunchedEffect(Unit) {
+        viewModel.loadSavedFingerprints()
+        viewModel.pingAllServers()
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -224,21 +227,6 @@ fun InCallScreen(
                         "Connect",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                         color = Color.White
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Ping button — pings all servers via native QUIC, saves results, exits app
-                OutlinedButton(
-                    onClick = { viewModel.pingAndExit() },
-                    modifier = Modifier.fillMaxWidth().height(40.dp),
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    Text(
-                        "Ping Servers (restarts app)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextDim
                     )
                 }
 

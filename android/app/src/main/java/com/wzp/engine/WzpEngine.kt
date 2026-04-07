@@ -153,20 +153,21 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeWriteAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, sampleCount: Int): Int
     private external fun nativeReadAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, maxSamples: Int): Int
     private external fun nativeDestroy(handle: Long)
+    private external fun nativePingRelay(handle: Long, relay: String): String?
+
+    /**
+     * Ping a relay server. Requires engine to be initialized.
+     * Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}` or null.
+     */
+    fun pingRelay(address: String): String? {
+        if (nativeHandle == 0L) return null
+        return nativePingRelay(nativeHandle, address)
+    }
 
     companion object {
         init {
             System.loadLibrary("wzp_android")
         }
-
-        /**
-         * Ping a relay server. Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}`
-         * or null if unreachable. Does not require an engine instance.
-         */
-        fun pingRelay(address: String): String? = nativePingRelay(address)
-
-        @JvmStatic
-        private external fun nativePingRelay(relay: String): String?
     }
 }
 

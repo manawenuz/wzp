@@ -208,53 +208,59 @@ class CallViewModel : ViewModel(), WzpCallback {
         settings?.saveSelectedServer(_selectedServer.value)
     }
 
-    /** Load saved ping results from last ping-and-exit cycle. */
-    fun loadSavedPingResults() {
-        val s = settings ?: return
-        val results = mutableMapOf<String, PingResult>()
-        val known = mutableMapOf<String, String>()
-        _servers.value.forEach { server ->
-            val rtt = s.loadPingRtt(server.address)
-            val fp = s.loadServerFingerprint(server.address)
-            if (rtt >= 0) {
-                results[server.address] = PingResult(rttMs = rtt, serverFingerprint = fp ?: "")
-            }
-            fp?.let { known[server.address] = it }
-        }
-        _pingResults.value = results
-        _knownFingerprints.value = known
-    }
-
     /**
-     * Ping all servers via native QUIC, save results, then exit process.
-     * On restart, saved results are loaded. This avoids the jemalloc crash
-     * by ensuring the native .so is only loaded once per process lifetime.
+     * Ping all servers via native QUIC. Requires engine to be initialized.
+     * Creates engine if needed, pings, keeps engine alive for subsequent Connect.
      */
-    fun pingAndExit() {
+    fun pingAllServers() {
         viewModelScope.launch {
-            val results = mutableMapOf<String, PingResult>()
-            _servers.value.forEach { server ->
-                val pr = withContext(Dispatchers.IO) {
-                    com.wzp.net.RelayPinger.ping(server.address)
+            // Ensure engine exists
+            if (engine == null || engine?.isInitialized != true) {
+                try {
+                    engine = WzpEngine(this@CallViewModel).also { it.init() }
+                    engineInitialized = true
+                } catch (e: Exception) {
+                    Log.w(TAG, "engine init for ping failed: $e")
+                    return@launch
                 }
-                results[server.address] = PingResult(
-                    rttMs = pr.rttMs,
-                    serverFingerprint = pr.serverFingerprint,
-                )
-                // Save results
-                settings?.savePingRtt(server.address, pr.rttMs)
-                if (pr.serverFingerprint.isNotEmpty()) {
-                    val saved = settings?.loadServerFingerprint(server.address)
-                    if (saved == null) {
-                        settings?.saveServerFingerprint(server.address, pr.serverFingerprint)
-                    }
+            }
+            val eng = engine ?: return@launch
+
+            val results = mutableMapOf<String, PingResult>()
+            val known = mutableMapOf<String, String>()
+            _servers.value.forEach { server ->
+                val json = withContext(Dispatchers.IO) {
+                    eng.pingRelay(server.address)
+                }
+                if (json != null) {
+                    try {
+                        val obj = JSONObject(json)
+                        val rtt = obj.getInt("rtt_ms")
+                        val fp = obj.optString("server_fingerprint", "")
+                        results[server.address] = PingResult(rttMs = rtt, serverFingerprint = fp)
+                        // TOFU
+                        if (fp.isNotEmpty()) {
+                            val saved = settings?.loadServerFingerprint(server.address)
+                            if (saved == null) settings?.saveServerFingerprint(server.address, fp)
+                            known[server.address] = saved ?: fp
+                        }
+                    } catch (_: Exception) {}
                 }
             }
             _pingResults.value = results
-            // Exit process — next launch loads saved results, native .so reinits cleanly
-            delay(300) // let UI update
-            System.exit(0)
+            _knownFingerprints.value = known
         }
+    }
+
+    /** Load saved TOFU fingerprints. */
+    fun loadSavedFingerprints() {
+        val known = mutableMapOf<String, String>()
+        _servers.value.forEach { server ->
+            settings?.loadServerFingerprint(server.address)?.let {
+                known[server.address] = it
+            }
+        }
+        _knownFingerprints.value = known
     }
 
     /** Get lock status for a server. */
