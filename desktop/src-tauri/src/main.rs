@@ -55,16 +55,19 @@ async fn ping_relay(relay: String) -> Result<PingResult, String> {
     let client_cfg = wzp_transport::client_config();
 
     let start = std::time::Instant::now();
-    match tokio::time::timeout(
+    let conn_result = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         wzp_transport::connect(&endpoint, addr, "ping", client_cfg),
     )
-    .await
-    {
+    .await;
+
+    // Always close endpoint to prevent resource leaks
+    endpoint.close(0u32.into(), b"done");
+
+    match conn_result {
         Ok(Ok(conn)) => {
             let rtt_ms = start.elapsed().as_millis() as u32;
 
-            // Extract server fingerprint from peer certificate
             let server_fingerprint = conn
                 .peer_identity()
                 .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
@@ -76,7 +79,6 @@ async fn ping_relay(relay: String) -> Result<PingResult, String> {
                     format!("{h:016x}")
                 }))
                 .unwrap_or_else(|| {
-                    // Fallback: hash the remote address as identifier
                     format!("{:x}", addr.ip().to_string().len() as u64 * 0x9e3779b97f4a7c15 + addr.port() as u64)
                 });
 
