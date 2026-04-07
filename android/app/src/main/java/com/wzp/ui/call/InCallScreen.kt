@@ -90,12 +90,13 @@ fun InCallScreen(
 
     var showManageRelays by remember { mutableStateOf(false) }
 
-    // Periodic ping every 5 seconds while app is open
+    // Ping once on launch, then every 5 minutes
     LaunchedEffect(Unit) {
         viewModel.loadSavedFingerprints()
+        viewModel.pingAllServers()
         while (true) {
+            kotlinx.coroutines.delay(300_000) // 5 minutes
             viewModel.pingAllServers()
-            kotlinx.coroutines.delay(5000)
         }
     }
 

@@ -177,19 +177,22 @@ impl WzpEngine {
             .enable_all()
             .build()?;
 
-        rt.block_on(async {
+        let result = rt.block_on(async {
             let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
             let endpoint = wzp_transport::create_endpoint(bind, None)?;
             let client_cfg = wzp_transport::client_config();
             let start = Instant::now();
 
-            let conn = tokio::time::timeout(
+            let conn_result = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 wzp_transport::connect(&endpoint, addr, "ping", client_cfg),
             )
-            .await
-            .map_err(|_| anyhow::anyhow!("timeout"))??;
+            .await;
 
+            // Always close endpoint to prevent resource leaks
+            endpoint.close(0u32.into(), b"done");
+
+            let conn = conn_result.map_err(|_| anyhow::anyhow!("timeout"))??;
             let rtt_ms = start.elapsed().as_millis() as u64;
             let server_fp = conn
                 .peer_identity()
@@ -203,8 +206,12 @@ impl WzpEngine {
                 .unwrap_or_default();
             conn.close(0u32.into(), b"ping");
 
-            Ok(format!(r#"{{"rtt_ms":{},"server_fingerprint":"{}"}}"#, rtt_ms, server_fp))
-        })
+            Ok::<_, anyhow::Error>(format!(r#"{{"rtt_ms":{},"server_fingerprint":"{}"}}"#, rtt_ms, server_fp))
+        });
+
+        // Shutdown runtime cleanly with timeout
+        rt.shutdown_timeout(std::time::Duration::from_millis(500));
+        result
     }
 
     pub fn set_mute(&self, muted: bool) {
