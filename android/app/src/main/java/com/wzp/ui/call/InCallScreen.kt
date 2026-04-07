@@ -90,10 +90,13 @@ fun InCallScreen(
 
     var showManageRelays by remember { mutableStateOf(false) }
 
-    // Ping servers on launch — engine init + QUIC ping, no restart needed
+    // Periodic ping every 5 seconds while app is open
     LaunchedEffect(Unit) {
         viewModel.loadSavedFingerprints()
-        viewModel.pingAllServers()
+        while (true) {
+            viewModel.pingAllServers()
+            kotlinx.coroutines.delay(5000)
+        }
     }
 
     Surface(
