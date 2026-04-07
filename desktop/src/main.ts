@@ -8,6 +8,7 @@ const callScreen = document.getElementById("call-screen")!;
 const roomInput = document.getElementById("room") as HTMLInputElement;
 const aliasInput = document.getElementById("alias") as HTMLInputElement;
 const osAecCheckbox = document.getElementById("os-aec") as HTMLInputElement;
+const qualitySelect = document.getElementById("quality") as HTMLSelectElement;
 const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
 const connectError = document.getElementById("connect-error")!;
 const roomName = document.getElementById("room-name")!;
@@ -48,6 +49,7 @@ const sRoom = document.getElementById("s-room") as HTMLInputElement;
 const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sAgc = document.getElementById("s-agc") as HTMLInputElement;
+const sQuality = document.getElementById("s-quality") as HTMLSelectElement;
 const sFingerprint = document.getElementById("s-fingerprint")!;
 const sRecentRooms = document.getElementById("s-recent-rooms")!;
 const sClearRecent = document.getElementById("s-clear-recent")!;
@@ -74,6 +76,7 @@ interface Settings {
   alias: string;
   osAec: boolean;
   agc: boolean;
+  quality: string;
   recentRooms: RecentRoom[];
 }
 
@@ -81,7 +84,7 @@ function loadSettings(): Settings {
   const defaults: Settings = {
     relays: [{ name: "Default", address: "193.180.213.68:4433" }],
     selectedRelay: 0, room: "android", alias: "",
-    osAec: true, agc: true, recentRooms: [],
+    osAec: true, agc: true, quality: "auto", recentRooms: [],
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
@@ -156,6 +159,7 @@ function applySettings() {
   roomInput.value = s.room;
   aliasInput.value = s.alias;
   osAecCheckbox.checked = s.osAec;
+  qualitySelect.value = s.quality || "auto";
   renderRecentRooms(s.recentRooms);
   renderRelayButton();
 }
@@ -376,7 +380,7 @@ async function doConnect() {
   userDisconnected = false;
 
   const s = loadSettings();
-  s.room = roomInput.value; s.alias = aliasInput.value; s.osAec = osAecCheckbox.checked;
+  s.room = roomInput.value; s.alias = aliasInput.value; s.osAec = osAecCheckbox.checked; s.quality = qualitySelect.value;
   const room = roomInput.value.trim();
   if (room) {
     const entry: RecentRoom = { relay: relay.address, room };
@@ -388,6 +392,7 @@ async function doConnect() {
     await invoke("connect", {
       relay: relay.address, room: roomInput.value,
       alias: aliasInput.value, osAec: osAecCheckbox.checked,
+      quality: qualitySelect.value,
     });
     showCallScreen();
   } catch (e: any) {
@@ -529,7 +534,7 @@ listen("call-event", (event: any) => {
 // ── Settings ──
 function openSettings() {
   const s = loadSettings();
-  sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
+  sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec; sQuality.value = s.quality || "auto";
   sFingerprint.textContent = myFingerprint || "(loading...)";
   renderSettingsRecentRooms(s.recentRooms);
   settingsPanel.classList.remove("hidden");
@@ -564,9 +569,9 @@ settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel)
 
 settingsSave.addEventListener("click", () => {
   const s = loadSettings();
-  s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked;
+  s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked; s.quality = sQuality.value;
   saveSettingsObj(s);
-  roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec;
+  roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec; qualitySelect.value = s.quality;
   renderRecentRooms(s.recentRooms);
   closeSettings();
 });

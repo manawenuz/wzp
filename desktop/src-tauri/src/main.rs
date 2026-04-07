@@ -122,6 +122,7 @@ async fn connect(
     room: String,
     alias: String,
     os_aec: bool,
+    quality: String,
 ) -> Result<String, String> {
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
@@ -129,7 +130,7 @@ async fn connect(
     }
 
     let app_clone = app.clone();
-    match CallEngine::start(relay, room, alias, os_aec, move |event_kind, message| {
+    match CallEngine::start(relay, room, alias, os_aec, quality, move |event_kind, message| {
         let _ = app_clone.emit(
             "call-event",
             CallEvent {

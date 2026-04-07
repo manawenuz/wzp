@@ -11,9 +11,27 @@ use tracing::{error, info};
 
 use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 use wzp_client::call::{CallConfig, CallEncoder};
-use wzp_proto::MediaTransport;
+use wzp_proto::{CodecId, MediaTransport, QualityProfile};
 
-const FRAME_SAMPLES: usize = 960;
+const FRAME_SAMPLES_20MS: usize = 960;
+const FRAME_SAMPLES_40MS: usize = 1920;
+
+/// Resolve a quality string from the UI to a QualityProfile.
+/// Returns None for "auto" (use default adaptive behavior).
+fn resolve_quality(quality: &str) -> Option<QualityProfile> {
+    match quality {
+        "good" | "opus" => Some(QualityProfile::GOOD),
+        "degraded" | "opus6k" => Some(QualityProfile::DEGRADED),
+        "catastrophic" | "codec2-1200" => Some(QualityProfile::CATASTROPHIC),
+        "codec2-3200" => Some(QualityProfile {
+            codec: CodecId::Codec2_3200,
+            fec_ratio: 0.5,
+            frame_duration_ms: 20,
+            frames_per_block: 5,
+        }),
+        _ => None, // "auto" or unknown
+    }
+}
 
 /// Wrapper to make non-Sync audio handles safe to store in shared state.
 /// The audio handle is only accessed from the thread that created it (drop),
@@ -60,6 +78,7 @@ impl CallEngine {
         room: String,
         alias: String,
         _os_aec: bool,
+        quality: String,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
@@ -173,21 +192,32 @@ impl CallEngine {
         let send_fs = frames_sent.clone();
         let send_level = audio_level.clone();
         let send_drops = Arc::new(AtomicU64::new(0));
+        let send_quality = quality.clone();
         tokio::spawn(async move {
-            let config = CallConfig {
-                noise_suppression: false,
-                suppression_enabled: false,
-                ..CallConfig::default()
+            let profile = resolve_quality(&send_quality);
+            let config = match profile {
+                Some(p) => CallConfig {
+                    noise_suppression: false,
+                    suppression_enabled: false,
+                    ..CallConfig::from_profile(p)
+                },
+                None => CallConfig {
+                    noise_suppression: false,
+                    suppression_enabled: false,
+                    ..CallConfig::default()
+                },
             };
+            let frame_samples = (config.profile.frame_duration_ms as usize) * 48;
+            info!(codec = ?config.profile.codec, frame_samples, "send task starting");
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false); // OS AEC or none
-            let mut buf = vec![0i16; FRAME_SAMPLES];
+            let mut buf = vec![0i16; frame_samples];
 
             loop {
                 if !send_r.load(Ordering::Relaxed) {
                     break;
                 }
-                if capture_ring.available() < FRAME_SAMPLES {
+                if capture_ring.available() < frame_samples {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     continue;
                 }
@@ -221,15 +251,17 @@ impl CallEngine {
             }
         });
 
-        // Recv task (direct playout)
+        // Recv task (direct playout with auto codec switch)
         let recv_t = transport.clone();
         let recv_r = running.clone();
         let recv_spk = spk_muted.clone();
         let recv_fr = frames_received.clone();
         tokio::spawn(async move {
-            let mut opus_dec = wzp_codec::create_decoder(wzp_proto::QualityProfile::GOOD);
+            let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
+            let mut decoder = wzp_codec::create_decoder(initial_profile);
+            let mut current_codec = initial_profile.codec;
             let mut agc = wzp_codec::AutoGainControl::new();
-            let mut pcm = vec![0i16; FRAME_SAMPLES];
+            let mut pcm = vec![0i16; FRAME_SAMPLES_40MS]; // big enough for any codec
 
             loop {
                 if !recv_r.load(Ordering::Relaxed) {
@@ -242,8 +274,24 @@ impl CallEngine {
                 .await
                 {
                     Ok(Ok(Some(pkt))) => {
-                        if !pkt.header.is_repair {
-                            if let Ok(n) = opus_dec.decode(&pkt.payload, &mut pcm) {
+                        if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
+                            // Auto-switch decoder if incoming codec differs
+                            if pkt.header.codec_id != current_codec {
+                                let new_profile = match pkt.header.codec_id {
+                                    CodecId::Opus24k => QualityProfile::GOOD,
+                                    CodecId::Opus6k => QualityProfile::DEGRADED,
+                                    CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
+                                    CodecId::Codec2_3200 => QualityProfile {
+                                        codec: CodecId::Codec2_3200,
+                                        fec_ratio: 0.5, frame_duration_ms: 20, frames_per_block: 5,
+                                    },
+                                    other => QualityProfile { codec: other, ..QualityProfile::GOOD },
+                                };
+                                info!(from = ?current_codec, to = ?pkt.header.codec_id, "recv: switching decoder");
+                                let _ = decoder.set_profile(new_profile);
+                                current_codec = pkt.header.codec_id;
+                            }
+                            if let Ok(n) = decoder.decode(&pkt.payload, &mut pcm) {
                                 agc.process_frame(&mut pcm[..n]);
                                 if !recv_spk.load(Ordering::Relaxed) {
                                     playout_ring.write(&pcm[..n]);
@@ -259,7 +307,6 @@ impl CallEngine {
                             error!("recv fatal: {e}");
                             break;
                         }
-                        // Transient error — continue
                     }
                     Err(_) => {}
                 }
