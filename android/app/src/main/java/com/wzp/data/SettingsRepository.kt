@@ -185,4 +185,14 @@ class SettingsRepository(context: Context) {
     fun loadServerFingerprint(address: String): String? {
         return prefs.getString("$TOFU_PREFIX$address", null)
     }
+
+    // --- Ping RTT cache ---
+
+    fun savePingRtt(address: String, rttMs: Int) {
+        prefs.edit().putInt("ping_rtt_$address", rttMs).apply()
+    }
+
+    fun loadPingRtt(address: String): Int {
+        return prefs.getInt("ping_rtt_$address", -1)
+    }
 }

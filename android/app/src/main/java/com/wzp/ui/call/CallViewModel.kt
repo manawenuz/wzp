@@ -31,7 +31,8 @@ data class ServerEntry(val address: String, val label: String)
 
 data class PingResult(
     val rttMs: Int,
-    val serverFingerprint: String,
+    val serverFingerprint: String = "",
+    val reachable: Boolean = rttMs > 0,
 )
 
 enum class LockStatus { UNKNOWN, OFFLINE, NEW, VERIFIED, CHANGED }
@@ -207,56 +208,61 @@ class CallViewModel : ViewModel(), WzpCallback {
         settings?.saveSelectedServer(_selectedServer.value)
     }
 
-    private var pingJob: Job? = null
-
-    /** Start periodic ping every 5 seconds. Safe to call multiple times. */
-    fun startPeriodicPing() {
-        if (pingJob?.isActive == true) return
-        pingJob = viewModelScope.launch {
-            while (isActive) {
-                pingAllServersOnce()
-                delay(5000)
+    /** Load saved ping results from last ping-and-exit cycle. */
+    fun loadSavedPingResults() {
+        val s = settings ?: return
+        val results = mutableMapOf<String, PingResult>()
+        val known = mutableMapOf<String, String>()
+        _servers.value.forEach { server ->
+            val rtt = s.loadPingRtt(server.address)
+            val fp = s.loadServerFingerprint(server.address)
+            if (rtt >= 0) {
+                results[server.address] = PingResult(rttMs = rtt, serverFingerprint = fp ?: "")
             }
+            fp?.let { known[server.address] = it }
         }
+        _pingResults.value = results
+        _knownFingerprints.value = known
     }
 
-    /** Stop periodic ping. */
-    fun stopPeriodicPing() {
-        pingJob?.cancel()
-        pingJob = null
-    }
-
-    /** Ping all servers once (pure Kotlin UDP, no JNI). */
-    fun pingAllServersOnce() {
+    /**
+     * Ping all servers via native QUIC, save results, then exit process.
+     * On restart, saved results are loaded. This avoids the jemalloc crash
+     * by ensuring the native .so is only loaded once per process lifetime.
+     */
+    fun pingAndExit() {
         viewModelScope.launch {
             val results = mutableMapOf<String, PingResult>()
             _servers.value.forEach { server ->
-                val udpResult = withContext(Dispatchers.IO) {
+                val pr = withContext(Dispatchers.IO) {
                     com.wzp.net.RelayPinger.ping(server.address)
                 }
                 results[server.address] = PingResult(
-                    rttMs = udpResult.rttMs,
-                    serverFingerprint = "", // filled lazily on first real connection
+                    rttMs = pr.rttMs,
+                    serverFingerprint = pr.serverFingerprint,
                 )
-            }
-            _pingResults.value = results
-            // Load saved TOFU fingerprints
-            val known = mutableMapOf<String, String>()
-            _servers.value.forEach { server ->
-                settings?.loadServerFingerprint(server.address)?.let {
-                    known[server.address] = it
+                // Save results
+                settings?.savePingRtt(server.address, pr.rttMs)
+                if (pr.serverFingerprint.isNotEmpty()) {
+                    val saved = settings?.loadServerFingerprint(server.address)
+                    if (saved == null) {
+                        settings?.saveServerFingerprint(server.address, pr.serverFingerprint)
+                    }
                 }
             }
-            _knownFingerprints.value = known
+            _pingResults.value = results
+            // Exit process — next launch loads saved results, native .so reinits cleanly
+            delay(300) // let UI update
+            System.exit(0)
         }
     }
 
     /** Get lock status for a server. */
     fun lockStatus(address: String): LockStatus {
         val pr = _pingResults.value[address] ?: return LockStatus.UNKNOWN
-        if (pr.rttMs <= 0 && pr.serverFingerprint.isEmpty()) return LockStatus.OFFLINE
+        if (!pr.reachable) return LockStatus.OFFLINE
         val known = _knownFingerprints.value[address] ?: return LockStatus.NEW
-        if (pr.serverFingerprint.isEmpty()) return LockStatus.NEW // no fingerprint yet
+        if (pr.serverFingerprint.isEmpty()) return LockStatus.NEW
         return if (pr.serverFingerprint == known) LockStatus.VERIFIED else LockStatus.CHANGED
     }
 

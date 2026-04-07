@@ -90,10 +90,8 @@ fun InCallScreen(
 
     var showManageRelays by remember { mutableStateOf(false) }
 
-    // Pure Kotlin UDP ping — no native .so loading, safe on Android 16 MTE
-    LaunchedEffect(Unit) {
-        viewModel.startPeriodicPing()
-    }
+    // Load saved ping results from last ping-and-exit cycle
+    LaunchedEffect(Unit) { viewModel.loadSavedPingResults() }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -226,6 +224,21 @@ fun InCallScreen(
                         "Connect",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                         color = Color.White
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Ping button — pings all servers via native QUIC, saves results, exits app
+                OutlinedButton(
+                    onClick = { viewModel.pingAndExit() },
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text(
+                        "Ping Servers (restarts app)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextDim
                     )
                 }
 
