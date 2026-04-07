@@ -203,38 +203,46 @@ class CallViewModel : ViewModel(), WzpCallback {
         settings?.saveSelectedServer(_selectedServer.value)
     }
 
-    /** Ping all servers in background, update results. */
-    fun pingAllServers() {
+    private var pingJob: Job? = null
+
+    /** Start periodic ping every 5 seconds. Safe to call multiple times. */
+    fun startPeriodicPing() {
+        if (pingJob?.isActive == true) return
+        pingJob = viewModelScope.launch {
+            while (isActive) {
+                pingAllServersOnce()
+                delay(5000)
+            }
+        }
+    }
+
+    /** Stop periodic ping. */
+    fun stopPeriodicPing() {
+        pingJob?.cancel()
+        pingJob = null
+    }
+
+    /** Ping all servers once (pure Kotlin UDP, no JNI). */
+    fun pingAllServersOnce() {
         viewModelScope.launch {
             val results = mutableMapOf<String, PingResult>()
-            val known = mutableMapOf<String, String>()
             _servers.value.forEach { server ->
-                val pr = withContext(Dispatchers.IO) {
-                    try {
-                        val json = WzpEngine.pingRelay(server.address) ?: return@withContext null
-                        val obj = JSONObject(json)
-                        PingResult(
-                            rttMs = obj.getInt("rtt_ms"),
-                            serverFingerprint = obj.optString("server_fingerprint", ""),
-                        )
-                    } catch (e: Exception) {
-                        Log.w(TAG, "ping ${server.address} failed: ${e.message}")
-                        null
-                    }
+                val udpResult = withContext(Dispatchers.IO) {
+                    com.wzp.net.RelayPinger.ping(server.address)
                 }
-                if (pr != null) {
-                    results[server.address] = pr
-                    // TOFU: save fingerprint on first contact
-                    if (pr.serverFingerprint.isNotEmpty()) {
-                        val saved = settings?.loadServerFingerprint(server.address)
-                        if (saved == null) {
-                            settings?.saveServerFingerprint(server.address, pr.serverFingerprint)
-                        }
-                        known[server.address] = saved ?: pr.serverFingerprint
-                    }
-                }
+                results[server.address] = PingResult(
+                    rttMs = udpResult.rttMs,
+                    serverFingerprint = "", // filled lazily on first real connection
+                )
             }
             _pingResults.value = results
+            // Load saved TOFU fingerprints
+            val known = mutableMapOf<String, String>()
+            _servers.value.forEach { server ->
+                settings?.loadServerFingerprint(server.address)?.let {
+                    known[server.address] = it
+                }
+            }
             _knownFingerprints.value = known
         }
     }
@@ -242,9 +250,9 @@ class CallViewModel : ViewModel(), WzpCallback {
     /** Get lock status for a server. */
     fun lockStatus(address: String): LockStatus {
         val pr = _pingResults.value[address] ?: return LockStatus.UNKNOWN
-        val known = _knownFingerprints.value[address]
-        if (pr.serverFingerprint.isEmpty()) return LockStatus.NEW
-        if (known == null) return LockStatus.NEW
+        if (pr.rttMs <= 0 && pr.serverFingerprint.isEmpty()) return LockStatus.OFFLINE
+        val known = _knownFingerprints.value[address] ?: return LockStatus.NEW
+        if (pr.serverFingerprint.isEmpty()) return LockStatus.NEW // no fingerprint yet
         return if (pr.serverFingerprint == known) LockStatus.VERIFIED else LockStatus.CHANGED
     }
 

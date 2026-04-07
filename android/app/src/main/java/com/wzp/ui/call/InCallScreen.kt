@@ -90,8 +90,10 @@ fun InCallScreen(
 
     var showManageRelays by remember { mutableStateOf(false) }
 
-    // Don't auto-ping — loading the native .so triggers jemalloc init
-    // which crashes on Android 16 MTE. Let user click "Ping All" manually.
+    // Pure Kotlin UDP ping — no native .so loading, safe on Android 16 MTE
+    LaunchedEffect(Unit) {
+        viewModel.startPeriodicPing()
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
