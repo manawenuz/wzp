@@ -311,6 +311,9 @@ async fn run_call(
         ephemeral_pub,
         signature,
         supported_profiles: vec![
+            QualityProfile::STUDIO_64K,
+            QualityProfile::STUDIO_48K,
+            QualityProfile::STUDIO_32K,
             QualityProfile::GOOD,
             QualityProfile::DEGRADED,
             QualityProfile::CATASTROPHIC,
