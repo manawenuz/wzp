@@ -500,6 +500,49 @@ impl CallDecoder {
         }
     }
 
+    /// Switch the decoder to match an incoming packet's codec if it differs
+    /// from the current profile. This enables cross-codec interop (e.g. one
+    /// client sends Opus, the other sends Codec2).
+    fn switch_decoder_if_needed(&mut self, incoming_codec: CodecId) {
+        if incoming_codec == self.profile.codec || incoming_codec == CodecId::ComfortNoise {
+            return;
+        }
+        let new_profile = Self::profile_for_codec(incoming_codec);
+        info!(
+            from = ?self.profile.codec,
+            to = ?incoming_codec,
+            "decoder switching codec to match incoming packet"
+        );
+        if let Err(e) = self.audio_dec.set_profile(new_profile) {
+            warn!("failed to switch decoder profile: {e}");
+            return;
+        }
+        self.fec_dec = wzp_fec::create_decoder(&new_profile);
+        self.profile = new_profile;
+    }
+
+    /// Map a `CodecId` to a reasonable `QualityProfile` for decoding.
+    fn profile_for_codec(codec: CodecId) -> QualityProfile {
+        match codec {
+            CodecId::Opus24k => QualityProfile::GOOD,
+            CodecId::Opus16k => QualityProfile {
+                codec: CodecId::Opus16k,
+                fec_ratio: 0.3,
+                frame_duration_ms: 20,
+                frames_per_block: 5,
+            },
+            CodecId::Opus6k => QualityProfile::DEGRADED,
+            CodecId::Codec2_3200 => QualityProfile {
+                codec: CodecId::Codec2_3200,
+                fec_ratio: 0.5,
+                frame_duration_ms: 20,
+                frames_per_block: 5,
+            },
+            CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
+            CodecId::ComfortNoise => QualityProfile::GOOD,
+        }
+    }
+
     /// Decode the next audio frame from the jitter buffer.
     ///
     /// Returns PCM samples (48kHz mono) or None if not ready.
@@ -513,6 +556,9 @@ impl CallDecoder {
                     self.jitter.record_decode();
                     return Some(pcm.len());
                 }
+
+                // Auto-switch decoder if incoming codec differs from current.
+                self.switch_decoder_if_needed(pkt.header.codec_id);
 
                 self.last_was_cn = false;
                 let result = match self.audio_dec.decode(&pkt.payload, pcm) {
