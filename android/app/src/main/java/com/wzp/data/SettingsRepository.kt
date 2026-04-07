@@ -126,6 +126,11 @@ class SettingsRepository(context: Context) {
     fun saveDebugRecording(enabled: Boolean) { prefs.edit().putBoolean(KEY_DEBUG_RECORDING, enabled).apply() }
     fun loadDebugRecording(): Boolean = prefs.getBoolean(KEY_DEBUG_RECORDING, false)
 
+    // --- Codec choice ---
+    // 0 = Opus (GOOD), 1 = Opus Low (DEGRADED), 2 = Codec2 (CATASTROPHIC)
+    fun saveCodecChoice(choice: Int) { prefs.edit().putInt("codec_choice", choice).apply() }
+    fun loadCodecChoice(): Int = prefs.getInt("codec_choice", 0)
+
     // --- Identity seed ---
 
     /**

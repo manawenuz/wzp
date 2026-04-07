@@ -38,9 +38,12 @@ class WzpEngine(private val callback: WzpCallback) {
      * @param alias     display name sent to relay for room participant list
      * @return 0 on success, negative error code on failure
      */
-    fun startCall(relayAddr: String, room: String, seedHex: String = "", token: String = "", alias: String = ""): Int {
+    /**
+     * @param profile 0 = Opus GOOD, 1 = Opus DEGRADED, 2 = Codec2 CATASTROPHIC
+     */
+    fun startCall(relayAddr: String, room: String, seedHex: String = "", token: String = "", alias: String = "", profile: Int = 0): Int {
         check(nativeHandle != 0L) { "Engine not initialized" }
-        val result = nativeStartCall(nativeHandle, relayAddr, room, seedHex, token, alias)
+        val result = nativeStartCall(nativeHandle, relayAddr, room, seedHex, token, alias, profile)
         if (result == 0) {
             callback.onCallStateChanged(CallStateConstants.CONNECTING)
         } else {
@@ -141,7 +144,7 @@ class WzpEngine(private val callback: WzpCallback) {
 
     private external fun nativeInit(): Long
     private external fun nativeStartCall(
-        handle: Long, relay: String, room: String, seed: String, token: String, alias: String
+        handle: Long, relay: String, room: String, seed: String, token: String, alias: String, profile: Int
     ): Int
     private external fun nativeStopCall(handle: Long)
     private external fun nativeSetMute(handle: Long, muted: Boolean)

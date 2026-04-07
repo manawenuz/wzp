@@ -109,6 +109,10 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _debugRecording = MutableStateFlow(false)
     val debugRecording: StateFlow<Boolean> = _debugRecording.asStateFlow()
 
+    // 0 = Opus (GOOD), 1 = Opus Low (DEGRADED), 2 = Codec2 (CATASTROPHIC)
+    private val _codecChoice = MutableStateFlow(0)
+    val codecChoice: StateFlow<Int> = _codecChoice.asStateFlow()
+
     /** True when a call just ended and debug report can be sent. */
     private val _debugReportAvailable = MutableStateFlow(false)
     val debugReportAvailable: StateFlow<Boolean> = _debugReportAvailable.asStateFlow()
@@ -164,6 +168,7 @@ class CallViewModel : ViewModel(), WzpCallback {
         _seedHex.value = s.getOrCreateSeedHex()
         _aecEnabled.value = s.loadAecEnabled()
         _debugRecording.value = s.loadDebugRecording()
+        _codecChoice.value = s.loadCodecChoice()
         _recentRooms.value = s.loadRecentRooms()
     }
 
@@ -309,6 +314,11 @@ class CallViewModel : ViewModel(), WzpCallback {
         settings?.saveDebugRecording(enabled)
     }
 
+    fun setCodecChoice(choice: Int) {
+        _codecChoice.value = choice
+        settings?.saveCodecChoice(choice)
+    }
+
     /**
      * Resolve DNS hostname to IP address on the Kotlin/Android side,
      * since Rust's DNS resolution may not work on Android.
@@ -406,7 +416,7 @@ class CallViewModel : ViewModel(), WzpCallback {
                     val seed = _seedHex.value
                     val name = _alias.value
                     Log.i(TAG, "startCall: resolved=$relay, alias=$name, calling engine.startCall")
-                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name) ?: -1
+                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name, profile = _codecChoice.value) ?: -1
                     Log.i(TAG, "startCall: engine returned $result")
                     // Only wire up notification callback after engine is running
                     CallService.onStopFromNotification = { stopCall() }

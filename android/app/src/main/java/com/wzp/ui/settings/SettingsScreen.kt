@@ -1,5 +1,6 @@
 package com.wzp.ui.settings
 
+import androidx.compose.foundation.clickable
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -22,6 +23,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -239,6 +241,35 @@ fun SettingsScreen(
                     checked = draftAecEnabled,
                     onCheckedChange = { draftAecEnabled = it }
                 )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Codec selection
+            val codecNames = listOf("Opus 24k (Best)", "Opus 6k (Low BW)", "Codec2 1.2k (Minimal)")
+            val currentCodec by viewModel.codecChoice.collectAsState()
+            Text("Encode Codec", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = "Decode always accepts all codecs",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            codecNames.forEachIndexed { idx, name ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.setCodecChoice(idx) }
+                        .padding(vertical = 4.dp)
+                ) {
+                    RadioButton(
+                        selected = currentCodec == idx,
+                        onClick = { viewModel.setCodecChoice(idx) }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(name, style = MaterialTheme.typography.bodyMedium)
+                }
             }
 
             Spacer(modifier = Modifier.height(24.dp))

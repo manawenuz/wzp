@@ -85,6 +85,7 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
     seed_hex_j: JString,
     token_j: JString,
     alias_j: JString,
+    profile_j: jint,
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
@@ -110,7 +111,7 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
         }
 
         let config = CallStartConfig {
-            profile: QualityProfile::GOOD,
+            profile: profile_from_int(profile_j),
             relay_addr,
             room,
             auth_token: if token.is_empty() { Vec::new() } else { token.into_bytes() },
