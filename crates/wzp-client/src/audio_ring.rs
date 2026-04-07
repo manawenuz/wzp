@@ -18,7 +18,7 @@ const RING_MASK: usize = RING_CAPACITY - 1;
 
 /// Lock-free single-producer single-consumer ring buffer for i16 PCM samples.
 pub struct AudioRing {
-    buf: Box<[i16; RING_CAPACITY]>,
+    buf: Box<[i16]>,
     /// Monotonically increasing write cursor. ONLY written by producer.
     write_pos: AtomicUsize,
     /// Monotonically increasing read cursor. ONLY written by consumer.
@@ -40,7 +40,7 @@ impl AudioRing {
     pub fn new() -> Self {
         debug_assert!(RING_CAPACITY.is_power_of_two());
         Self {
-            buf: Box::new([0i16; RING_CAPACITY]),
+            buf: vec![0i16; RING_CAPACITY].into_boxed_slice(),
             write_pos: AtomicUsize::new(0),
             read_pos: AtomicUsize::new(0),
             overflow_count: AtomicU64::new(0),
