@@ -51,22 +51,20 @@ const sAgc = document.getElementById("s-agc") as HTMLInputElement;
 const sQuality = document.getElementById("s-quality") as HTMLInputElement;
 const sQualityLabel = document.getElementById("s-quality-label")!;
 
-// Quality slider config
-const QUALITY_STEPS = ["auto", "good", "degraded", "codec2-3200", "catastrophic"];
-const QUALITY_LABELS = ["Auto", "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"];
-const QUALITY_COLORS = ["#4ade80", "#4ade80", "#facc15", "#e97320", "#991b1b"];
+// Quality slider config — best (left/green) to worst (right/red)
+const QUALITY_STEPS = ["studio-64k", "studio-48k", "studio-32k", "auto", "good", "degraded", "codec2-3200", "catastrophic"];
+const QUALITY_LABELS = ["Studio 64k", "Studio 48k", "Studio 32k", "Auto", "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"];
+const QUALITY_COLORS = ["#22c55e", "#4ade80", "#86efac", "#a3e635", "#facc15", "#f59e0b", "#e97320", "#991b1b"];
 
 function qualityToIndex(q: string): number {
   const idx = QUALITY_STEPS.indexOf(q);
-  return idx >= 0 ? idx : 0;
+  return idx >= 0 ? idx : 3; // default to "auto" (index 3)
 }
 
 function updateQualityUI(index: number) {
   sQualityLabel.textContent = QUALITY_LABELS[index];
   sQualityLabel.style.color = QUALITY_COLORS[index];
-  const pct = index / (QUALITY_STEPS.length - 1);
-  // Gradient: green at left → yellow middle → dark red at right
-  sQuality.style.background = `linear-gradient(90deg, #4ade80 0%, #facc15 40%, #e97320 70%, #991b1b 100%)`;
+  sQuality.style.background = `linear-gradient(90deg, #22c55e 0%, #86efac 25%, #facc15 50%, #e97320 75%, #991b1b 100%)`;
 }
 
 sQuality.addEventListener("input", () => {

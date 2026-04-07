@@ -532,6 +532,9 @@ impl CallDecoder {
                 frames_per_block: 5,
             },
             CodecId::Opus6k => QualityProfile::DEGRADED,
+            CodecId::Opus32k => QualityProfile::STUDIO_32K,
+            CodecId::Opus48k => QualityProfile::STUDIO_48K,
+            CodecId::Opus64k => QualityProfile::STUDIO_64K,
             CodecId::Codec2_3200 => QualityProfile {
                 codec: CodecId::Codec2_3200,
                 fec_ratio: 0.5,

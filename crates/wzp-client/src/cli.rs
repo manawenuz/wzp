@@ -133,9 +133,12 @@ fn resolve_profile(name: &str) -> wzp_proto::QualityProfile {
             frame_duration_ms: 20,
             frames_per_block: 5,
         },
+        "studio-32k" | "opus32k" | "32k" => QualityProfile::STUDIO_32K,
+        "studio-48k" | "opus48k" | "48k" | "studio" => QualityProfile::STUDIO_48K,
+        "studio-64k" | "opus64k" | "64k" | "studio-high" => QualityProfile::STUDIO_64K,
         other => {
             eprintln!("unknown profile: {other}");
-            eprintln!("valid: good, degraded, catastrophic, codec2-3200, codec2-1200");
+            eprintln!("valid: good, degraded, catastrophic, codec2-3200, codec2-1200, studio-32k, studio-48k, studio-64k");
             std::process::exit(1);
         }
     }
