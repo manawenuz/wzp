@@ -19,12 +19,18 @@ use tracing::{error, info, warn};
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
 use wzp_proto::MediaTransport;
 
-const FRAME_SAMPLES: usize = 960; // 20ms @ 48kHz
+const FRAME_SAMPLES_20MS: usize = 960; // 20ms @ 48kHz
+const FRAME_SAMPLES_40MS: usize = 1920; // 40ms @ 48kHz
+
+/// Compute frame samples at 48kHz for a given profile.
+fn frame_samples_for(profile: &wzp_proto::QualityProfile) -> usize {
+    (profile.frame_duration_ms as usize) * 48 // 48000 / 1000
+}
 
 /// Generate a sine wave tone.
-fn generate_sine_frame(freq_hz: f32, sample_rate: u32, frame_offset: u64) -> Vec<i16> {
-    let start_sample = frame_offset * FRAME_SAMPLES as u64;
-    (0..FRAME_SAMPLES)
+fn generate_sine_frame(freq_hz: f32, sample_rate: u32, frame_offset: u64, frame_samples: usize) -> Vec<i16> {
+    let start_sample = frame_offset * frame_samples as u64;
+    (0..frame_samples)
         .map(|i| {
             let t = (start_sample + i as u64) as f32 / sample_rate as f32;
             (f32::sin(2.0 * std::f32::consts::PI * freq_hz * t) * 16000.0) as i16
@@ -57,6 +63,8 @@ struct CliArgs {
     os_aec: bool,
     token: Option<String>,
     _metrics_file: Option<String>,
+    /// Force a quality profile: "good", "degraded", "catastrophic", "codec2-3200"
+    profile_override: Option<String>,
 }
 
 /// Default identity file path: ~/.wzp/identity
@@ -112,6 +120,27 @@ impl CliArgs {
     }
 }
 
+/// Resolve a profile name to a QualityProfile.
+fn resolve_profile(name: &str) -> wzp_proto::QualityProfile {
+    use wzp_proto::{CodecId, QualityProfile};
+    match name.to_lowercase().as_str() {
+        "good" | "opus" | "opus24k" => QualityProfile::GOOD,
+        "degraded" | "opus6k" => QualityProfile::DEGRADED,
+        "catastrophic" | "codec2-1200" | "c2-1200" | "1200" => QualityProfile::CATASTROPHIC,
+        "codec2-3200" | "c2-3200" | "3200" => QualityProfile {
+            codec: CodecId::Codec2_3200,
+            fec_ratio: 0.5,
+            frame_duration_ms: 20,
+            frames_per_block: 5,
+        },
+        other => {
+            eprintln!("unknown profile: {other}");
+            eprintln!("valid: good, degraded, catastrophic, codec2-3200, codec2-1200");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let mut live = false;
@@ -136,6 +165,7 @@ fn parse_args() -> CliArgs {
     let mut os_aec = false;
     let mut token = None;
     let mut metrics_file = None;
+    let mut profile_override = None;
     let mut relay_str = None;
 
     let mut i = 1;
@@ -237,6 +267,14 @@ fn parse_args() -> CliArgs {
                         .expect("--drift-test value must be a number"),
                 );
             }
+            "--profile" | "--codec" => {
+                i += 1;
+                profile_override = Some(
+                    args.get(i)
+                        .expect("--profile requires a value (good, degraded, catastrophic, codec2-3200)")
+                        .to_string(),
+                );
+            }
             "--sweep" => sweep = true,
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
@@ -248,6 +286,8 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
                 eprintln!("  --drift-test <secs>    Run automated clock-drift measurement");
+                eprintln!("  --profile <name>       Force quality profile: good, degraded, catastrophic, codec2-3200");
+                eprintln!("  --codec <name>         Alias for --profile");
                 eprintln!("  --sweep                Run jitter buffer parameter sweep (local, no network)");
                 eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
@@ -312,6 +352,7 @@ fn parse_args() -> CliArgs {
         os_aec,
         token,
         _metrics_file: metrics_file,
+        profile_override,
     }
 }
 
@@ -332,12 +373,19 @@ async fn main() -> anyhow::Result<()> {
 
     let seed = cli.resolve_seed();
 
+    // Resolve profile override
+    let profile = cli.profile_override.as_deref().map(resolve_profile);
+    if let Some(ref p) = profile {
+        info!(codec = ?p.codec, frame_ms = p.frame_duration_ms, fec = p.fec_ratio, "forced profile");
+    }
+
     info!(
         relay = %cli.relay_addr,
         live = cli.live,
         send_tone = ?cli.send_tone_secs,
         record = ?cli.record_file,
         room = ?cli.room,
+        profile = ?cli.profile_override,
         "WarzonePhone client"
     );
 
@@ -400,6 +448,7 @@ async fn main() -> anyhow::Result<()> {
                 direct_playout: cli.direct_playout,
                 aec_delay_ms: cli.aec_delay_ms,
                 os_aec: cli.os_aec,
+                profile_override: profile,
             };
             return run_live(transport, audio_opts).await;
         }
@@ -422,19 +471,23 @@ async fn main() -> anyhow::Result<()> {
         transport.close().await?;
         Ok(())
     } else if cli.send_tone_secs.is_some() || cli.send_file.is_some() || cli.record_file.is_some() {
-        run_file_mode(transport, cli.send_tone_secs, cli.send_file, cli.record_file).await
+        run_file_mode(transport, cli.send_tone_secs, cli.send_file, cli.record_file, profile).await
     } else {
-        run_silence(transport).await
+        run_silence(transport, profile).await
     }
 }
 
 /// Send silence frames (connectivity test).
-async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
-    let config = CallConfig::default();
+async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>, profile: Option<wzp_proto::QualityProfile>) -> anyhow::Result<()> {
+    let config = match profile {
+        Some(p) => CallConfig::from_profile(p),
+        None => CallConfig::default(),
+    };
+    let frame_samples = frame_samples_for(&config.profile);
     let mut encoder = CallEncoder::new(&config);
 
-    let frame_duration = tokio::time::Duration::from_millis(20);
-    let pcm = vec![0i16; FRAME_SAMPLES];
+    let frame_duration = tokio::time::Duration::from_millis(config.profile.frame_duration_ms as u64);
+    let pcm = vec![0i16; frame_samples];
 
     let mut total_source = 0u64;
     let mut total_repair = 0u64;
@@ -480,13 +533,20 @@ async fn run_file_mode(
     send_tone_secs: Option<u32>,
     send_file: Option<String>,
     record_file: Option<String>,
+    profile: Option<wzp_proto::QualityProfile>,
 ) -> anyhow::Result<()> {
-    let config = CallConfig::default();
+    let config = match profile {
+        Some(p) => CallConfig::from_profile(p),
+        None => CallConfig::default(),
+    };
+    let frame_samples = frame_samples_for(&config.profile);
+    let frame_duration_ms = config.profile.frame_duration_ms as u64;
 
     // --- Send task: generate tone or play file ---
     let send_transport = transport.clone();
     let send_handle = tokio::spawn(async move {
         // Load PCM frames from file or generate tone
+        let frames_per_sec = 1000 / frame_duration_ms;
         let pcm_frames: Vec<Vec<i16>> = if let Some(ref path) = send_file {
             // Read raw PCM file (48kHz mono s16le)
             let bytes = match std::fs::read(path) {
@@ -498,14 +558,14 @@ async fn run_file_mode(
                 .collect();
             let duration = samples.len() as f64 / 48_000.0;
             info!(file = %path, duration = format!("{:.1}s", duration), "sending audio file");
-            samples.chunks(FRAME_SAMPLES)
-                .filter(|c| c.len() == FRAME_SAMPLES)
+            samples.chunks(frame_samples)
+                .filter(|c| c.len() == frame_samples)
                 .map(|c| c.to_vec())
                 .collect()
         } else if let Some(secs) = send_tone_secs {
-            let total = (secs as u64) * 50;
-            info!(seconds = secs, frames = total, "sending 440Hz tone");
-            (0..total).map(|i| generate_sine_frame(440.0, 48_000, i)).collect()
+            let total = (secs as u64) * frames_per_sec;
+            info!(seconds = secs, frames = total, frame_samples, frame_ms = frame_duration_ms, "sending 440Hz tone");
+            (0..total).map(|i| generate_sine_frame(440.0, 48_000, i, frame_samples)).collect()
         } else {
             // No sending, just wait
             tokio::signal::ctrl_c().await.ok();
@@ -514,7 +574,7 @@ async fn run_file_mode(
 
         let mut encoder = CallEncoder::new(&config);
         let _total_frames = pcm_frames.len() as u64;
-        let frame_duration = tokio::time::Duration::from_millis(20);
+        let frame_duration = tokio::time::Duration::from_millis(frame_duration_ms);
 
         let mut total_source = 0u64;
         let mut total_repair = 0u64;
@@ -564,8 +624,13 @@ async fn run_file_mode(
             }
         };
 
-        let mut decoder = CallDecoder::new(&CallConfig::default());
-        let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
+        let recv_config = match profile {
+            Some(p) => CallConfig::from_profile(p),
+            None => CallConfig::default(),
+        };
+        let recv_frame_samples = frame_samples_for(&recv_config.profile);
+        let mut decoder = CallDecoder::new(&recv_config);
+        let mut pcm_buf = vec![0i16; recv_frame_samples.max(FRAME_SAMPLES_40MS)];
         let mut all_pcm: Vec<i16> = Vec::new();
         let mut frames_received = 0u64;
 
@@ -704,6 +769,7 @@ struct AudioOpts {
     direct_playout: bool,
     aec_delay_ms: Option<u32>,
     os_aec: bool,
+    profile_override: Option<wzp_proto::QualityProfile>,
 }
 
 #[cfg(feature = "audio")]
@@ -788,12 +854,18 @@ async fn run_live(
         std::process::exit(1);
     });
 
+    let base_config = match opts.profile_override {
+        Some(p) => CallConfig::from_profile(p),
+        None => CallConfig::default(),
+    };
     let config = CallConfig {
         noise_suppression: !opts.no_denoise,
         suppression_enabled: !opts.no_silence,
         aec_delay_ms: opts.aec_delay_ms.unwrap_or(40),
-        ..CallConfig::default()
+        ..base_config
     };
+    let frame_samples = frame_samples_for(&config.profile);
+    info!(codec = ?config.profile.codec, frame_samples, frame_ms = config.profile.frame_duration_ms, "call config");
     {
         let mut flags = Vec::new();
         if opts.no_denoise { flags.push("denoise"); }
@@ -819,8 +891,8 @@ async fn run_live(
         let mut encoder = CallEncoder::new(&config);
         if no_aec { encoder.set_aec_enabled(false); }
         if no_agc { encoder.set_agc_enabled(false); }
-        let mut capture_buf = vec![0i16; FRAME_SAMPLES];
-        let mut farend_buf = vec![0i16; FRAME_SAMPLES];
+        let mut capture_buf = vec![0i16; frame_samples];
+        let mut farend_buf = vec![0i16; frame_samples];
         let mut frames_sent: u64 = 0;
         let mut frames_dropped: u64 = 0;
         let mut send_errors: u64 = 0;
@@ -834,19 +906,19 @@ async fn run_live(
             }
 
             let avail = capture_ring.available();
-            if avail < FRAME_SAMPLES {
+            if avail < frame_samples {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 polls += 1;
                 // Diagnostic every 2 seconds
                 if last_diag.elapsed().as_secs() >= 2 {
-                    info!(avail, polls, frames_sent, "send: ring starved (avail < {FRAME_SAMPLES})");
+                    info!(avail, polls, frames_sent, frame_samples, "send: ring starved");
                     last_diag = std::time::Instant::now();
                 }
                 continue;
             }
 
             let read = capture_ring.read(&mut capture_buf);
-            if read < FRAME_SAMPLES {
+            if read < frame_samples {
                 continue;
             }
 
@@ -858,7 +930,7 @@ async fn run_live(
             // Feed AEC far-end reference: what was played through the speaker.
             // Must be called BEFORE encode_frame processes the mic signal.
             if !no_aec {
-                while send_farend.available() >= FRAME_SAMPLES {
+                while send_farend.available() >= frame_samples {
                     send_farend.read(&mut farend_buf);
                     encoder.feed_aec_farend(&farend_buf);
                 }
@@ -903,6 +975,8 @@ async fn run_live(
     let recv_running = running.clone();
     let recv_spk_muted = spk_muted.clone();
     let direct_playout = opts.direct_playout;
+    let recv_profile = opts.profile_override;
+    let playout_profile = recv_profile; // Copy for playout_task
 
     // Direct playout: decode on recv, write straight to playout ring (like Android).
     // Jitter buffer mode: ingest into jitter buffer, decode on 20ms tick.
@@ -917,14 +991,15 @@ async fn run_live(
             let mut packets_received: u64 = 0;
             let mut recv_errors: u64 = 0;
             let mut timeouts: u64 = 0;
-            // For direct playout: raw Opus decoder + AGC
+            // For direct playout: raw codec decoder + AGC
+            let direct_profile = recv_profile.unwrap_or(wzp_proto::QualityProfile::GOOD);
             let mut opus_dec = if direct_playout {
-                Some(wzp_codec::create_decoder(wzp_proto::QualityProfile::GOOD))
+                Some(wzp_codec::create_decoder(direct_profile))
             } else {
                 None
             };
             let mut playout_agc = wzp_codec::AutoGainControl::new();
-            let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
+            let mut pcm_buf = vec![0i16; frame_samples.max(FRAME_SAMPLES_40MS)];
 
             loop {
                 if !recv_running.load(Ordering::Relaxed) {
@@ -1019,10 +1094,15 @@ async fn run_live(
             return;
         }
 
-        let config = CallConfig::default();
-        let mut decoder = CallDecoder::new(&config);
-        let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+        let playout_config = match playout_profile {
+            Some(p) => CallConfig::from_profile(p),
+            None => CallConfig::default(),
+        };
+        let playout_frame_ms = playout_config.profile.frame_duration_ms as u64;
+        let playout_frame_samples = frame_samples_for(&playout_config.profile);
+        let mut decoder = CallDecoder::new(&playout_config);
+        let mut pcm_buf = vec![0i16; playout_frame_samples.max(FRAME_SAMPLES_40MS)];
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(playout_frame_ms));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut telemetry = JitterTelemetry::new(5);
         loop {
