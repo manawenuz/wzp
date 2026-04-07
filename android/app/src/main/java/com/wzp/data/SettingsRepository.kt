@@ -28,6 +28,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_PREFER_IPV6 = "prefer_ipv6"
         private const val KEY_IDENTITY_SEED = "identity_seed_hex"
         private const val KEY_AEC_ENABLED = "aec_enabled"
+        private const val KEY_DEBUG_RECORDING = "debug_recording"
         private const val KEY_RECENT_ROOMS = "recent_rooms"
         private const val TOFU_PREFIX = "tofu_"
     }
@@ -119,6 +120,11 @@ class SettingsRepository(context: Context) {
 
     fun saveAecEnabled(enabled: Boolean) { prefs.edit().putBoolean(KEY_AEC_ENABLED, enabled).apply() }
     fun loadAecEnabled(): Boolean = prefs.getBoolean(KEY_AEC_ENABLED, true)
+
+    // --- Debug recording ---
+
+    fun saveDebugRecording(enabled: Boolean) { prefs.edit().putBoolean(KEY_DEBUG_RECORDING, enabled).apply() }
+    fun loadDebugRecording(): Boolean = prefs.getBoolean(KEY_DEBUG_RECORDING, false)
 
     // --- Identity seed ---
 

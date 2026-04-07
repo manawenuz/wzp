@@ -41,7 +41,7 @@ LOCAL_OUTPUT_DIR="target/android-apk"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOCAL_KEYSTORE_DIR="$PROJECT_DIR/android/keystore"
 
-SSH_OPTS="-o ConnectTimeout=10 -o LogLevel=ERROR"
+SSH_OPTS="-o ConnectTimeout=10 -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 
 # ---------------------------------------------------------------------------
 # Helpers

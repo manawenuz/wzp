@@ -105,6 +105,9 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _aecEnabled = MutableStateFlow(true)
     val aecEnabled: StateFlow<Boolean> = _aecEnabled.asStateFlow()
 
+    private val _debugRecording = MutableStateFlow(false)
+    val debugRecording: StateFlow<Boolean> = _debugRecording.asStateFlow()
+
     /** True when a call just ended and debug report can be sent. */
     private val _debugReportAvailable = MutableStateFlow(false)
     val debugReportAvailable: StateFlow<Boolean> = _debugReportAvailable.asStateFlow()
@@ -159,6 +162,7 @@ class CallViewModel : ViewModel(), WzpCallback {
         _captureGainDb.value = s.loadCaptureGain()
         _seedHex.value = s.getOrCreateSeedHex()
         _aecEnabled.value = s.loadAecEnabled()
+        _debugRecording.value = s.loadDebugRecording()
         _recentRooms.value = s.loadRecentRooms()
     }
 
@@ -286,6 +290,11 @@ class CallViewModel : ViewModel(), WzpCallback {
     fun setAecEnabled(enabled: Boolean) {
         _aecEnabled.value = enabled
         settings?.saveAecEnabled(enabled)
+    }
+
+    fun setDebugRecording(enabled: Boolean) {
+        _debugRecording.value = enabled
+        settings?.saveDebugRecording(enabled)
     }
 
     /**
@@ -476,6 +485,7 @@ class CallViewModel : ViewModel(), WzpCallback {
             it.playoutGainDb = _playoutGainDb.value
             it.captureGainDb = _captureGainDb.value
             it.aecEnabled = _aecEnabled.value
+            it.debugRecording = _debugRecording.value
             it.start(e)
         }
         audioRouteManager?.register()

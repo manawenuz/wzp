@@ -57,7 +57,7 @@ class AudioPipeline(private val context: Context) {
     /** Whether to attach hardware AEC. Must be set before start(). */
     var aecEnabled: Boolean = true
     /** Enable debug recording of PCM + RMS histogram to cache dir. */
-    var debugRecording: Boolean = true
+    var debugRecording: Boolean = false
     private var captureThread: Thread? = null
     private var playoutThread: Thread? = null
 
