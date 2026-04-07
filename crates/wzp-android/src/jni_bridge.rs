@@ -23,8 +23,18 @@ unsafe fn handle_ref(handle: jlong) -> &'static mut EngineHandle {
 
 fn profile_from_int(value: jint) -> QualityProfile {
     match value {
-        1 => QualityProfile::DEGRADED,
-        2 => QualityProfile::CATASTROPHIC,
+        0 => QualityProfile::GOOD,            // Opus 24k
+        1 => QualityProfile::DEGRADED,        // Opus 6k
+        2 => QualityProfile::CATASTROPHIC,    // Codec2 1.2k
+        3 => QualityProfile {                 // Codec2 3.2k
+            codec: wzp_proto::CodecId::Codec2_3200,
+            fec_ratio: 0.5,
+            frame_duration_ms: 20,
+            frames_per_block: 5,
+        },
+        4 => QualityProfile::STUDIO_32K,      // Opus 32k
+        5 => QualityProfile::STUDIO_48K,      // Opus 48k
+        6 => QualityProfile::STUDIO_64K,      // Opus 64k
         _ => QualityProfile::GOOD,
     }
 }

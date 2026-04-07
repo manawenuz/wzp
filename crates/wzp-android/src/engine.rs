@@ -615,6 +615,9 @@ async fn run_call(
                             let switch_profile = match pkt.header.codec_id {
                                 CodecId::Opus24k => QualityProfile::GOOD,
                                 CodecId::Opus6k => QualityProfile::DEGRADED,
+                                CodecId::Opus32k => QualityProfile::STUDIO_32K,
+                                CodecId::Opus48k => QualityProfile::STUDIO_48K,
+                                CodecId::Opus64k => QualityProfile::STUDIO_64K,
                                 CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
                                 CodecId::Codec2_3200 => QualityProfile {
                                     codec: CodecId::Codec2_3200,

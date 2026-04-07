@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -89,6 +90,50 @@ fun InCallScreen(
     val pingResults by viewModel.pingResults.collectAsState()
 
     var showManageRelays by remember { mutableStateOf(false) }
+    val keyWarning by viewModel.keyWarning.collectAsState()
+
+    // Key-change warning dialog
+    keyWarning?.let { info ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissKeyWarning() },
+            title = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    Text("\u26A0\uFE0F", fontSize = 40.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Server Key Changed", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "The relay's identity has changed since you last connected. " +
+                        "This usually happens when the server was restarted.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Previously known", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(info.oldFp, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("New key", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(info.newFp, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.acceptNewFingerprint() },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFACC15))
+                ) {
+                    Text("Accept New Key", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissKeyWarning() }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     // Ping once on launch, then every 5 minutes
     LaunchedEffect(Unit) {

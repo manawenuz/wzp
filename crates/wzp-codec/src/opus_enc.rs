@@ -100,7 +100,7 @@ impl AudioEncoder for OpusEncoder {
 
     fn set_profile(&mut self, profile: QualityProfile) -> Result<(), CodecError> {
         match profile.codec {
-            CodecId::Opus24k | CodecId::Opus16k | CodecId::Opus6k => {
+            c if c.is_opus() => {
                 self.codec_id = profile.codec;
                 self.frame_duration_ms = profile.frame_duration_ms;
                 self.apply_bitrate(profile.codec)?;

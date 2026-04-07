@@ -50,6 +50,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.wzp.ui.call.CallViewModel
 import com.wzp.ui.call.ServerEntry
@@ -245,31 +248,47 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Codec selection
-            val codecNames = listOf("Opus 24k (Best)", "Opus 6k (Low BW)", "Codec2 1.2k (Minimal)")
+            // Quality selection — slider from best (studio 64k) to worst (codec2 1.2k)
+            val qualityLabels = listOf(
+                "Studio 64k", "Studio 48k", "Studio 32k", "Opus 24k",
+                "Opus 6k", "Codec2 1.2k", "Codec2 3.2k"
+            )
+            // Map slider position to JNI profile int:
+            // 0=Studio64k(6), 1=Studio48k(5), 2=Studio32k(4), 3=Opus24k(0),
+            // 4=Opus6k(1), 5=Codec2_1.2k(2), 6=Codec2_3.2k(3)
+            val sliderToProfile = intArrayOf(6, 5, 4, 0, 1, 2, 3)
+            val profileToSlider = mapOf(6 to 0, 5 to 1, 4 to 2, 0 to 3, 1 to 4, 2 to 5, 3 to 6)
+            val qualityColors = listOf(
+                Color(0xFF22C55E), Color(0xFF4ADE80), Color(0xFF86EFAC), Color(0xFFA3E635),
+                Color(0xFFFACC15), Color(0xFF991B1B), Color(0xFFE97320)
+            )
             val currentCodec by viewModel.codecChoice.collectAsState()
-            Text("Encode Codec", style = MaterialTheme.typography.bodyMedium)
+            val sliderPos = profileToSlider[currentCodec] ?: 3
+            Text("Quality", style = MaterialTheme.typography.bodyMedium)
             Text(
                 text = "Decode always accepts all codecs",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(4.dp))
-            codecNames.forEachIndexed { idx, name ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { viewModel.setCodecChoice(idx) }
-                        .padding(vertical = 4.dp)
-                ) {
-                    RadioButton(
-                        selected = currentCodec == idx,
-                        onClick = { viewModel.setCodecChoice(idx) }
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(name, style = MaterialTheme.typography.bodyMedium)
-                }
+            Text(
+                text = qualityLabels[sliderPos],
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = qualityColors[sliderPos]
+            )
+            Slider(
+                value = sliderPos.toFloat(),
+                onValueChange = { viewModel.setCodecChoice(sliderToProfile[it.toInt()]) },
+                valueRange = 0f..6f,
+                steps = 5,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Best", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E))
+                Text("Lowest", style = MaterialTheme.typography.labelSmall, color = Color(0xFF991B1B))
             }
 
             Spacer(modifier = Modifier.height(24.dp))

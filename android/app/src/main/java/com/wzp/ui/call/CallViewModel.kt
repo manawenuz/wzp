@@ -109,9 +109,14 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _debugRecording = MutableStateFlow(false)
     val debugRecording: StateFlow<Boolean> = _debugRecording.asStateFlow()
 
-    // 0 = Opus (GOOD), 1 = Opus Low (DEGRADED), 2 = Codec2 (CATASTROPHIC)
+    // Quality profile index (matches JNI bridge profile_from_int)
     private val _codecChoice = MutableStateFlow(0)
     val codecChoice: StateFlow<Int> = _codecChoice.asStateFlow()
+
+    /** Key-change warning dialog state. */
+    data class KeyWarningInfo(val address: String, val oldFp: String, val newFp: String)
+    private val _keyWarning = MutableStateFlow<KeyWarningInfo?>(null)
+    val keyWarning: StateFlow<KeyWarningInfo?> = _keyWarning.asStateFlow()
 
     /** True when a call just ended and debug report can be sent. */
     private val _debugReportAvailable = MutableStateFlow(false)
@@ -385,7 +390,35 @@ class CallViewModel : ViewModel(), WzpCallback {
         Log.i(TAG, "teardown: done")
     }
 
+    /** Accept the new server key and proceed with the call. */
+    fun acceptNewFingerprint() {
+        val info = _keyWarning.value ?: return
+        _knownFingerprints.value = _knownFingerprints.value.toMutableMap().also {
+            it[info.address] = info.newFp
+        }
+        settings?.saveServerFingerprint(info.address, info.newFp)
+        _keyWarning.value = null
+        startCallInternal()
+    }
+
+    fun dismissKeyWarning() {
+        _keyWarning.value = null
+    }
+
     fun startCall() {
+        val serverEntry = _servers.value[_selectedServer.value]
+        // Check for key change before connecting
+        val ls = lockStatus(serverEntry.address)
+        if (ls == LockStatus.CHANGED) {
+            val known = _knownFingerprints.value[serverEntry.address] ?: ""
+            val current = _pingResults.value[serverEntry.address]?.serverFingerprint ?: ""
+            _keyWarning.value = KeyWarningInfo(serverEntry.address, known, current)
+            return
+        }
+        startCallInternal()
+    }
+
+    private fun startCallInternal() {
         val serverEntry = _servers.value[_selectedServer.value]
         val room = _roomName.value
         Log.i(TAG, "startCall: server=${serverEntry.address} room=$room")
