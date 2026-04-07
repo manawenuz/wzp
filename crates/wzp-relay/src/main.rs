@@ -299,6 +299,13 @@ async fn main() -> anyhow::Result<()> {
 
             let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
+            // Ping connections: client just measures QUIC connect RTT.
+            // No handshake, no streams — client closes immediately after connecting.
+            if room_name == "ping" {
+                info!(%addr, "ping connection (RTT probe)");
+                return;
+            }
+
             // Probe connections use SNI "_probe" to identify themselves.
             // They skip auth + handshake and just do Ping->Pong + presence gossip.
             if room_name == "_probe" {
