@@ -13,7 +13,6 @@ use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 use wzp_client::call::{CallConfig, CallEncoder};
 use wzp_proto::{CodecId, MediaTransport, QualityProfile};
 
-const FRAME_SAMPLES_20MS: usize = 960;
 const FRAME_SAMPLES_40MS: usize = 1920;
 
 /// Resolve a quality string from the UI to a QualityProfile.
