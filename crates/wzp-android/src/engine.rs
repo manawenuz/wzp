@@ -27,8 +27,13 @@ use crate::audio_ring::AudioRing;
 use crate::commands::EngineCommand;
 use crate::stats::{CallState, CallStats};
 
-/// Opus frame size at 48kHz mono, 20ms = 960 samples.
-const FRAME_SAMPLES: usize = 960;
+/// Max frame size at 48kHz mono (40ms = 1920 samples, for Codec2/Opus6k).
+const MAX_FRAME_SAMPLES: usize = 1920;
+
+/// Compute frame samples at 48kHz for a given profile.
+fn frame_samples_for(profile: &QualityProfile) -> usize {
+    (profile.frame_duration_ms as usize) * 48 // 48000 / 1000
+}
 
 /// Configuration to start a call.
 pub struct CallStartConfig {
@@ -350,18 +355,22 @@ async fn run_call(
     let mut capture_agc = AutoGainControl::new();
     let mut playout_agc = AutoGainControl::new();
 
+    let frame_samples = frame_samples_for(&profile);
     info!(
+        codec = ?profile.codec,
         fec_ratio = profile.fec_ratio,
         frames_per_block = profile.frames_per_block,
-        "codec + FEC + AGC initialized (48kHz mono, 20ms frames)"
+        frame_ms = profile.frame_duration_ms,
+        frame_samples,
+        "codec + FEC + AGC initialized"
     );
 
     let seq = AtomicU16::new(0);
     let ts = AtomicU32::new(0);
     let transport_recv = transport.clone();
 
-    // Pre-allocate buffers
-    let mut capture_buf = vec![0i16; FRAME_SAMPLES];
+    // Pre-allocate buffers (sized for current profile)
+    let mut capture_buf = vec![0i16; frame_samples];
     let mut encode_buf = vec![0u8; encoder.max_frame_bytes()];
     let mut frame_in_block: u8 = 0;
     let mut block_id: u8 = 0;
@@ -391,13 +400,13 @@ async fn run_call(
             }
 
             let avail = state.capture_ring.available();
-            if avail < FRAME_SAMPLES {
+            if avail < frame_samples {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 continue;
             }
 
             let read = state.capture_ring.read(&mut capture_buf);
-            if read < FRAME_SAMPLES {
+            if read < frame_samples {
                 continue;
             }
 
@@ -426,7 +435,7 @@ async fn run_call(
 
             // Build source packet
             let s = seq.fetch_add(1, Ordering::Relaxed);
-            let t = ts.fetch_add(FRAME_SAMPLES as u32, Ordering::Relaxed);
+            let t = ts.fetch_add(frame_samples as u32, Ordering::Relaxed);
 
             let source_pkt = MediaPacket {
                 header: MediaHeader {
@@ -554,8 +563,8 @@ async fn run_call(
         info!(frames_sent, frames_dropped, send_errors, "send task ended");
     };
 
-    // Pre-allocate decode buffer
-    let mut decode_buf = vec![0i16; FRAME_SAMPLES];
+    // Pre-allocate decode buffer (max size to handle any incoming codec)
+    let mut decode_buf = vec![0i16; MAX_FRAME_SAMPLES];
 
     // Recv task: MediaPackets → FEC decode → Opus decode → playout ring
     let recv_task = async {
@@ -600,13 +609,22 @@ async fn run_call(
                     );
 
                     // Source packets: decode directly
-                    if !is_repair {
+                    if !is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
                         // Switch decoder to match incoming codec if different
                         if pkt.header.codec_id != decoder.codec_id() {
-                            let switch_profile = QualityProfile {
-                                codec: pkt.header.codec_id,
-                                ..profile
+                            let switch_profile = match pkt.header.codec_id {
+                                CodecId::Opus24k => QualityProfile::GOOD,
+                                CodecId::Opus6k => QualityProfile::DEGRADED,
+                                CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
+                                CodecId::Codec2_3200 => QualityProfile {
+                                    codec: CodecId::Codec2_3200,
+                                    fec_ratio: 0.5,
+                                    frame_duration_ms: 20,
+                                    frames_per_block: 5,
+                                },
+                                other => QualityProfile { codec: other, ..QualityProfile::GOOD },
                             };
+                            info!(from = ?decoder.codec_id(), to = ?pkt.header.codec_id, "recv: switching decoder");
                             let _ = decoder.set_profile(switch_profile);
                         }
                         match decoder.decode(&pkt.payload, &mut decode_buf) {
