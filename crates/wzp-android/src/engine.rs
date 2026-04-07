@@ -38,6 +38,8 @@ fn frame_samples_for(profile: &QualityProfile) -> usize {
 /// Configuration to start a call.
 pub struct CallStartConfig {
     pub profile: QualityProfile,
+    /// When true, use the relay's chosen_profile from CallAnswer instead of local profile.
+    pub auto_profile: bool,
     pub relay_addr: String,
     pub room: String,
     pub auth_token: Vec<u8>,
@@ -49,6 +51,7 @@ impl Default for CallStartConfig {
     fn default() -> Self {
         Self {
             profile: QualityProfile::GOOD,
+            auto_profile: false,
             relay_addr: String::new(),
             room: String::new(),
             auth_token: Vec::new(),
@@ -126,6 +129,7 @@ impl WzpEngine {
         let room = config.room.clone();
         let identity_seed = config.identity_seed;
         let profile = config.profile;
+        let auto_profile = config.auto_profile;
         let alias = config.alias.clone();
         let state = self.state.clone();
 
@@ -134,7 +138,7 @@ impl WzpEngine {
 
         let state_clone = state.clone();
         runtime.block_on(async move {
-            if let Err(e) = run_call(relay_addr, &room, &identity_seed, profile, alias.as_deref(), state_clone).await
+            if let Err(e) = run_call(relay_addr, &room, &identity_seed, profile, auto_profile, alias.as_deref(), state_clone).await
             {
                 error!("call failed: {e}");
             }
@@ -277,6 +281,7 @@ async fn run_call(
     room: &str,
     identity_seed: &[u8; 32],
     profile: QualityProfile,
+    auto_profile: bool,
     alias: Option<&str>,
     state: Arc<EngineState>,
 ) -> Result<(), anyhow::Error> {
@@ -328,8 +333,8 @@ async fn run_call(
         .await?
         .ok_or_else(|| anyhow::anyhow!("connection closed before CallAnswer"))?;
 
-    let relay_ephemeral_pub = match answer {
-        SignalMessage::CallAnswer { ephemeral_pub, .. } => ephemeral_pub,
+    let (relay_ephemeral_pub, chosen_profile) = match answer {
+        SignalMessage::CallAnswer { ephemeral_pub, chosen_profile, .. } => (ephemeral_pub, chosen_profile),
         other => {
             return Err(anyhow::anyhow!(
                 "expected CallAnswer, got {:?}",
@@ -338,8 +343,16 @@ async fn run_call(
         }
     };
 
+    // Auto mode: use the relay's chosen profile instead of the local preference
+    let profile = if auto_profile {
+        info!(chosen = ?chosen_profile.codec, "auto mode: using relay's chosen profile");
+        chosen_profile
+    } else {
+        profile
+    };
+
     let _session = kx.derive_session(&relay_ephemeral_pub)?;
-    info!("handshake complete, call active");
+    info!(codec = ?profile.codec, "handshake complete, call active");
 
     {
         let mut stats = state.stats.lock().unwrap();

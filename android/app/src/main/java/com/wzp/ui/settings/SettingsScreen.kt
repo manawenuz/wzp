@@ -245,19 +245,19 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Quality selection — slider from best (studio 64k) to worst (codec2 1.2k)
+            // Quality selection — slider from best (studio 64k) to worst (codec2 1.2k) + auto
             val qualityLabels = listOf(
-                "Studio 64k", "Studio 48k", "Studio 32k", "Opus 24k",
-                "Opus 6k", "Codec2 1.2k", "Codec2 3.2k"
+                "Studio 64k", "Studio 48k", "Studio 32k", "Auto",
+                "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"
             )
             // Map slider position to JNI profile int:
-            // 0=Studio64k(6), 1=Studio48k(5), 2=Studio32k(4), 3=Opus24k(0),
-            // 4=Opus6k(1), 5=Codec2_1.2k(2), 6=Codec2_3.2k(3)
-            val sliderToProfile = intArrayOf(6, 5, 4, 0, 1, 2, 3)
-            val profileToSlider = mapOf(6 to 0, 5 to 1, 4 to 2, 0 to 3, 1 to 4, 2 to 5, 3 to 6)
+            // 0=Studio64k(6), 1=Studio48k(5), 2=Studio32k(4), 3=Auto(7),
+            // 4=Opus24k(0), 5=Opus6k(1), 6=Codec2_3.2k(3), 7=Codec2_1.2k(2)
+            val sliderToProfile = intArrayOf(6, 5, 4, 7, 0, 1, 3, 2)
+            val profileToSlider = mapOf(6 to 0, 5 to 1, 4 to 2, 7 to 3, 0 to 4, 1 to 5, 3 to 6, 2 to 7)
             val qualityColors = listOf(
                 Color(0xFF22C55E), Color(0xFF4ADE80), Color(0xFF86EFAC), Color(0xFFA3E635),
-                Color(0xFFFACC15), Color(0xFF991B1B), Color(0xFFE97320)
+                Color(0xFFA3E635), Color(0xFFFACC15), Color(0xFFE97320), Color(0xFF991B1B)
             )
             val currentCodec by viewModel.codecChoice.collectAsState()
             val sliderPos = profileToSlider[currentCodec] ?: 3
@@ -276,8 +276,8 @@ fun SettingsScreen(
             Slider(
                 value = sliderPos.toFloat(),
                 onValueChange = { viewModel.setCodecChoice(sliderToProfile[it.toInt()]) },
-                valueRange = 0f..6f,
-                steps = 5,
+                valueRange = 0f..7f,
+                steps = 6,
                 modifier = Modifier.fillMaxWidth()
             )
             Row(

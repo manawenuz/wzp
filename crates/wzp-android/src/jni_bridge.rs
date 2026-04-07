@@ -21,6 +21,9 @@ unsafe fn handle_ref(handle: jlong) -> &'static mut EngineHandle {
     unsafe { &mut *(handle as *mut EngineHandle) }
 }
 
+/// 7 = auto (use relay's chosen profile)
+const PROFILE_AUTO: jint = 7;
+
 fn profile_from_int(value: jint) -> QualityProfile {
     match value {
         0 => QualityProfile::GOOD,            // Opus 24k
@@ -35,7 +38,7 @@ fn profile_from_int(value: jint) -> QualityProfile {
         4 => QualityProfile::STUDIO_32K,      // Opus 32k
         5 => QualityProfile::STUDIO_48K,      // Opus 48k
         6 => QualityProfile::STUDIO_64K,      // Opus 64k
-        _ => QualityProfile::GOOD,
+        _ => QualityProfile::GOOD,            // auto falls back to GOOD
     }
 }
 
@@ -122,6 +125,7 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
 
         let config = CallStartConfig {
             profile: profile_from_int(profile_j),
+            auto_profile: profile_j == PROFILE_AUTO,
             relay_addr,
             room,
             auth_token: if token.is_empty() { Vec::new() } else { token.into_bytes() },

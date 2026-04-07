@@ -485,6 +485,7 @@ fun InCallScreen(
             onSelect = { idx -> viewModel.selectServer(idx) },
             onDelete = { idx -> viewModel.removeServer(idx) },
             onAdd = { addr, label -> viewModel.addServer(addr, label) },
+            onRefresh = { viewModel.pingAllServers() },
             onDismiss = { showManageRelays = false }
         )
     }
@@ -513,6 +514,7 @@ private fun ManageRelaysDialog(
     onSelect: (Int) -> Unit,
     onDelete: (Int) -> Unit,
     onAdd: (String, String) -> Unit,
+    onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var addName by remember { mutableStateOf("") }
@@ -528,14 +530,26 @@ private fun ManageRelaysDialog(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Manage Relays", color = Color.White, fontWeight = FontWeight.Bold)
-                Surface(
-                    onClick = onDismiss,
-                    shape = RoundedCornerShape(8.dp),
-                    color = DarkSurface2,
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text("\u00D7", color = TextDim, fontSize = 18.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        onClick = onRefresh,
+                        shape = RoundedCornerShape(8.dp),
+                        color = DarkSurface2,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("\u21BB", color = TextDim, fontSize = 16.sp)
+                        }
+                    }
+                    Surface(
+                        onClick = onDismiss,
+                        shape = RoundedCornerShape(8.dp),
+                        color = DarkSurface2,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("\u00D7", color = TextDim, fontSize = 18.sp)
+                        }
                     }
                 }
             }
@@ -590,13 +604,17 @@ private fun ManageRelaysDialog(
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "\u00D7",
-                                color = TextDim,
-                                fontSize = 18.sp,
-                                modifier = Modifier.clickable { onDelete(idx) }
-                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Surface(
+                                onClick = { onDelete(idx) },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color.Transparent,
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text("\u00D7", color = TextDim, fontSize = 18.sp)
+                                }
+                            }
                         }
                     }
                 }
