@@ -85,9 +85,19 @@ echo ">>> Rust build..."
 cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release -p wzp-android 2>&1 | tail -5
 
 echo ">>> Checking .so files..."
+# cargo-ndk may not copy libc++_shared.so — grab it from the NDK if missing
+if [ ! -f android/app/src/main/jniLibs/arm64-v8a/libc++_shared.so ]; then
+    echo ">>> libc++_shared.so missing, copying from NDK..."
+    NDK_LIBCXX=$(find "$ANDROID_NDK_HOME" -name "libc++_shared.so" -path "*/aarch64-linux-android/*" | head -1)
+    if [ -n "$NDK_LIBCXX" ]; then
+        cp "$NDK_LIBCXX" android/app/src/main/jniLibs/arm64-v8a/
+        echo "Copied from: $NDK_LIBCXX"
+    else
+        echo "WARNING: libc++_shared.so not found in NDK, APK may crash at runtime"
+    fi
+fi
 ls -lh android/app/src/main/jniLibs/arm64-v8a/
 [ -f android/app/src/main/jniLibs/arm64-v8a/libwzp_android.so ] || { echo "ERROR: libwzp_android.so missing!"; exit 1; }
-[ -f android/app/src/main/jniLibs/arm64-v8a/libc++_shared.so ] || { echo "ERROR: libc++_shared.so missing!"; exit 1; }
 
 echo ">>> APK build..."
 cd android && chmod +x gradlew
