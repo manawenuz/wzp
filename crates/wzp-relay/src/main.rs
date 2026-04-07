@@ -267,7 +267,9 @@ async fn main() -> anyhow::Result<()> {
         info!("    fingerprint: \"{relay_fp}\"");
     }
 
-    let (server_config, _cert) = wzp_transport::server_config();
+    let (server_config, cert_der) = wzp_transport::server_config_from_seed(&relay_seed.0);
+    let tls_fp = wzp_transport::tls_fingerprint(&cert_der);
+    info!(tls_fingerprint = %tls_fp, "TLS certificate (deterministic from relay identity)");
     let endpoint = wzp_transport::create_endpoint(config.listen_addr, Some(server_config))?;
 
     // Forward mode

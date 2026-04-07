@@ -22,7 +22,7 @@ pub mod path_monitor;
 pub mod quic;
 pub mod reliable;
 
-pub use config::{client_config, server_config};
+pub use config::{client_config, server_config, server_config_from_seed, tls_fingerprint};
 pub use connection::{accept, connect, create_endpoint};
 pub use path_monitor::PathMonitor;
 pub use quic::QuinnTransport;
