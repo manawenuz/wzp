@@ -463,7 +463,51 @@ fun InCallScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Stats
+                // Codec + Stats
+                if (stats.currentCodec.isNotEmpty()) {
+                    val codecLabel = formatCodecName(stats.currentCodec)
+                    val peerLabel = if (stats.peerCodec.isNotEmpty()) formatCodecName(stats.peerCodec) else null
+                    val autoTag = if (stats.autoMode) " [Auto]" else ""
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Our codec badge
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = codecColor(stats.currentCodec)
+                        ) {
+                            Text(
+                                text = "TX $codecLabel$autoTag",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp
+                                ),
+                                color = Color.White
+                            )
+                        }
+                        if (peerLabel != null) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = codecColor(stats.peerCodec)
+                            ) {
+                                Text(
+                                    text = "RX $peerLabel",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp
+                                    ),
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
                 Text(
                     text = "TX: ${stats.framesEncoded} | RX: ${stats.framesDecoded}",
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
@@ -824,4 +868,26 @@ private fun DebugReportCard(
             }
         }
     }
+}
+
+/** Map Rust CodecId debug name to a human-readable label. */
+private fun formatCodecName(codecId: String): String = when (codecId) {
+    "Opus64k" -> "Opus 64k"
+    "Opus48k" -> "Opus 48k"
+    "Opus32k" -> "Opus 32k"
+    "Opus24k" -> "Opus 24k"
+    "Opus16k" -> "Opus 16k"
+    "Opus6k" -> "Opus 6k"
+    "Codec2_3200" -> "C2 3.2k"
+    "Codec2_1200" -> "C2 1.2k"
+    else -> codecId
+}
+
+/** Color-code codec badges by quality tier. */
+private fun codecColor(codecId: String): Color = when (codecId) {
+    "Opus64k", "Opus48k", "Opus32k" -> Color(0xFF0D6EFD) // blue — studio
+    "Opus24k", "Opus16k" -> Color(0xFF198754) // green — good
+    "Opus6k" -> Color(0xFFCC8800) // amber — degraded
+    "Codec2_3200", "Codec2_1200" -> Color(0xFFDC3545) // red — catastrophic
+    else -> Color(0xFF6C757D) // gray
 }

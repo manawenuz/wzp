@@ -59,6 +59,12 @@ pub struct CallStats {
     pub capture_overflows: u64,
     /// Current mic audio level (RMS of i16 samples, 0-32767).
     pub audio_level: u32,
+    /// Our current outgoing codec name (e.g. "Opus24k", "Codec2_1200").
+    pub current_codec: String,
+    /// Last seen incoming codec from other participants.
+    pub peer_codec: String,
+    /// Whether auto quality mode is active.
+    pub auto_mode: bool,
     /// Number of participants in the room (from last RoomUpdate).
     pub room_participant_count: u32,
     /// Participant list (fingerprint + optional alias) serialized as JSON array.

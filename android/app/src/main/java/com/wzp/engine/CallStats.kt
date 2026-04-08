@@ -33,6 +33,12 @@ data class CallStats(
     val fecRecovered: Long = 0,
     /** Current mic audio level (RMS, 0-32767). */
     val audioLevel: Int = 0,
+    /** Our current outgoing codec (e.g. "Opus24k"). */
+    val currentCodec: String = "",
+    /** Last seen incoming codec from peers. */
+    val peerCodec: String = "",
+    /** Whether auto quality mode is active. */
+    val autoMode: Boolean = false,
     /** Number of participants in the room. */
     val roomParticipantCount: Int = 0,
     /** Participants in the room (fingerprint + optional alias). */
@@ -76,6 +82,9 @@ data class CallStats(
                     underruns = obj.optLong("underruns", 0),
                     fecRecovered = obj.optLong("fec_recovered", 0),
                     audioLevel = obj.optInt("audio_level", 0),
+                    currentCodec = obj.optString("current_codec", ""),
+                    peerCodec = obj.optString("peer_codec", ""),
+                    autoMode = obj.optBoolean("auto_mode", false),
                     roomParticipantCount = obj.optInt("room_participant_count", 0),
                     roomParticipants = parseParticipants(obj.optJSONArray("room_participants"))
                 )

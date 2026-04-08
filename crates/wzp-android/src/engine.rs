@@ -9,7 +9,7 @@
 //! and AudioTrack. PCM samples are transferred through lock-free ring buffers.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -19,8 +19,8 @@ use wzp_codec::agc::AutoGainControl;
 use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::{
-    AudioDecoder, AudioEncoder, CodecId, FecDecoder, FecEncoder,
-    MediaHeader, MediaPacket, MediaTransport, QualityProfile, SignalMessage,
+    AdaptiveQualityController, AudioDecoder, AudioEncoder, CodecId, FecDecoder, FecEncoder,
+    MediaHeader, MediaPacket, MediaTransport, QualityController, QualityProfile, SignalMessage,
 };
 
 use crate::audio_ring::AudioRing;
@@ -29,6 +29,27 @@ use crate::stats::{CallState, CallStats};
 
 /// Max frame size at 48kHz mono (40ms = 1920 samples, for Codec2/Opus6k).
 const MAX_FRAME_SAMPLES: usize = 1920;
+
+/// Sentinel value: no profile change pending.
+const PROFILE_NO_CHANGE: u8 = 0xFF;
+
+/// All quality profiles in index order, for AtomicU8-based signaling.
+const PROFILES: [QualityProfile; 6] = [
+    QualityProfile::STUDIO_64K,   // 0
+    QualityProfile::STUDIO_48K,   // 1
+    QualityProfile::STUDIO_32K,   // 2
+    QualityProfile::GOOD,         // 3
+    QualityProfile::DEGRADED,     // 4
+    QualityProfile::CATASTROPHIC, // 5
+];
+
+fn profile_to_index(p: &QualityProfile) -> u8 {
+    PROFILES.iter().position(|pp| pp.codec == p.codec).map(|i| i as u8).unwrap_or(3)
+}
+
+fn index_to_profile(idx: u8) -> Option<QualityProfile> {
+    PROFILES.get(idx as usize).copied()
+}
 
 /// Compute frame samples at 48kHz for a given profile.
 fn frame_samples_for(profile: &QualityProfile) -> usize {
@@ -371,7 +392,7 @@ async fn run_call(
     let mut capture_agc = AutoGainControl::new();
     let mut playout_agc = AutoGainControl::new();
 
-    let frame_samples = frame_samples_for(&profile);
+    let mut frame_samples = frame_samples_for(&profile);
     info!(
         codec = ?profile.codec,
         fec_ratio = profile.fec_ratio,
@@ -381,15 +402,27 @@ async fn run_call(
         "codec + FEC + AGC initialized"
     );
 
+    {
+        let mut stats = state.stats.lock().unwrap();
+        stats.current_codec = format!("{:?}", profile.codec);
+        stats.auto_mode = auto_profile;
+    }
+
     let seq = AtomicU16::new(0);
     let ts = AtomicU32::new(0);
     let transport_recv = transport.clone();
+
+    // Adaptive quality: shared AtomicU8 between recv task (writer) and send task (reader).
+    // 0xFF = no change pending, 0-5 = index into PROFILES array.
+    let pending_profile = Arc::new(AtomicU8::new(PROFILE_NO_CHANGE));
+    let pending_profile_recv = pending_profile.clone();
 
     // Pre-allocate buffers (sized for current profile)
     let mut capture_buf = vec![0i16; frame_samples];
     let mut encode_buf = vec![0u8; encoder.max_frame_bytes()];
     let mut frame_in_block: u8 = 0;
     let mut block_id: u8 = 0;
+    let mut current_profile = profile;
 
     // Send task: capture ring → Opus encode → FEC → MediaPackets
     //
@@ -413,6 +446,39 @@ async fn run_call(
         loop {
             if !state.running.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // Check for adaptive profile switch from recv task
+            if auto_profile {
+                let p = pending_profile.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
+                if p != PROFILE_NO_CHANGE {
+                    if let Some(new_profile) = index_to_profile(p) {
+                        info!(
+                            from = ?current_profile.codec,
+                            to = ?new_profile.codec,
+                            "auto: switching encoder profile"
+                        );
+                        if let Err(e) = encoder.set_profile(new_profile) {
+                            warn!("encoder set_profile failed: {e}");
+                        } else {
+                            fec_enc = wzp_fec::create_encoder(&new_profile);
+                            current_profile = new_profile;
+                            let new_frame_samples = frame_samples_for(&new_profile);
+                            if new_frame_samples != frame_samples {
+                                frame_samples = new_frame_samples;
+                                capture_buf.resize(frame_samples, 0);
+                            }
+                            encode_buf.resize(encoder.max_frame_bytes(), 0);
+                            // Reset FEC block state for clean switch
+                            frame_in_block = 0;
+                            block_id = block_id.wrapping_add(1);
+                            // Update stats with new codec
+                            if let Ok(mut stats) = state.stats.lock() {
+                                stats.current_codec = format!("{:?}", new_profile.codec);
+                            }
+                        }
+                    }
+                }
             }
 
             let avail = state.capture_ring.available();
@@ -457,9 +523,9 @@ async fn run_call(
                 header: MediaHeader {
                     version: 0,
                     is_repair: false,
-                    codec_id: profile.codec,
+                    codec_id: current_profile.codec,
                     has_quality_report: false,
-                    fec_ratio_encoded: MediaHeader::encode_fec_ratio(profile.fec_ratio),
+                    fec_ratio_encoded: MediaHeader::encode_fec_ratio(current_profile.fec_ratio),
                     seq: s,
                     timestamp: t,
                     fec_block: block_id,
@@ -501,8 +567,8 @@ async fn run_call(
             frame_in_block += 1;
 
             // When block is full, generate repair packets
-            if frame_in_block >= profile.frames_per_block {
-                match fec_enc.generate_repair(profile.fec_ratio) {
+            if frame_in_block >= current_profile.frames_per_block {
+                match fec_enc.generate_repair(current_profile.fec_ratio) {
                     Ok(repairs) => {
                         let repair_count = repairs.len();
                         for (sym_idx, repair_data) in repairs {
@@ -511,10 +577,10 @@ async fn run_call(
                                 header: MediaHeader {
                                     version: 0,
                                     is_repair: true,
-                                    codec_id: profile.codec,
+                                    codec_id: current_profile.codec,
                                     has_quality_report: false,
                                     fec_ratio_encoded: MediaHeader::encode_fec_ratio(
-                                        profile.fec_ratio,
+                                        current_profile.fec_ratio,
                                     ),
                                     seq: rs,
                                     timestamp: t,
@@ -537,7 +603,7 @@ async fn run_call(
                             info!(
                                 block_id,
                                 repair_count,
-                                fec_ratio = profile.fec_ratio,
+                                fec_ratio = current_profile.fec_ratio,
                                 "FEC block complete"
                             );
                         }
@@ -590,6 +656,8 @@ async fn run_call(
         let mut last_recv_instant = Instant::now();
         let mut max_recv_gap_ms: u64 = 0;
         let mut last_stats_log = Instant::now();
+        let mut quality_ctrl = AdaptiveQualityController::new();
+        let mut last_peer_codec: Option<CodecId> = None;
         info!("recv task started (Opus + RaptorQ FEC)");
         loop {
             if !state.running.load(Ordering::Relaxed) {
@@ -610,6 +678,23 @@ async fn run_call(
                             is_repair = pkt.header.is_repair,
                             "large recv gap — possible network stall"
                         );
+                    }
+
+                    // Adaptive quality: ingest quality reports from relay
+                    if auto_profile {
+                        if let Some(ref qr) = pkt.quality_report {
+                            if let Some(new_profile) = quality_ctrl.observe(qr) {
+                                let idx = profile_to_index(&new_profile);
+                                info!(
+                                    loss = qr.loss_percent(),
+                                    rtt = qr.rtt_ms(),
+                                    tier = ?quality_ctrl.tier(),
+                                    to = ?new_profile.codec,
+                                    "auto: quality adapter recommends switch"
+                                );
+                                pending_profile_recv.store(idx, Ordering::Release);
+                            }
+                        }
                     }
 
                     let is_repair = pkt.header.is_repair;
@@ -645,6 +730,13 @@ async fn run_call(
                             };
                             info!(from = ?decoder.codec_id(), to = ?pkt.header.codec_id, "recv: switching decoder");
                             let _ = decoder.set_profile(switch_profile);
+                        }
+                        // Track peer codec for UI display
+                        if last_peer_codec != Some(pkt.header.codec_id) {
+                            last_peer_codec = Some(pkt.header.codec_id);
+                            if let Ok(mut stats) = state.stats.lock() {
+                                stats.peer_codec = format!("{:?}", pkt.header.codec_id);
+                            }
                         }
                         match decoder.decode(&pkt.payload, &mut decode_buf) {
                             Ok(samples) => {
