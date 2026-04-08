@@ -68,7 +68,8 @@ find "$BASE_DIR/data/source" "$BASE_DIR/data/cache" \
 # Clean jniLibs
 rm -rf "$BASE_DIR/data/source/android/app/src/main/jniLibs/arm64-v8a"
 
-notify "WZP build started..."
+GIT_HASH=$(cd $BASE_DIR/data/source && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+notify "WZP Android build started [$GIT_HASH]..."
 
 echo ">>> Building in Docker..."
 docker run --rm --user 1000:1000 \
@@ -112,7 +113,7 @@ APK=$(find "$BASE_DIR/data/source/android" -name "app-debug*.apk" -path "*/outpu
 if [ -n "$APK" ]; then
     URL=$(curl -s -F "file=@$APK" -H "Authorization: $rusty_auth_token" "$rusty_address")
     echo "UPLOAD_URL=$URL"
-    notify "WZP build done! APK: $URL"
+    notify "WZP Android [$GIT_HASH] done! APK: $URL"
     echo ">>> Done! APK at: $URL"
 else
     notify "WZP build FAILED - no APK"
