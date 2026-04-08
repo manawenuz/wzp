@@ -597,9 +597,18 @@ async fn handle_signal(
             let mut links = fm.peer_links.lock().await;
             if let Some(link) = links.get_mut(peer_fp) {
                 link.active_rooms.remove(&room);
+                // Clear remote participants for this peer+room
+                link.remote_participants.remove(&room);
+                // Also try canonical name
+                if let Some(canonical) = fm.resolve_global_room(&room) {
+                    link.remote_participants.remove(canonical);
+                }
             }
-            // Update active rooms gauge
+
+            // Update active rooms metric
             let total: usize = links.values().map(|l| l.active_rooms.len()).sum();
+            fm.metrics.federation_active_rooms.set(total as i64);
+
             // Check if any other peer still has this room — if none, propagate inactive
             let any_other_active = links.iter()
                 .any(|(fp, l)| fp != peer_fp && l.active_rooms.contains(&room));
@@ -612,6 +621,37 @@ async fn handle_signal(
                     if fp != peer_fp {
                         let _ = link.transport.send_signal(&SignalMessage::GlobalRoomInactive { room: room.clone() }).await;
                     }
+                }
+            }
+            drop(links);
+
+            // Broadcast updated RoomUpdate to local clients (remote participant removed)
+            let mgr = fm.room_mgr.lock().await;
+            for local_room in mgr.active_rooms() {
+                if fm.is_global_room(&local_room) && fm.resolve_global_room(&local_room) == fm.resolve_global_room(&room) {
+                    let mut all_participants = mgr.local_participant_list(&local_room);
+                    // Merge remaining remote participants from other peers
+                    let links = fm.peer_links.lock().await;
+                    for link in links.values() {
+                        if let Some(canonical) = fm.resolve_global_room(&local_room) {
+                            if let Some(remote) = link.remote_participants.get(canonical) {
+                                all_participants.extend(remote.iter().cloned());
+                            }
+                            if let Some(remote) = link.remote_participants.get(&local_room) {
+                                all_participants.extend(remote.iter().cloned());
+                            }
+                        }
+                    }
+                    let update = SignalMessage::RoomUpdate {
+                        count: all_participants.len() as u32,
+                        participants: all_participants,
+                    };
+                    let senders = mgr.local_senders(&local_room);
+                    drop(links);
+                    drop(mgr);
+                    room::broadcast_signal(&senders, &update).await;
+                    info!(room = %room, "broadcast updated presence (remote participant removed)");
+                    break;
                 }
             }
         }
