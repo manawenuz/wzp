@@ -347,13 +347,22 @@ async fn run_federation_link(
         }
     };
 
+    let peer_label_media = peer_label.clone();
     let media_task = async move {
+        let mut media_count: u64 = 0;
         loop {
             match media_transport.connection().read_datagram().await {
                 Ok(data) => {
+                    media_count += 1;
+                    if media_count == 1 || media_count % 250 == 0 {
+                        info!(peer = %peer_label_media, media_count, len = data.len(), "federation: received datagram");
+                    }
                     handle_datagram(&fm_media, &peer_fp_media, data).await;
                 }
-                Err(_) => break,
+                Err(e) => {
+                    info!(peer = %peer_label_media, "federation media task ended: {e}");
+                    break;
+                }
             }
         }
     };
@@ -469,7 +478,9 @@ async fn handle_datagram(
             let mut tagged = Vec::with_capacity(8 + media_bytes.len());
             tagged.extend_from_slice(&rh);
             tagged.extend_from_slice(&media_bytes);
-            let _ = link.transport.send_raw_datagram(&tagged);
+            if let Err(e) = link.transport.send_raw_datagram(&tagged) {
+                warn!(peer = %link.label, "multi-hop forward error: {e}");
+            }
         }
     }
 }
