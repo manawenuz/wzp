@@ -122,3 +122,56 @@ pub fn load_config(path: &str) -> Result<RelayConfig, anyhow::Error> {
     let config: RelayConfig = toml::from_str(&content)?;
     Ok(config)
 }
+
+/// Load config from path, or create an example config file if it doesn't exist.
+pub fn load_or_create_config(path: &str) -> Result<RelayConfig, anyhow::Error> {
+    let p = std::path::Path::new(path);
+    if p.exists() {
+        return load_config(path);
+    }
+    // Create parent directory if needed
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Write example config
+    let example = EXAMPLE_CONFIG;
+    std::fs::write(p, example)?;
+    eprintln!("Created example config at {path} — edit it and restart.");
+    let config: RelayConfig = toml::from_str(example)?;
+    Ok(config)
+}
+
+/// Example TOML configuration written when --config points to a non-existent file.
+pub const EXAMPLE_CONFIG: &str = r#"# WarzonePhone Relay Configuration
+# See docs/ADMINISTRATION.md for full reference.
+
+# Listen address for client connections
+listen_addr = "0.0.0.0:4433"
+
+# Maximum concurrent sessions
+# max_sessions = 100
+
+# Prometheus metrics endpoint (uncomment to enable)
+# metrics_port = 9090
+
+# featherChat auth endpoint (uncomment to enable)
+# auth_url = "https://chat.example.com/v1/auth/validate"
+
+# Federation: peer relays we connect to (outbound)
+# [[peers]]
+# url = "relay-b.example.com:4433"
+# fingerprint = "aa:bb:cc:dd:..."
+# label = "Relay B"
+
+# Federation: relays we trust inbound connections from
+# [[trusted]]
+# fingerprint = "ee:ff:00:11:..."
+# label = "Relay X"
+
+# Global rooms bridged across all federated peers
+# [[global_rooms]]
+# name = "general"
+
+# Debug: log packet headers for a room ("*" for all)
+# debug_tap = "*"
+"#;

@@ -23,22 +23,30 @@ use wzp_relay::presence::PresenceRegistry;
 use wzp_relay::room::{self, RoomManager};
 use wzp_relay::session_mgr::SessionManager;
 
-fn parse_args() -> RelayConfig {
+/// Parsed CLI result — config + identity path.
+struct CliResult {
+    config: RelayConfig,
+    identity_path: Option<String>,
+}
+
+fn parse_args() -> CliResult {
     let args: Vec<String> = std::env::args().collect();
 
-    // Check for --config first to use as base
+    // First pass: extract --config and --identity
     let mut config_file = None;
+    let mut identity_path = None;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "--config" {
-            i += 1;
-            config_file = args.get(i).cloned();
+        match args[i].as_str() {
+            "--config" | "-c" => { i += 1; config_file = args.get(i).cloned(); }
+            "--identity" | "-i" => { i += 1; identity_path = args.get(i).cloned(); }
+            _ => {}
         }
         i += 1;
     }
 
     let mut config = if let Some(ref path) = config_file {
-        wzp_relay::config::load_config(path)
+        wzp_relay::config::load_or_create_config(path)
             .unwrap_or_else(|e| {
                 eprintln!("failed to load config from {path}: {e}");
                 std::process::exit(1);
@@ -51,7 +59,8 @@ fn parse_args() -> RelayConfig {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--config" => { i += 1; } // already handled
+            "--config" | "-c" => { i += 1; } // already handled
+            "--identity" | "-i" => { i += 1; } // already handled
             "--listen" => {
                 i += 1;
                 config.listen_addr = args.get(i).expect("--listen requires an address")
@@ -128,7 +137,8 @@ fn parse_args() -> RelayConfig {
                 eprintln!("Usage: wzp-relay [--config <path>] [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]... [--probe-mesh] [--mesh-status]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --config <path>        Load configuration from TOML file (peers, listen, etc.)");
+                eprintln!("  -c, --config <path>    Load config from TOML file (creates example if missing)");
+                eprintln!("  -i, --identity <path>  Identity file path (creates if missing, uses OsRng)");
                 eprintln!("  --listen <addr>        Listen address (default: 0.0.0.0:4433)");
                 eprintln!("  --remote <addr>        Remote relay for forwarding (disables room mode)");
                 eprintln!("  --auth-url <url>       featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
@@ -154,7 +164,7 @@ fn parse_args() -> RelayConfig {
         }
         i += 1;
     }
-    config
+    CliResult { config, identity_path }
 }
 
 struct RelayStats {
@@ -239,7 +249,7 @@ fn detect_public_ip() -> Option<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = parse_args();
+    let CliResult { config, identity_path } = parse_args();
     tracing_subscriber::fmt().init();
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -260,36 +270,41 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(wzp_relay::metrics::serve_metrics(port, m, p, rr));
     }
 
-    // Load or generate relay identity — persisted in ~/.wzp/relay-identity
+    // Load or generate relay identity
     let relay_seed = {
-        let config_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".wzp");
-        let identity_path = config_dir.join("relay-identity");
-        if identity_path.exists() {
-            if let Ok(hex) = std::fs::read_to_string(&identity_path) {
+        let id_path = match identity_path {
+            Some(ref p) => std::path::PathBuf::from(p),
+            None => dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".wzp")
+                .join("relay-identity"),
+        };
+        if id_path.exists() {
+            if let Ok(hex) = std::fs::read_to_string(&id_path) {
                 if let Ok(s) = wzp_crypto::Seed::from_hex(hex.trim()) {
-                    info!("loaded relay identity from {}", identity_path.display());
+                    info!("loaded relay identity from {}", id_path.display());
                     s
                 } else {
-                    warn!("corrupt relay identity file, generating new");
+                    warn!("corrupt identity file {}, generating new", id_path.display());
                     let s = wzp_crypto::Seed::generate();
                     let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
-                    let _ = std::fs::write(&identity_path, &hex);
+                    let _ = std::fs::write(&id_path, &hex);
                     s
                 }
             } else {
                 let s = wzp_crypto::Seed::generate();
                 let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
-                let _ = std::fs::write(&identity_path, &hex);
+                let _ = std::fs::write(&id_path, &hex);
                 s
             }
         } else {
             let s = wzp_crypto::Seed::generate();
-            let _ = std::fs::create_dir_all(&config_dir);
+            if let Some(parent) = id_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
-            let _ = std::fs::write(&identity_path, &hex);
-            info!("generated relay identity at {}", identity_path.display());
+            let _ = std::fs::write(&id_path, &hex);
+            info!("generated relay identity at {}", id_path.display());
             s
         }
     };
