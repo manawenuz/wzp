@@ -180,6 +180,7 @@ impl Room {
             .map(|p| wzp_proto::packet::RoomParticipant {
                 fingerprint: p.fingerprint.clone().unwrap_or_default(),
                 alias: p.alias.clone(),
+                relay_label: None, // local participant
             })
             .collect()
     }

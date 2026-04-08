@@ -539,7 +539,15 @@ async fn handle_signal(
                 let total: usize = links.values().map(|l| l.active_rooms.len()).sum();
                 fm.metrics.federation_active_rooms.set(total as i64);
                 if let Some(link) = links.get_mut(peer_fp) {
-                    link.remote_participants.insert(room.clone(), participants.clone());
+                    // Tag remote participants with their relay label
+                    let tagged: Vec<_> = participants.iter().map(|p| {
+                        let mut tagged = p.clone();
+                        if tagged.relay_label.is_none() {
+                            tagged.relay_label = Some(link.label.clone());
+                        }
+                        tagged
+                    }).collect();
+                    link.remote_participants.insert(room.clone(), tagged);
                 }
                 // Propagate to other peers
                 for (fp, link) in links.iter() {
