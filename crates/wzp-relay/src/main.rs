@@ -501,16 +501,8 @@ async fn main() -> anyhow::Result<()> {
             // Federation connections use SNI "_federation"
             if room_name == "_federation" {
                 if let Some(ref fm) = federation_mgr {
-                    // Check if we recognize this peer by TLS fingerprint
-                    let peer_fp = wzp_transport::tls_fingerprint(
-                        &transport.connection()
-                            .peer_identity()
-                            .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
-                            .and_then(|certs| certs.first().cloned())
-                            .map(|c| c.to_vec())
-                            .unwrap_or_default()
-                    );
-                    if let Some(peer_config) = fm.find_peer_by_fingerprint(&peer_fp) {
+                    // Match inbound peer by source IP (client connections don't present TLS certs)
+                    if let Some(peer_config) = fm.find_peer_by_addr(addr) {
                         let peer_config = peer_config.clone();
                         let fm = fm.clone();
                         info!(%addr, label = ?peer_config.label, "inbound federation connection accepted");
@@ -520,12 +512,9 @@ async fn main() -> anyhow::Result<()> {
                         info!("  to accept, add to relay.toml:");
                         info!("  [[peers]]");
                         info!("  url = \"{addr}\"");
-                        info!("  fingerprint = \"{peer_fp}\"");
-                        transport.close().await.ok();
                     }
                 } else {
                     info!(%addr, "federation connection rejected (no peers configured)");
-                    transport.close().await.ok();
                 }
                 return;
             }

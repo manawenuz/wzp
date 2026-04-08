@@ -87,6 +87,17 @@ impl FederationManager {
     pub fn find_peer_by_fingerprint(&self, fp: &str) -> Option<&PeerConfig> {
         self.peers.iter().find(|p| normalize_fp(&p.fingerprint) == normalize_fp(fp))
     }
+
+    /// Find a configured peer by source IP address.
+    /// Used for inbound connections where the client doesn't present a TLS cert.
+    pub fn find_peer_by_addr(&self, addr: SocketAddr) -> Option<&PeerConfig> {
+        let addr_ip = addr.ip();
+        self.peers.iter().find(|p| {
+            p.url.parse::<SocketAddr>()
+                .map(|sa| sa.ip() == addr_ip)
+                .unwrap_or(false)
+        })
+    }
 }
 
 /// Normalize a fingerprint string (remove colons, lowercase).
@@ -156,12 +167,15 @@ async fn run_federation_link(
     // Map room_hash -> room_name for incoming media demux
     let mut hash_to_room: HashMap<[u8; 8], String> = HashMap::new();
 
-    // Run two tasks: recv signals + recv media datagrams
+    // Run three tasks: recv signals + recv media + periodic room announcements
     let signal_transport = transport.clone();
     let media_transport = transport.clone();
+    let announce_transport = transport.clone();
     let fm_signal = fm.clone();
     let fm_media = fm.clone();
+    let fm_announce = fm.clone();
     let peer_label = peer.label.clone().unwrap_or_else(|| peer.url.clone());
+    let peer_label2 = peer_label.clone();
 
     let signal_task = async move {
         loop {
@@ -275,9 +289,43 @@ async fn run_federation_link(
         }
     };
 
+    // Periodically announce new local rooms to the peer
+    let announce_task = async move {
+        let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let rooms = {
+                let mgr = fm_announce.room_mgr.lock().await;
+                mgr.active_rooms()
+            };
+            for room_name in &rooms {
+                if !announced.contains(room_name) {
+                    let participants = {
+                        let mgr = fm_announce.room_mgr.lock().await;
+                        mgr.local_participants(room_name)
+                    };
+                    if participants.is_empty() {
+                        continue; // only virtual participants, skip
+                    }
+                    let msg = SignalMessage::FederationRoomJoin {
+                        room: room_name.clone(),
+                        participants,
+                    };
+                    if announce_transport.send_signal(&msg).await.is_ok() {
+                        info!(peer = %peer_label2, room = %room_name, "federation: announced room to peer");
+                        announced.insert(room_name.clone());
+                    }
+                }
+            }
+            // Remove rooms that no longer exist
+            announced.retain(|r| rooms.contains(r));
+        }
+    };
+
     tokio::select! {
         _ = signal_task => {}
         _ = media_task => {}
+        _ = announce_task => {}
     }
 
     Ok(())
