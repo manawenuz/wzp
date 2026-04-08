@@ -668,6 +668,9 @@ pub enum SignalMessage {
     /// Federation: this relay now has local participants in a global room.
     GlobalRoomActive {
         room: String,
+        /// Participants on the announcing relay (for federated presence).
+        #[serde(default)]
+        participants: Vec<RoomParticipant>,
     },
 
     /// Federation: this relay's last local participant left a global room.

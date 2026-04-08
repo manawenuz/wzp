@@ -392,7 +392,6 @@ async fn main() -> anyhow::Result<()> {
             room_mgr.clone(),
             endpoint.clone(),
             tls_fp.clone(),
-            metrics.clone(),
         ));
         let fm_run = fm.clone();
         tokio::spawn(async move { fm_run.run().await });

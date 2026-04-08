@@ -304,6 +304,13 @@ impl RoomManager {
         self.rooms.keys().cloned().collect()
     }
 
+    /// Get participant list for a room (fingerprint + alias).
+    pub fn local_participant_list(&self, room_name: &str) -> Vec<wzp_proto::packet::RoomParticipant> {
+        self.rooms.get(room_name)
+            .map(|room| room.participant_list())
+            .unwrap_or_default()
+    }
+
     /// Get all senders for participants in a room (for federation inbound media delivery).
     pub fn local_senders(&self, room_name: &str) -> Vec<ParticipantSender> {
         self.rooms.get(room_name)
