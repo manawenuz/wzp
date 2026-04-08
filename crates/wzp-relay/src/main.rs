@@ -721,12 +721,15 @@ async fn main() -> anyhow::Result<()> {
                     .collect();
                 // Set up federation media channel if this is a global room
                 let federation_tx = if let Some(ref fm) = federation_mgr {
-                    if fm.is_global_room(&room_name) {
+                    let is_global = fm.is_global_room(&room_name);
+                    info!(room = %room_name, is_global, "checking if room is global for federation");
+                    if is_global {
                         let (tx, rx) = tokio::sync::mpsc::channel(256);
                         let fm_clone = fm.clone();
                         tokio::spawn(async move {
                             wzp_relay::federation::run_federation_media_egress(fm_clone, rx).await;
                         });
+                        info!(room = %room_name, "federation media egress channel created");
                         Some(tx)
                     } else {
                         None
