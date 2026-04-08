@@ -63,6 +63,9 @@ pub struct RelayConfig {
     /// Federation peer relays.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+    /// Debug tap: log packet headers for matching rooms ("*" = all rooms).
+    /// Activated via --debug-tap <room> or debug_tap = "room" in TOML.
+    pub debug_tap: Option<String>,
 }
 
 impl Default for RelayConfig {
@@ -82,6 +85,7 @@ impl Default for RelayConfig {
             ws_port: None,
             static_dir: None,
             peers: Vec::new(),
+            debug_tap: None,
         }
     }
 }

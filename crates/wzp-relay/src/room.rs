@@ -18,6 +18,38 @@ use wzp_proto::MediaTransport;
 use crate::metrics::RelayMetrics;
 use crate::trunk::TrunkBatcher;
 
+/// Debug tap: logs packet metadata for matching rooms.
+#[derive(Clone)]
+pub struct DebugTap {
+    /// Room name filter ("*" = all rooms, or specific room name/hash).
+    pub room_filter: String,
+}
+
+impl DebugTap {
+    pub fn matches(&self, room_name: &str) -> bool {
+        self.room_filter == "*" || self.room_filter == room_name
+    }
+
+    pub fn log_packet(&self, room: &str, dir: &str, addr: &std::net::SocketAddr, pkt: &wzp_proto::MediaPacket, fan_out: usize) {
+        let h = &pkt.header;
+        info!(
+            target: "debug_tap",
+            room = %room,
+            dir = dir,
+            addr = %addr,
+            seq = h.seq,
+            codec = ?h.codec_id,
+            ts = h.timestamp,
+            fec_block = h.fec_block,
+            fec_sym = h.fec_symbol,
+            repair = h.is_repair,
+            len = pkt.payload.len(),
+            fan_out,
+            "TAP"
+        );
+    }
+}
+
 /// Unique participant ID within a room.
 pub type ParticipantId = u64;
 
@@ -477,6 +509,7 @@ pub async fn run_participant(
     metrics: Arc<RelayMetrics>,
     session_id: &str,
     trunking_enabled: bool,
+    debug_tap: Option<DebugTap>,
 ) {
     if trunking_enabled {
         run_participant_trunked(
@@ -485,7 +518,7 @@ pub async fn run_participant(
         .await;
     } else {
         run_participant_plain(
-            room_mgr, room_name, participant_id, transport, metrics, session_id,
+            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap,
         )
         .await;
     }
@@ -499,6 +532,7 @@ async fn run_participant_plain(
     transport: Arc<wzp_transport::QuinnTransport>,
     metrics: Arc<RelayMetrics>,
     session_id: &str,
+    debug_tap: Option<DebugTap>,
 ) {
     let addr = transport.connection().remote_address();
     let mut packets_forwarded = 0u64;
@@ -570,6 +604,13 @@ async fn run_participant_plain(
                 lock_ms,
                 "slow room_mgr lock"
             );
+        }
+
+        // Debug tap: log packet metadata
+        if let Some(ref tap) = debug_tap {
+            if tap.matches(&room_name) {
+                tap.log_packet(&room_name, "in", &addr, &pkt, others.len());
+            }
         }
 
         // Forward to all others

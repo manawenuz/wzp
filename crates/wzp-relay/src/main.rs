@@ -104,6 +104,12 @@ fn parse_args() -> RelayConfig {
                     args.get(i).expect("--static-dir requires a directory path").to_string(),
                 );
             }
+            "--debug-tap" => {
+                i += 1;
+                config.debug_tap = Some(
+                    args.get(i).expect("--debug-tap requires a room name (or '*' for all)").to_string(),
+                );
+            }
             "--mesh-status" => {
                 // Print mesh table from a fresh registry and exit.
                 // In practice this is useful after the relay has been running;
@@ -126,6 +132,7 @@ fn parse_args() -> RelayConfig {
                 eprintln!("  --probe-mesh           Enable mesh mode (mark config flag, probes all --probe targets).");
                 eprintln!("  --mesh-status          Print mesh health table and exit (diagnostic).");
                 eprintln!("  --trunking             Enable trunk batching for outgoing media in room mode.");
+                eprintln!("  --debug-tap <room>     Log packet headers for a room ('*' for all rooms).");
                 eprintln!("  --ws-port <port>       WebSocket listener port for browser clients (e.g., 8080).");
                 eprintln!("  --static-dir <dir>     Directory to serve static files from (HTML/JS/WASM).");
                 eprintln!();
@@ -372,6 +379,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!("auth disabled — any client can connect (use --auth-url to enable)");
     }
+    if let Some(ref tap) = config.debug_tap {
+        info!(filter = %tap, "debug tap enabled — logging packet headers");
+    }
 
     info!("Listening for connections...");
 
@@ -388,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         let relay_seed_bytes = relay_seed.0;
         let metrics = metrics.clone();
         let trunking_enabled = config.trunking_enabled;
+        let debug_tap = config.debug_tap.as_ref().map(|filter| room::DebugTap { room_filter: filter.clone() });
         let presence = presence.clone();
         let route_resolver = route_resolver.clone();
         let federation_mgr = federation_mgr.clone();
@@ -675,6 +686,7 @@ async fn main() -> anyhow::Result<()> {
                     metrics.clone(),
                     &session_id_str,
                     trunking_enabled,
+                    debug_tap,
                 ).await;
 
                 // Participant disconnected — clean up presence + per-session metrics
