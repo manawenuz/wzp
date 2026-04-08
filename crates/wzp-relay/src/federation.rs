@@ -241,6 +241,26 @@ impl FederationManager {
         }
     }
 
+    /// Get all remote participants for a room from all peer links.
+    pub async fn get_remote_participants(&self, room: &str) -> Vec<wzp_proto::packet::RoomParticipant> {
+        let canonical = self.resolve_global_room(room);
+        let links = self.peer_links.lock().await;
+        let mut result = Vec::new();
+        for link in links.values() {
+            // Check canonical name
+            if let Some(c) = canonical {
+                if let Some(remote) = link.remote_participants.get(c) {
+                    result.extend(remote.iter().cloned());
+                }
+            }
+            // Also check raw room name
+            if let Some(remote) = link.remote_participants.get(room) {
+                result.extend(remote.iter().cloned());
+            }
+        }
+        result
+    }
+
     /// Forward locally-generated media to all connected peers.
     /// For locally-originated media, we send to ALL peers (they decide whether to deliver).
     /// For forwarded media (multi-hop), handle_datagram filters by active_rooms.

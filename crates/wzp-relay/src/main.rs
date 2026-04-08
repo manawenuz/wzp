@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, SignalMessage};
 use wzp_relay::config::RelayConfig;
 use wzp_relay::metrics::RelayMetrics;
 use wzp_relay::pipeline::{PipelineConfig, RelayPipeline};
@@ -741,7 +741,29 @@ async fn main() -> anyhow::Result<()> {
                         Ok((id, update, senders)) => {
                             metrics.active_rooms.set(mgr.list().len() as i64);
                             drop(mgr); // release lock before async broadcast
-                            room::broadcast_signal(&senders, &update).await;
+
+                            // Merge federated participants into RoomUpdate if this is a global room
+                            let merged_update = if let Some(ref fm) = federation_mgr {
+                                if fm.is_global_room(&room_name) {
+                                    if let SignalMessage::RoomUpdate { count: _, participants: mut local_parts } = update {
+                                        let remote = fm.get_remote_participants(&room_name).await;
+                                        if !remote.is_empty() {
+                                            local_parts.extend(remote);
+                                            SignalMessage::RoomUpdate {
+                                                count: local_parts.len() as u32,
+                                                participants: local_parts,
+                                            }
+                                        } else {
+                                            SignalMessage::RoomUpdate {
+                                                count: local_parts.len() as u32,
+                                                participants: local_parts,
+                                            }
+                                        }
+                                    } else { update }
+                                } else { update }
+                            } else { update };
+
+                            room::broadcast_signal(&senders, &merged_update).await;
                             id
                         }
                         Err(e) => {

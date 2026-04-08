@@ -250,12 +250,11 @@ async fn main() -> anyhow::Result<()> {
         "WarzonePhone client"
     );
 
-    // Hash room name for SNI privacy (or "default" if none specified)
+    // Use raw room name as SNI (consistent with Android + Desktop clients for federation)
     let sni = match &cli.room {
         Some(name) => {
-            let hashed = wzp_crypto::hash_room_name(name);
-            info!(room = %name, hashed = %hashed, "room name hashed for SNI");
-            hashed
+            info!(room = %name, "using room name as SNI");
+            name.clone()
         }
         None => "default".to_string(),
     };
