@@ -112,7 +112,7 @@ PIDS+=($!); sleep 2
 RUST_LOG=error $CLIENT --room $ROOM --seed $SEED_A --send-tone $DURATION "$RELAY1" &
 PIDS+=($!); sleep $((DURATION + 3))
 
-kill ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
+kill -INT ${PIDS[-2]} 2>/dev/null; sleep 3; kill -INT ${PIDS[-1]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
 PIDS=("${PIDS[@]:0:${#PIDS[@]}-2}")
 
 analyze "$RESULTS/t1_b.raw" "Relay1→Relay2 audio"
@@ -129,7 +129,7 @@ PIDS+=($!); sleep 2
 RUST_LOG=error $CLIENT --room $ROOM --seed $SEED_B --send-tone $DURATION "$RELAY2" &
 PIDS+=($!); sleep $((DURATION + 3))
 
-kill ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
+kill -INT ${PIDS[-2]} 2>/dev/null; sleep 3; kill -INT ${PIDS[-1]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
 PIDS=("${PIDS[@]:0:${#PIDS[@]}-2}")
 
 analyze "$RESULTS/t2_a.raw" "Relay2→Relay1 audio"
@@ -146,7 +146,7 @@ PIDS+=($!); sleep 2
 RUST_LOG=error $CLIENT --room $ROOM --seed $SEED_A --send-tone $DURATION "$RELAY1" &
 PIDS+=($!); sleep $((DURATION + 3))
 
-kill ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
+kill -INT ${PIDS[-2]} 2>/dev/null; sleep 3; kill -INT ${PIDS[-1]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
 PIDS=("${PIDS[@]:0:${#PIDS[@]}-2}")
 
 analyze "$RESULTS/t3_c.raw" "Relay1→Relay3 (via Relay2) audio"
@@ -163,7 +163,7 @@ PIDS+=($!); sleep 2
 RUST_LOG=error $CLIENT --room $ROOM --seed $SEED_A --send-file "$AUDIO" "$RELAY1" &
 PIDS+=($!); sleep 20  # file is 60s but we only wait 20
 
-kill ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
+kill -INT ${PIDS[-2]} 2>/dev/null; sleep 3; kill -INT ${PIDS[-1]} 2>/dev/null; wait ${PIDS[-1]} ${PIDS[-2]} 2>/dev/null || true
 PIDS=("${PIDS[@]:0:${#PIDS[@]}-2}")
 
 analyze "$RESULTS/t4_b.raw" "File playback Relay1→Relay2"
@@ -193,7 +193,7 @@ RUST_LOG=error $CLIENT --room $ROOM --seed $SEED_B --record "$RESULTS/t5_b_rejoi
 B_PID=$!; PIDS+=($B_PID)
 sleep 8
 kill -INT $B_PID 2>/dev/null; wait $B_PID 2>/dev/null || true
-kill $A_PID 2>/dev/null; wait $A_PID 2>/dev/null || true
+kill -INT $A_PID 2>/dev/null; wait $A_PID 2>/dev/null || true
 
 analyze "$RESULTS/t5_b_first.raw" "B first join (before disconnect)"
 analyze "$RESULTS/t5_b_rejoin.raw" "B rejoin (after disconnect)"
@@ -213,7 +213,7 @@ PIDS+=($!); sleep $((DURATION + 3))
 
 # Kill all 3
 for i in 1 2 3; do
-    kill ${PIDS[-$i]} 2>/dev/null || true
+    kill -INT ${PIDS[-$i]} 2>/dev/null || true
 done
 wait 2>/dev/null || true
 PIDS=()

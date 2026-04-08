@@ -135,6 +135,10 @@ fn parse_args() -> CliResult {
                     args.get(i).expect("--debug-tap requires a room name (or '*' for all)").to_string(),
                 );
             }
+            "--version" | "-V" => {
+                println!("wzp-relay {}", env!("WZP_BUILD_HASH"));
+                std::process::exit(0);
+            }
             "--mesh-status" => {
                 // Print mesh table from a fresh registry and exit.
                 // In practice this is useful after the relay has been running;
@@ -257,10 +261,14 @@ fn detect_public_ip() -> Option<String> {
     None
 }
 
+/// Build-time git hash, set by build.rs or env.
+const BUILD_GIT_HASH: &str = env!("WZP_BUILD_HASH");
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let CliResult { mut config, identity_path, config_file, config_needs_create } = parse_args();
     tracing_subscriber::fmt().init();
+    info!(version = BUILD_GIT_HASH, "wzp-relay build");
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
