@@ -138,7 +138,7 @@ class CallViewModel : ViewModel(), WzpCallback {
             ServerEntry("172.16.81.175:4433", "LAN (172.16.81.175)"),
             ServerEntry("193.180.213.68:4433", "Pangolin (IP)"),
         )
-        const val DEFAULT_ROOM = "android"
+        const val DEFAULT_ROOM = "general"
     }
 
     fun setContext(context: Context) {

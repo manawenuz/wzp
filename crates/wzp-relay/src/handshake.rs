@@ -89,20 +89,9 @@ pub async fn accept_handshake(
 
 /// Select the best quality profile from those the caller supports.
 fn choose_profile(supported: &[QualityProfile]) -> QualityProfile {
-    // Prefer higher-quality profiles. Use GOOD as default if supported list is empty.
-    if supported.is_empty() {
-        return QualityProfile::GOOD;
-    }
-    // Pick the profile with the highest bitrate.
-    supported
-        .iter()
-        .max_by(|a, b| {
-            a.total_bitrate_kbps()
-                .partial_cmp(&b.total_bitrate_kbps())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .copied()
-        .unwrap_or(QualityProfile::GOOD)
+    // Cap at GOOD (24k) for now — studio tiers (32k/48k/64k) not yet tested
+    // for federation reliability (large packets may exceed path MTU).
+    QualityProfile::GOOD
 }
 
 #[cfg(test)]
