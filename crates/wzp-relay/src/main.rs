@@ -27,6 +27,8 @@ use wzp_relay::session_mgr::SessionManager;
 struct CliResult {
     config: RelayConfig,
     identity_path: Option<String>,
+    config_file: Option<String>,
+    config_needs_create: bool,
 }
 
 fn parse_args() -> CliResult {
@@ -45,12 +47,20 @@ fn parse_args() -> CliResult {
         i += 1;
     }
 
+    // Track if we need to create the config after identity is known
+    let config_needs_create = config_file.as_ref().map(|p| !std::path::Path::new(p).exists()).unwrap_or(false);
+
     let mut config = if let Some(ref path) = config_file {
-        wzp_relay::config::load_or_create_config(path)
-            .unwrap_or_else(|e| {
-                eprintln!("failed to load config from {path}: {e}");
-                std::process::exit(1);
-            })
+        if config_needs_create {
+            // Will be re-created with personalized info after identity is loaded
+            RelayConfig::default()
+        } else {
+            wzp_relay::config::load_config(path)
+                .unwrap_or_else(|e| {
+                    eprintln!("failed to load config from {path}: {e}");
+                    std::process::exit(1);
+                })
+        }
     } else {
         RelayConfig::default()
     };
@@ -164,7 +174,7 @@ fn parse_args() -> CliResult {
         }
         i += 1;
     }
-    CliResult { config, identity_path }
+    CliResult { config, identity_path, config_file, config_needs_create }
 }
 
 struct RelayStats {
@@ -249,7 +259,7 @@ fn detect_public_ip() -> Option<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let CliResult { config, identity_path } = parse_args();
+    let CliResult { mut config, identity_path, config_file, config_needs_create } = parse_args();
     tracing_subscriber::fmt().init();
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -315,9 +325,23 @@ async fn main() -> anyhow::Result<()> {
     let tls_fp = wzp_transport::tls_fingerprint(&cert_der);
     info!(tls_fingerprint = %tls_fp, "TLS certificate (deterministic from relay identity)");
 
+    // Create personalized config file if it was missing
+    let public_ip = detect_public_ip();
+    if config_needs_create {
+        if let Some(ref path) = config_file {
+            let info = wzp_relay::config::RelayInfo {
+                listen_addr: config.listen_addr.to_string(),
+                tls_fingerprint: tls_fp.clone(),
+                public_ip: public_ip.clone(),
+            };
+            if let Err(e) = wzp_relay::config::load_or_create_config(path, Some(&info)) {
+                warn!("failed to create config: {e}");
+            }
+        }
+    }
+
     // Print federation hint with our public IP + listen port + TLS fingerprint
     let listen_port = config.listen_addr.port();
-    let public_ip = detect_public_ip();
     if let Some(ip) = &public_ip {
         info!("federation: to peer with this relay, add to relay.toml:");
         info!("  [[peers]]");

@@ -123,8 +123,15 @@ pub fn load_config(path: &str) -> Result<RelayConfig, anyhow::Error> {
     Ok(config)
 }
 
-/// Load config from path, or create an example config file if it doesn't exist.
-pub fn load_or_create_config(path: &str) -> Result<RelayConfig, anyhow::Error> {
+/// Info about this relay instance, used to generate personalized example configs.
+pub struct RelayInfo {
+    pub listen_addr: String,
+    pub tls_fingerprint: String,
+    pub public_ip: Option<String>,
+}
+
+/// Load config from path, or create a personalized example config if it doesn't exist.
+pub fn load_or_create_config(path: &str, info: Option<&RelayInfo>) -> Result<RelayConfig, anyhow::Error> {
     let p = std::path::Path::new(path);
     if p.exists() {
         return load_config(path);
@@ -133,20 +140,38 @@ pub fn load_or_create_config(path: &str) -> Result<RelayConfig, anyhow::Error> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Write example config
-    let example = EXAMPLE_CONFIG;
-    std::fs::write(p, example)?;
+    // Generate personalized example config
+    let example = generate_example_config(info);
+    std::fs::write(p, &example)?;
     eprintln!("Created example config at {path} — edit it and restart.");
-    let config: RelayConfig = toml::from_str(example)?;
+    let config: RelayConfig = toml::from_str(&example)?;
     Ok(config)
 }
 
-/// Example TOML configuration written when --config points to a non-existent file.
-pub const EXAMPLE_CONFIG: &str = r#"# WarzonePhone Relay Configuration
+/// Generate an example TOML config, personalized with this relay's info if available.
+fn generate_example_config(info: Option<&RelayInfo>) -> String {
+    let listen = info.map(|i| i.listen_addr.as_str()).unwrap_or("0.0.0.0:4433");
+    let peer_example = if let Some(i) = info {
+        let ip = i.public_ip.as_deref().unwrap_or("this-relay-ip");
+        format!(
+            r#"# Other relays can peer with this relay using:
+# [[peers]]
+# url = "{ip}:{port}"
+# fingerprint = "{fp}"
+# label = "This Relay""#,
+            port = listen.rsplit(':').next().unwrap_or("4433"),
+            fp = i.tls_fingerprint,
+        )
+    } else {
+        "# To peer with another relay, add its url + fingerprint:".to_string()
+    };
+
+    format!(
+        r#"# WarzonePhone Relay Configuration
 # See docs/ADMINISTRATION.md for full reference.
 
 # Listen address for client connections
-listen_addr = "0.0.0.0:4433"
+listen_addr = "{listen}"
 
 # Maximum concurrent sessions
 # max_sessions = 100
@@ -157,9 +182,11 @@ listen_addr = "0.0.0.0:4433"
 # featherChat auth endpoint (uncomment to enable)
 # auth_url = "https://chat.example.com/v1/auth/validate"
 
+{peer_example}
+
 # Federation: peer relays we connect to (outbound)
 # [[peers]]
-# url = "relay-b.example.com:4433"
+# url = "other-relay.example.com:4433"
 # fingerprint = "aa:bb:cc:dd:..."
 # label = "Relay B"
 
@@ -174,4 +201,6 @@ listen_addr = "0.0.0.0:4433"
 
 # Debug: log packet headers for a room ("*" for all)
 # debug_tap = "*"
-"#;
+"#
+    )
+}
