@@ -181,6 +181,7 @@ async fn run_federation_link(
         loop {
             match signal_transport.recv_signal().await {
                 Ok(Some(msg)) => {
+                    info!(peer = %peer_label, "federation: received signal {:?}", std::mem::discriminant(&msg));
                     match msg {
                         SignalMessage::FederationRoomJoin { room, participants } => {
                             info!(peer = %peer_label, room = %room, count = participants.len(), "federation: peer room join");
@@ -307,13 +308,19 @@ async fn run_federation_link(
                     if participants.is_empty() {
                         continue; // only virtual participants, skip
                     }
+                    info!(peer = %peer_label2, room = %room_name, local_count = participants.len(), "federation: announcing room to peer");
                     let msg = SignalMessage::FederationRoomJoin {
                         room: room_name.clone(),
                         participants,
                     };
-                    if announce_transport.send_signal(&msg).await.is_ok() {
-                        info!(peer = %peer_label2, room = %room_name, "federation: announced room to peer");
-                        announced.insert(room_name.clone());
+                    match announce_transport.send_signal(&msg).await {
+                        Ok(()) => {
+                            info!(peer = %peer_label2, room = %room_name, "federation: room announced successfully");
+                            announced.insert(room_name.clone());
+                        }
+                        Err(e) => {
+                            warn!(peer = %peer_label2, room = %room_name, "federation: announce send failed: {e}");
+                        }
                     }
                 }
             }
