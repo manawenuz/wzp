@@ -675,12 +675,24 @@ async fn handle_signal(
                     }).collect();
                     link.remote_participants.insert(room.clone(), tagged);
                 }
-                // Propagate to other peers
+                // Propagate to other peers (with relay labels preserved)
+                let tagged_for_propagation = if let Some(link) = links.get(peer_fp) {
+                    let label = link.label.clone();
+                    participants.iter().map(|p| {
+                        let mut t = p.clone();
+                        if t.relay_label.is_none() {
+                            t.relay_label = Some(label.clone());
+                        }
+                        t
+                    }).collect::<Vec<_>>()
+                } else {
+                    participants.clone()
+                };
                 for (fp, link) in links.iter() {
                     if fp != peer_fp {
                         let _ = link.transport.send_signal(&SignalMessage::GlobalRoomActive {
                             room: room.clone(),
-                            participants: participants.clone(),
+                            participants: tagged_for_propagation.clone(),
                         }).await;
                     }
                 }
