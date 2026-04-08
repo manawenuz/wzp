@@ -52,7 +52,8 @@ trap 'notify "WZP Linux build FAILED! Check /tmp/wzp-linux-build.log"' ERR
 if [ "$DO_PULL" = "1" ]; then
     echo ">>> Pulling latest..."
     cd "$BASE_DIR/data/source"
-    git checkout -- . 2>/dev/null || true
+    git reset --hard HEAD 2>/dev/null || true
+    git clean -fd 2>/dev/null || true
     git pull origin feat/android-voip-client 2>&1 | tail -3
 fi
 
