@@ -436,16 +436,41 @@ async fn run_federation_link(
         });
     }
 
-    // Announce our currently active global rooms
-    {
+    // Announce our currently active global rooms to this new peer
+    // Collect all announcements first, then send (avoid holding locks across await)
+    let announcements = {
         let mgr = fm.room_mgr.lock().await;
-        for room_name in mgr.active_rooms() {
-            if fm.is_global_room(&room_name) {
-                let participants = mgr.local_participant_list(&room_name);
-                let msg = SignalMessage::GlobalRoomActive { room: room_name, participants };
-                let _ = transport.send_signal(&msg).await;
+        let active = mgr.active_rooms();
+        let mut msgs = Vec::new();
+
+        // Local rooms
+        for room_name in &active {
+            if fm.is_global_room(room_name) {
+                let participants = mgr.local_participant_list(room_name);
+                info!(peer = %peer_label, room = %room_name, participants = participants.len(), "announcing local global room to new peer");
+                msgs.push(SignalMessage::GlobalRoomActive { room: room_name.clone(), participants });
             }
         }
+
+        // Remote rooms from OTHER peers (for multi-hop propagation)
+        let links = fm.peer_links.lock().await;
+        for (fp, link) in links.iter() {
+            if fp != &peer_fp {
+                for (room, participants) in &link.remote_participants {
+                    if fm.is_global_room(room) {
+                        info!(peer = %peer_label, room = %room, via = %link.label, "propagating remote room to new peer");
+                        msgs.push(SignalMessage::GlobalRoomActive {
+                            room: room.clone(),
+                            participants: participants.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        msgs
+    };
+    for msg in &announcements {
+        let _ = transport.send_signal(msg).await;
     }
 
     // Three concurrent tasks: signal recv + media recv + RTT monitor
