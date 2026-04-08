@@ -60,7 +60,8 @@ data class CallStats(
                 val o = arr.getJSONObject(i)
                 RoomMember(
                     fingerprint = o.optString("fingerprint", ""),
-                    alias = if (o.isNull("alias")) null else o.optString("alias", null)
+                    alias = if (o.isNull("alias")) null else o.optString("alias", null),
+                    relayLabel = if (o.isNull("relay_label")) null else o.optString("relay_label", null)
                 )
             }
         }
@@ -97,7 +98,8 @@ data class CallStats(
 
 data class RoomMember(
     val fingerprint: String,
-    val alias: String? = null
+    val alias: String? = null,
+    val relayLabel: String? = null
 ) {
     /** Short display name: alias if set, otherwise first 8 chars of fingerprint. */
     val displayName: String

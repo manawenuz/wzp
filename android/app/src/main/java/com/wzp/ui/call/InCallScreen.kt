@@ -411,31 +411,54 @@ fun InCallScreen(
                         if (stats.roomParticipantCount > 0) {
                             val unique = stats.roomParticipants
                                 .distinctBy { it.fingerprint.ifEmpty { it.displayName } }
-                            unique.forEach { member ->
+                            // Group by relay
+                            val grouped = unique.groupBy { it.relayLabel ?: "This Relay" }
+                            grouped.forEach { (relay, members) ->
+                                // Relay header
+                                val isLocal = relay == "This Relay"
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(vertical = 4.dp)
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
                                 ) {
-                                    Identicon(
-                                        fingerprint = member.fingerprint.ifEmpty { member.displayName },
-                                        size = 40.dp,
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isLocal) Green else Color(0xFF60A5FA))
                                     )
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
-                                        Text(
-                                            text = member.displayName,
-                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                                            color = Color.White
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = relay.uppercase(),
+                                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
+                                        color = TextDim
+                                    )
+                                }
+                                members.forEach { member ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(vertical = 4.dp)
+                                    ) {
+                                        Identicon(
+                                            fingerprint = member.fingerprint.ifEmpty { member.displayName },
+                                            size = 40.dp,
                                         )
-                                        if (member.fingerprint.isNotEmpty()) {
-                                            CopyableFingerprint(
-                                                fingerprint = member.fingerprint.take(16),
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    fontSize = 10.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                ),
-                                                color = TextDim,
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text(
+                                                text = member.displayName,
+                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                                color = Color.White
                                             )
+                                            if (member.fingerprint.isNotEmpty()) {
+                                                CopyableFingerprint(
+                                                    fingerprint = member.fingerprint.take(16),
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        fontSize = 10.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                    ),
+                                                    color = TextDim,
+                                                )
+                                            }
                                         }
                                     }
                                 }
