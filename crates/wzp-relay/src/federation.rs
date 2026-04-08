@@ -138,7 +138,9 @@ impl FederationManager {
         }
     }
 
-    /// Forward locally-generated media to active peers for a global room.
+    /// Forward locally-generated media to all connected peers.
+    /// For locally-originated media, we send to ALL peers (they decide whether to deliver).
+    /// For forwarded media (multi-hop), handle_datagram filters by active_rooms.
     pub async fn forward_to_peers(&self, room_name: &str, room_hash: &[u8; 8], media_data: &Bytes) {
         let links = self.peer_links.lock().await;
         if links.is_empty() {
@@ -146,7 +148,9 @@ impl FederationManager {
         }
         let mut sent = 0u32;
         for (fp, link) in links.iter() {
-            if link.active_rooms.contains(room_name) {
+            // Send to all connected peers — they have the global room configured
+            // and will deliver to local participants or forward further
+            {
                 let mut tagged = Vec::with_capacity(8 + media_data.len());
                 tagged.extend_from_slice(room_hash);
                 tagged.extend_from_slice(media_data);
@@ -155,13 +159,6 @@ impl FederationManager {
                     Err(e) => warn!(peer = %link.label, "federation send error: {e}"),
                 }
             }
-        }
-        if sent == 0 && !links.is_empty() {
-            // Debug: no peer had this room active
-            let active_rooms: Vec<_> = links.values()
-                .flat_map(|l| l.active_rooms.iter().cloned())
-                .collect();
-            warn!(room = %room_name, peer_count = links.len(), ?active_rooms, "no peer has this room active");
         }
     }
 
