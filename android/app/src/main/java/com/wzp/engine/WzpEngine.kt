@@ -53,6 +53,7 @@ class WzpEngine(private val callback: WzpCallback) {
     }
 
     /** Stop the active call. Safe to call when no call is active. */
+    @Synchronized
     fun stopCall() {
         if (nativeHandle != 0L) {
             nativeStopCall(nativeHandle)
@@ -76,6 +77,7 @@ class WzpEngine(private val callback: WzpCallback) {
      *
      * @return JSON-serialised [CallStats], or `"{}"` if the engine is not initialised.
      */
+    @Synchronized
     fun getStats(): String {
         if (nativeHandle == 0L) return "{}"
         return try {
@@ -95,6 +97,7 @@ class WzpEngine(private val callback: WzpCallback) {
     }
 
     /** Destroy the native engine and free all resources. The instance must not be reused. */
+    @Synchronized
     fun destroy() {
         if (nativeHandle != 0L) {
             nativeDestroy(nativeHandle)

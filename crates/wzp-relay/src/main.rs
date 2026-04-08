@@ -765,17 +765,13 @@ async fn main() -> anyhow::Result<()> {
                                 if fm.is_global_room(&room_name) {
                                     if let SignalMessage::RoomUpdate { count: _, participants: mut local_parts } = update {
                                         let remote = fm.get_remote_participants(&room_name).await;
-                                        if !remote.is_empty() {
-                                            local_parts.extend(remote);
-                                            SignalMessage::RoomUpdate {
-                                                count: local_parts.len() as u32,
-                                                participants: local_parts,
-                                            }
-                                        } else {
-                                            SignalMessage::RoomUpdate {
-                                                count: local_parts.len() as u32,
-                                                participants: local_parts,
-                                            }
+                                        local_parts.extend(remote);
+                                        // Deduplicate by fingerprint
+                                        let mut seen = std::collections::HashSet::new();
+                                        local_parts.retain(|p| seen.insert(p.fingerprint.clone()));
+                                        SignalMessage::RoomUpdate {
+                                            count: local_parts.len() as u32,
+                                            participants: local_parts,
                                         }
                                     } else { update }
                                 } else { update }
