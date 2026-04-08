@@ -431,6 +431,7 @@ pub async fn run_participant(
     trunking_enabled: bool,
     debug_tap: Option<DebugTap>,
     federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
+    federation_room_hash: Option<[u8; 8]>,
 ) {
     if trunking_enabled {
         run_participant_trunked(
@@ -439,7 +440,7 @@ pub async fn run_participant(
         .await;
     } else {
         run_participant_plain(
-            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap, federation_tx,
+            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap, federation_tx, federation_room_hash,
         )
         .await;
     }
@@ -455,6 +456,7 @@ async fn run_participant_plain(
     session_id: &str,
     debug_tap: Option<DebugTap>,
     federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
+    federation_room_hash: Option<[u8; 8]>,
 ) {
     let addr = transport.connection().remote_address();
     let mut packets_forwarded = 0u64;
@@ -565,7 +567,7 @@ async fn run_participant_plain(
             let data = pkt.to_bytes();
             let _ = fed_tx.try_send(FederationMediaOut {
                 room_name: room_name.clone(),
-                room_hash: crate::federation::room_hash(&room_name),
+                room_hash: federation_room_hash.unwrap_or_else(|| crate::federation::room_hash(&room_name)),
                 data,
             });
         }

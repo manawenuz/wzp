@@ -392,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
             room_mgr.clone(),
             endpoint.clone(),
             tls_fp.clone(),
+            metrics.clone(),
         ));
         let fm_run = fm.clone();
         tokio::spawn(async move { fm_run.run().await });
@@ -759,22 +760,22 @@ async fn main() -> anyhow::Result<()> {
                     .map(|b| format!("{b:02x}"))
                     .collect();
                 // Set up federation media channel if this is a global room
-                let federation_tx = if let Some(ref fm) = federation_mgr {
+                let (federation_tx, federation_room_hash) = if let Some(ref fm) = federation_mgr {
                     let is_global = fm.is_global_room(&room_name);
-                    info!(room = %room_name, is_global, "checking if room is global for federation");
                     if is_global {
+                        let canonical_hash = fm.global_room_hash(&room_name);
                         let (tx, rx) = tokio::sync::mpsc::channel(256);
                         let fm_clone = fm.clone();
                         tokio::spawn(async move {
                             wzp_relay::federation::run_federation_media_egress(fm_clone, rx).await;
                         });
-                        info!(room = %room_name, "federation media egress channel created");
-                        Some(tx)
+                        info!(room = %room_name, canonical = ?fm.resolve_global_room(&room_name), "federation egress created (global room)");
+                        (Some(tx), Some(canonical_hash))
                     } else {
-                        None
+                        (None, None)
                     }
                 } else {
-                    None
+                    (None, None)
                 };
 
                 room::run_participant(
@@ -787,6 +788,7 @@ async fn main() -> anyhow::Result<()> {
                     trunking_enabled,
                     debug_tap,
                     federation_tx,
+                    federation_room_hash,
                 ).await;
 
                 // Participant disconnected — clean up presence + per-session metrics
