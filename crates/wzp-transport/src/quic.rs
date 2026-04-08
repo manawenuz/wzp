@@ -143,7 +143,7 @@ impl MediaTransport for QuinnTransport {
             }
         };
 
-        match datagram::deserialize_media(data) {
+        match datagram::deserialize_media(data.clone()) {
             Some(packet) => {
                 // Record receive observation
                 {
@@ -156,8 +156,10 @@ impl MediaTransport for QuinnTransport {
                 Ok(Some(packet))
             }
             None => {
-                tracing::warn!("received malformed media datagram");
-                Ok(None)
+                tracing::warn!(len = data.len(), "skipping malformed media datagram, continuing");
+                // Don't return Ok(None) — that signals connection closed.
+                // Recurse to read the next datagram instead.
+                Box::pin(self.recv_media()).await
             }
         }
     }

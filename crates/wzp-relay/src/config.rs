@@ -90,6 +90,9 @@ pub struct RelayConfig {
     /// Debug tap: log packet headers for matching rooms ("*" = all rooms).
     /// Activated via --debug-tap <room> or debug_tap = "room" in TOML.
     pub debug_tap: Option<String>,
+    /// JSONL event log path for protocol analysis (--event-log).
+    #[serde(skip)]
+    pub event_log: Option<String>,
 }
 
 impl Default for RelayConfig {
@@ -112,6 +115,7 @@ impl Default for RelayConfig {
             global_rooms: Vec::new(),
             trusted: Vec::new(),
             debug_tap: None,
+            event_log: None,
         }
     }
 }

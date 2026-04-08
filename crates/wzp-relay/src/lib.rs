@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod event_log;
 pub mod federation;
 pub mod handshake;
 pub mod metrics;

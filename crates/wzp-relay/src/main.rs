@@ -135,6 +135,12 @@ fn parse_args() -> CliResult {
                     args.get(i).expect("--debug-tap requires a room name (or '*' for all)").to_string(),
                 );
             }
+            "--event-log" => {
+                i += 1;
+                config.event_log = Some(
+                    args.get(i).expect("--event-log requires a file path").to_string(),
+                );
+            }
             "--version" | "-V" => {
                 println!("wzp-relay {}", env!("WZP_BUILD_HASH"));
                 std::process::exit(0);
@@ -387,6 +393,11 @@ async fn main() -> anyhow::Result<()> {
     // Room manager (room mode only)
     let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
 
+    // Event log for protocol analysis
+    let event_log = wzp_relay::event_log::start_event_log(
+        config.event_log.as_ref().map(std::path::PathBuf::from)
+    );
+
     // Federation manager
     let global_room_set: std::collections::HashSet<String> = config.global_rooms.iter()
         .map(|g| g.name.clone())
@@ -401,6 +412,7 @@ async fn main() -> anyhow::Result<()> {
             endpoint.clone(),
             tls_fp.clone(),
             metrics.clone(),
+            event_log.clone(),
         ));
         let fm_run = fm.clone();
         tokio::spawn(async move { fm_run.run().await });

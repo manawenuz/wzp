@@ -297,6 +297,26 @@ async fn main() -> anyhow::Result<()> {
 
     let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
+    // Register shutdown handler so SIGTERM/SIGINT always closes QUIC cleanly.
+    // Without this, killed clients leave zombie connections on the relay for ~30s.
+    {
+        let shutdown_transport = transport.clone();
+        tokio::spawn(async move {
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to register SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => { info!("SIGTERM received, closing connection..."); }
+                _ = sigint.recv() => { info!("SIGINT received, closing connection..."); }
+            }
+            // Close the QUIC connection immediately (APPLICATION_CLOSE frame).
+            // Don't call process::exit — let the main task detect the closed
+            // connection and perform clean shutdown (e.g., save recordings).
+            shutdown_transport.connection().close(0u32.into(), b"shutdown");
+        });
+    }
+
     // Send auth token if provided (relay with --auth-url expects this first)
     if let Some(ref token) = cli.token {
         let auth = wzp_proto::SignalMessage::AuthToken {

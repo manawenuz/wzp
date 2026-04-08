@@ -19,6 +19,7 @@ use wzp_proto::{MediaTransport, SignalMessage};
 use wzp_transport::QuinnTransport;
 
 use crate::config::{PeerConfig, TrustedConfig};
+use crate::event_log::{Event, EventLogger};
 use crate::room::{self, FederationMediaOut, RoomEvent, RoomManager};
 
 /// Compute 8-byte room hash for federation datagram tagging.
@@ -34,41 +35,42 @@ fn normalize_fp(fp: &str) -> String {
     fp.replace(':', "").to_lowercase()
 }
 
-/// Sliding-window dedup filter for federation datagrams.
-/// Tracks recently seen (room_hash, seq) pairs to discard duplicates
-/// arriving via multiple federation paths (e.g., A↔B↔C and A↔C).
+/// Time-based dedup filter for federation datagrams.
+/// Tracks recently seen packets and expires entries older than 2 seconds.
+/// This prevents duplicate delivery when the same packet arrives via
+/// multiple federation paths, while allowing new senders that happen to
+/// reuse the same seq numbers.
 struct Deduplicator {
-    /// Ring buffer of recent packet fingerprints (room_hash XOR'd with seq).
-    seen: HashSet<u64>,
-    /// Ordered list for eviction.
-    order: std::collections::VecDeque<u64>,
-    capacity: usize,
+    /// Recently seen packet keys with insertion time.
+    entries: HashMap<u64, Instant>,
+    /// Expiry duration.
+    ttl: Duration,
 }
 
 impl Deduplicator {
-    fn new(capacity: usize) -> Self {
+    fn new(_capacity: usize) -> Self {
         Self {
-            seen: HashSet::with_capacity(capacity),
-            order: std::collections::VecDeque::with_capacity(capacity),
-            capacity,
+            entries: HashMap::with_capacity(512),
+            ttl: Duration::from_secs(2),
         }
     }
 
-    /// Returns true if this packet is a duplicate (already seen).
-    /// The source_fp_hash distinguishes packets from different senders
-    /// that share the same room and seq number.
-    fn is_dup(&mut self, room_hash: &[u8; 8], seq: u16, source_fp_hash: u64) -> bool {
-        let key = u64::from_be_bytes(*room_hash) ^ (seq as u64) ^ source_fp_hash;
-        if self.seen.contains(&key) {
-            return true;
+    /// Returns true if this packet is a duplicate (already seen within TTL).
+    fn is_dup(&mut self, room_hash: &[u8; 8], seq: u16, extra: u64) -> bool {
+        let key = u64::from_be_bytes(*room_hash) ^ (seq as u64) ^ extra;
+        let now = Instant::now();
+
+        // Periodic cleanup (every ~256 packets)
+        if self.entries.len() > 256 {
+            self.entries.retain(|_, ts| now.duration_since(*ts) < self.ttl);
         }
-        if self.order.len() >= self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.seen.remove(&old);
+
+        if let Some(ts) = self.entries.get(&key) {
+            if now.duration_since(*ts) < self.ttl {
+                return true; // seen recently — duplicate
             }
         }
-        self.seen.insert(key);
-        self.order.push_back(key);
+        self.entries.insert(key, now);
         false
     }
 }
@@ -143,6 +145,8 @@ pub struct FederationManager {
     /// Per-room seq counter for federation media delivered to local clients.
     /// Ensures clients see monotonically increasing seq regardless of federation sender.
     local_delivery_seq: std::sync::atomic::AtomicU16,
+    /// JSONL event log for protocol analysis.
+    event_log: EventLogger,
     /// Per-room rate limiters for inbound federation media.
     rate_limiters: Mutex<HashMap<String, RateLimiter>>,
 }
@@ -156,6 +160,7 @@ impl FederationManager {
         endpoint: quinn::Endpoint,
         local_tls_fp: String,
         metrics: Arc<crate::metrics::RelayMetrics>,
+        event_log: EventLogger,
     ) -> Self {
         Self {
             peers,
@@ -168,6 +173,7 @@ impl FederationManager {
             peer_links: Arc::new(Mutex::new(HashMap::new())),
             dedup: Mutex::new(Deduplicator::new(DEDUP_WINDOW_SIZE)),
             local_delivery_seq: std::sync::atomic::AtomicU16::new(0),
+            event_log,
             rate_limiters: Mutex::new(HashMap::new()),
         }
     }
@@ -854,8 +860,18 @@ async fn handle_datagram(
 
     let pkt = match wzp_proto::MediaPacket::from_bytes(media_bytes.clone()) {
         Some(pkt) => pkt,
-        None => return,
+        None => {
+            fm.event_log.emit(Event::new("federation_ingress_malformed").len(data.len()));
+            return;
+        }
     };
+
+    // Event log: federation ingress
+    let peer_label = {
+        let links = fm.peer_links.lock().await;
+        links.get(source_peer_fp).map(|l| l.label.clone()).unwrap_or_default()
+    };
+    fm.event_log.emit(Event::new("federation_ingress").packet(&pkt).peer(&peer_label));
 
     // Count inbound federation packet + update last_seen
     fm.metrics.federation_packets_forwarded
@@ -867,18 +883,20 @@ async fn handle_datagram(
         }
     }
 
-    // Dedup: drop packets we've already seen (multi-path duplicates)
-    // Include source peer fingerprint so different senders with same seq aren't confused
-    let source_fp_hash = {
+    // Dedup: drop packets we've already seen (multi-path duplicates).
+    // Key uses a hash of the actual payload bytes — unique per Opus frame,
+    // so different senders with the same seq/timestamp never collide.
+    let payload_hash = {
         let mut h = 0u64;
-        for (i, b) in source_peer_fp.bytes().enumerate().take(8) {
+        for (i, &b) in media_bytes.iter().take(16).enumerate() {
             h ^= (b as u64) << ((i % 8) * 8);
         }
         h
     };
     {
         let mut dedup = fm.dedup.lock().await;
-        if dedup.is_dup(&rh, pkt.header.seq, source_fp_hash) {
+        if dedup.is_dup(&rh, pkt.header.seq, payload_hash) {
+            fm.event_log.emit(Event::new("dedup_drop").seq(pkt.header.seq).peer(&peer_label));
             return;
         }
     }
@@ -898,7 +916,10 @@ async fn handle_datagram(
 
     let room_name = match room_name {
         Some(r) => r,
-        None => return, // not a known room
+        None => {
+            fm.event_log.emit(Event::new("room_not_found").seq(pkt.header.seq).peer(&peer_label));
+            return;
+        }
     };
 
     // Rate limit per room
@@ -907,32 +928,29 @@ async fn handle_datagram(
         let limiter = limiters.entry(room_name.clone())
             .or_insert_with(|| RateLimiter::new(FEDERATION_RATE_LIMIT_PPS));
         if !limiter.allow() {
+            fm.event_log.emit(Event::new("rate_limit_drop").room(&room_name).seq(pkt.header.seq));
             return;
         }
     }
 
-    // Deliver to all local participants with rewritten seq/fec
-    // so the client sees a monotonic stream regardless of which federation sender
+    // Deliver to all local participants — forward the raw bytes as-is.
+    // The original sender's MediaPacket is preserved exactly (no re-serialization).
     let locals = {
         let mgr = fm.room_mgr.lock().await;
         mgr.local_senders(&room_name)
     };
-    if !locals.is_empty() {
-        let new_seq = fm.local_delivery_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut local_pkt = pkt.clone();
-        local_pkt.header.seq = new_seq;
-        // Rewrite FEC block/symbol to match new seq so decoder doesn't see stale blocks
-        let frames_per_block = 5u16; // matches default FEC config
-        local_pkt.header.fec_block = (new_seq / frames_per_block) as u8;
-        local_pkt.header.fec_symbol = (new_seq % frames_per_block) as u8;
-        local_pkt.header.is_repair = false; // federation packets are source-only for local delivery
-        for sender in &locals {
-            match sender {
-                room::ParticipantSender::Quic(t) => { let _ = t.send_media(&local_pkt).await; }
-                room::ParticipantSender::WebSocket(_) => { let _ = sender.send_raw(&local_pkt.payload).await; }
+    for sender in &locals {
+        match sender {
+            room::ParticipantSender::Quic(t) => {
+                if let Err(e) = t.send_raw_datagram(&media_bytes) {
+                    fm.event_log.emit(Event::new("local_deliver_error").room(&room_name).seq(pkt.header.seq).reason(&e.to_string()));
+                    warn!("federation local delivery error: {e}");
+                }
             }
+            room::ParticipantSender::WebSocket(_) => { let _ = sender.send_raw(&pkt.payload).await; }
         }
     }
+    fm.event_log.emit(Event::new("local_deliver").room(&room_name).seq(pkt.header.seq).to_count(locals.len()));
 
     // Multi-hop: forward to ALL other connected peers (not the source)
     // Don't filter by active_rooms — the receiving peer decides whether to deliver

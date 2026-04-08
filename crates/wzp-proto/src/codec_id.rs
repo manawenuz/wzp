@@ -105,10 +105,10 @@ pub struct QualityProfile {
 }
 
 impl QualityProfile {
-    /// Good conditions: Opus 24kbps, light FEC.
+    /// Good conditions: Opus 24kbps, FEC disabled for federation debugging.
     pub const GOOD: Self = Self {
         codec: CodecId::Opus24k,
-        fec_ratio: 0.2,
+        fec_ratio: 0.0,
         frame_duration_ms: 20,
         frames_per_block: 5,
     };

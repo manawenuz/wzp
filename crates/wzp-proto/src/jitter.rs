@@ -273,10 +273,21 @@ impl JitterBuffer {
             return;
         }
 
-        // Check if packet is too old (already played out)
+        // Check if packet is too old (already played out).
+        // A backward jump of >100 seq (~2s at 50fps) indicates a new sender in a
+        // federation room — reset instead of dropping.
         if self.stats.packets_played > 0 && seq_before(seq, self.next_playout_seq) {
-            self.stats.packets_late += 1;
-            return;
+            let backward_distance = self.next_playout_seq.wrapping_sub(seq);
+            tracing::warn!(seq, next = self.next_playout_seq, backward_distance, "jitter: backward seq detected");
+            if backward_distance > 100 {
+                tracing::info!(seq, next = self.next_playout_seq, "jitter: RESET — new sender detected");
+                self.buffer.clear();
+                self.next_playout_seq = seq;
+                self.stats.packets_late = 0;
+            } else {
+                self.stats.packets_late += 1;
+                return;
+            }
         }
 
         // If we haven't started playout yet, adjust next_playout_seq to earliest known
@@ -412,10 +423,21 @@ impl JitterBuffer {
             return;
         }
 
-        // Check if packet is too old (already played out)
+        // Check if packet is too old (already played out).
+        // A backward jump of >100 seq (~2s at 50fps) indicates a new sender in a
+        // federation room — reset instead of dropping.
         if self.stats.packets_played > 0 && seq_before(seq, self.next_playout_seq) {
-            self.stats.packets_late += 1;
-            return;
+            let backward_distance = self.next_playout_seq.wrapping_sub(seq);
+            tracing::warn!(seq, next = self.next_playout_seq, backward_distance, "jitter: backward seq detected");
+            if backward_distance > 100 {
+                tracing::info!(seq, next = self.next_playout_seq, "jitter: RESET — new sender detected");
+                self.buffer.clear();
+                self.next_playout_seq = seq;
+                self.stats.packets_late = 0;
+            } else {
+                self.stats.packets_late += 1;
+                return;
+            }
         }
 
         // If we haven't started playout yet, adjust next_playout_seq to earliest known
