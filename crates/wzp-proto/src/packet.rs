@@ -670,6 +670,10 @@ pub struct RoomParticipant {
     pub fingerprint: String,
     /// Optional display name set by the client.
     pub alias: Option<String>,
+    /// Relay label — identifies which relay this participant is connected to.
+    /// None for local participants, Some("Relay B") for federated.
+    #[serde(default)]
+    pub relay_label: Option<String>,
 }
 
 /// Reasons for ending a call.

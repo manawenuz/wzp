@@ -45,6 +45,7 @@ unsafe impl Sync for SyncWrapper {}
 pub struct ParticipantInfo {
     pub fingerprint: String,
     pub alias: Option<String>,
+    pub relay_label: Option<String>,
 }
 
 pub struct EngineStatus {
@@ -346,6 +347,7 @@ impl CallEngine {
                             .map(|p| ParticipantInfo {
                                 fingerprint: p.fingerprint,
                                 alias: p.alias,
+                                relay_label: p.relay_label,
                             })
                             .collect();
                         let count = unique.len();
@@ -395,6 +397,7 @@ impl CallEngine {
                 .map(|p| ParticipantInfo {
                     fingerprint: p.fingerprint.clone(),
                     alias: p.alias.clone(),
+                    relay_label: p.relay_label.clone(),
                 })
                 .collect()
         }; // lock dropped here

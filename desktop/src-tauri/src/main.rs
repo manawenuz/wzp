@@ -18,6 +18,7 @@ struct CallEvent {
 struct Participant {
     fingerprint: String,
     alias: Option<String>,
+    relay_label: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -195,6 +196,7 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
                 .map(|p| Participant {
                     fingerprint: p.fingerprint,
                     alias: p.alias,
+                    relay_label: p.relay_label,
                 })
                 .collect(),
             encode_fps: status.frames_sent,

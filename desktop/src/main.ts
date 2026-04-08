@@ -540,32 +540,49 @@ async function pollStatus() {
     const pct = rms > 0 ? Math.min(100, (Math.log(rms) / Math.log(32767)) * 100) : 0;
     levelBar.style.width = `${pct}%`;
 
-    // Participants with identicons
+    // Participants grouped by relay
     if (st.participants.length === 0) {
       participantsDiv.innerHTML = '<div class="participants-empty">Waiting for participants...</div>';
     } else {
       participantsDiv.innerHTML = "";
-      st.participants.forEach((p) => {
-        const name = p.alias || "Anonymous";
-        const fp = p.fingerprint || "";
-        const isMe = fp && myFingerprint.includes(fp);
+      // Group by relay_label (null = this relay)
+      const groups: Record<string, typeof st.participants> = {};
+      st.participants.forEach((p: any) => {
+        const relay = p.relay_label || "This Relay";
+        if (!groups[relay]) groups[relay] = [];
+        groups[relay].push(p);
+      });
 
-        const row = document.createElement("div");
-        row.className = "participant";
+      Object.entries(groups).forEach(([relay, members]) => {
+        // Relay header
+        const header = document.createElement("div");
+        header.className = "relay-group-header";
+        const isLocal = relay === "This Relay";
+        header.innerHTML = `<span class="relay-dot-small ${isLocal ? "green" : "blue"}"></span> ${escapeHtml(relay)}`;
+        participantsDiv.appendChild(header);
 
-        // Identicon avatar
-        const icon = createIdenticonEl(fp || name, 36, true);
-        if (isMe) icon.style.outline = "2px solid var(--accent)";
-        row.appendChild(icon);
+        // Participants under this relay
+        (members as any[]).forEach((p) => {
+          const name = p.alias || "Anonymous";
+          const fp = p.fingerprint || "";
+          const isMe = fp && myFingerprint.includes(fp);
 
-        const info = document.createElement("div");
-        info.className = "info";
-        info.innerHTML = `
-          <div class="name">${escapeHtml(name)} ${isMe ? '<span class="you-badge">you</span>' : ""}</div>
-          <div class="fp">${escapeHtml(fp ? fp.substring(0, 16) : "")}</div>
-        `;
-        row.appendChild(info);
-        participantsDiv.appendChild(row);
+          const row = document.createElement("div");
+          row.className = "participant";
+
+          const icon = createIdenticonEl(fp || name, 36, true);
+          if (isMe) icon.style.outline = "2px solid var(--accent)";
+          row.appendChild(icon);
+
+          const info = document.createElement("div");
+          info.className = "info";
+          info.innerHTML = `
+            <div class="name">${escapeHtml(name)} ${isMe ? '<span class="you-badge">you</span>' : ""}</div>
+            <div class="fp">${escapeHtml(fp ? fp.substring(0, 16) : "")}</div>
+          `;
+          row.appendChild(info);
+          participantsDiv.appendChild(row);
+        });
       });
     }
 
