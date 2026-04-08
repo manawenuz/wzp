@@ -470,6 +470,27 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .relay-dot-small.green { background: var(--green); }
 .relay-dot-small.blue { background: #60a5fa; }
 
+/* ── Codec badges ── */
+.codec-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  margin: 0 2px;
+}
+
+.codec-badge.tx {
+  background: #22c55e30;
+  color: #4ade80;
+}
+
+.codec-badge.rx {
+  background: #3b82f630;
+  color: #60a5fa;
+}
+
 /* ── Controls ── */
 .controls {
   display: flex;

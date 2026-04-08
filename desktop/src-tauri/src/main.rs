@@ -32,6 +32,8 @@ struct CallStatus {
     audio_level: u32,
     call_duration_secs: f64,
     fingerprint: String,
+    tx_codec: String,
+    rx_codec: String,
 }
 
 struct AppState {
@@ -204,6 +206,8 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
             audio_level: status.audio_level,
             call_duration_secs: status.call_duration_secs,
             fingerprint: status.fingerprint,
+            tx_codec: status.tx_codec,
+            rx_codec: status.rx_codec,
         })
     } else {
         Ok(CallStatus {
@@ -216,6 +220,8 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
             audio_level: 0,
             call_duration_secs: 0.0,
             fingerprint: String::new(),
+            tx_codec: String::new(),
+            rx_codec: String::new(),
         })
     }
 }

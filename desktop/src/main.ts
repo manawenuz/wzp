@@ -586,7 +586,10 @@ async function pollStatus() {
       });
     }
 
-    statsDiv.textContent = `TX: ${st.encode_fps} | RX: ${st.recv_fps}`;
+    // Stats line with codec badges
+    const txBadge = (st as any).tx_codec ? `<span class="codec-badge tx">${escapeHtml((st as any).tx_codec)}</span>` : "";
+    const rxBadge = (st as any).rx_codec ? `<span class="codec-badge rx">${escapeHtml((st as any).rx_codec)}</span>` : "";
+    statsDiv.innerHTML = `${txBadge} ${rxBadge} TX: ${st.encode_fps} | RX: ${st.recv_fps}`;
   } catch {}
 }
 

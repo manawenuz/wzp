@@ -57,6 +57,8 @@ pub struct EngineStatus {
     pub audio_level: u32,
     pub call_duration_secs: f64,
     pub fingerprint: String,
+    pub tx_codec: String,
+    pub rx_codec: String,
 }
 
 pub struct CallEngine {
@@ -67,6 +69,8 @@ pub struct CallEngine {
     frames_sent: Arc<AtomicU64>,
     frames_received: Arc<AtomicU64>,
     audio_level: Arc<AtomicU32>,
+    tx_codec: Arc<Mutex<String>>,
+    rx_codec: Arc<Mutex<String>>,
     transport: Arc<wzp_transport::QuinnTransport>,
     start_time: Instant,
     fingerprint: String,
@@ -187,6 +191,8 @@ impl CallEngine {
         let frames_sent = Arc::new(AtomicU64::new(0));
         let frames_received = Arc::new(AtomicU64::new(0));
         let audio_level = Arc::new(AtomicU32::new(0));
+        let tx_codec = Arc::new(Mutex::new(String::new()));
+        let rx_codec = Arc::new(Mutex::new(String::new()));
 
         // Send task
         let send_t = transport.clone();
@@ -196,6 +202,7 @@ impl CallEngine {
         let send_level = audio_level.clone();
         let send_drops = Arc::new(AtomicU64::new(0));
         let send_quality = quality.clone();
+        let send_tx_codec = tx_codec.clone();
         tokio::spawn(async move {
             let profile = resolve_quality(&send_quality);
             let config = match profile {
@@ -212,6 +219,7 @@ impl CallEngine {
             };
             let frame_samples = (config.profile.frame_duration_ms as usize) * 48;
             info!(codec = ?config.profile.codec, frame_samples, "send task starting");
+            *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false); // OS AEC or none
             let mut buf = vec![0i16; frame_samples];
@@ -259,6 +267,7 @@ impl CallEngine {
         let recv_r = running.clone();
         let recv_spk = spk_muted.clone();
         let recv_fr = frames_received.clone();
+        let recv_rx_codec = rx_codec.clone();
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
             let mut decoder = wzp_codec::create_decoder(initial_profile);
@@ -278,6 +287,12 @@ impl CallEngine {
                 {
                     Ok(Ok(Some(pkt))) => {
                         if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
+                            // Track RX codec
+                            {
+                                let mut rx = recv_rx_codec.lock().await;
+                                let codec_name = format!("{:?}", pkt.header.codec_id);
+                                if *rx != codec_name { *rx = codec_name; }
+                            }
                             // Auto-switch decoder if incoming codec differs
                             if pkt.header.codec_id != current_codec {
                                 let new_profile = match pkt.header.codec_id {
@@ -373,6 +388,8 @@ impl CallEngine {
             transport,
             start_time: Instant::now(),
             fingerprint,
+            tx_codec,
+            rx_codec,
             _audio_handle: SyncWrapper(audio_handle),
         })
     }
@@ -410,6 +427,8 @@ impl CallEngine {
             audio_level: self.audio_level.load(Ordering::Relaxed),
             call_duration_secs: self.start_time.elapsed().as_secs_f64(),
             fingerprint: self.fingerprint.clone(),
+            tx_codec: self.tx_codec.lock().await.clone(),
+            rx_codec: self.rx_codec.lock().await.clone(),
         }
     }
 
