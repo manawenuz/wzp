@@ -17,12 +17,13 @@ LOCAL_OUTPUT="target/android-apk"
 SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR"
 
 REBUILD_RUST=0
-DO_PULL=0
+DO_PULL=1
 DO_INSTALL=0
 for arg in "$@"; do
     case "$arg" in
         --rust) REBUILD_RUST=1 ;;
         --pull) DO_PULL=1 ;;
+        --no-pull) DO_PULL=0 ;;
         --install) DO_INSTALL=1 ;;
     esac
 done

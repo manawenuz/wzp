@@ -55,8 +55,10 @@ impl Deduplicator {
     }
 
     /// Returns true if this packet is a duplicate (already seen).
-    fn is_dup(&mut self, room_hash: &[u8; 8], seq: u16) -> bool {
-        let key = u64::from_be_bytes(*room_hash) ^ (seq as u64);
+    /// The source_fp_hash distinguishes packets from different senders
+    /// that share the same room and seq number.
+    fn is_dup(&mut self, room_hash: &[u8; 8], seq: u16, source_fp_hash: u64) -> bool {
+        let key = u64::from_be_bytes(*room_hash) ^ (seq as u64) ^ source_fp_hash;
         if self.seen.contains(&key) {
             return true;
         }
@@ -850,9 +852,17 @@ async fn handle_datagram(
     }
 
     // Dedup: drop packets we've already seen (multi-path duplicates)
+    // Include source peer fingerprint so different senders with same seq aren't confused
+    let source_fp_hash = {
+        let mut h = 0u64;
+        for (i, b) in source_peer_fp.bytes().enumerate().take(8) {
+            h ^= (b as u64) << ((i % 8) * 8);
+        }
+        h
+    };
     {
         let mut dedup = fm.dedup.lock().await;
-        if dedup.is_dup(&rh, pkt.header.seq) {
+        if dedup.is_dup(&rh, pkt.header.seq, source_fp_hash) {
             return;
         }
     }

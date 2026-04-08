@@ -17,12 +17,13 @@ NTFY_TOPIC="https://ntfy.sh/wzp"
 LOCAL_OUTPUT="target/linux-x86_64"
 SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR"
 
-DO_PULL=0
+DO_PULL=1
 DO_CLEAN=0
 DO_INSTALL=0
 for arg in "$@"; do
     case "$arg" in
         --pull) DO_PULL=1 ;;
+        --no-pull) DO_PULL=0 ;;
         --clean) DO_CLEAN=1 ;;
         --install) DO_INSTALL=1 ;;
     esac
