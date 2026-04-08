@@ -111,9 +111,8 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::SessionForwardAck { .. } => CallSignalType::Offer, // reuse
         SignalMessage::RoomUpdate { .. } => CallSignalType::Offer, // reuse
         SignalMessage::FederationHello { .. }
-        | SignalMessage::FederationRoomJoin { .. }
-        | SignalMessage::FederationRoomLeave { .. }
-        | SignalMessage::FederationParticipantUpdate { .. } => CallSignalType::Offer, // relay-only
+        | SignalMessage::GlobalRoomActive { .. }
+        | SignalMessage::GlobalRoomInactive { .. } => CallSignalType::Offer, // relay-only
     }
 }
 

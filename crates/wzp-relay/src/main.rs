@@ -104,6 +104,12 @@ fn parse_args() -> RelayConfig {
                     args.get(i).expect("--static-dir requires a directory path").to_string(),
                 );
             }
+            "--global-room" => {
+                i += 1;
+                config.global_rooms.push(wzp_relay::config::GlobalRoomConfig {
+                    name: args.get(i).expect("--global-room requires a room name").to_string(),
+                });
+            }
             "--debug-tap" => {
                 i += 1;
                 config.debug_tap = Some(
@@ -132,6 +138,7 @@ fn parse_args() -> RelayConfig {
                 eprintln!("  --probe-mesh           Enable mesh mode (mark config flag, probes all --probe targets).");
                 eprintln!("  --mesh-status          Print mesh health table and exit (diagnostic).");
                 eprintln!("  --trunking             Enable trunk batching for outgoing media in room mode.");
+                eprintln!("  --global-room <name>   Declare a room as global (bridged across federation). Repeatable.");
                 eprintln!("  --debug-tap <room>     Log packet headers for a room ('*' for all rooms).");
                 eprintln!("  --ws-port <port>       WebSocket listener port for browser clients (e.g., 8080).");
                 eprintln!("  --static-dir <dir>     Directory to serve static files from (HTML/JS/WASM).");
@@ -334,10 +341,15 @@ async fn main() -> anyhow::Result<()> {
     let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
 
     // Federation manager
-    let federation_mgr = if !config.peers.is_empty() || !config.trusted.is_empty() {
+    let global_room_set: std::collections::HashSet<String> = config.global_rooms.iter()
+        .map(|g| g.name.clone())
+        .collect();
+
+    let federation_mgr = if !config.peers.is_empty() || !config.trusted.is_empty() || !global_room_set.is_empty() {
         let fm = Arc::new(wzp_relay::federation::FederationManager::new(
             config.peers.clone(),
             config.trusted.clone(),
+            global_room_set.clone(),
             room_mgr.clone(),
             endpoint.clone(),
             tls_fp.clone(),
@@ -385,6 +397,12 @@ async fn main() -> anyhow::Result<()> {
         info!(url, "auth enabled — clients must present featherChat token");
     } else {
         info!("auth disabled — any client can connect (use --auth-url to enable)");
+    }
+    if !config.global_rooms.is_empty() {
+        info!(count = config.global_rooms.len(), "global rooms configured");
+        for g in &config.global_rooms {
+            info!(name = %g.name, "  global room");
+        }
     }
     if let Some(ref tap) = config.debug_tap {
         info!(filter = %tap, "debug tap enabled — logging packet headers");
@@ -701,6 +719,22 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect();
+                // Set up federation media channel if this is a global room
+                let federation_tx = if let Some(ref fm) = federation_mgr {
+                    if fm.is_global_room(&room_name) {
+                        let (tx, rx) = tokio::sync::mpsc::channel(256);
+                        let fm_clone = fm.clone();
+                        tokio::spawn(async move {
+                            wzp_relay::federation::run_federation_media_egress(fm_clone, rx).await;
+                        });
+                        Some(tx)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 room::run_participant(
                     room_mgr.clone(),
                     room_name,
@@ -710,6 +744,7 @@ async fn main() -> anyhow::Result<()> {
                     &session_id_str,
                     trunking_enabled,
                     debug_tap,
+                    federation_tx,
                 ).await;
 
                 // Participant disconnected — clean up presence + per-session metrics

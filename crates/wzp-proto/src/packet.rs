@@ -665,21 +665,14 @@ pub enum SignalMessage {
         tls_fingerprint: String,
     },
 
-    /// Federation: a room exists on the sending relay with active local participants.
-    FederationRoomJoin {
-        room: String,
-        participants: Vec<RoomParticipant>,
-    },
-
-    /// Federation: a room is now empty on the sending relay.
-    FederationRoomLeave {
+    /// Federation: this relay now has local participants in a global room.
+    GlobalRoomActive {
         room: String,
     },
 
-    /// Federation: local participant list changed for a federated room.
-    FederationParticipantUpdate {
+    /// Federation: this relay's last local participant left a global room.
+    GlobalRoomInactive {
         room: String,
-        participants: Vec<RoomParticipant>,
     },
 }
 

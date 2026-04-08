@@ -25,6 +25,13 @@ pub struct TrustedConfig {
     pub label: Option<String>,
 }
 
+/// A room declared global — bridged across all federated peers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GlobalRoomConfig {
+    /// Room name to bridge (e.g., "android").
+    pub name: String,
+}
+
 /// Configuration for the relay daemon.
 ///
 /// All fields have defaults, so a minimal TOML file only needs the
@@ -73,6 +80,9 @@ pub struct RelayConfig {
     /// Federation peer relays.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+    /// Global rooms bridged across federation.
+    #[serde(default)]
+    pub global_rooms: Vec<GlobalRoomConfig>,
     /// Trusted relay fingerprints — accept inbound federation from these relays.
     /// Unlike [[peers]], no url is needed — the peer connects to us.
     #[serde(default)]
@@ -99,6 +109,7 @@ impl Default for RelayConfig {
             ws_port: None,
             static_dir: None,
             peers: Vec::new(),
+            global_rooms: Vec::new(),
             trusted: Vec::new(),
             debug_tap: None,
         }

@@ -59,13 +59,20 @@ fn next_id() -> ParticipantId {
     NEXT_PARTICIPANT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Tracks where a participant originates from (for loop prevention).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ParticipantOrigin {
-    /// Connected directly to this relay.
-    Local,
-    /// Virtual participant representing a federated peer relay.
-    Federated { relay_addr: std::net::SocketAddr },
+/// Events emitted by RoomManager for federation to observe.
+#[derive(Clone, Debug)]
+pub enum RoomEvent {
+    /// First local participant joined this room.
+    LocalJoin { room: String },
+    /// Last local participant left this room.
+    LocalLeave { room: String },
+}
+
+/// Outbound federation media from a local participant.
+pub struct FederationMediaOut {
+    pub room_name: String,
+    pub room_hash: [u8; 8],
+    pub data: Bytes,
 }
 
 /// How to send data to a participant — either via QUIC transport or WebSocket channel.
@@ -73,11 +80,6 @@ pub enum ParticipantOrigin {
 pub enum ParticipantSender {
     Quic(Arc<wzp_transport::QuinnTransport>),
     WebSocket(tokio::sync::mpsc::Sender<Bytes>),
-    /// Federated peer relay — media is prefixed with an 8-byte room hash.
-    Federation {
-        transport: Arc<wzp_transport::QuinnTransport>,
-        room_hash: [u8; 8],
-    },
 }
 
 impl ParticipantSender {
@@ -95,14 +97,6 @@ impl ParticipantSender {
                     quality_report: None,
                 };
                 transport.send_media(&pkt).await.map_err(|e| format!("quic send: {e}"))
-            }
-            ParticipantSender::Federation { transport, room_hash } => {
-                // Prefix media data with room hash for demuxing on the peer relay
-                let mut tagged = Vec::with_capacity(8 + data.len());
-                tagged.extend_from_slice(room_hash);
-                tagged.extend_from_slice(data);
-                transport.send_raw_datagram(&tagged)
-                    .map_err(|e| format!("federation send: {e}"))
             }
         }
     }
@@ -139,21 +133,17 @@ struct Participant {
     sender: ParticipantSender,
     fingerprint: Option<String>,
     alias: Option<String>,
-    origin: ParticipantOrigin,
 }
 
 /// A room holding multiple participants.
 struct Room {
     participants: Vec<Participant>,
-    /// Remote participants from federated peers (for merged RoomUpdate).
-    federated_participants: HashMap<std::net::SocketAddr, Vec<wzp_proto::packet::RoomParticipant>>,
 }
 
 impl Room {
     fn new() -> Self {
         Self {
             participants: Vec::new(),
-            federated_participants: HashMap::new(),
         }
     }
 
@@ -163,11 +153,10 @@ impl Room {
         sender: ParticipantSender,
         fingerprint: Option<String>,
         alias: Option<String>,
-        origin: ParticipantOrigin,
     ) -> ParticipantId {
         let id = next_id();
-        info!(room_size = self.participants.len() + 1, participant = id, %addr, ?origin, "joined room");
-        self.participants.push(Participant { id, _addr: addr, sender, fingerprint, alias, origin });
+        info!(room_size = self.participants.len() + 1, participant = id, %addr, "joined room");
+        self.participants.push(Participant { id, _addr: addr, sender, fingerprint, alias });
         id
     }
 
@@ -184,38 +173,15 @@ impl Room {
             .collect()
     }
 
-    /// Get senders with loop prevention for federation.
-    ///
-    /// - Media from a **local** participant → send to ALL others (local + federated)
-    /// - Media from a **federated** participant → send to LOCAL participants only
-    ///   (the source relay already forwarded to its own locals and other peers)
-    fn others_for_origin(&self, exclude_id: ParticipantId, source_origin: &ParticipantOrigin) -> Vec<ParticipantSender> {
+    /// Build a RoomUpdate participant list.
+    fn participant_list(&self) -> Vec<wzp_proto::packet::RoomParticipant> {
         self.participants
             .iter()
-            .filter(|p| p.id != exclude_id)
-            .filter(|p| match source_origin {
-                ParticipantOrigin::Local => true,
-                ParticipantOrigin::Federated { .. } => p.origin == ParticipantOrigin::Local,
-            })
-            .map(|p| p.sender.clone())
-            .collect()
-    }
-
-    /// Build a RoomUpdate participant list (local + federated).
-    fn participant_list(&self) -> Vec<wzp_proto::packet::RoomParticipant> {
-        let mut list: Vec<_> = self.participants
-            .iter()
-            .filter(|p| p.origin == ParticipantOrigin::Local)
             .map(|p| wzp_proto::packet::RoomParticipant {
                 fingerprint: p.fingerprint.clone().unwrap_or_default(),
                 alias: p.alias.clone(),
             })
-            .collect();
-        // Merge federated participants from all peer relays
-        for remote in self.federated_participants.values() {
-            list.extend(remote.iter().cloned());
-        }
-        list
+            .collect()
     }
 
     /// Get all senders (for broadcasting to everyone including the joiner).
@@ -239,22 +205,33 @@ pub struct RoomManager {
     /// When `None`, rooms are open (no auth mode). When `Some`, only listed
     /// fingerprints can join the corresponding room.
     acl: Option<HashMap<String, HashSet<String>>>,
+    /// Channel for room lifecycle events (federation subscribes).
+    event_tx: tokio::sync::broadcast::Sender<RoomEvent>,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             rooms: HashMap::new(),
             acl: None,
+            event_tx,
         }
     }
 
     /// Create a room manager with ACL enforcement enabled.
     pub fn with_acl() -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             rooms: HashMap::new(),
             acl: Some(HashMap::new()),
+            event_tx,
         }
+    }
+
+    /// Subscribe to room lifecycle events (for federation).
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<RoomEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Grant a fingerprint access to a room.
@@ -295,8 +272,13 @@ impl RoomManager {
             warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
             return Err("not authorized for this room".to_string());
         }
+        let was_empty = !self.rooms.contains_key(room_name)
+            || self.rooms.get(room_name).map_or(true, |r| r.is_empty());
         let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
-        let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()), ParticipantOrigin::Local);
+        let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()));
+        if was_empty {
+            let _ = self.event_tx.send(RoomEvent::LocalJoin { room: room_name.to_string() });
+        }
         let update = wzp_proto::SignalMessage::RoomUpdate {
             count: room.len() as u32,
             participants: room.participant_list(),
@@ -317,78 +299,15 @@ impl RoomManager {
         Ok(id)
     }
 
-    /// Join a room as a federated virtual participant.
-    pub fn join_federated(
-        &mut self,
-        room_name: &str,
-        relay_addr: std::net::SocketAddr,
-        sender: ParticipantSender,
-        remote_participants: Vec<wzp_proto::packet::RoomParticipant>,
-    ) -> (ParticipantId, wzp_proto::SignalMessage, Vec<ParticipantSender>) {
-        let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
-        room.federated_participants.insert(relay_addr, remote_participants);
-        let id = room.add(
-            relay_addr, sender, None, Some("(federated)".to_string()),
-            ParticipantOrigin::Federated { relay_addr },
-        );
-        let update = wzp_proto::SignalMessage::RoomUpdate {
-            count: room.len() as u32,
-            participants: room.participant_list(),
-        };
-        let senders = room.all_senders();
-        (id, update, senders)
-    }
-
-    /// Update federated participant list for a room (from FederationParticipantUpdate).
-    pub fn update_federated_participants(
-        &mut self,
-        room_name: &str,
-        relay_addr: std::net::SocketAddr,
-        participants: Vec<wzp_proto::packet::RoomParticipant>,
-    ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
-        if let Some(room) = self.rooms.get_mut(room_name) {
-            room.federated_participants.insert(relay_addr, participants);
-            let update = wzp_proto::SignalMessage::RoomUpdate {
-                count: room.len() as u32,
-                participants: room.participant_list(),
-            };
-            let senders = room.all_senders();
-            Some((update, senders))
-        } else {
-            None
-        }
-    }
-
-    /// Get the origin of a participant by ID.
-    pub fn participant_origin(&self, room_name: &str, participant_id: ParticipantId) -> Option<ParticipantOrigin> {
-        self.rooms.get(room_name)
-            .and_then(|room| room.participants.iter().find(|p| p.id == participant_id))
-            .map(|p| p.origin.clone())
-    }
-
-    /// Get list of active room names (for federation room announcements).
+    /// Get list of active room names.
     pub fn active_rooms(&self) -> Vec<String> {
         self.rooms.keys().cloned().collect()
     }
 
-    /// Get local participant list for a room (excludes federated virtual participants).
-    pub fn local_participants(&self, room_name: &str) -> Vec<wzp_proto::packet::RoomParticipant> {
-        self.rooms.get(room_name)
-            .map(|room| room.participants.iter()
-                .filter(|p| p.origin == ParticipantOrigin::Local)
-                .map(|p| wzp_proto::packet::RoomParticipant {
-                    fingerprint: p.fingerprint.clone().unwrap_or_default(),
-                    alias: p.alias.clone(),
-                })
-                .collect())
-            .unwrap_or_default()
-    }
-
-    /// Get senders for local-only participants in a room (for federation inbound media).
+    /// Get all senders for participants in a room (for federation inbound media delivery).
     pub fn local_senders(&self, room_name: &str) -> Vec<ParticipantSender> {
         self.rooms.get(room_name)
             .map(|room| room.participants.iter()
-                .filter(|p| p.origin == ParticipantOrigin::Local)
                 .map(|p| p.sender.clone())
                 .collect())
             .unwrap_or_default()
@@ -400,6 +319,7 @@ impl RoomManager {
             room.remove(participant_id);
             if room.is_empty() {
                 self.rooms.remove(room_name);
+                let _ = self.event_tx.send(RoomEvent::LocalLeave { room: room_name.to_string() });
                 info!(room = room_name, "room closed (empty)");
                 return None;
             }
@@ -510,6 +430,7 @@ pub async fn run_participant(
     session_id: &str,
     trunking_enabled: bool,
     debug_tap: Option<DebugTap>,
+    federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
 ) {
     if trunking_enabled {
         run_participant_trunked(
@@ -518,7 +439,7 @@ pub async fn run_participant(
         .await;
     } else {
         run_participant_plain(
-            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap,
+            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap, federation_tx,
         )
         .await;
     }
@@ -533,6 +454,7 @@ async fn run_participant_plain(
     metrics: Arc<RelayMetrics>,
     session_id: &str,
     debug_tap: Option<DebugTap>,
+    federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
 ) {
     let addr = transport.connection().remote_address();
     let mut packets_forwarded = 0u64;
@@ -635,21 +557,19 @@ async fn run_participant_plain(
                 ParticipantSender::WebSocket(_) => {
                     let _ = other.send_raw(&pkt.payload).await;
                 }
-                ParticipantSender::Federation { transport, room_hash } => {
-                    // Send room-tagged datagram to federated peer
-                    let data = pkt.to_bytes();
-                    let mut tagged = Vec::with_capacity(8 + data.len());
-                    tagged.extend_from_slice(room_hash);
-                    tagged.extend_from_slice(&data);
-                    if let Err(e) = transport.send_raw_datagram(&tagged) {
-                        send_errors += 1;
-                        if send_errors <= 5 {
-                            warn!(room = %room_name, "federation forward error: {e}");
-                        }
-                    }
-                }
             }
         }
+
+        // Federation: forward to active peer relays via channel
+        if let Some(ref fed_tx) = federation_tx {
+            let data = pkt.to_bytes();
+            let _ = fed_tx.try_send(FederationMediaOut {
+                room_name: room_name.clone(),
+                room_hash: crate::federation::room_hash(&room_name),
+                data,
+            });
+        }
+
         let fwd_ms = fwd_start.elapsed().as_millis() as u64;
         if fwd_ms > max_forward_ms {
             max_forward_ms = fwd_ms;
@@ -814,13 +734,6 @@ async fn run_participant_trunked(
                         }
                         ParticipantSender::WebSocket(_) => {
                             let _ = other.send_raw(&pkt.payload).await;
-                        }
-                        ParticipantSender::Federation { transport, room_hash } => {
-                            let data = pkt.to_bytes();
-                            let mut tagged = Vec::with_capacity(8 + data.len());
-                            tagged.extend_from_slice(room_hash);
-                            tagged.extend_from_slice(&data);
-                            let _ = transport.send_raw_datagram(&tagged);
                         }
                     }
                 }
