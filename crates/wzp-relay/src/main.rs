@@ -303,11 +303,17 @@ async fn main() -> anyhow::Result<()> {
         info!("  fingerprint = \"{tls_fp}\"");
     }
 
-    // Log configured peers
+    // Log configured peers and trusted relays
     if !config.peers.is_empty() {
         info!(count = config.peers.len(), "federation peers configured");
         for p in &config.peers {
             info!(url = %p.url, label = ?p.label, "  peer");
+        }
+    }
+    if !config.trusted.is_empty() {
+        info!(count = config.trusted.len(), "trusted relays configured");
+        for t in &config.trusted {
+            info!(fingerprint = %t.fingerprint, label = ?t.label, "  trusted");
         }
     }
     let endpoint = wzp_transport::create_endpoint(config.listen_addr, Some(server_config))?;
@@ -328,9 +334,10 @@ async fn main() -> anyhow::Result<()> {
     let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
 
     // Federation manager
-    let federation_mgr = if !config.peers.is_empty() {
+    let federation_mgr = if !config.peers.is_empty() || !config.trusted.is_empty() {
         let fm = Arc::new(wzp_relay::federation::FederationManager::new(
             config.peers.clone(),
+            config.trusted.clone(),
             room_mgr.clone(),
             endpoint.clone(),
             tls_fp.clone(),
@@ -512,20 +519,36 @@ async fn main() -> anyhow::Result<()> {
             // Federation connections use SNI "_federation"
             if room_name == "_federation" {
                 if let Some(ref fm) = federation_mgr {
-                    // Match inbound peer by source IP (client connections don't present TLS certs)
-                    if let Some(peer_config) = fm.find_peer_by_addr(addr) {
-                        let peer_config = peer_config.clone();
+                    // Wait for FederationHello to identify the connecting relay
+                    let hello_fp = match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        transport.recv_signal(),
+                    ).await {
+                        Ok(Ok(Some(wzp_proto::SignalMessage::FederationHello { tls_fingerprint }))) => tls_fingerprint,
+                        _ => {
+                            warn!(%addr, "federation: no hello received, closing");
+                            return;
+                        }
+                    };
+
+                    if let Some(label) = fm.check_inbound_trust(addr, &hello_fp) {
+                        let peer_config = wzp_relay::config::PeerConfig {
+                            url: addr.to_string(),
+                            fingerprint: hello_fp,
+                            label: Some(label.clone()),
+                        };
                         let fm = fm.clone();
-                        info!(%addr, label = ?peer_config.label, "inbound federation connection accepted");
+                        info!(%addr, label = %label, "inbound federation accepted (trusted)");
                         fm.handle_inbound(transport, peer_config).await;
                     } else {
-                        warn!(%addr, "unknown relay wants to federate");
+                        warn!(%addr, fp = %hello_fp, "unknown relay wants to federate");
                         info!("  to accept, add to relay.toml:");
-                        info!("  [[peers]]");
-                        info!("  url = \"{addr}\"");
+                        info!("  [[trusted]]");
+                        info!("  fingerprint = \"{hello_fp}\"");
+                        info!("  label = \"Relay at {addr}\"");
                     }
                 } else {
-                    info!(%addr, "federation connection rejected (no peers configured)");
+                    info!(%addr, "federation connection rejected (no federation configured)");
                 }
                 return;
             }

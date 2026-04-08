@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use wzp_proto::{MediaTransport, SignalMessage};
 use wzp_transport::QuinnTransport;
 
-use crate::config::PeerConfig;
+use crate::config::{PeerConfig, TrustedConfig};
 use crate::room::{self, ParticipantSender, RoomManager};
 
 /// Compute 8-byte room hash for federation datagram tagging.
@@ -31,6 +31,7 @@ pub fn room_hash(room_name: &str) -> [u8; 8] {
 /// Manages federation connections to peer relays.
 pub struct FederationManager {
     peers: Vec<PeerConfig>,
+    trusted: Vec<TrustedConfig>,
     room_mgr: Arc<Mutex<RoomManager>>,
     endpoint: quinn::Endpoint,
     local_tls_fp: String,
@@ -39,12 +40,14 @@ pub struct FederationManager {
 impl FederationManager {
     pub fn new(
         peers: Vec<PeerConfig>,
+        trusted: Vec<TrustedConfig>,
         room_mgr: Arc<Mutex<RoomManager>>,
         endpoint: quinn::Endpoint,
         local_tls_fp: String,
     ) -> Self {
         Self {
             peers,
+            trusted,
             room_mgr,
             endpoint,
             local_tls_fp,
@@ -89,7 +92,6 @@ impl FederationManager {
     }
 
     /// Find a configured peer by source IP address.
-    /// Used for inbound connections where the client doesn't present a TLS cert.
     pub fn find_peer_by_addr(&self, addr: SocketAddr) -> Option<&PeerConfig> {
         let addr_ip = addr.ip();
         self.peers.iter().find(|p| {
@@ -97,6 +99,25 @@ impl FederationManager {
                 .map(|sa| sa.ip() == addr_ip)
                 .unwrap_or(false)
         })
+    }
+
+    /// Find a trusted relay by TLS fingerprint.
+    pub fn find_trusted_by_fingerprint(&self, fp: &str) -> Option<&TrustedConfig> {
+        self.trusted.iter().find(|t| normalize_fp(&t.fingerprint) == normalize_fp(fp))
+    }
+
+    /// Check if an inbound federation connection is trusted (by IP match in [[peers]] or fingerprint in [[trusted]]).
+    /// Returns the label for logging.
+    pub fn check_inbound_trust(&self, addr: SocketAddr, hello_fp: &str) -> Option<String> {
+        // Check [[peers]] by IP
+        if let Some(peer) = self.find_peer_by_addr(addr) {
+            return Some(peer.label.clone().unwrap_or_else(|| peer.url.clone()));
+        }
+        // Check [[trusted]] by fingerprint
+        if let Some(trusted) = self.find_trusted_by_fingerprint(hello_fp) {
+            return Some(trusted.label.clone().unwrap_or_else(|| hello_fp[..16].to_string()));
+        }
+        None
     }
 }
 
@@ -134,7 +155,13 @@ async fn connect_to_peer(fm: &FederationManager, peer: &PeerConfig) -> Result<Ar
     let conn = wzp_transport::connect(&fm.endpoint, addr, "_federation", client_cfg).await?;
     // TODO: verify peer TLS fingerprint once we have cert access
     let transport = Arc::new(QuinnTransport::new(conn));
-    info!(peer_url = %peer.url, label = ?peer.label, "federation: connected to peer");
+    // Send hello with our TLS fingerprint so the peer can verify us
+    let hello = SignalMessage::FederationHello {
+        tls_fingerprint: fm.local_tls_fp.clone(),
+    };
+    transport.send_signal(&hello).await
+        .map_err(|e| anyhow::anyhow!("federation hello send failed: {e}"))?;
+    info!(peer_url = %peer.url, label = ?peer.label, "federation: connected to peer (hello sent)");
     Ok(transport)
 }
 

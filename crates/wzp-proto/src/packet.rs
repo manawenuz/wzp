@@ -659,6 +659,12 @@ pub enum SignalMessage {
 
     // ── Federation signals (relay-to-relay) ──
 
+    /// Federation: initial handshake — the connecting relay identifies itself.
+    FederationHello {
+        /// TLS certificate fingerprint of the connecting relay.
+        tls_fingerprint: String,
+    },
+
     /// Federation: a room exists on the sending relay with active local participants.
     FederationRoomJoin {
         room: String,

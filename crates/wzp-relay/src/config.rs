@@ -15,6 +15,16 @@ pub struct PeerConfig {
     pub label: Option<String>,
 }
 
+/// A trusted relay — accepts inbound federation without needing the peer's address.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrustedConfig {
+    /// Expected TLS certificate fingerprint (hex, with colons).
+    pub fingerprint: String,
+    /// Optional human-readable label.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 /// Configuration for the relay daemon.
 ///
 /// All fields have defaults, so a minimal TOML file only needs the
@@ -63,6 +73,10 @@ pub struct RelayConfig {
     /// Federation peer relays.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+    /// Trusted relay fingerprints — accept inbound federation from these relays.
+    /// Unlike [[peers]], no url is needed — the peer connects to us.
+    #[serde(default)]
+    pub trusted: Vec<TrustedConfig>,
     /// Debug tap: log packet headers for matching rooms ("*" = all rooms).
     /// Activated via --debug-tap <room> or debug_tap = "room" in TOML.
     pub debug_tap: Option<String>,
@@ -85,6 +99,7 @@ impl Default for RelayConfig {
             ws_port: None,
             static_dir: None,
             peers: Vec::new(),
+            trusted: Vec::new(),
             debug_tap: None,
         }
     }
