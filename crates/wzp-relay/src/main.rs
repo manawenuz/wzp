@@ -490,9 +490,19 @@ async fn main() -> anyhow::Result<()> {
             let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
             // Ping connections: client just measures QUIC connect RTT.
-            // No handshake, no streams — client closes immediately after connecting.
             if room_name == "ping" {
                 info!(%addr, "ping connection (RTT probe)");
+                return;
+            }
+
+            // Version query: respond with build hash over a uni stream.
+            if room_name == "version" {
+                if let Ok(mut send) = transport.connection().open_uni().await {
+                    let _ = send.write_all(BUILD_GIT_HASH.as_bytes()).await;
+                    let _ = send.finish();
+                    // Wait for client to read before closing
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
                 return;
             }
 

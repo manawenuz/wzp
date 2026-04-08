@@ -47,6 +47,7 @@ struct CliArgs {
     room: Option<String>,
     token: Option<String>,
     _metrics_file: Option<String>,
+    version_check: bool,
 }
 
 impl CliArgs {
@@ -88,6 +89,7 @@ fn parse_args() -> CliArgs {
     let mut room = None;
     let mut token = None;
     let mut metrics_file = None;
+    let mut version_check = false;
     let mut relay_str = None;
 
     let mut i = 1;
@@ -169,6 +171,7 @@ fn parse_args() -> CliArgs {
                 );
             }
             "--sweep" => sweep = true,
+            "--version-check" => { version_check = true; }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
                 eprintln!();
@@ -221,6 +224,7 @@ fn parse_args() -> CliArgs {
         room,
         token,
         _metrics_file: metrics_file,
+        version_check,
     }
 }
 
@@ -236,6 +240,26 @@ async fn main() -> anyhow::Result<()> {
     // --sweep runs locally (no network), so handle it before connecting.
     if cli.sweep {
         wzp_client::sweep::run_and_print_default_sweep();
+        return Ok(());
+    }
+
+    // --version-check: query relay version over QUIC and exit
+    if cli.version_check {
+        let client_config = wzp_transport::client_config();
+        let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+        let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+        let conn = wzp_transport::connect(&endpoint, cli.relay_addr, "version", client_config).await?;
+        match conn.accept_uni().await {
+            Ok(mut recv) => {
+                let data = recv.read_to_end(256).await.unwrap_or_default();
+                let version = String::from_utf8_lossy(&data);
+                println!("{} {}", cli.relay_addr, version.trim());
+            }
+            Err(e) => {
+                eprintln!("relay {} does not support version query: {e}", cli.relay_addr);
+            }
+        }
+        endpoint.close(0u32.into(), b"done");
         return Ok(());
     }
 
