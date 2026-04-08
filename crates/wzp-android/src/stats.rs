@@ -76,4 +76,5 @@ pub struct CallStats {
 pub struct RoomMember {
     pub fingerprint: String,
     pub alias: Option<String>,
+    pub relay_label: Option<String>,
 }

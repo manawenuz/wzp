@@ -852,6 +852,7 @@ async fn run_call(
                         .map(|p| crate::stats::RoomMember {
                             fingerprint: p.fingerprint.clone(),
                             alias: p.alias.clone(),
+                            relay_label: p.relay_label.clone(),
                         })
                         .collect();
                     let mut stats = state_signal.stats.lock().unwrap();

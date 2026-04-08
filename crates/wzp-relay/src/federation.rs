@@ -688,19 +688,22 @@ async fn handle_datagram(
         }
     }
 
-    // Find room by hash
+    // Find room by hash — check local rooms AND global room config
     let room_name = {
         let mgr = fm.room_mgr.lock().await;
-        {
         let active = mgr.active_rooms();
+        // First: check local rooms (has participants)
         active.iter().find(|r| room_hash(r) == rh).cloned()
             .or_else(|| active.iter().find(|r| fm.global_room_hash(r) == rh).cloned())
-    }
+            // Second: check global room config (hub relay may have no local participants)
+            .or_else(|| {
+                fm.global_rooms.iter().find(|name| room_hash(name) == rh).cloned()
+            })
     };
 
     let room_name = match room_name {
         Some(r) => r,
-        None => return, // room not active locally
+        None => return, // not a known room
     };
 
     // Rate limit per room
@@ -725,16 +728,15 @@ async fn handle_datagram(
         }
     }
 
-    // Multi-hop: forward to OTHER active peers (not the source)
+    // Multi-hop: forward to ALL other connected peers (not the source)
+    // Don't filter by active_rooms — the receiving peer decides whether to deliver
     let links = fm.peer_links.lock().await;
     for (fp, link) in links.iter() {
-        if fp != source_peer_fp && link.active_rooms.contains(&room_name) {
+        if fp != source_peer_fp {
             let mut tagged = Vec::with_capacity(8 + media_bytes.len());
             tagged.extend_from_slice(&rh);
             tagged.extend_from_slice(&media_bytes);
-            if let Err(e) = link.transport.send_raw_datagram(&tagged) {
-                warn!(peer = %link.label, "multi-hop forward error: {e}");
-            }
+            let _ = link.transport.send_raw_datagram(&tagged);
         }
     }
 }
