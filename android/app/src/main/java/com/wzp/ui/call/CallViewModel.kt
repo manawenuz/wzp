@@ -171,16 +171,20 @@ class CallViewModel : ViewModel(), WzpCallback {
         val seed = _seedHex.value
         val alias = _alias.value
 
-        viewModelScope.launch(Dispatchers.IO) {
-            val resolvedRelay = resolveToIp(relay) ?: relay
+        // Use a Java Thread with 8MB stack — Kotlin's IO dispatcher threads are too small
+        // for the native JNI + Rust + TLS stack requirements
+        val resolvedRelay = resolveToIp(relay) ?: relay
+        Thread(null, {
             val result = engine?.startSignaling(resolvedRelay, seed, "", alias)
-            if (result == 0) {
-                _signalState.value = 5 // Registered
-                startStatsPolling()
-            } else {
-                _errorMessage.value = "Failed to register on relay"
+            viewModelScope.launch {
+                if (result == 0) {
+                    _signalState.value = 5 // Registered
+                    startStatsPolling()
+                } else {
+                    _errorMessage.value = "Failed to register on relay"
+                }
             }
-        }
+        }, "wzp-register", 8 * 1024 * 1024).start()
     }
 
     /** Place a direct call to the target fingerprint */
