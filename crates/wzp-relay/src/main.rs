@@ -794,10 +794,25 @@ async fn main() -> anyhow::Result<()> {
                                         }
 
                                         // Send CallSetup to both parties
+                                        // Use the address the client connected to (their remote addr
+                                        // is our perspective, but we need our listen addr).
+                                        // Replace 0.0.0.0 with the client's destination IP.
+                                        let relay_addr_for_setup = if listen_addr_str.starts_with("0.0.0.0:") {
+                                            let port = &listen_addr_str[8..];
+                                            // Use the local IP from the client's connection
+                                            let local_ip = addr.ip();
+                                            if local_ip.is_loopback() {
+                                                format!("127.0.0.1:{port}")
+                                            } else {
+                                                format!("{local_ip}:{port}")
+                                            }
+                                        } else {
+                                            listen_addr_str.clone()
+                                        };
                                         let setup = SignalMessage::CallSetup {
                                             call_id: call_id.clone(),
                                             room: room.clone(),
-                                            relay_addr: listen_addr_str.clone(),
+                                            relay_addr: relay_addr_for_setup,
                                         };
                                         {
                                             let hub = signal_hub.lock().await;
