@@ -37,21 +37,25 @@ fn build_android_native() {
         .file("cpp/getauxval_fix.c")
         .compile("getauxval_fix");
 
-    // ─── Step E.4: minimal C++ smoke file instead of full Oboe ─────────────
-    // The full Oboe compile (Step E, commit 4250f1b) triggered the
-    // __init_tcb+4 crash at launch — even without any FFI call from Rust.
-    // Bisection jump: replace the 200+ Oboe source files with ONE tiny
-    // cpp/cpp_smoke.cpp that uses the same libc++ features Oboe does
-    // (std::atomic, std::mutex, std::thread), still linked via
-    // libc++_shared. If this crashes too, the trigger is just "any C++
-    // link that references libc++ threads/mutexes". If it passes, Oboe
-    // itself (size, specific headers, static ctors) is the culprit.
+    // ─── Step E.1 with STATIC libc++ ───────────────────────────────────────
+    // Every cpp_smoke variant (atomic-mutex-thread / atomic-only / empty
+    // function) crashed identically with c++_shared linkage — byte-
+    // identical crash offsets. The cpp code was dead-stripped from the
+    // final .so in every case, so the only remaining delta was the
+    // NEEDED entry for libc++_shared.so added by
+    // cargo:rustc-link-lib=c++_shared. Theory: that NEEDED entry (and
+    // Android's dynamic linker running libc++_shared.so's init_array at
+    // dlopen time) is the trigger.
+    //
+    // Test: swap c++_shared → c++_static. Bundles libc++ code directly
+    // into our .so, drops the NEEDED entry. If the app launches, we've
+    // proven the NEEDED libc++_shared.so is the trigger and have a
+    // working linkage for adding C++ to Tauri Android cdylibs.
     println!("cargo:rerun-if-changed=cpp/cpp_smoke.cpp");
     cc::Build::new()
         .cpp(true)
         .std("c++17")
-        // Shared libc++ — same linkage Oboe uses.
-        .cpp_link_stdlib(Some("c++_shared"))
+        .cpp_link_stdlib(Some("c++_static"))
         .file("cpp/cpp_smoke.cpp")
         .compile("wzp_cpp_smoke");
 
