@@ -97,6 +97,10 @@ pub(crate) struct EngineState {
     /// QUIC transport handle — stored so stop_call() can close it immediately,
     /// triggering relay-side leave + RoomUpdate broadcast.
     pub quic_transport: Mutex<Option<Arc<wzp_transport::QuinnTransport>>>,
+    /// Signal transport for direct calling — stored so place_call/answer_call can send.
+    pub signal_transport: Mutex<Option<Arc<wzp_transport::QuinnTransport>>>,
+    /// Our fingerprint (set during signaling registration).
+    pub signal_fingerprint: Mutex<Option<String>>,
 }
 
 pub struct WzpEngine {
@@ -118,6 +122,8 @@ impl WzpEngine {
             playout_ring: AudioRing::new(),
             audio_level_rms: AtomicU32::new(0),
             quic_transport: Mutex::new(None),
+            signal_transport: Mutex::new(None),
+            signal_fingerprint: Mutex::new(None),
         });
         Self {
             state,
@@ -314,6 +320,10 @@ impl WzpEngine {
                     info!(fingerprint = %fp, "signal: registered");
                     let mut stats = signal_state.stats.lock().unwrap();
                     stats.state = crate::stats::CallState::Registered;
+                    drop(stats);
+                    // Store transport + fingerprint so place_call/answer_call can use them
+                    *signal_state.signal_transport.lock().unwrap() = Some(transport.clone());
+                    *signal_state.signal_fingerprint.lock().unwrap() = Some(fp.clone());
                 }
                 other => {
                     error!("signal registration failed: {other:?}");
@@ -379,19 +389,63 @@ impl WzpEngine {
         Ok(())
     }
 
-    /// Place a direct call to a target fingerprint via the signal connection.
+    /// Place a direct call to a target fingerprint via the signal transport.
     pub fn place_call(&self, target_fingerprint: &str) -> Result<(), anyhow::Error> {
-        let _ = self.state.command_tx.send(EngineCommand::PlaceCall {
-            target_fingerprint: target_fingerprint.to_string(),
+        use wzp_proto::SignalMessage;
+
+        let transport = self.state.signal_transport.lock().unwrap().clone()
+            .ok_or_else(|| anyhow::anyhow!("not registered"))?;
+        let caller_fp = self.state.signal_fingerprint.lock().unwrap().clone()
+            .unwrap_or_default();
+        let target = target_fingerprint.to_string();
+        let call_id = format!("{:016x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+        // Send on a separate thread since we can't block the UI thread
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async {
+                let _ = transport.send_signal(&SignalMessage::DirectCallOffer {
+                    caller_fingerprint: caller_fp,
+                    caller_alias: None,
+                    target_fingerprint: target,
+                    call_id,
+                    identity_pub: [0u8; 32],
+                    ephemeral_pub: [0u8; 32],
+                    signature: vec![],
+                    supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+                }).await;
+            });
         });
         Ok(())
     }
 
-    /// Answer an incoming direct call.
+    /// Answer an incoming direct call via the signal transport.
     pub fn answer_call(&self, call_id: &str, mode: wzp_proto::CallAcceptMode) -> Result<(), anyhow::Error> {
-        let _ = self.state.command_tx.send(EngineCommand::AnswerCall {
-            call_id: call_id.to_string(),
-            accept_mode: mode,
+        use wzp_proto::SignalMessage;
+
+        let transport = self.state.signal_transport.lock().unwrap().clone()
+            .ok_or_else(|| anyhow::anyhow!("not registered"))?;
+        let call_id = call_id.to_string();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async {
+                let _ = transport.send_signal(&SignalMessage::DirectCallAnswer {
+                    call_id,
+                    accept_mode: mode,
+                    identity_pub: None,
+                    ephemeral_pub: None,
+                    signature: None,
+                    chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
+                }).await;
+            });
         });
         Ok(())
     }

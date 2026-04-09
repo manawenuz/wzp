@@ -690,12 +690,12 @@ class CallViewModel : ViewModel(), WzpCallback {
                         val s = CallStats.fromJson(json)
                         lastCallDuration = s.durationSecs
                         _stats.value = s
-                        if (s.state != 0) {
-                            _callState.value = s.state
-                        }
                         // Track signal state changes for direct calling
                         if (s.state in 5..7) {
                             _signalState.value = s.state
+                            // Don't update callState for signal-only states
+                        } else if (s.state != 0) {
+                            _callState.value = s.state
                         }
                         // Incoming call detection
                         if (s.state == 7) { // IncomingCall
