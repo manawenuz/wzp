@@ -109,7 +109,12 @@ interface Settings {
 
 function loadSettings(): Settings {
   const defaults: Settings = {
-    relays: [{ name: "Default", address: "193.180.213.68:4433" }],
+    relays: [
+      // Local laptop relay — used during Android rewrite testing so the phone
+      // and the relay logs are on the same host. Laptop IP on the test LAN.
+      { name: "Laptop", address: "172.16.81.125:4433" },
+      { name: "Default", address: "193.180.213.68:4433" },
+    ],
     selectedRelay: 0, room: "android", alias: "",
     osAec: true, agc: true, quality: "auto", recentRooms: [],
   };
@@ -125,6 +130,15 @@ function loadSettings(): Settings {
       if (parsed.recentRooms?.length > 0 && typeof parsed.recentRooms[0] === "string") {
         const addr = parsed.relays?.[0]?.address || defaults.relays[0].address;
         parsed.recentRooms = parsed.recentRooms.map((r: string) => ({ relay: addr, room: r }));
+      }
+      // Ensure the Laptop test relay is present as the first entry for
+      // existing installs — otherwise users with cached settings keep using
+      // the remote default and we have to manually add it each install.
+      // Remove this block once the Android rewrite is stable.
+      const LAPTOP_ADDR = "172.16.81.125:4433";
+      if (Array.isArray(parsed.relays) && !parsed.relays.some((r: any) => r.address === LAPTOP_ADDR)) {
+        parsed.relays.unshift({ name: "Laptop", address: LAPTOP_ADDR });
+        parsed.selectedRelay = 0;
       }
       return { ...defaults, ...parsed };
     }
