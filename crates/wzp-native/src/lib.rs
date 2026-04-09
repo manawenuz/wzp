@@ -1,32 +1,31 @@
 //! wzp-native — standalone Android cdylib for all the C++ audio code.
 //!
-//! This crate is built with `cargo ndk`, NOT `cargo tauri android build`,
-//! because the latter mispipes link flags in a way that causes bionic's
-//! private `pthread_create` / `__init_tcb` symbols to land LOCALLY inside
-//! any cdylib that also has a `cc::Build::new().cpp(true)` step. See
-//! `docs/incident-tauri-android-init-tcb.md` for the full post-mortem.
+//! Built with `cargo ndk`, NOT `cargo tauri android build`. Loaded at
+//! runtime by the Tauri desktop cdylib (`wzp-desktop`) via libloading.
+//! See `docs/incident-tauri-android-init-tcb.md` for why the split exists.
 //!
-//! The Tauri desktop crate (`wzp-desktop`) has **no C++ at all**. At
-//! runtime on Android, it `libloading::Library::new("libwzp_native.so")`'s
-//! this crate's .so and calls the `wzp_native_*` functions below.
+//! Phase 2: real Oboe audio backend.
 //!
-//! Phase 1 (this file): a tiny smoke-test FFI surface so we can validate
-//! that (a) cargo-ndk happily builds this crate standalone, (b) gradle
-//! picks up the resulting .so from jniLibs, (c) the Tauri cdylib can
-//! dlopen us at runtime and call exported functions. No C++, no Oboe, no
-//! external deps. Phase 2 will add the Oboe cc::Build + audio FFI.
+//! Architecture: Oboe runs capture + playout streams on its own high-
+//! priority AAudio callback threads inside the C++ bridge. Two SPSC ring
+//! buffers (capture and playout) are shared between the C++ callbacks
+//! and the Rust side via atomic indices — no locks on the hot path.
+//! `wzp-desktop` drains the capture ring into its Opus encoder and fills
+//! the playout ring with decoded PCM.
 
-/// Smoke-test export #1 — returns a fixed magic number so the Tauri cdylib
-/// can assert that `dlopen + dlsym` worked end-to-end. Always returns 42.
+use std::sync::atomic::{AtomicI32, Ordering};
+
+// ─── Phase 1 smoke-test exports (kept for sanity checks) ─────────────────
+
+/// Returns 42. Used by wzp-desktop's setup() to verify dlopen + dlsym
+/// work before any audio code runs.
 #[unsafe(no_mangle)]
 pub extern "C" fn wzp_native_version() -> i32 {
     42
 }
 
-/// Smoke-test export #2 — writes a fixed message into the caller's buffer
-/// (NUL-terminated, capped at `cap`) and returns the number of bytes
-/// written (not counting the NUL). Lets us verify we can move non-trivial
-/// data across the FFI boundary without fighting ownership.
+/// Writes a NUL-terminated string into `out` (capped at `cap`) and
+/// returns bytes written excluding the NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wzp_native_hello(out: *mut u8, cap: usize) -> usize {
     const MSG: &[u8] = b"hello from wzp-native\0";
@@ -34,11 +33,249 @@ pub unsafe extern "C" fn wzp_native_hello(out: *mut u8, cap: usize) -> usize {
         return 0;
     }
     let n = MSG.len().min(cap);
-    // SAFETY: caller provided a writable buffer of at least `cap` bytes.
     unsafe {
         core::ptr::copy_nonoverlapping(MSG.as_ptr(), out, n);
-        // ensure last byte is a NUL even if we had to truncate
         *out.add(n - 1) = 0;
     }
-    n - 1 // bytes written excluding the NUL
+    n - 1
+}
+
+// ─── C++ Oboe bridge FFI ─────────────────────────────────────────────────
+
+#[repr(C)]
+struct WzpOboeConfig {
+    sample_rate: i32,
+    frames_per_burst: i32,
+    channel_count: i32,
+}
+
+#[repr(C)]
+struct WzpOboeRings {
+    capture_buf: *mut i16,
+    capture_capacity: i32,
+    capture_write_idx: *mut AtomicI32,
+    capture_read_idx: *mut AtomicI32,
+    playout_buf: *mut i16,
+    playout_capacity: i32,
+    playout_write_idx: *mut AtomicI32,
+    playout_read_idx: *mut AtomicI32,
+}
+
+// SAFETY: atomics synchronise producer/consumer; raw pointers are owned
+// by the AudioBackend singleton below whose lifetime covers all calls.
+unsafe impl Send for WzpOboeRings {}
+unsafe impl Sync for WzpOboeRings {}
+
+unsafe extern "C" {
+    fn wzp_oboe_start(config: *const WzpOboeConfig, rings: *const WzpOboeRings) -> i32;
+    fn wzp_oboe_stop();
+    fn wzp_oboe_capture_latency_ms() -> f32;
+    fn wzp_oboe_playout_latency_ms() -> f32;
+    fn wzp_oboe_is_running() -> i32;
+}
+
+// ─── SPSC ring buffer (shared with C++ via AtomicI32) ────────────────────
+
+/// 20 ms @ 48 kHz mono = 960 samples.
+const FRAME_SAMPLES: usize = 960;
+/// ~160 ms headroom at 48 kHz.
+const RING_CAPACITY: usize = 7680;
+
+struct RingBuffer {
+    buf: Vec<i16>,
+    capacity: usize,
+    write_idx: AtomicI32,
+    read_idx: AtomicI32,
+}
+
+// SAFETY: SPSC with atomic read/write cursors; producer and consumer
+// are always on different threads.
+unsafe impl Send for RingBuffer {}
+unsafe impl Sync for RingBuffer {}
+
+impl RingBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            buf: vec![0i16; capacity],
+            capacity,
+            write_idx: AtomicI32::new(0),
+            read_idx: AtomicI32::new(0),
+        }
+    }
+
+    fn available_read(&self) -> usize {
+        let w = self.write_idx.load(Ordering::Acquire);
+        let r = self.read_idx.load(Ordering::Relaxed);
+        let avail = w - r;
+        if avail < 0 { (avail + self.capacity as i32) as usize } else { avail as usize }
+    }
+
+    fn available_write(&self) -> usize {
+        self.capacity - 1 - self.available_read()
+    }
+
+    fn write(&self, data: &[i16]) -> usize {
+        let count = data.len().min(self.available_write());
+        if count == 0 {
+            return 0;
+        }
+        let mut w = self.write_idx.load(Ordering::Relaxed) as usize;
+        let cap = self.capacity;
+        let buf_ptr = self.buf.as_ptr() as *mut i16;
+        for sample in &data[..count] {
+            unsafe { *buf_ptr.add(w) = *sample; }
+            w += 1;
+            if w >= cap { w = 0; }
+        }
+        self.write_idx.store(w as i32, Ordering::Release);
+        count
+    }
+
+    fn read(&self, out: &mut [i16]) -> usize {
+        let count = out.len().min(self.available_read());
+        if count == 0 {
+            return 0;
+        }
+        let mut r = self.read_idx.load(Ordering::Relaxed) as usize;
+        let cap = self.capacity;
+        let buf_ptr = self.buf.as_ptr();
+        for slot in &mut out[..count] {
+            unsafe { *slot = *buf_ptr.add(r); }
+            r += 1;
+            if r >= cap { r = 0; }
+        }
+        self.read_idx.store(r as i32, Ordering::Release);
+        count
+    }
+
+    fn buf_ptr(&self) -> *mut i16 {
+        self.buf.as_ptr() as *mut i16
+    }
+    fn write_idx_ptr(&self) -> *mut AtomicI32 {
+        &self.write_idx as *const AtomicI32 as *mut AtomicI32
+    }
+    fn read_idx_ptr(&self) -> *mut AtomicI32 {
+        &self.read_idx as *const AtomicI32 as *mut AtomicI32
+    }
+}
+
+// ─── AudioBackend singleton ──────────────────────────────────────────────
+//
+// There is one global AudioBackend instance because Oboe's C++ side
+// holds its own singleton of the streams. The `Box::leak`'d statics own
+// the ring buffers for the lifetime of the process — dropping them while
+// Oboe is still running would cause use-after-free in the audio callback.
+
+use std::sync::OnceLock;
+
+struct AudioBackend {
+    capture: RingBuffer,
+    playout: RingBuffer,
+    started: std::sync::Mutex<bool>,
+}
+
+static BACKEND: OnceLock<&'static AudioBackend> = OnceLock::new();
+
+fn backend() -> &'static AudioBackend {
+    BACKEND.get_or_init(|| {
+        Box::leak(Box::new(AudioBackend {
+            capture: RingBuffer::new(RING_CAPACITY),
+            playout: RingBuffer::new(RING_CAPACITY),
+            started: std::sync::Mutex::new(false),
+        }))
+    })
+}
+
+// ─── C FFI for wzp-desktop ───────────────────────────────────────────────
+
+/// Start the Oboe audio streams. Returns 0 on success, non-zero on error.
+/// Idempotent — calling while already running is a no-op that returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_start() -> i32 {
+    let b = backend();
+    let mut started = match b.started.lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    if *started {
+        return 0;
+    }
+
+    let config = WzpOboeConfig {
+        sample_rate: 48_000,
+        frames_per_burst: FRAME_SAMPLES as i32,
+        channel_count: 1,
+    };
+    let rings = WzpOboeRings {
+        capture_buf: b.capture.buf_ptr(),
+        capture_capacity: b.capture.capacity as i32,
+        capture_write_idx: b.capture.write_idx_ptr(),
+        capture_read_idx: b.capture.read_idx_ptr(),
+        playout_buf: b.playout.buf_ptr(),
+        playout_capacity: b.playout.capacity as i32,
+        playout_write_idx: b.playout.write_idx_ptr(),
+        playout_read_idx: b.playout.read_idx_ptr(),
+    };
+    let ret = unsafe { wzp_oboe_start(&config, &rings) };
+    if ret != 0 {
+        return ret;
+    }
+    *started = true;
+    0
+}
+
+/// Stop Oboe. Idempotent. Safe to call from any thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_stop() {
+    let b = backend();
+    if let Ok(mut started) = b.started.lock() {
+        if *started {
+            unsafe { wzp_oboe_stop() };
+            *started = false;
+        }
+    }
+}
+
+/// Read captured PCM samples from the capture ring. Returns the number
+/// of `i16` samples actually copied into `out` (may be less than
+/// `out_len` if the ring is empty).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wzp_native_audio_read_capture(out: *mut i16, out_len: usize) -> usize {
+    if out.is_null() || out_len == 0 {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(out, out_len) };
+    backend().capture.read(slice)
+}
+
+/// Write PCM samples into the playout ring. Returns the number of
+/// samples actually enqueued (may be less than `in_len` if the ring
+/// is nearly full — in practice the caller should pace to 20 ms
+/// frames and spin briefly if the ring is full).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_len: usize) -> usize {
+    if input.is_null() || in_len == 0 {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(input, in_len) };
+    backend().playout.write(slice)
+}
+
+/// Current capture latency reported by Oboe, in milliseconds. Returns
+/// NaN / 0.0 if the stream isn't running.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_capture_latency_ms() -> f32 {
+    unsafe { wzp_oboe_capture_latency_ms() }
+}
+
+/// Current playout latency reported by Oboe, in milliseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_playout_latency_ms() -> f32 {
+    unsafe { wzp_oboe_playout_latency_ms() }
+}
+
+/// Non-zero if both Oboe streams are currently running.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_is_running() -> i32 {
+    unsafe { wzp_oboe_is_running() }
 }

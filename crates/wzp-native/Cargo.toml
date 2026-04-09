@@ -15,8 +15,15 @@ description = "WarzonePhone native audio library — standalone Android cdylib t
 name = "wzp_native"
 crate-type = ["cdylib"]
 
+[build-dependencies]
+# cc is SAFE to use here because this crate is a single-cdylib: no
+# staticlib in crate-type → no rust-lang/rust#104707 symbol leak. The
+# legacy wzp-android crate uses the same setup and works.
+cc = "1"
+
 [dependencies]
-# Phase 1 scaffold: no dependencies at all. Pure Rust FFI smoke test so we
-# can validate the standalone-cdylib + libloading runtime pipeline before
-# bringing Oboe / wzp-codec / etc. back in. Phase 2 will add the Oboe cc
-# build and the actual audio pipeline.
+# Phase 2: Oboe C++ audio bridge. Still no Rust deps — we do the whole
+# audio pipeline via extern "C" into the bundled C++ and expose our own
+# narrow extern "C" API for wzp-desktop to dlopen via libloading.
+# Phase 3 can add wzp-proto/wzp-codec if we want to share codec logic
+# instead of calling back into wzp-desktop via callbacks.
