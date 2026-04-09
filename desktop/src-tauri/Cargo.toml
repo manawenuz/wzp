@@ -68,6 +68,12 @@ wzp-client = { path = "../../crates/wzp-client", default-features = false }
 # any C/C++ static archives that would otherwise leak bionic's internal
 # pthread_create into our cdylib and trigger the __init_tcb crash.
 libloading = "0.8"
+# jni + ndk-context: called from android_audio.rs to invoke
+# AudioManager.setSpeakerphoneOn on the JVM side at runtime, so the
+# Oboe playout stream (opened with Usage::VoiceCommunication) can route
+# between earpiece and loud speaker without restarting.
+jni = "0.21"
+ndk-context = "0.1"
 
 # Platform-specific
 [target.'cfg(target_os = "macos")'.dependencies]

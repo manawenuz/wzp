@@ -17,6 +17,10 @@ mod engine;
 #[cfg(target_os = "android")]
 mod wzp_native;
 
+// Android AudioManager bridge (routing earpiece / speaker / BT).
+#[cfg(target_os = "android")]
+mod android_audio;
+
 // CallEngine has a unified impl on both targets now — the Android branch of
 // CallEngine::start() routes audio through the standalone wzp-native cdylib
 // (loaded via the wzp_native module below), the desktop branch uses CPAL.
@@ -346,6 +350,37 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
     }
 }
 
+// ─── Audio routing (Android-specific, no-op on desktop) ─────────────────────
+
+/// Switch the call audio between earpiece (`on=false`) and loudspeaker
+/// (`on=true`). On Android this calls AudioManager.setSpeakerphoneOn via
+/// JNI; on desktop it's a no-op that always succeeds.
+#[tauri::command]
+#[allow(unused_variables)]
+async fn set_speakerphone(on: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        android_audio::set_speakerphone(on)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
+    }
+}
+
+/// Query whether the call is currently routed to the loudspeaker.
+#[tauri::command]
+async fn is_speakerphone_on() -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        android_audio::is_speakerphone_on()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(false)
+    }
+}
+
 // ─── Signaling commands — platform independent ───────────────────────────────
 
 struct SignalState {
@@ -548,6 +583,7 @@ pub fn run() {
             ping_relay, get_identity, get_app_info,
             connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
+            set_speakerphone, is_speakerphone_on,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarzonePhone");

@@ -510,8 +510,25 @@ function showConnectScreen() {
 micBtn.addEventListener("click", async () => {
   try { const m: boolean = await invoke("toggle_mic"); micBtn.classList.toggle("muted", m); micIcon.textContent = m ? "Mic Off" : "Mic"; } catch {}
 });
+
+// Speaker routing (Android) — toggles AudioManager.setSpeakerphoneOn so the
+// same Oboe VoiceCommunication stream swaps between earpiece and
+// loudspeaker without restarting. Desktop callers get a no-op command so
+// the same UI works everywhere.
+let speakerphoneOn = false;
+function updateSpkLabel() {
+  spkBtn.classList.toggle("muted", !speakerphoneOn);
+  spkIcon.textContent = speakerphoneOn ? "Speaker" : "Earpiece";
+}
 spkBtn.addEventListener("click", async () => {
-  try { const m: boolean = await invoke("toggle_speaker"); spkBtn.classList.toggle("muted", m); spkIcon.textContent = m ? "Spk Off" : "Spk"; } catch {}
+  const next = !speakerphoneOn;
+  try {
+    await invoke("set_speakerphone", { on: next });
+    speakerphoneOn = next;
+    updateSpkLabel();
+  } catch (e) {
+    console.error("set_speakerphone failed:", e);
+  }
 });
 hangupBtn.addEventListener("click", async () => {
   userDisconnected = true;
@@ -571,8 +588,9 @@ async function pollStatus() {
 
     micBtn.classList.toggle("muted", st.mic_muted);
     micIcon.textContent = st.mic_muted ? "Mic Off" : "Mic";
-    spkBtn.classList.toggle("muted", st.spk_muted);
-    spkIcon.textContent = st.spk_muted ? "Spk Off" : "Spk";
+    // NB: spkBtn label is driven by the Android audio routing state
+    // (speakerphoneOn / updateSpkLabel), not by the engine's spk_muted.
+    // Skip that here so pollStatus doesn't clobber the routing UI.
     callTimer.textContent = formatDuration(st.call_duration_secs);
 
     const rms = st.audio_level;
