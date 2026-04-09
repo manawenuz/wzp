@@ -16,17 +16,22 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
 
     // ─── Step A: single trivial cpp/hello.c compiled via cc::Build ─────────
-    // We deliberately add this on Android only so we can verify that the
-    // cc::Build → static archive → rustc-link pipeline itself does not
-    // regress the working build #17. cpp/hello.c defines `wzp_hello_stub`
-    // which is never called from Rust — if the crash comes back just from
-    // adding a tiny C static lib, we know the build pipeline is the issue.
+    // ─── Step D: also compile getauxval_fix.c (legacy wzp-android shim) ────
+    // getauxval_fix.c overrides the broken static getauxval stub that
+    // compiler-rt pulls in for Android targets. It's been shipping in the
+    // legacy wzp-android .so for months without issue, so including it here
+    // is low-risk — but it's an incremental variable we want to isolate.
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("android") {
         println!("cargo:rerun-if-changed=cpp/hello.c");
         cc::Build::new()
             .file("cpp/hello.c")
             .compile("wzp_hello");
+
+        println!("cargo:rerun-if-changed=cpp/getauxval_fix.c");
+        cc::Build::new()
+            .file("cpp/getauxval_fix.c")
+            .compile("getauxval_fix");
     }
 
     tauri_build::build()
