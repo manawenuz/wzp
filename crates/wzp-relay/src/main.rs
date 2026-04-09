@@ -676,18 +676,16 @@ async fn main() -> anyhow::Result<()> {
                     transport.recv_signal(),
                 ).await {
                     Ok(Ok(Some(SignalMessage::RegisterPresence { identity_pub, signature: _, alias }))) => {
-                        // Compute fingerprint: SHA-256(Ed25519 pub key)[:16] as hex pairs with colons
-                        let hash = {
+                        // Compute fingerprint: SHA-256(Ed25519 pub key)[:16], same as Fingerprint type
+                        let fp = {
                             use sha2::{Sha256, Digest};
-                            Sha256::digest(&identity_pub)
+                            let hash = Sha256::digest(&identity_pub);
+                            let fingerprint = wzp_crypto::Fingerprint([
+                                hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+                                hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+                            ]);
+                            fingerprint.to_string()
                         };
-                        let fp = hash[..16].iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<Vec<_>>()
-                            .chunks(2)
-                            .map(|c| c.join(""))
-                            .collect::<Vec<_>>()
-                            .join(":");
                         let fp = auth_fp.unwrap_or(fp);
                         (fp, alias)
                     }
@@ -952,6 +950,28 @@ async fn main() -> anyhow::Result<()> {
             // Use the caller's identity fingerprint from the handshake
             let participant_fp = authenticated_fp.clone().unwrap_or(caller_fp);
 
+            // ACL: call rooms (call-*) are restricted to the two authorized participants.
+            // Only the relay's call orchestrator creates these rooms — random clients can't join.
+            if room_name.starts_with("call-") {
+                let call_id = &room_name[5..]; // strip "call-" prefix
+                let authorized = {
+                    let reg = call_registry.lock().await;
+                    match reg.get(call_id) {
+                        Some(call) => {
+                            call.caller_fingerprint == participant_fp
+                                || call.callee_fingerprint == participant_fp
+                        }
+                        None => false, // unknown call — reject
+                    }
+                };
+                if !authorized {
+                    warn!(%addr, room = %room_name, fp = %participant_fp, "rejected: not authorized for this call room");
+                    transport.close().await.ok();
+                    return;
+                }
+                info!(%addr, room = %room_name, fp = %participant_fp, "authorized for call room");
+            }
+
             // Register in presence registry
             {
                 let mut reg = presence.lock().await;
@@ -1003,6 +1023,20 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 metrics.active_sessions.inc();
+
+                // Call rooms: enforce 2-participant limit
+                if room_name.starts_with("call-") {
+                    let mgr = room_mgr.lock().await;
+                    if mgr.room_size(&room_name) >= 2 {
+                        drop(mgr);
+                        warn!(%addr, room = %room_name, "call room full (max 2 participants)");
+                        metrics.active_sessions.dec();
+                        let mut smgr = session_mgr.lock().await;
+                        smgr.remove_session(session_id);
+                        transport.close().await.ok();
+                        return;
+                    }
+                }
 
                 let participant_id = {
                     let mut mgr = room_mgr.lock().await;

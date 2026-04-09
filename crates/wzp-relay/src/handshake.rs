@@ -78,11 +78,17 @@ pub async fn accept_handshake(
     };
     transport.send_signal(&answer).await?;
 
-    // Derive caller fingerprint from their identity public key (first 8 bytes as hex)
-    let caller_fp = caller_identity_pub[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    // Derive caller fingerprint: SHA-256(Ed25519 pub)[:16], formatted as xxxx:xxxx:...
+    // Must match the format used in signal registration and presence.
+    let caller_fp = {
+        use sha2::{Sha256, Digest};
+        let hash = Sha256::digest(&caller_identity_pub);
+        let fp = wzp_crypto::Fingerprint([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+            hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+        ]);
+        fp.to_string()
+    };
 
     Ok((session, chosen_profile, caller_fp, caller_alias))
 }
