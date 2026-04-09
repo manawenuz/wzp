@@ -38,6 +38,14 @@ fn build_oboe_android(target: &str) {
         .file("cpp/getauxval_fix.c")
         .compile("getauxval_fix");
 
+    // pthread_shim: interpose pthread_create so Rust libstd can't use the
+    // broken static pthread_create stub (which calls __init_tcb, crashing
+    // in a .so). Our shim forwards to libc.so's real one via RTLD_NEXT.
+    // Compiled as its own static lib so the linker links it ahead of libstd.
+    cc::Build::new()
+        .file("cpp/pthread_shim.c")
+        .compile("pthread_shim");
+
     let oboe_dir = fetch_oboe();
     match oboe_dir {
         Some(oboe_path) => {
