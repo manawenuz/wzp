@@ -64,7 +64,15 @@ static inline void ring_read(int16_t* buf, int32_t capacity,
 
 static std::shared_ptr<oboe::AudioStream> g_capture_stream;
 static std::shared_ptr<oboe::AudioStream> g_playout_stream;
-static const WzpOboeRings* g_rings = nullptr;
+// Value copy — the WzpOboeRings the Rust side passes us lives on the caller's
+// stack frame and goes away as soon as wzp_oboe_start returns. The raw
+// int16/atomic pointers INSIDE the struct point into the Rust-owned, leaked-
+// for-the-lifetime-of-the-process AudioBackend singleton, so copying the
+// struct by value is safe and keeps the inner pointers valid indefinitely.
+// g_rings_valid guards the audio-callback-side read; clearing it in stop()
+// signals "no backend" to the callbacks which then return silence + Stop.
+static WzpOboeRings g_rings{};
+static std::atomic<bool> g_rings_valid{false};
 static std::atomic<bool> g_running{false};
 static std::atomic<float> g_capture_latency_ms{0.0f};
 static std::atomic<float> g_playout_latency_ms{0.0f};
@@ -79,18 +87,19 @@ public:
             oboe::AudioStream* stream,
             void* audioData,
             int32_t numFrames) override {
-        if (!g_running.load(std::memory_order_relaxed) || !g_rings) {
+        if (!g_running.load(std::memory_order_relaxed) ||
+            !g_rings_valid.load(std::memory_order_acquire)) {
             return oboe::DataCallbackResult::Stop;
         }
 
         const int16_t* src = static_cast<const int16_t*>(audioData);
-        int32_t avail = ring_available_write(g_rings->capture_write_idx,
-                                              g_rings->capture_read_idx,
-                                              g_rings->capture_capacity);
+        int32_t avail = ring_available_write(g_rings.capture_write_idx,
+                                              g_rings.capture_read_idx,
+                                              g_rings.capture_capacity);
         int32_t to_write = (numFrames < avail) ? numFrames : avail;
         if (to_write > 0) {
-            ring_write(g_rings->capture_buf, g_rings->capture_capacity,
-                       g_rings->capture_write_idx, g_rings->capture_read_idx,
+            ring_write(g_rings.capture_buf, g_rings.capture_capacity,
+                       g_rings.capture_write_idx, g_rings.capture_read_idx,
                        src, to_write);
         }
 
@@ -115,20 +124,21 @@ public:
             oboe::AudioStream* stream,
             void* audioData,
             int32_t numFrames) override {
-        if (!g_running.load(std::memory_order_relaxed) || !g_rings) {
+        if (!g_running.load(std::memory_order_relaxed) ||
+            !g_rings_valid.load(std::memory_order_acquire)) {
             memset(audioData, 0, numFrames * sizeof(int16_t));
             return oboe::DataCallbackResult::Stop;
         }
 
         int16_t* dst = static_cast<int16_t*>(audioData);
-        int32_t avail = ring_available_read(g_rings->playout_write_idx,
-                                             g_rings->playout_read_idx,
-                                             g_rings->playout_capacity);
+        int32_t avail = ring_available_read(g_rings.playout_write_idx,
+                                             g_rings.playout_read_idx,
+                                             g_rings.playout_capacity);
         int32_t to_read = (numFrames < avail) ? numFrames : avail;
 
         if (to_read > 0) {
-            ring_read(g_rings->playout_buf, g_rings->playout_capacity,
-                      g_rings->playout_write_idx, g_rings->playout_read_idx,
+            ring_read(g_rings.playout_buf, g_rings.playout_capacity,
+                      g_rings.playout_write_idx, g_rings.playout_read_idx,
                       dst, to_read);
         }
         // Fill remainder with silence on underrun
@@ -160,7 +170,11 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         return -1;
     }
 
-    g_rings = rings;
+    // Deep-copy the rings struct into static storage BEFORE we publish it to
+    // the audio callbacks — `rings` points at the caller's stack frame and
+    // goes away as soon as this function returns.
+    g_rings = *rings;
+    g_rings_valid.store(true, std::memory_order_release);
 
     // Build capture stream
     oboe::AudioStreamBuilder captureBuilder;
@@ -233,6 +247,10 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
 
 void wzp_oboe_stop(void) {
     g_running.store(false, std::memory_order_release);
+    // Tell the audio callbacks to stop touching g_rings BEFORE we tear down
+    // the streams, so any in-flight callback returns Stop instead of reading
+    // stale pointers.
+    g_rings_valid.store(false, std::memory_order_release);
 
     if (g_capture_stream) {
         g_capture_stream->requestStop();
@@ -245,7 +263,6 @@ void wzp_oboe_stop(void) {
         g_playout_stream.reset();
     }
 
-    g_rings = nullptr;
     LOGI("Oboe stopped");
 }
 
