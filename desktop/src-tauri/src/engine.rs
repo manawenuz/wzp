@@ -1,5 +1,12 @@
 //! Call engine for the desktop app — wraps wzp-client audio + transport
 //! into a clean async interface for Tauri commands.
+//!
+//! Step C of the incremental Android rewrite: the module now compiles on
+//! Android too (previously cfg-gated out entirely in lib.rs), but the
+//! actual `CallEngine::start()` body uses CPAL via `wzp_client::audio_io`
+//! which is only available on desktop. On Android we expose a stub
+//! `start()` that returns an error, so the frontend's `connect` command
+//! still fails cleanly but the rest of the engine code links in.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -7,11 +14,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::Mutex;
+#[cfg(not(target_os = "android"))]
 use tracing::{error, info};
 
+#[cfg(not(target_os = "android"))]
 use wzp_client::audio_io::{AudioCapture, AudioPlayback};
+#[cfg(not(target_os = "android"))]
 use wzp_client::call::{CallConfig, CallEncoder};
+#[cfg(not(target_os = "android"))]
 use wzp_proto::{CodecId, MediaTransport, QualityProfile};
+
+// On Android we still need MediaTransport (for transport.close()) and nothing
+// else from wzp_proto — this keeps the struct/stop()/status() code compiling.
+#[cfg(target_os = "android")]
+use wzp_proto::MediaTransport;
 
 const FRAME_SAMPLES_40MS: usize = 1920;
 
@@ -80,6 +96,26 @@ pub struct CallEngine {
 }
 
 impl CallEngine {
+    /// Android stub — the real audio pipeline depends on wzp_client's
+    /// CPAL-backed audio_io module, which isn't available here. Returns an
+    /// error so the `connect` Tauri command fails cleanly. We'll replace
+    /// this in a later step with an Oboe-backed implementation.
+    #[cfg(target_os = "android")]
+    pub async fn start<F>(
+        _relay: String,
+        _room: String,
+        _alias: String,
+        _os_aec: bool,
+        _quality: String,
+        _event_cb: F,
+    ) -> Result<Self, anyhow::Error>
+    where
+        F: Fn(&str, &str) + Send + Sync + 'static,
+    {
+        Err(anyhow::anyhow!("audio engine not yet wired on Android (step C)"))
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub async fn start<F>(
         relay: String,
         room: String,

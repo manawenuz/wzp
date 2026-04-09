@@ -6,11 +6,13 @@
     windows_subsystem = "windows"
 )]
 
-// CPAL-backed audio engine — desktop only. On Android we'll plug in an
-// oboe/AAudio backend in a later step.
-#[cfg(not(target_os = "android"))]
+// Call engine — now compiled on every platform. On desktop it runs the real
+// CPAL/VPIO audio pipeline; on Android `CallEngine::start()` currently returns
+// an error stub (see engine.rs — that's step C of the Oboe integration).
 mod engine;
 
+// CallEngine is only referenced from the non-Android connect/disconnect/etc
+// commands; the Android stubs return errors directly.
 #[cfg(not(target_os = "android"))]
 use engine::CallEngine;
 
