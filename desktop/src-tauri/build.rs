@@ -57,6 +57,15 @@ fn main() {
             .file("cpp/cpp_smoke.cpp")
             .compile("wzp_cpp_smoke");
 
+        // Per rust-lang/rust#104707 + the android-ndk advice: force the
+        // linker to keep bionic symbols (pthread_create, __init_tcb) as
+        // UND dynamic references resolved against libc.so at runtime,
+        // not bound locally from libc.a that cc-rs + cpp(true) drag in.
+        // llvm-nm confirmed these symbols were landing in our .so as
+        // LOCAL (lowercase t), which is exactly the bug.
+        println!("cargo:rustc-link-arg=-Wl,--exclude-libs,ALL");
+        println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+
         // Copy libc++_shared.so from the NDK sysroot to gen/android jniLibs
         // so the runtime linker can find it at dlopen time (it's now in the
         // .so's NEEDED list thanks to cpp_link_stdlib("c++_shared") above).
