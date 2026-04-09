@@ -359,3 +359,89 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePingRelay<'a>(
         .map(|s| s.into_raw())
         .unwrap_or(JObject::null().into_raw())
 }
+
+// ── Direct calling JNI functions ──
+
+/// Start persistent signaling connection to relay for direct calls.
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartSignaling<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    handle: jlong,
+    relay_addr_j: JString,
+    seed_hex_j: JString,
+    token_j: JString,
+    alias_j: JString,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
+        let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
+        let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
+        let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
+
+        h.engine.start_signaling(
+            &relay_addr,
+            &seed_hex,
+            if token.is_empty() { None } else { Some(&token) },
+            if alias.is_empty() { None } else { Some(&alias) },
+        )
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { error!("start_signaling failed: {e}"); -1 }
+        Err(_) => { error!("start_signaling panicked"); -1 }
+    }
+}
+
+/// Place a direct call to a target fingerprint.
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePlaceCall<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    handle: jlong,
+    target_fp_j: JString,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let target: String = env.get_string(&target_fp_j).map(|s| s.into()).unwrap_or_default();
+        h.engine.place_call(&target)
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { error!("place_call failed: {e}"); -1 }
+        Err(_) => { error!("place_call panicked"); -1 }
+    }
+}
+
+/// Answer an incoming direct call.
+/// mode: 0=Reject, 1=AcceptTrusted, 2=AcceptGeneric
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeAnswerCall<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    handle: jlong,
+    call_id_j: JString,
+    mode: jint,
+) -> jint {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        let call_id: String = env.get_string(&call_id_j).map(|s| s.into()).unwrap_or_default();
+        let accept_mode = match mode {
+            0 => wzp_proto::CallAcceptMode::Reject,
+            1 => wzp_proto::CallAcceptMode::AcceptTrusted,
+            _ => wzp_proto::CallAcceptMode::AcceptGeneric,
+        };
+        h.engine.answer_call(&call_id, accept_mode)
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { error!("answer_call failed: {e}"); -1 }
+        Err(_) => { error!("answer_call panicked"); -1 }
+    }
+}

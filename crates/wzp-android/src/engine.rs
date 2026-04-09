@@ -244,6 +244,156 @@ impl WzpEngine {
         result
     }
 
+    /// Start persistent signaling connection for direct calls.
+    /// Spawns a background task that maintains the `_signal` connection.
+    pub fn start_signaling(
+        &mut self,
+        relay_addr: &str,
+        seed_hex: &str,
+        token: Option<&str>,
+        alias: Option<&str>,
+    ) -> Result<(), anyhow::Error> {
+        use wzp_proto::{MediaTransport, SignalMessage};
+
+        let addr: SocketAddr = relay_addr.parse()?;
+        let seed = if seed_hex.is_empty() {
+            wzp_crypto::Seed::generate()
+        } else {
+            wzp_crypto::Seed::from_hex(seed_hex).map_err(|e| anyhow::anyhow!(e))?
+        };
+        let identity = seed.derive_identity();
+        let pub_id = identity.public_identity();
+        let identity_pub = *pub_id.signing.as_bytes();
+        let fp = pub_id.fingerprint.to_string();
+        let token = token.map(|s| s.to_string());
+        let alias = alias.map(|s| s.to_string());
+        let state = self.state.clone();
+        let seed_bytes = seed.0;
+
+        info!(fingerprint = %fp, relay = %addr, "starting signaling");
+
+        // Create runtime for signaling (separate from call runtime)
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+
+        let signal_state = state.clone();
+        rt.spawn(async move {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            let endpoint = match wzp_transport::create_endpoint(bind, None) {
+                Ok(e) => e,
+                Err(e) => { error!("signal endpoint: {e}"); return; }
+            };
+            let client_cfg = wzp_transport::client_config();
+            let conn = match wzp_transport::connect(&endpoint, addr, "_signal", client_cfg).await {
+                Ok(c) => c,
+                Err(e) => { error!("signal connect: {e}"); return; }
+            };
+            let transport = std::sync::Arc::new(wzp_transport::QuinnTransport::new(conn));
+
+            // Auth if token provided
+            if let Some(ref tok) = token {
+                let _ = transport.send_signal(&SignalMessage::AuthToken { token: tok.clone() }).await;
+            }
+
+            // Register presence
+            let _ = transport.send_signal(&SignalMessage::RegisterPresence {
+                identity_pub,
+                signature: vec![],
+                alias: alias.clone(),
+            }).await;
+
+            // Wait for ack
+            match transport.recv_signal().await {
+                Ok(Some(SignalMessage::RegisterPresenceAck { success: true, .. })) => {
+                    info!(fingerprint = %fp, "signal: registered");
+                    let mut stats = signal_state.stats.lock().unwrap();
+                    stats.state = crate::stats::CallState::Registered;
+                }
+                other => {
+                    error!("signal registration failed: {other:?}");
+                    return;
+                }
+            }
+
+            // Signal recv loop
+            loop {
+                if !signal_state.running.load(Ordering::Relaxed) {
+                    break;
+                }
+                match transport.recv_signal().await {
+                    Ok(Some(SignalMessage::CallRinging { call_id })) => {
+                        info!(call_id = %call_id, "signal: ringing");
+                        let mut stats = signal_state.stats.lock().unwrap();
+                        stats.state = crate::stats::CallState::Ringing;
+                    }
+                    Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, .. })) => {
+                        info!(from = %caller_fingerprint, call_id = %call_id, "signal: incoming call");
+                        let mut stats = signal_state.stats.lock().unwrap();
+                        stats.state = crate::stats::CallState::IncomingCall;
+                        stats.incoming_call_id = Some(call_id);
+                        stats.incoming_caller_fp = Some(caller_fingerprint);
+                        stats.incoming_caller_alias = caller_alias;
+                    }
+                    Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, .. })) => {
+                        info!(call_id = %call_id, mode = ?accept_mode, "signal: call answered");
+                    }
+                    Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr })) => {
+                        info!(call_id = %call_id, room = %room, relay = %relay_addr, "signal: call setup");
+                        // Connect to media room via the existing start_call mechanism
+                        // Store the room info so Kotlin can call startCall with it
+                        let mut stats = signal_state.stats.lock().unwrap();
+                        stats.state = crate::stats::CallState::Connecting;
+                        // Store call setup info for Kotlin to pick up
+                        stats.incoming_call_id = Some(format!("{relay_addr}|{room}"));
+                    }
+                    Ok(Some(SignalMessage::Hangup { reason })) => {
+                        info!(reason = ?reason, "signal: call ended by remote");
+                        let mut stats = signal_state.stats.lock().unwrap();
+                        stats.state = crate::stats::CallState::Closed;
+                        stats.incoming_call_id = None;
+                        stats.incoming_caller_fp = None;
+                        stats.incoming_caller_alias = None;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        info!("signal: connection closed");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("signal recv error: {e}");
+                        break;
+                    }
+                }
+            }
+
+            let mut stats = signal_state.stats.lock().unwrap();
+            stats.state = crate::stats::CallState::Closed;
+        });
+
+        self.tokio_runtime = Some(rt);
+        Ok(())
+    }
+
+    /// Place a direct call to a target fingerprint via the signal connection.
+    pub fn place_call(&self, target_fingerprint: &str) -> Result<(), anyhow::Error> {
+        let _ = self.state.command_tx.send(EngineCommand::PlaceCall {
+            target_fingerprint: target_fingerprint.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Answer an incoming direct call.
+    pub fn answer_call(&self, call_id: &str, mode: wzp_proto::CallAcceptMode) -> Result<(), anyhow::Error> {
+        let _ = self.state.command_tx.send(EngineCommand::AnswerCall {
+            call_id: call_id.to_string(),
+            accept_mode: mode,
+        });
+        Ok(())
+    }
+
     pub fn set_mute(&self, muted: bool) {
         self.state.muted.store(muted, Ordering::Relaxed);
     }

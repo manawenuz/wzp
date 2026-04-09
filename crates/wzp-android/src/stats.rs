@@ -11,6 +11,12 @@ pub enum CallState {
     Active,
     Reconnecting,
     Closed,
+    /// Connected to relay signal channel, registered for direct calls.
+    Registered,
+    /// Outgoing call ringing on callee's side.
+    Ringing,
+    /// Incoming call received, waiting for user to accept/reject.
+    IncomingCall,
 }
 
 impl serde::Serialize for CallState {
@@ -21,6 +27,9 @@ impl serde::Serialize for CallState {
             CallState::Active => 2,
             CallState::Reconnecting => 3,
             CallState::Closed => 4,
+            CallState::Registered => 5,
+            CallState::Ringing => 6,
+            CallState::IncomingCall => 7,
         };
         serializer.serialize_u8(n)
     }
@@ -69,6 +78,18 @@ pub struct CallStats {
     pub room_participant_count: u32,
     /// Participant list (fingerprint + optional alias) serialized as JSON array.
     pub room_participants: Vec<RoomMember>,
+    /// SAS code for verbal verification (None if not in a call).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sas_code: Option<u32>,
+    /// Incoming call info (present when state == IncomingCall).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_call_id: Option<String>,
+    /// Fingerprint of the caller (present when state == IncomingCall).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_caller_fp: Option<String>,
+    /// Alias of the caller (present when state == IncomingCall).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_caller_alias: Option<String>,
 }
 
 /// A room member entry, serialized into the stats JSON.

@@ -160,6 +160,9 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeReadAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, maxSamples: Int): Int
     private external fun nativeDestroy(handle: Long)
     private external fun nativePingRelay(handle: Long, relay: String): String?
+    private external fun nativeStartSignaling(handle: Long, relay: String, seed: String, token: String, alias: String): Int
+    private external fun nativePlaceCall(handle: Long, targetFp: String): Int
+    private external fun nativeAnswerCall(handle: Long, callId: String, mode: Int): Int
 
     /**
      * Ping a relay server. Requires engine to be initialized.
@@ -168,6 +171,41 @@ class WzpEngine(private val callback: WzpCallback) {
     fun pingRelay(address: String): String? {
         if (nativeHandle == 0L) return null
         return nativePingRelay(nativeHandle, address)
+    }
+
+    /**
+     * Start persistent signaling connection for direct 1:1 calls.
+     * The engine registers on the relay and listens for incoming calls.
+     * Call state updates are available via [getStats].
+     *
+     * @return 0 on success, -1 on error
+     */
+    fun startSignaling(relay: String, seed: String = "", token: String = "", alias: String = ""): Int {
+        check(nativeHandle != 0L) { "Engine not initialized" }
+        return nativeStartSignaling(nativeHandle, relay, seed, token, alias)
+    }
+
+    /**
+     * Place a direct call to a peer by fingerprint.
+     * Requires [startSignaling] to have been called first.
+     *
+     * @return 0 on success, -1 on error
+     */
+    fun placeCall(targetFingerprint: String): Int {
+        check(nativeHandle != 0L) { "Engine not initialized" }
+        return nativePlaceCall(nativeHandle, targetFingerprint)
+    }
+
+    /**
+     * Answer an incoming direct call.
+     *
+     * @param callId The call ID from the incoming call (available in stats.incoming_call_id)
+     * @param mode 0=Reject, 1=AcceptTrusted (P2P in Phase 2), 2=AcceptGeneric (relay-mediated)
+     * @return 0 on success, -1 on error
+     */
+    fun answerCall(callId: String, mode: Int = 2): Int {
+        check(nativeHandle != 0L) { "Engine not initialized" }
+        return nativeAnswerCall(nativeHandle, callId, mode)
     }
 
     companion object {

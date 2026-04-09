@@ -12,4 +12,13 @@ pub enum EngineCommand {
     ForceProfile(QualityProfile),
     /// Stop the call and shut down the engine.
     Stop,
+    /// Place a direct call to a fingerprint (requires signal connection).
+    PlaceCall { target_fingerprint: String },
+    /// Answer an incoming direct call.
+    AnswerCall {
+        call_id: String,
+        accept_mode: wzp_proto::CallAcceptMode,
+    },
+    /// Reject an incoming direct call.
+    RejectCall { call_id: String },
 }
