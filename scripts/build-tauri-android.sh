@@ -36,6 +36,7 @@ REBUILD_RUST=0
 DO_PULL=1
 DO_INIT=0
 BUILD_RELEASE=0
+DROP_SHELL=0
 for arg in "$@"; do
     case "$arg" in
         --rust)     REBUILD_RUST=1 ;;
@@ -43,12 +44,41 @@ for arg in "$@"; do
         --no-pull)  DO_PULL=0 ;;
         --init)     DO_INIT=1 ;;
         --release)  BUILD_RELEASE=1 ;;
+        --shell)    DROP_SHELL=1 ;;    # interactive debug shell inside container
         -h|--help)
             sed -n '3,30p' "$0"
             exit 0
             ;;
     esac
 done
+
+# ── --shell: drop into an interactive container for fast manual iteration ──
+# The container is NOT --rm'd so you can keep hacking between invocations,
+# and has the same mounts / env as the build path above so `cargo tauri
+# android build ...` just works.
+if [ "$DROP_SHELL" = "1" ]; then
+    log "Starting interactive shell in wzp-android-builder container..."
+    log "  cd /build/source/desktop/src-tauri && cargo tauri android build --debug --target aarch64 --apk"
+    log "  (exit the shell with ^D; container will be removed)"
+    ssh -t -A $SSH_OPTS "$REMOTE_HOST" "
+        set -euo pipefail
+        BASE=$BASE_DIR
+        # Make sure the source/cache is writable by uid 1000
+        sudo chown -R 1000:1000 \$BASE/data/source \$BASE/data/cache 2>/dev/null || true
+        docker run --rm -it \
+            --user 1000:1000 \
+            -v \$BASE/data/source:/build/source \
+            -v \$BASE/data/cache/cargo-registry:/home/builder/.cargo/registry \
+            -v \$BASE/data/cache/cargo-git:/home/builder/.cargo/git \
+            -v \$BASE/data/cache/target:/build/source/target \
+            -v \$BASE/data/cache/gradle:/home/builder/.gradle \
+            -v \$BASE/data/cache/android-home:/home/builder/.android \
+            -w /build/source/desktop/src-tauri \
+            wzp-android-builder \
+            bash
+    "
+    exit 0
+fi
 
 log() { echo -e "\033[1;36m>>> $*\033[0m"; }
 ssh_cmd() { ssh -A $SSH_OPTS "$REMOTE_HOST" "$@"; }
@@ -166,30 +196,6 @@ docker run --rm \
     wzp-android-builder \
     bash -c '
 set -euo pipefail
-
-# ─── Linker wrappers ───────────────────────────────────────────────────────
-# Tauri-cli hard-codes aarch64-linux-android24-clang as the Rust linker for
-# the aarch64 target, which resolves pthread_create / dlsym / __init_tcb
-# against the NDK API-24 *stub* libc.a/libdl.a. Those stubs are designed to
-# crash if called — they only exist so the API-24 sysroot compiles, not so
-# symbols actually work. API-26 has the real dynamic bindings to libc.so.
-#
-# Rather than fight tauri-cli to change which clang it invokes, we put a
-# wrapper on $PATH that IS named android24-clang but exec()s the android26
-# version. Same trick works for every ABI.
-mkdir -p /tmp/wrappers
-for abi in aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android; do
-    for suffix in clang clang++; do
-        cat > /tmp/wrappers/${abi}24-${suffix} <<WRAPPER
-#!/bin/sh
-exec /opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/${abi}26-${suffix} "\$@"
-WRAPPER
-        chmod +x /tmp/wrappers/${abi}24-${suffix}
-    done
-done
-export PATH=/tmp/wrappers:$PATH
-echo ">>> installed android24→android26 linker wrappers in /tmp/wrappers"
-
 cd /build/source/desktop
 
 echo ">>> npm install"

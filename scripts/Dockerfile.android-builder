@@ -74,6 +74,27 @@ RUN yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/nu
         "platform-tools" \
         2>&1 | grep -v '^\[' > /dev/null
 
+# Work around broken API-24 libc/libdl stubs in the NDK. Rust's pre-compiled
+# libstd.rlib for aarch64-linux-android links against pthread_create / dlsym
+# from the sysroot. With --target=...24, those resolve to the API-24 "stub"
+# libc.a/libdl.a that return "libdl.a is a stub --- use libdl.so instead" at
+# runtime. API-26 has real dynamic bindings. Tauri-cli hard-codes the
+# android24-clang path so env var overrides don't stick.
+#
+# Permanent fix inside the image: replace every `${abi}24-clang` binary with
+# a shim that exec()s the corresponding `${abi}26-clang`. Any build using
+# this image now transparently gets the API-26 sysroot even when the caller
+# asks for API-24.
+RUN set -eux; \
+    BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin; \
+    for abi in aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android; do \
+        for suffix in clang clang++; do \
+            mv "$BIN/${abi}24-${suffix}" "$BIN/${abi}24-${suffix}.orig"; \
+            printf '#!/bin/sh\nexec "%s/%s26-%s" "$@"\n' "$BIN" "$abi" "$suffix" > "$BIN/${abi}24-${suffix}"; \
+            chmod +x "$BIN/${abi}24-${suffix}"; \
+        done; \
+    done
+
 # Make SDK world-readable so builder user can access it
 RUN chmod -R a+rX $ANDROID_HOME
 
