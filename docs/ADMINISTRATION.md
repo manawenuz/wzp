@@ -218,6 +218,8 @@ wzp-relay [--config <path>] [--listen <addr>] [--remote <addr>]
 | `--trunking` | Enable trunk batching for outgoing media |
 | `--global-room <name>` | Declare a room as global (bridged across federation). Repeatable |
 | `--debug-tap <room>` | Log packet headers for a room (`"*"` for all rooms) |
+| `--event-log <path>` | Write JSONL protocol event log for federation debugging |
+| `--version`, `-V` | Print build git hash and exit |
 | `--ws-port <port>` | WebSocket listener port for browser clients |
 | `--static-dir <dir>` | Directory to serve static files from |
 | `--help`, `-h` | Print help and exit |
@@ -454,6 +456,41 @@ A pre-built dashboard is available at `docs/grafana-dashboard.json`. Import it i
 3. **Inter-Relay Mesh** -- latency heatmap, probe status, loss trends
 4. **Web Bridge** -- active connections, frames bridged, auth failures
 
+### Event Log (Protocol Analyzer)
+
+Use `--event-log` to write a JSONL event log that traces every federation media packet through the relay pipeline. Essential for debugging federation audio issues.
+
+```bash
+wzp-relay --config relay.toml --event-log /tmp/events.jsonl
+```
+
+Each media packet emits events at every decision point:
+- `federation_ingress` — packet arrived from a peer relay
+- `local_deliver` — packet delivered to local participants
+- `dedup_drop` — packet dropped as duplicate
+- `rate_limit_drop` — packet dropped by rate limiter
+- `room_not_found` — packet for unknown room
+- `local_deliver_error` — delivery to local client failed
+
+Analyze with:
+```bash
+# Count events by type
+cat events.jsonl | python3 -c "
+import json, collections, sys
+c = collections.Counter()
+for l in sys.stdin: c[json.loads(l)['event']] += 1
+for k,v in sorted(c.items(), key=lambda x:-x[1]): print(f'  {k}: {v}')
+"
+```
+
+### Remote Version Check
+
+Verify a deployed relay's version without SSH:
+
+```bash
+wzp-client --version-check <relay-addr:port>
+```
+
 ### Debug Tap
 
 Use `--debug-tap` to log packet headers for debugging:
@@ -548,6 +585,9 @@ To restore, copy the file back before starting the relay.
 | Clients cannot connect | Firewall blocking UDP 4433 | Open UDP port 4433 in firewall |
 | Federation "unknown relay wants to federate" | Peer's fingerprint not in `[[trusted]]` | Add the logged fingerprint to `[[trusted]]` |
 | Federation "fingerprint mismatch" | Peer relay restarted with new identity | Update the fingerprint in `[[peers]]` config |
+| Federation audio silent on consecutive connects | Dedup filter or jitter buffer state | Verify relay is running latest build with time-based dedup |
+| Federation participant shows wrong relay label | Hub relay not propagating original labels | Update relay to latest build (label preservation fix) |
+| Federation disconnect takes >15 seconds | QUIC idle timeout + stale sweeper | Normal: sweeper runs every 5s with 15s TTL. Use latest client with SIGTERM handler for instant disconnect |
 | High packet loss between relays | Network congestion or misconfiguration | Check `wzp_probe_loss_pct` metric; consider relay chaining |
 | Jitter buffer overruns | Packets arriving faster than playout | Increase `jitter_max_depth` |
 | Jitter buffer underruns | Packets arriving too slowly or lost | Check network quality; increase `jitter_target_depth` |
