@@ -364,6 +364,8 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePingRelay<'a>(
 
 /// Start persistent signaling connection to relay for direct calls.
 /// Returns 0 on success, -1 on error.
+/// NOTE: No panic::catch_unwind here — Android's Kotlin dispatcher thread has
+/// very limited stack (~1MB) and the unwind machinery overflows it.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartSignaling<'a>(
     mut env: JNIEnv<'a>,
@@ -374,25 +376,20 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartSignaling
     token_j: JString,
     alias_j: JString,
 ) -> jint {
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        let h = unsafe { handle_ref(handle) };
-        let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
-        let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
-        let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
-        let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
+    let h = unsafe { handle_ref(handle) };
+    let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
+    let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
+    let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
+    let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
 
-        h.engine.start_signaling(
-            &relay_addr,
-            &seed_hex,
-            if token.is_empty() { None } else { Some(&token) },
-            if alias.is_empty() { None } else { Some(&alias) },
-        )
-    }));
-
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => { error!("start_signaling failed: {e}"); -1 }
-        Err(_) => { error!("start_signaling panicked"); -1 }
+    match h.engine.start_signaling(
+        &relay_addr,
+        &seed_hex,
+        if token.is_empty() { None } else { Some(&token) },
+        if alias.is_empty() { None } else { Some(&alias) },
+    ) {
+        Ok(()) => 0,
+        Err(e) => { error!("start_signaling failed: {e}"); -1 }
     }
 }
 
