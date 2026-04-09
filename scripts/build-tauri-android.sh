@@ -166,6 +166,30 @@ docker run --rm \
     wzp-android-builder \
     bash -c '
 set -euo pipefail
+
+# ─── Linker wrappers ───────────────────────────────────────────────────────
+# Tauri-cli hard-codes aarch64-linux-android24-clang as the Rust linker for
+# the aarch64 target, which resolves pthread_create / dlsym / __init_tcb
+# against the NDK API-24 *stub* libc.a/libdl.a. Those stubs are designed to
+# crash if called — they only exist so the API-24 sysroot compiles, not so
+# symbols actually work. API-26 has the real dynamic bindings to libc.so.
+#
+# Rather than fight tauri-cli to change which clang it invokes, we put a
+# wrapper on $PATH that IS named android24-clang but exec()s the android26
+# version. Same trick works for every ABI.
+mkdir -p /tmp/wrappers
+for abi in aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android; do
+    for suffix in clang clang++; do
+        cat > /tmp/wrappers/${abi}24-${suffix} <<WRAPPER
+#!/bin/sh
+exec /opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/${abi}26-${suffix} "\$@"
+WRAPPER
+        chmod +x /tmp/wrappers/${abi}24-${suffix}
+    done
+done
+export PATH=/tmp/wrappers:$PATH
+echo ">>> installed android24→android26 linker wrappers in /tmp/wrappers"
+
 cd /build/source/desktop
 
 echo ">>> npm install"
