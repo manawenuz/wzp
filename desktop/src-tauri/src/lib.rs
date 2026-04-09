@@ -15,10 +15,44 @@ mod engine;
 use engine::CallEngine;
 
 use serde::Serialize;
-use std::sync::Arc;
-use tauri::Emitter;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use wzp_proto::MediaTransport;
+
+/// Short git hash captured at compile time by build.rs.
+const GIT_HASH: &str = env!("WZP_GIT_HASH");
+
+/// Resolved by `setup()` once we have a Tauri AppHandle. Holds the
+/// platform-correct app data dir (e.g. `/data/data/com.wzp.desktop/files` on
+/// Android, `~/Library/Application Support/com.wzp.desktop` on macOS).
+static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Adjective list — keep in sync with the noun list below. Both are powers of
+/// 2 friendly so the modulo bias is negligible.
+const ALIAS_ADJECTIVES: &[&str] = &[
+    "Swift", "Silent", "Brave", "Calm", "Dark", "Fierce", "Ghost",
+    "Iron", "Lucky", "Noble", "Quick", "Sharp", "Storm", "Wild",
+    "Cold", "Bright", "Lone", "Red", "Grey", "Frosty", "Dusty",
+    "Rusty", "Neon", "Void", "Solar", "Lunar", "Cyber", "Pixel",
+    "Sonic", "Hyper", "Turbo", "Nano", "Mega", "Ultra", "Zinc",
+];
+const ALIAS_NOUNS: &[&str] = &[
+    "Wolf", "Hawk", "Fox", "Bear", "Lynx", "Crow", "Viper",
+    "Cobra", "Tiger", "Eagle", "Shark", "Raven", "Falcon", "Otter",
+    "Mantis", "Panda", "Jackal", "Badger", "Heron", "Bison",
+    "Condor", "Coyote", "Gecko", "Hornet", "Marten", "Osprey",
+    "Parrot", "Puma", "Raptor", "Stork", "Toucan", "Walrus",
+];
+
+/// Derive a stable human-readable alias from the seed bytes. Same seed →
+/// same alias forever, different seeds → effectively random aliases.
+fn derive_alias(seed: &wzp_crypto::Seed) -> String {
+    let adj_idx = (u16::from_le_bytes([seed.0[0], seed.0[1]]) as usize) % ALIAS_ADJECTIVES.len();
+    let noun_idx = (u16::from_le_bytes([seed.0[2], seed.0[3]]) as usize) % ALIAS_NOUNS.len();
+    format!("{} {}", ALIAS_ADJECTIVES[adj_idx], ALIAS_NOUNS[noun_idx])
+}
 
 #[derive(Clone, Serialize)]
 struct CallEvent {
@@ -109,13 +143,23 @@ async fn ping_relay(relay: String) -> Result<PingResult, String> {
 
 /// Return the directory where identity/config should live.
 ///
-/// Desktop: `$HOME/.wzp`
-/// Android: `/data/data/com.wzp.phone/files/.wzp` (app-internal storage)
-fn identity_dir() -> std::path::PathBuf {
+/// Resolved at startup from Tauri's `path().app_data_dir()` API which gives
+/// us the platform-correct app-private location:
+///   - Android: `/data/data/<package_id>/files/com.wzp.desktop`
+///   - macOS:   `~/Library/Application Support/com.wzp.desktop`
+///   - Linux:   `~/.local/share/com.wzp.desktop`
+///
+/// Falls back to `$HOME/.wzp` on the desktop side if the OnceLock hasn't been
+/// initialised yet (shouldn't happen in normal startup, but keeps the fn
+/// total).
+fn identity_dir() -> PathBuf {
+    if let Some(dir) = APP_DATA_DIR.get() {
+        return dir.clone();
+    }
     #[cfg(target_os = "android")]
     {
-        // Android app-internal storage. The package id must match tauri.conf.json.
-        return std::path::PathBuf::from("/data/data/com.wzp.phone/files/.wzp");
+        // Last-resort default. The real path is set in setup() below.
+        std::path::PathBuf::from("/data/data/com.wzp.desktop/files")
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -149,6 +193,32 @@ fn load_or_create_seed() -> Result<wzp_crypto::Seed, String> {
 fn get_identity() -> Result<String, String> {
     let seed = load_or_create_seed()?;
     Ok(seed.derive_identity().public_identity().fingerprint.to_string())
+}
+
+/// Build/identity info shown on the home screen so the user can prove which
+/// build is installed and what their stable alias is.
+#[derive(Clone, Serialize)]
+struct AppInfo {
+    /// Short git commit hash captured at build time.
+    git_hash: &'static str,
+    /// Stable adjective+noun derived from the seed.
+    alias: String,
+    /// Full fingerprint, e.g. "abcd:ef01:..."
+    fingerprint: String,
+    /// App data dir actually in use — useful for debugging EACCES issues.
+    data_dir: String,
+}
+
+#[tauri::command]
+fn get_app_info() -> Result<AppInfo, String> {
+    let seed = load_or_create_seed()?;
+    let pub_id = seed.derive_identity().public_identity();
+    Ok(AppInfo {
+        git_hash: GIT_HASH,
+        alias: derive_alias(&seed),
+        fingerprint: pub_id.fingerprint.to_string(),
+        data_dir: identity_dir().to_string_lossy().into_owned(),
+    })
 }
 
 #[cfg(not(target_os = "android"))]
@@ -449,8 +519,25 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(state)
+        .setup(|app| {
+            // Resolve the platform-correct app data dir once at startup so
+            // every command can read/write the seed without juggling AppHandle.
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map(|p| p.join(".wzp"))
+                .unwrap_or_else(|_| identity_dir());
+            // create_dir_all is a no-op if it already exists.
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                tracing::warn!("failed to create app data dir {data_dir:?}: {e}");
+            }
+            tracing::info!("app data dir: {data_dir:?}");
+            let _ = APP_DATA_DIR.set(data_dir);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            ping_relay, get_identity, connect, disconnect, toggle_mic, toggle_speaker, get_status,
+            ping_relay, get_identity, get_app_info,
+            connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
         ])
         .run(tauri::generate_context!())

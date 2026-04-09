@@ -354,10 +354,13 @@ function renderRecentRooms(rooms: RecentRoom[]) {
 applySettings();
 setTimeout(pingAllRelays, 300);
 
-// Load fingerprint + render identicon
+// Load fingerprint + alias + git hash + render identicon
+interface AppInfo { git_hash: string; alias: string; fingerprint: string; data_dir: string }
+
 (async () => {
   try {
-    const fp: string = await invoke("get_identity");
+    const info: AppInfo = await invoke("get_app_info");
+    const fp = info.fingerprint;
     myFingerprint = fp;
     myFingerprintEl.textContent = fp;
     myFingerprintEl.style.cursor = "pointer";
@@ -373,7 +376,29 @@ setTimeout(pingAllRelays, 300);
     const icon = createIdenticonEl(fp, 28, true);
     myIdenticonEl.innerHTML = "";
     myIdenticonEl.appendChild(icon);
-  } catch {}
+
+    // Prefill alias if the user hasn't typed one yet
+    if (!aliasInput.value.trim()) {
+      aliasInput.value = info.alias;
+      const s = loadSettings();
+      s.alias = info.alias;
+      saveSettingsObj(s);
+    }
+
+    // Stamp the build hash on the home screen so we can prove which build
+    // is installed (this caused us a lot of grief on the Kotlin app).
+    let buildEl = document.getElementById("build-hash");
+    if (!buildEl) {
+      buildEl = document.createElement("div");
+      buildEl.id = "build-hash";
+      buildEl.style.cssText = "font-size:10px;opacity:0.6;text-align:center;margin-top:4px;font-family:monospace";
+      myFingerprintEl.parentElement?.appendChild(buildEl);
+    }
+    buildEl.textContent = `build ${info.git_hash} • ${info.alias}`;
+    buildEl.title = info.data_dir;
+  } catch (e) {
+    console.error("get_app_info failed", e);
+  }
 })();
 
 // ── Connect ──
