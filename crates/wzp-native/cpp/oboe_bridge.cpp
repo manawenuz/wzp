@@ -210,10 +210,13 @@ public:
         // Heartbeat every 50 callbacks (~1s at 20ms/burst)
         calls++;
         if ((calls % 50) == 0) {
-            LOGI("playout heartbeat: calls=%llu nonempty=%llu numFrames=%d ring_avail_read=%d to_read=%d underrun_frames=%llu total_played_real=%llu",
+            int state = (int)stream->getState();
+            int xruns = stream->getXRunCount().value_or(-1);
+            LOGI("playout heartbeat: calls=%llu nonempty=%llu numFrames=%d ring_avail_read=%d to_read=%d underrun_frames=%llu total_played_real=%llu state=%d xruns=%d",
                  (unsigned long long)calls, (unsigned long long)nonempty_calls,
                  numFrames, avail, to_read,
-                 (unsigned long long)underrun_frames, (unsigned long long)total_played_real);
+                 (unsigned long long)underrun_frames, (unsigned long long)total_played_real,
+                 state, xruns);
         }
 
         // Update latency estimate
@@ -273,26 +276,30 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
          (int)g_capture_stream->getSharingMode(),
          (int)g_capture_stream->getPerformanceMode());
 
-    // Build playout stream
+    // Build playout stream.
     //
-    // Usage::Media (NOT VoiceCommunication) routes to the media audio
-    // stream which plays through the loud speaker and uses the media
-    // volume slider. VoiceCommunication routes to the in-call earpiece
-    // stream which is silent unless AudioManager.setMode(IN_COMMUNICATION)
-    // has been called from the Activity, and even then only the earpiece
-    // (or a bluetooth headset) gets audio by default. For a debug-friendly
-    // smoke test we want loud speaker by default. A future polish step
-    // will wire setMode + setSpeakerphoneOn from MainActivity.kt so we
-    // can switch back to VoiceCommunication (for AEC benefits etc).
+    // Usage::Media was a failed experiment — diagnosis from build 96be740
+    // showed the whole pipeline is healthy (capture → encode → network →
+    // decode → playout ring → C++ callback reads 960 samples every 20ms
+    // with real audio content) but nothing was audible. This means Oboe
+    // received the PCM and routed it to a silent output. Usage::Media
+    // alone is not enough — the AudioManager must also be switched to
+    // MODE_IN_COMMUNICATION and speakerphone explicitly turned on from
+    // the Activity side, which MainActivity.kt now does on startup.
+    //
+    // Reverting to Usage::VoiceCommunication + ContentType::Speech +
+    // explicit AAudio API (more reliable routing than OpenSLES default)
+    // on top of the Kotlin-side setMode/setSpeakerphoneOn changes.
     oboe::AudioStreamBuilder playoutBuilder;
     playoutBuilder.setDirection(oboe::Direction::Output)
+        ->setAudioApi(oboe::AudioApi::AAudio)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
         ->setSharingMode(oboe::SharingMode::Exclusive)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(config->channel_count)
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
-        ->setUsage(oboe::Usage::Media)
+        ->setUsage(oboe::Usage::VoiceCommunication)
         ->setContentType(oboe::ContentType::Speech)
         ->setDataCallback(&g_playout_cb);
 

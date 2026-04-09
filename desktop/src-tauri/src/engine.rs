@@ -300,6 +300,33 @@ impl CallEngine {
             let mut pcm = vec![0i16; FRAME_SAMPLES_40MS];
             info!(codec = ?current_codec, "recv task starting (android/oboe)");
 
+            // ─── Decoded-PCM recorder (debug) ────────────────────────────
+            // Dumps the first ~10 seconds of post-AGC PCM to a raw i16 LE
+            // file in the app's private data dir so we can adb pull it and
+            // play it back to prove the pipeline is producing real audio
+            // independent of Oboe routing. Convert locally with e.g.
+            //   ffmpeg -f s16le -ar 48000 -ac 1 -i decoded.pcm decoded.wav
+            use std::io::Write;
+            let recorder_path = crate::APP_DATA_DIR
+                .get()
+                .map(|p| p.join("decoded.pcm"));
+            let mut recorder = match recorder_path.as_ref() {
+                Some(p) => match std::fs::File::create(p) {
+                    Ok(f) => {
+                        info!(path = %p.display(), "decoded-pcm recorder open");
+                        Some(std::io::BufWriter::new(f))
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %p.display(), error = %e, "decoded-pcm recorder open failed");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let mut recorder_bytes: u64 = 0;
+            // Stop writing after ~10 seconds @ 48kHz mono i16 = ~960KB.
+            const RECORDER_MAX_BYTES: u64 = 48_000 * 2 * 10;
+
             let mut heartbeat = std::time::Instant::now();
             let mut decoded_frames: u64 = 0;
             let mut written_samples: u64 = 0;
@@ -372,6 +399,33 @@ impl CallEngine {
                                         );
                                     }
                                     agc.process_frame(&mut pcm[..n]);
+
+                                    // Dump to debug recorder before playout
+                                    // so we capture post-AGC samples that
+                                    // are exactly what we hand to Oboe.
+                                    if let Some(rec) = recorder.as_mut() {
+                                        if recorder_bytes < RECORDER_MAX_BYTES {
+                                            let slice = &pcm[..n];
+                                            // SAFETY: i16 is Plain Old Data;
+                                            // writing its little-endian bytes
+                                            // is well-defined on all targets
+                                            // we build for.
+                                            let byte_slice: &[u8] = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    slice.as_ptr() as *const u8,
+                                                    slice.len() * 2,
+                                                )
+                                            };
+                                            let _ = rec.write_all(byte_slice);
+                                            recorder_bytes = recorder_bytes
+                                                .saturating_add(byte_slice.len() as u64);
+                                            if recorder_bytes >= RECORDER_MAX_BYTES {
+                                                let _ = rec.flush();
+                                                info!(recorder_bytes, "decoded-pcm recorder: stopped after limit");
+                                            }
+                                        }
+                                    }
+
                                     if !recv_spk.load(Ordering::Relaxed) {
                                         let w = crate::wzp_native::audio_write_playout(&pcm[..n]);
                                         last_written = w;
@@ -379,6 +433,9 @@ impl CallEngine {
                                         if w < n && decoded_frames <= 10 {
                                             tracing::warn!(n, w, "recv: partial playout write (ring nearly full)");
                                         }
+                                    } else if decoded_frames <= 3 || decoded_frames % 100 == 0 {
+                                        // User clicked spk-mute — log it so we don't chase ghost bugs
+                                        tracing::info!(decoded_frames, "recv: spk_muted=true, skipping playout write");
                                     }
                                 }
                                 Err(e) => {
