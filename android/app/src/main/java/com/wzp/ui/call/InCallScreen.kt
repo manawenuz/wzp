@@ -2,6 +2,7 @@ package com.wzp.ui.call
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -217,65 +218,211 @@ fun InCallScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Room
-                SectionLabel("ROOM")
-                OutlinedTextField(
-                    value = roomName,
-                    onValueChange = { viewModel.setRoomName(it) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // Mode toggle: Room vs Direct Call
+                val callMode by viewModel.callMode.collectAsState()
+                val signalState by viewModel.signalState.collectAsState()
+                val targetFp by viewModel.targetFingerprint.collectAsState()
+                val incomingCallId by viewModel.incomingCallId.collectAsState()
+                val incomingCallerFp by viewModel.incomingCallerFp.collectAsState()
+                val incomingCallerAlias by viewModel.incomingCallerAlias.collectAsState()
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Alias
-                SectionLabel("ALIAS")
-                OutlinedTextField(
-                    value = alias,
-                    onValueChange = { viewModel.setAlias(it) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // AEC + Settings
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Checkbox(
-                        checked = aecEnabled,
-                        onCheckedChange = { viewModel.setAecEnabled(it) }
-                    )
-                    Text("OS ECHO CANCEL", color = TextDim, style = MaterialTheme.typography.labelSmall)
-                    Spacer(modifier = Modifier.weight(1f))
-                    Surface(
-                        onClick = onOpenSettings,
+                    Button(
+                        onClick = { viewModel.setCallMode(0) },
+                        modifier = Modifier.weight(1f).height(36.dp),
                         shape = RoundedCornerShape(8.dp),
-                        color = Color.Transparent,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text("\u2699", fontSize = 18.sp, color = TextDim)
-                        }
-                    }
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (callMode == 0) Accent else Color(0xFF333333)
+                        )
+                    ) { Text("Room", color = Color.White, fontSize = 13.sp) }
+                    Button(
+                        onClick = { viewModel.setCallMode(1) },
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (callMode == 1) Accent else Color(0xFF333333)
+                        )
+                    ) { Text("Direct Call", color = Color.White, fontSize = 13.sp) }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Connect button
-                Button(
-                    onClick = { viewModel.startCall() },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent)
-                ) {
-                    Text(
-                        "Connect",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = Color.White
+                if (callMode == 0) {
+                    // ── Room mode ──
+                    SectionLabel("ROOM")
+                    OutlinedTextField(
+                        value = roomName,
+                        onValueChange = { viewModel.setRoomName(it) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    SectionLabel("ALIAS")
+                    OutlinedTextField(
+                        value = alias,
+                        onValueChange = { viewModel.setAlias(it) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = aecEnabled,
+                            onCheckedChange = { viewModel.setAecEnabled(it) }
+                        )
+                        Text("OS ECHO CANCEL", color = TextDim, style = MaterialTheme.typography.labelSmall)
+                        Spacer(modifier = Modifier.weight(1f))
+                        Surface(
+                            onClick = onOpenSettings,
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color.Transparent,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text("\u2699", fontSize = 18.sp, color = TextDim)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = { viewModel.startCall() },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent)
+                    ) {
+                        Text(
+                            "Connect",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                    }
+                } else {
+                    // ── Direct call mode ──
+                    if (signalState < 5) {
+                        // Not registered yet
+                        SectionLabel("ALIAS")
+                        OutlinedTextField(
+                            value = alias,
+                            onValueChange = { viewModel.setAlias(it) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = { viewModel.registerForCalls() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3))
+                        ) {
+                            Text(
+                                "Register on Relay",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    } else if (signalState == 5) {
+                        // Registered — show dial pad
+                        Text(
+                            "\u2705 Registered — waiting for calls",
+                            color = Green,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Incoming call notification
+                        if (incomingCallId != null && incomingCallerFp != null) {
+                            Surface(
+                                color = Color(0xFF1B5E20),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Text(
+                                        "Incoming Call",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        "From: ${incomingCallerAlias ?: incomingCallerFp?.take(16) ?: "unknown"}",
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = { viewModel.answerIncomingCall(2) },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Green),
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Accept", color = Color.White) }
+                                        Button(
+                                            onClick = { viewModel.rejectIncomingCall() },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Red),
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Reject", color = Color.White) }
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
+
+                        SectionLabel("CALL BY FINGERPRINT")
+                        OutlinedTextField(
+                            value = targetFp,
+                            onValueChange = { viewModel.setTargetFingerprint(it) },
+                            singleLine = true,
+                            placeholder = { Text("Paste fingerprint (xxxx:xxxx:...)") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = { viewModel.placeDirectCall() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                            enabled = targetFp.isNotBlank()
+                        ) {
+                            Text(
+                                "Call",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    } else if (signalState == 6) {
+                        // Ringing
+                        Text(
+                            "\uD83D\uDD14 Ringing...",
+                            color = Yellow,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else if (signalState == 7) {
+                        // Incoming call (state 7 also handled above in registered view)
+                        Text(
+                            "\uD83D\uDCDE Incoming call...",
+                            color = Green,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
 
                 errorMessage?.let { err ->

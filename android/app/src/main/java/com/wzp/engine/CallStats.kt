@@ -43,6 +43,14 @@ data class CallStats(
     val roomParticipantCount: Int = 0,
     /** Participants in the room (fingerprint + optional alias). */
     val roomParticipants: List<RoomMember> = emptyList(),
+    /** SAS verification code (4-digit, null if not in a call). */
+    val sasCode: Int? = null,
+    /** Incoming call ID (or "relay|room" for CallSetup). */
+    val incomingCallId: String? = null,
+    /** Incoming caller's fingerprint. */
+    val incomingCallerFp: String? = null,
+    /** Incoming caller's alias. */
+    val incomingCallerAlias: String? = null,
 ) {
     /** Human-readable quality label. */
     val qualityLabel: String
@@ -87,7 +95,11 @@ data class CallStats(
                     peerCodec = obj.optString("peer_codec", ""),
                     autoMode = obj.optBoolean("auto_mode", false),
                     roomParticipantCount = obj.optInt("room_participant_count", 0),
-                    roomParticipants = parseParticipants(obj.optJSONArray("room_participants"))
+                    roomParticipants = parseParticipants(obj.optJSONArray("room_participants")),
+                    sasCode = if (obj.has("sas_code")) obj.optInt("sas_code") else null,
+                    incomingCallId = if (obj.isNull("incoming_call_id")) null else obj.optString("incoming_call_id", null),
+                    incomingCallerFp = if (obj.isNull("incoming_caller_fp")) null else obj.optString("incoming_caller_fp", null),
+                    incomingCallerAlias = if (obj.isNull("incoming_caller_alias")) null else obj.optString("incoming_caller_alias", null),
                 )
             } catch (e: Exception) {
                 CallStats()

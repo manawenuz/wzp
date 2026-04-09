@@ -132,6 +132,84 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private var statsJob: Job? = null
 
+    // ── Direct calling state ──
+    /** 0=room mode, 1=direct call mode */
+    private val _callMode = MutableStateFlow(0)
+    val callMode: StateFlow<Int> = _callMode.asStateFlow()
+
+    /** Target fingerprint for direct call */
+    private val _targetFingerprint = MutableStateFlow("")
+    val targetFingerprint: StateFlow<String> = _targetFingerprint.asStateFlow()
+
+    /** Signal connection state: 0=idle, 5=registered, 6=ringing, 7=incoming */
+    private val _signalState = MutableStateFlow(0)
+    val signalState: StateFlow<Int> = _signalState.asStateFlow()
+
+    /** Incoming call info */
+    private val _incomingCallId = MutableStateFlow<String?>(null)
+    val incomingCallId: StateFlow<String?> = _incomingCallId.asStateFlow()
+
+    private val _incomingCallerFp = MutableStateFlow<String?>(null)
+    val incomingCallerFp: StateFlow<String?> = _incomingCallerFp.asStateFlow()
+
+    private val _incomingCallerAlias = MutableStateFlow<String?>(null)
+    val incomingCallerAlias: StateFlow<String?> = _incomingCallerAlias.asStateFlow()
+
+    fun setCallMode(mode: Int) { _callMode.value = mode }
+    fun setTargetFingerprint(fp: String) { _targetFingerprint.value = fp }
+
+    /** Register on relay for direct calls */
+    fun registerForCalls() {
+        if (engine == null) {
+            engine = WzpEngine(this).also { it.init() }
+        }
+        val serverIdx = _selectedServer.value
+        val serverList = _servers.value
+        if (serverIdx >= serverList.size) return
+
+        val relay = serverList[serverIdx].address
+        val seed = _seedHex.value
+        val alias = _alias.value
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolvedRelay = resolveToIp(relay) ?: relay
+            val result = engine?.startSignaling(resolvedRelay, seed, "", alias)
+            if (result == 0) {
+                _signalState.value = 5 // Registered
+                startStatsPolling()
+            } else {
+                _errorMessage.value = "Failed to register on relay"
+            }
+        }
+    }
+
+    /** Place a direct call to the target fingerprint */
+    fun placeDirectCall() {
+        val target = _targetFingerprint.value.trim()
+        if (target.isEmpty()) {
+            _errorMessage.value = "Enter a fingerprint to call"
+            return
+        }
+        engine?.placeCall(target)
+        _signalState.value = 6 // Ringing
+    }
+
+    /** Answer an incoming direct call */
+    fun answerIncomingCall(mode: Int = 2) {
+        val callId = _incomingCallId.value ?: return
+        engine?.answerCall(callId, mode)
+    }
+
+    /** Reject an incoming direct call */
+    fun rejectIncomingCall() {
+        val callId = _incomingCallId.value ?: return
+        engine?.answerCall(callId, 0) // 0 = Reject
+        _signalState.value = 5 // Back to registered
+        _incomingCallId.value = null
+        _incomingCallerFp.value = null
+        _incomingCallerAlias.value = null
+    }
+
     companion object {
         private const val TAG = "WzpCall"
         val DEFAULT_SERVERS = listOf(
@@ -418,6 +496,45 @@ class CallViewModel : ViewModel(), WzpCallback {
         startCallInternal()
     }
 
+    /** Start a call to a specific relay + room (used by direct call setup). */
+    private fun startCallInternal(relay: String, room: String) {
+        Log.i(TAG, "startCallDirect: relay=$relay room=$room")
+        try {
+            // Don't teardown — keep the signal connection alive
+            engine = WzpEngine(this)
+            engine!!.init()
+            engineInitialized = true
+            _callState.value = 1
+            _errorMessage.value = null
+            try { appContext?.let { CallService.start(it) } } catch (e: Exception) {
+                Log.w(TAG, "service start err: $e")
+            }
+            startStatsPolling()
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val seed = _seedHex.value
+                    val name = _alias.value
+                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name, profile = _codecChoice.value) ?: -1
+                    CallService.onStopFromNotification = { stopCall() }
+                    if (result != 0) {
+                        _callState.value = 0
+                        _errorMessage.value = "Failed to connect to call room (code $result)"
+                        appContext?.let { CallService.stop(it) }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "startCallDirect error", e)
+                    _callState.value = 0
+                    _errorMessage.value = "Engine error: ${e.message}"
+                    appContext?.let { CallService.stop(it) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startCallDirect error", e)
+            _callState.value = 0
+            _errorMessage.value = "Engine error: ${e.message}"
+        }
+    }
+
     private fun startCallInternal() {
         val serverEntry = _servers.value[_selectedServer.value]
         val room = _roomName.value
@@ -570,6 +687,27 @@ class CallViewModel : ViewModel(), WzpCallback {
                         _stats.value = s
                         if (s.state != 0) {
                             _callState.value = s.state
+                        }
+                        // Track signal state changes for direct calling
+                        if (s.state in 5..7) {
+                            _signalState.value = s.state
+                        }
+                        // Incoming call detection
+                        if (s.state == 7) { // IncomingCall
+                            _incomingCallId.value = s.incomingCallId
+                            _incomingCallerFp.value = s.incomingCallerFp
+                            _incomingCallerAlias.value = s.incomingCallerAlias
+                        }
+                        // CallSetup: auto-connect to media room
+                        if (s.state == 1 && s.incomingCallId != null && s.incomingCallId.contains("|")) {
+                            // Format: "relay_addr|room_name"
+                            val parts = s.incomingCallId.split("|", limit = 2)
+                            if (parts.size == 2) {
+                                val mediaRelay = parts[0]
+                                val mediaRoom = parts[1]
+                                Log.i(TAG, "CallSetup: connecting to $mediaRelay room $mediaRoom")
+                                startCallInternal(mediaRelay, mediaRoom)
+                            }
                         }
                         if (s.state == 2 && !audioStarted) {
                             startAudio()
