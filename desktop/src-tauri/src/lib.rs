@@ -6,12 +6,12 @@
     windows_subsystem = "windows"
 )]
 
-// Call engine — compiled on every platform. Audio backend is cfg-switched
-// inside engine.rs (CPAL/VPIO on desktop, Oboe on Android).
+// CPAL-backed audio engine — desktop only. On Android we'll plug in an
+// oboe/AAudio backend in a later step.
+#[cfg(not(target_os = "android"))]
 mod engine;
-#[cfg(target_os = "android")]
-mod oboe_audio;
 
+#[cfg(not(target_os = "android"))]
 use engine::CallEngine;
 
 use serde::Serialize;
@@ -83,6 +83,7 @@ struct CallStatus {
 }
 
 struct AppState {
+    #[cfg(not(target_os = "android"))]
     engine: Mutex<Option<CallEngine>>,
     signal: Arc<Mutex<SignalState>>,
 }
@@ -151,7 +152,7 @@ async fn ping_relay(relay: String) -> Result<PingResult, String> {
 /// Falls back to `$HOME/.wzp` on the desktop side if the OnceLock hasn't been
 /// initialised yet (shouldn't happen in normal startup, but keeps the fn
 /// total).
-pub(crate) fn identity_dir() -> PathBuf {
+fn identity_dir() -> PathBuf {
     if let Some(dir) = APP_DATA_DIR.get() {
         return dir.clone();
     }
@@ -172,7 +173,7 @@ fn identity_path() -> std::path::PathBuf {
 }
 
 /// Load the persisted seed, or generate-and-persist a new one if missing.
-pub(crate) fn load_or_create_seed() -> Result<wzp_crypto::Seed, String> {
+fn load_or_create_seed() -> Result<wzp_crypto::Seed, String> {
     let path = identity_path();
     if path.exists() {
         let hex = std::fs::read_to_string(&path).map_err(|e| format!("read identity: {e}"))?;
@@ -220,6 +221,7 @@ fn get_app_info() -> Result<AppInfo, String> {
     })
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn connect(
     state: tauri::State<'_, Arc<AppState>>,
@@ -255,6 +257,7 @@ async fn connect(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
     let mut engine_lock = state.engine.lock().await;
@@ -266,6 +269,7 @@ async fn disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<String, St
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn toggle_mic(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
@@ -276,6 +280,7 @@ async fn toggle_mic(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, Stri
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn toggle_speaker(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
@@ -286,6 +291,7 @@ async fn toggle_speaker(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, 
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus, String> {
     let engine_lock = state.engine.lock().await;
@@ -327,6 +333,62 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
             rx_codec: String::new(),
         })
     }
+}
+
+// ─── Android stubs for engine-backed commands ────────────────────────────────
+//
+// Step 1 of the Android rewrite: signal-only. Audio is wired up in Step 3.
+// These keep the JS frontend happy (same `invoke` surface) without pulling
+// in CPAL, which doesn't support Android.
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn connect(
+    _state: tauri::State<'_, Arc<AppState>>,
+    _app: tauri::AppHandle,
+    _relay: String,
+    _room: String,
+    _alias: String,
+    _os_aec: bool,
+    _quality: String,
+) -> Result<String, String> {
+    Err("audio backend not yet wired on Android (step 3)".into())
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn disconnect(_state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
+    Ok("not connected".into())
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn toggle_mic(_state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
+    Err("not connected".into())
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn toggle_speaker(_state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
+    Err("not connected".into())
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn get_status(_state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus, String> {
+    Ok(CallStatus {
+        active: false,
+        mic_muted: false,
+        spk_muted: false,
+        participants: vec![],
+        encode_fps: 0,
+        recv_fps: 0,
+        audio_level: 0,
+        call_duration_secs: 0.0,
+        fingerprint: String::new(),
+        tx_codec: String::new(),
+        rx_codec: String::new(),
+    })
 }
 
 // ─── Signaling commands — platform independent ───────────────────────────────
@@ -446,6 +508,7 @@ pub fn run() {
     tracing_subscriber::fmt().init();
 
     let state = Arc::new(AppState {
+        #[cfg(not(target_os = "android"))]
         engine: Mutex::new(None),
         signal: Arc::new(Mutex::new(SignalState {
             transport: None, fingerprint: String::new(), signal_status: "idle".into(),

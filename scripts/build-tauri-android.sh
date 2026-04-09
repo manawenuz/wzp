@@ -36,7 +36,6 @@ REBUILD_RUST=0
 DO_PULL=1
 DO_INIT=0
 BUILD_RELEASE=0
-DROP_SHELL=0
 for arg in "$@"; do
     case "$arg" in
         --rust)     REBUILD_RUST=1 ;;
@@ -44,41 +43,12 @@ for arg in "$@"; do
         --no-pull)  DO_PULL=0 ;;
         --init)     DO_INIT=1 ;;
         --release)  BUILD_RELEASE=1 ;;
-        --shell)    DROP_SHELL=1 ;;    # interactive debug shell inside container
         -h|--help)
             sed -n '3,30p' "$0"
             exit 0
             ;;
     esac
 done
-
-# ── --shell: drop into an interactive container for fast manual iteration ──
-# The container is NOT --rm'd so you can keep hacking between invocations,
-# and has the same mounts / env as the build path above so `cargo tauri
-# android build ...` just works.
-if [ "$DROP_SHELL" = "1" ]; then
-    log "Starting interactive shell in wzp-android-builder container..."
-    log "  cd /build/source/desktop/src-tauri && cargo tauri android build --debug --target aarch64 --apk"
-    log "  (exit the shell with ^D; container will be removed)"
-    ssh -t -A $SSH_OPTS "$REMOTE_HOST" "
-        set -euo pipefail
-        BASE=$BASE_DIR
-        # Make sure the source/cache is writable by uid 1000
-        sudo chown -R 1000:1000 \$BASE/data/source \$BASE/data/cache 2>/dev/null || true
-        docker run --rm -it \
-            --user 1000:1000 \
-            -v \$BASE/data/source:/build/source \
-            -v \$BASE/data/cache/cargo-registry:/home/builder/.cargo/registry \
-            -v \$BASE/data/cache/cargo-git:/home/builder/.cargo/git \
-            -v \$BASE/data/cache/target:/build/source/target \
-            -v \$BASE/data/cache/gradle:/home/builder/.gradle \
-            -v \$BASE/data/cache/android-home:/home/builder/.android \
-            -w /build/source/desktop/src-tauri \
-            wzp-android-builder \
-            bash
-    "
-    exit 0
-fi
 
 log() { echo -e "\033[1;36m>>> $*\033[0m"; }
 ssh_cmd() { ssh -A $SSH_OPTS "$REMOTE_HOST" "$@"; }
@@ -183,10 +153,6 @@ docker run --rm \
     --user 1000:1000 \
     -e DO_INIT="$DO_INIT" \
     -e PROFILE_FLAG="$PROFILE_FLAG" \
-    -e CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang \
-    -e CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang \
-    -e CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang \
-    -e CARGO_TARGET_I686_LINUX_ANDROID_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang \
     -v "$BASE_DIR/data/source:/build/source" \
     -v "$BASE_DIR/data/cache/cargo-registry:/home/builder/.cargo/registry" \
     -v "$BASE_DIR/data/cache/cargo-git:/home/builder/.cargo/git" \
@@ -212,57 +178,6 @@ if [ "${DO_INIT}" = "1" ] || [ ! -x gen/android/gradlew ]; then
     echo ">>> cargo tauri android init"
     cargo tauri android init 2>&1 | tail -20
 fi
-
-# ── Post-init patches ────────────────────────────────────────────────────────
-
-# Bump minSdk 24 -> 26. Tauri scaffolds with minSdk=24, which forces cargo to
-# use the aarch64-linux-android24-clang linker. That linker pulls a broken
-# compiler-rt stub for __init_tcb / pthread_create that SIGSEGVs on first
-# thread::spawn inside a .so (static libc init never runs in dlopen-loaded
-# libraries). API 26 has working runtime symbols. Oboe also requires API 26+.
-BUILD_GRADLE=gen/android/app/build.gradle.kts
-if grep -q "minSdk = 24" "$BUILD_GRADLE"; then
-    echo ">>> bumping minSdk 24 -> 26 in build.gradle.kts"
-    sed -i "s|minSdk = 24|minSdk = 26|" "$BUILD_GRADLE"
-fi
-
-MANIFEST=gen/android/app/src/main/AndroidManifest.xml
-if ! grep -q "RECORD_AUDIO" "$MANIFEST"; then
-    echo ">>> injecting RECORD_AUDIO + MODIFY_AUDIO_SETTINGS into AndroidManifest"
-    sed -i "s|<uses-permission android:name=\"android.permission.INTERNET\" />|<uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission android:name=\"android.permission.RECORD_AUDIO\" />\n    <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />|" "$MANIFEST"
-fi
-
-# Overwrite MainActivity to request the mic permission on launch. Idempotent —
-# Tauri re-init would reset it, and we re-write it here on every build.
-MAIN_ACTIVITY=gen/android/app/src/main/java/com/wzp/desktop/MainActivity.kt
-cat > "$MAIN_ACTIVITY" <<KOTLIN_EOF
-package com.wzp.desktop
-
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Bundle
-import androidx.activity.enableEdgeToEdge
-import androidx.core.app.ActivityCompat
-
-class MainActivity : TauriActivity() {
-  override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge()
-    super.onCreate(savedInstanceState)
-
-    // Auto-request RECORD_AUDIO + MODIFY_AUDIO_SETTINGS on first launch — Oboe
-    // capture fails silently without them.
-    val needed = arrayOf(
-      Manifest.permission.RECORD_AUDIO,
-      Manifest.permission.MODIFY_AUDIO_SETTINGS,
-    ).filter {
-      ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-    }.toTypedArray()
-    if (needed.isNotEmpty()) {
-      ActivityCompat.requestPermissions(this, needed, 1337)
-    }
-  }
-}
-KOTLIN_EOF
 
 echo ">>> cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk"
 cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk

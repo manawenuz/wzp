@@ -17,10 +17,6 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# cc is always available because build.rs runs on the HOST, not the TARGET.
-# We gate the actual cc::Build::new() calls on `target.contains("android")` at
-# build-script runtime.
-cc = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -40,16 +36,10 @@ wzp-fec = { path = "../../crates/wzp-fec" }
 wzp-crypto = { path = "../../crates/wzp-crypto" }
 wzp-transport = { path = "../../crates/wzp-transport" }
 
-# wzp-client on desktop: full audio stack (CPAL + macOS VoiceProcessingIO)
+# wzp-client pulls CPAL + (on macOS) VoiceProcessingIO — desktop only.
+# Android gets an oboe/AAudio backend in Step 3 of the Tauri mobile rewrite.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
-
-# wzp-client on Android: only the codec/handshake/call modules. Audio I/O is
-# handled by our own oboe_audio module (C++ Oboe bridge).
-[target.'cfg(target_os = "android")'.dependencies]
-wzp-client = { path = "../../crates/wzp-client", default-features = false }
-# On-device logcat bridge for the tracing crate — useful for native debugging.
-tracing-android = "0.2"
 
 # Platform-specific
 [target.'cfg(target_os = "macos")'.dependencies]

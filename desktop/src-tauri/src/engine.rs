@@ -1,11 +1,5 @@
-//! Call engine for the Tauri app — desktop and Android share this exact file.
-//!
-//! Desktop (macOS/Linux/Windows) uses `wzp_client::audio_io::{AudioCapture,
-//! AudioPlayback}` on top of CPAL (and VoiceProcessingIO on macOS for OS-level
-//! AEC). Android uses `crate::oboe_audio::OboeHandle` which wraps the C++ Oboe
-//! bridge on high-priority AAudio callback threads. Both expose the same
-//! `Arc<AudioRing>` shape (`available()` / `read()` / `write()`) so the
-//! send/recv tasks below are identical across platforms.
+//! Call engine for the desktop app — wraps wzp-client audio + transport
+//! into a clean async interface for Tauri commands.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -15,19 +9,9 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
+use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 use wzp_client::call::{CallConfig, CallEncoder};
 use wzp_proto::{CodecId, MediaTransport, QualityProfile};
-
-// Ring buffer type used by the send/recv tasks. Different concrete type on
-// each platform but both provide the same method surface: `available()`,
-// `read(&mut [i16]) -> usize`, `write(&[i16]) -> usize`.
-#[cfg(not(target_os = "android"))]
-use wzp_client::audio_ring::AudioRing;
-#[cfg(not(target_os = "android"))]
-use wzp_client::audio_io::{AudioCapture, AudioPlayback};
-
-#[cfg(target_os = "android")]
-use crate::oboe_audio::{AudioRing, OboeHandle};
 
 const FRAME_SAMPLES_40MS: usize = 1920;
 
@@ -111,11 +95,32 @@ impl CallEngine {
 
         let relay_addr: SocketAddr = relay.parse()?;
 
-        // Load or generate identity. Uses the same helper as the signaling
-        // commands so the desktop and the Android app both read from the
-        // platform-correct data dir (resolved via Tauri's path().app_data_dir()).
-        let seed = crate::load_or_create_seed()
-            .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
+        // Load or generate identity
+        let seed = {
+            let path = {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                std::path::PathBuf::from(home).join(".wzp").join("identity")
+            };
+            if path.exists() {
+                if let Ok(hex) = std::fs::read_to_string(&path) {
+                    if let Ok(s) = wzp_crypto::Seed::from_hex(hex.trim()) {
+                        s
+                    } else {
+                        wzp_crypto::Seed::generate()
+                    }
+                } else {
+                    wzp_crypto::Seed::generate()
+                }
+            } else {
+                let s = wzp_crypto::Seed::generate();
+                if let Some(p) = path.parent() {
+                    std::fs::create_dir_all(p).ok();
+                }
+                let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
+                std::fs::write(&path, hex).ok();
+                s
+            }
+        };
 
         let fp = seed.derive_identity().public_identity().fingerprint;
         let fingerprint = fp.to_string();
@@ -139,28 +144,12 @@ impl CallEngine {
         info!("connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));
 
-        // Audio I/O — platform-dispatched.
-        //   macOS      VoiceProcessingIO (OS AEC) with CPAL fallback
-        //   Linux/Win  plain CPAL
-        //   Android    Oboe (AAudio / OpenSLES) via the C++ bridge
-        //
-        // The `audio_handle` must outlive the send/recv tasks so audio streams
-        // keep running — stored in the CallEngine below.
-        let (capture_ring, playout_ring, audio_handle): (
-            Arc<AudioRing>,
-            Arc<AudioRing>,
-            Box<dyn std::any::Any + Send>,
-        ) = {
-            #[cfg(target_os = "android")]
-            {
-                let _ = _os_aec; // AEC TBD on Android (step 6 polish)
-                let (cr, pr, handle) = OboeHandle::start()?;
-                info!("using Oboe backend (AAudio/OpenSLES)");
-                (cr, pr, Box::new(handle))
-            }
-            #[cfg(target_os = "macos")]
-            {
-                if _os_aec {
+        // Audio I/O — VPIO (OS AEC) on macOS, plain CPAL otherwise.
+        // The audio handle must be stored in CallEngine to keep streams alive.
+        let (capture_ring, playout_ring, audio_handle): (_, _, Box<dyn std::any::Any + Send>) =
+            if _os_aec {
+                #[cfg(target_os = "macos")]
+                {
                     match wzp_client::audio_vpio::VpioAudio::start() {
                         Ok(v) => {
                             let cr = v.capture_ring().clone();
@@ -177,25 +166,23 @@ impl CallEngine {
                             (cr, pr, Box::new((capture, playback)))
                         }
                     }
-                } else {
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    info!("OS AEC not available on this platform, using CPAL");
                     let capture = AudioCapture::start()?;
                     let playback = AudioPlayback::start()?;
                     let cr = capture.ring().clone();
                     let pr = playback.ring().clone();
                     (cr, pr, Box::new((capture, playback)))
                 }
-            }
-            #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
-            {
-                let _ = _os_aec; // OS AEC not available on Linux/Windows here
-                info!("OS AEC not available on this platform, using CPAL");
+            } else {
                 let capture = AudioCapture::start()?;
                 let playback = AudioPlayback::start()?;
                 let cr = capture.ring().clone();
                 let pr = playback.ring().clone();
                 (cr, pr, Box::new((capture, playback)))
-            }
-        };
+            };
 
         let running = Arc::new(AtomicBool::new(true));
         let mic_muted = Arc::new(AtomicBool::new(false));
