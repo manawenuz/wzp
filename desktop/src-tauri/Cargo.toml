@@ -7,9 +7,21 @@ default-run = "wzp-desktop"
 
 # Library target — required for Tauri mobile (Android/iOS link the app as a cdylib)
 # and also used by the desktop binary below.
+#
+# `staticlib` was DROPPED from crate-type because rust-lang/rust#104707
+# documents that having staticlib alongside cdylib leaks non-exported
+# symbols from staticlibs into the cdylib. Bionic's private `__init_tcb`
+# / `pthread_create` symbols end up bound LOCALLY inside our .so instead
+# of resolved dynamically against libc.so at dlopen time — which crashes
+# at launch as soon as tao tries to std::thread::spawn() from the JNI
+# onCreate callback. The legacy wzp-android crate uses ["cdylib", "rlib"]
+# and runs fine on the same phone with the same NDK + Rust toolchain.
+#
+# iOS Tauri builds that actually need staticlib can re-add it behind a
+# target cfg if we ever ship on iOS.
 [lib]
 name = "wzp_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "wzp-desktop"
