@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability — grants core APIs (events, path, window, app, clipboard) to the main window on every platform we ship to.",
+  "windows": ["main"],
+  "platforms": [
+    "linux",
+    "macOS",
+    "windows",
+    "android",
+    "iOS"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:path:default",
+    "core:window:default",
+    "core:app:default",
+    "core:webview:default",
+    "shell:default"
+  ]
+}

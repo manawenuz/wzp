@@ -109,7 +109,10 @@ if [ "$DO_PULL" = "1" ]; then
     echo ">>> git fetch + reset $BRANCH"
     cd "$BASE_DIR/data/source"
     git reset --hard HEAD 2>/dev/null || true
-    git clean -fd 2>/dev/null || true
+    # NOTE: deliberately do NOT run `git clean -fd` here. It would wipe the
+    # tauri-generated `desktop/src-tauri/gen/android/` scaffold (gradlew,
+    # settings.gradle, etc.) which is expensive to recreate and breaks
+    # subsequent builds with "gradlew not found".
     git gc --prune=now 2>/dev/null || true
     git fetch origin "$BRANCH" 2>&1 | tail -3
     git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
@@ -139,6 +142,13 @@ fi
 PROFILE_FLAG="--debug"
 [ "$BUILD_RELEASE" = "1" ] && PROFILE_FLAG=""
 
+# Persist ~/.android (where the auto-generated debug.keystore lives) so every
+# build is signed with the SAME key. Without this, every fresh container gets
+# a new debug keystore and `adb install -r` fails with INSTALL_FAILED_UPDATE_
+# INCOMPATIBLE because the signature changed.
+mkdir -p "$BASE_DIR/data/cache/android-home"
+chown 1000:1000 "$BASE_DIR/data/cache/android-home" 2>/dev/null || true
+
 docker run --rm \
     --user 1000:1000 \
     -e DO_INIT="$DO_INIT" \
@@ -148,6 +158,7 @@ docker run --rm \
     -v "$BASE_DIR/data/cache/cargo-git:/home/builder/.cargo/git" \
     -v "$BASE_DIR/data/cache/target:/build/source/target" \
     -v "$BASE_DIR/data/cache/gradle:/home/builder/.gradle" \
+    -v "$BASE_DIR/data/cache/android-home:/home/builder/.android" \
     wzp-android-builder \
     bash -c '
 set -euo pipefail
@@ -158,7 +169,12 @@ npm install --silent 2>&1 | tail -5 || npm install 2>&1 | tail -20
 
 cd src-tauri
 
-if [ "${DO_INIT}" = "1" ] || [ ! -d gen/android ]; then
+# Run init if forced, OR if the gradle wrapper is missing. Just checking
+# for `gen/android` is not enough — Tauri creates a few subdirectories
+# during build (app/, buildSrc/, .gradle/) that survive a partial wipe and
+# would make a naive `[ ! -d gen/android ]` check return false even though
+# the build wrapper itself is gone.
+if [ "${DO_INIT}" = "1" ] || [ ! -x gen/android/gradlew ]; then
     echo ">>> cargo tauri android init"
     cargo tauri android init 2>&1 | tail -20
 fi
