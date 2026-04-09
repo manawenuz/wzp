@@ -1,9 +1,7 @@
 use std::process::Command;
 
 fn main() {
-    // Capture short git hash so the running app can prove which build it is.
-    // Falls back to "unknown" if git isn't available (e.g. when building from
-    // a tarball without a .git dir).
+    // ─── Embedded git hash ─────────────────────────────────────────────────
     let git_hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -14,10 +12,22 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
 
     println!("cargo:rustc-env=WZP_GIT_HASH={git_hash}");
-    // Re-run if the HEAD pointer or its target moves so the embedded hash
-    // tracks reality between builds.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
+
+    // ─── Step A: single trivial cpp/hello.c compiled via cc::Build ─────────
+    // We deliberately add this on Android only so we can verify that the
+    // cc::Build → static archive → rustc-link pipeline itself does not
+    // regress the working build #17. cpp/hello.c defines `wzp_hello_stub`
+    // which is never called from Rust — if the crash comes back just from
+    // adding a tiny C static lib, we know the build pipeline is the issue.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.contains("android") {
+        println!("cargo:rerun-if-changed=cpp/hello.c");
+        cc::Build::new()
+            .file("cpp/hello.c")
+            .compile("wzp_hello");
+    }
 
     tauri_build::build()
 }
