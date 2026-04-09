@@ -171,18 +171,19 @@ class CallViewModel : ViewModel(), WzpCallback {
         val seed = _seedHex.value
         val alias = _alias.value
 
-        // Use a Java Thread with 8MB stack — Kotlin's IO dispatcher threads are too small
-        // for the native JNI + Rust + TLS stack requirements
+        // Start stats polling BEFORE blocking — startSignaling blocks the thread forever
+        startStatsPolling()
+
+        // Use a Java Thread with 8MB stack — blocks forever in signal recv loop
         val resolvedRelay = resolveToIp(relay) ?: relay
         Thread(null, {
             val result = engine?.startSignaling(resolvedRelay, seed, "", alias)
+            // Only reached if signaling disconnects
             viewModelScope.launch {
-                if (result == 0) {
-                    _signalState.value = 5 // Registered
-                    startStatsPolling()
-                } else {
-                    _errorMessage.value = "Failed to register on relay"
+                if (result != 0) {
+                    _errorMessage.value = "Signal connection lost"
                 }
+                _signalState.value = 0
             }
         }, "wzp-register", 8 * 1024 * 1024).start()
     }
