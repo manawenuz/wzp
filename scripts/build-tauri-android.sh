@@ -153,6 +153,10 @@ docker run --rm \
     --user 1000:1000 \
     -e DO_INIT="$DO_INIT" \
     -e PROFILE_FLAG="$PROFILE_FLAG" \
+    -e CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang \
+    -e CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang \
+    -e CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang \
+    -e CARGO_TARGET_I686_LINUX_ANDROID_LINKER=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang \
     -v "$BASE_DIR/data/source:/build/source" \
     -v "$BASE_DIR/data/cache/cargo-registry:/home/builder/.cargo/registry" \
     -v "$BASE_DIR/data/cache/cargo-git:/home/builder/.cargo/git" \
