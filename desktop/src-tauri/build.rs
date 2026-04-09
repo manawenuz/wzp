@@ -37,26 +37,24 @@ fn build_android_native() {
         .file("cpp/getauxval_fix.c")
         .compile("getauxval_fix");
 
-    // ─── Step E.0: no C++ stdlib linkage at all ────────────────────────────
-    // c++_shared crashed. c++_static also crashed (same byte stack, new
-    // offsets because the .so layout shifted). So it's NOT the NEEDED
-    // entry — it's something that happens whenever libc++ code lands in
-    // our .so, regardless of linkage.
+    // ─── Step E.minus-1: cpp_smoke.cpp → cpp_smoke.c, compile as plain C ──
+    // E.0 (cpp(true), no stdlib, empty extern-C function) still crashed.
+    // libc++ linkage ruled out in all forms. Remaining variable: is it the
+    // .cpp(true) compile mode itself — cc-rs invoking clang++ instead of
+    // clang, or emitting language-specific flags?
     //
-    // cpp_smoke.cpp is just `extern "C" int wzp_cpp_hello(){return 42;}`
-    // — it uses zero C++ features, so we can drop cpp_link_stdlib
-    // entirely and the compile still succeeds. No libc++ code gets
-    // dragged in at all. If the app launches, the trigger is the libc++
-    // code itself (probably its .init_array static constructors). If it
-    // still crashes, the trigger is just `cc::Build::new().cpp(true)`
-    // switching rustc's linker driver from clang to clang++ and the
-    // different default library pull-ins that causes.
-    println!("cargo:rerun-if-changed=cpp/cpp_smoke.cpp");
+    // The content of cpp_smoke is already zero-C++ (just an extern "C"
+    // function returning 42). Rename the file to .c and drop .cpp(true)
+    // so cc-rs uses the plain C compile path — exactly like hello.c in
+    // Step A, which worked. If THIS crashes, cc::Build is being accused
+    // wrongly and the crash is triggered by literally _adding any
+    // additional static archive_ to the link (in which case Step A
+    // should also have crashed and clearly didn't). If this launches,
+    // the trigger is the cpp(true) → clang++ pipeline, and we need to
+    // find out exactly what clang++ differs on for Android cdylibs.
+    println!("cargo:rerun-if-changed=cpp/cpp_smoke.c");
     cc::Build::new()
-        .cpp(true)
-        .std("c++17")
-        .cpp_link_stdlib(None::<&str>)
-        .file("cpp/cpp_smoke.cpp")
+        .file("cpp/cpp_smoke.c")
         .compile("wzp_cpp_smoke");
 
     // Copy libc++_shared.so next to libwzp_desktop_lib.so in the Tauri
