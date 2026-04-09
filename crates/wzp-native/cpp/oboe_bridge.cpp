@@ -211,7 +211,8 @@ public:
         calls++;
         if ((calls % 50) == 0) {
             int state = (int)stream->getState();
-            int xruns = stream->getXRunCount().value_or(-1);
+            auto xrunRes = stream->getXRunCount();
+            int xruns = xrunRes ? xrunRes.value() : -1;
             LOGI("playout heartbeat: calls=%llu nonempty=%llu numFrames=%d ring_avail_read=%d to_read=%d underrun_frames=%llu total_played_real=%llu state=%d xruns=%d",
                  (unsigned long long)calls, (unsigned long long)nonempty_calls,
                  numFrames, avail, to_read,
