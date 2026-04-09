@@ -410,8 +410,10 @@ pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalConn
     relay_j: JString,
     seed_j: JString,
 ) -> jlong {
+    info!("nativeSignalConnect: entered");
     let relay: String = env.get_string(&relay_j).map(|s| s.into()).unwrap_or_default();
     let seed: String = env.get_string(&seed_j).map(|s| s.into()).unwrap_or_default();
+    info!(relay = %relay, seed_len = seed.len(), "nativeSignalConnect: parsed strings");
 
     // start() spawns an internal thread (connect+register+recv, ONE runtime, never dropped).
     // Blocks up to 10s waiting for the connect+register to complete.
