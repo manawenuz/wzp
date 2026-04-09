@@ -179,7 +179,19 @@ if [ "${DO_INIT}" = "1" ] || [ ! -x gen/android/gradlew ]; then
     cargo tauri android init 2>&1 | tail -20
 fi
 
-# ── Post-init patches: runtime mic permission + jniLibs dir ─────────────────
+# ── Post-init patches ────────────────────────────────────────────────────────
+
+# Bump minSdk 24 -> 26. Tauri scaffolds with minSdk=24, which forces cargo to
+# use the aarch64-linux-android24-clang linker. That linker pulls a broken
+# compiler-rt stub for __init_tcb / pthread_create that SIGSEGVs on first
+# thread::spawn inside a .so (static libc init never runs in dlopen-loaded
+# libraries). API 26 has working runtime symbols. Oboe also requires API 26+.
+BUILD_GRADLE=gen/android/app/build.gradle.kts
+if grep -q "minSdk = 24" "$BUILD_GRADLE"; then
+    echo ">>> bumping minSdk 24 -> 26 in build.gradle.kts"
+    sed -i "s|minSdk = 24|minSdk = 26|" "$BUILD_GRADLE"
+fi
+
 MANIFEST=gen/android/app/src/main/AndroidManifest.xml
 if ! grep -q "RECORD_AUDIO" "$MANIFEST"; then
     echo ">>> injecting RECORD_AUDIO + MODIFY_AUDIO_SETTINGS into AndroidManifest"
