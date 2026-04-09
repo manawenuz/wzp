@@ -57,19 +57,20 @@ class MainActivity : TauriActivity() {
   }
 
   /**
-   * Max out STREAM_MUSIC so the Oboe playout stream (opened with
-   * Usage::Media, which routes to STREAM_MUSIC) is actually audible.
+   * Put the phone into VoIP call mode with handset (earpiece) as the
+   * default output. The Oboe playout stream is opened with
+   * Usage::VoiceCommunication which honours this routing, so:
    *
-   * DELIBERATELY does NOT call setMode(IN_COMMUNICATION) or
-   * setSpeakerphoneOn: build 8c36fb5 confirmed that combining those with
-   * Usage::Media OR with Usage::VoiceCommunication (both tried) broke the
-   * Oboe playout callback entirely — the ring filled once at startup and
-   * Oboe stopped draining it. Keeping audio mode in MODE_NORMAL so the
-   * Media stream follows the normal speaker-output path, controlled by
-   * the media volume slider.
+   *   MODE_IN_COMMUNICATION + speakerphoneOn=false  → earpiece (handset)
+   *   MODE_IN_COMMUNICATION + speakerphoneOn=true   → loudspeaker
+   *   MODE_IN_COMMUNICATION + bluetoothScoOn=true   → bluetooth headset
    *
-   * A polished version of the app will setMode/setSpeakerphoneOn on a
-   * per-call basis once we've figured out the correct combo with AAudio.
+   * The speaker/handset/BT toggle itself is wired up via the Tauri
+   * command `set_speakerphone(on)` in a follow-up build. For now the
+   * default is handset, matching the user's stated preference.
+   *
+   * STREAM_VOICE_CALL volume is cranked to max since the in-call volume
+   * slider is separate from media volume on most devices.
    */
   private fun configureAudioForCall() {
     try {
@@ -80,12 +81,19 @@ class MainActivity : TauriActivity() {
         "musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/" +
         "${am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}")
 
-      // Crank media volume to max — STREAM_MUSIC is what Usage::Media
-      // plays through. User can adjust with hardware volume buttons.
+      am.mode = AudioManager.MODE_IN_COMMUNICATION
+      am.isSpeakerphoneOn = false   // default: handset / earpiece
+
+      // Crank both voice-call and music volumes so nothing silent slips
+      // through regardless of which stream actually ends up driving.
+      val maxVoice = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+      am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoice, 0)
       val maxMusic = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
       am.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
 
-      Log.i(TAG, "audio state after: mode=${am.mode} musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/$maxMusic")
+      Log.i(TAG, "audio state after: mode=${am.mode} speaker=${am.isSpeakerphoneOn} " +
+        "voiceVol=${am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)}/$maxVoice " +
+        "musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/$maxMusic")
     } catch (e: Throwable) {
       Log.e(TAG, "configureAudioForCall failed: ${e.message}", e)
     }

@@ -297,6 +297,20 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     // config that at least drove callbacks correctly, plus the
     // Kotlin-side MODE_IN_COMMUNICATION + setSpeakerphoneOn(true)
     // handled in MainActivity.kt to route audio to the loud speaker.
+    // Usage::VoiceCommunication is the correct Oboe usage for a VoIP app
+    // — it respects Android's in-call audio routing and lets
+    // AudioManager.setSpeakerphoneOn/setBluetoothScoOn actually switch
+    // between earpiece, loudspeaker, and Bluetooth headset. Combined with
+    // MODE_IN_COMMUNICATION set from MainActivity.kt and
+    // speakerphoneOn=false by default, this produces handset/earpiece as
+    // the default output.
+    //
+    // IMPORTANT: do NOT add setAudioApi(AAudio) here. Build 8c36fb5 proved
+    // forcing AAudio with Usage::VoiceCommunication makes the playout
+    // callback stop draining the ring after cb#0, even though the stream
+    // opens successfully. Letting Oboe pick the API (which will be AAudio
+    // on API ≥ 27 but via a different codepath) kept callbacks firing in
+    // every other build.
     oboe::AudioStreamBuilder playoutBuilder;
     playoutBuilder.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -305,7 +319,7 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         ->setChannelCount(config->channel_count)
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
-        ->setUsage(oboe::Usage::Media)
+        ->setUsage(oboe::Usage::VoiceCommunication)
         ->setDataCallback(&g_playout_cb);
 
     result = playoutBuilder.openStream(g_playout_stream);
