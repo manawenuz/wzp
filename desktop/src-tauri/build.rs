@@ -37,25 +37,25 @@ fn build_android_native() {
         .file("cpp/getauxval_fix.c")
         .compile("getauxval_fix");
 
-    // ─── Step E.1 with STATIC libc++ ───────────────────────────────────────
-    // Every cpp_smoke variant (atomic-mutex-thread / atomic-only / empty
-    // function) crashed identically with c++_shared linkage — byte-
-    // identical crash offsets. The cpp code was dead-stripped from the
-    // final .so in every case, so the only remaining delta was the
-    // NEEDED entry for libc++_shared.so added by
-    // cargo:rustc-link-lib=c++_shared. Theory: that NEEDED entry (and
-    // Android's dynamic linker running libc++_shared.so's init_array at
-    // dlopen time) is the trigger.
+    // ─── Step E.0: no C++ stdlib linkage at all ────────────────────────────
+    // c++_shared crashed. c++_static also crashed (same byte stack, new
+    // offsets because the .so layout shifted). So it's NOT the NEEDED
+    // entry — it's something that happens whenever libc++ code lands in
+    // our .so, regardless of linkage.
     //
-    // Test: swap c++_shared → c++_static. Bundles libc++ code directly
-    // into our .so, drops the NEEDED entry. If the app launches, we've
-    // proven the NEEDED libc++_shared.so is the trigger and have a
-    // working linkage for adding C++ to Tauri Android cdylibs.
+    // cpp_smoke.cpp is just `extern "C" int wzp_cpp_hello(){return 42;}`
+    // — it uses zero C++ features, so we can drop cpp_link_stdlib
+    // entirely and the compile still succeeds. No libc++ code gets
+    // dragged in at all. If the app launches, the trigger is the libc++
+    // code itself (probably its .init_array static constructors). If it
+    // still crashes, the trigger is just `cc::Build::new().cpp(true)`
+    // switching rustc's linker driver from clang to clang++ and the
+    // different default library pull-ins that causes.
     println!("cargo:rerun-if-changed=cpp/cpp_smoke.cpp");
     cc::Build::new()
         .cpp(true)
         .std("c++17")
-        .cpp_link_stdlib(Some("c++_static"))
+        .cpp_link_stdlib(None::<&str>)
         .file("cpp/cpp_smoke.cpp")
         .compile("wzp_cpp_smoke");
 
