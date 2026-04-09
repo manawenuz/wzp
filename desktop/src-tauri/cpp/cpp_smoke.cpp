@@ -1,19 +1,14 @@
-// cpp_smoke.cpp — Step E.2 minimal stub: std::atomic only, no thread/mutex.
+// cpp_smoke.cpp — Step E.1: the absolute minimum C++ file.
+// No #include, no STL, no atomics, no thread, no mutex. Just one function.
+// Still compiled as .cpp(true) with cpp_link_stdlib("c++_shared"), so the
+// only delta vs the non-crashing baseline is:
+//   1. cc::Build using cpp(true) (vs plain C in hello.c)
+//   2. cargo:rustc-link-lib=c++_shared emitted by cc-rs (adds NEEDED
+//      entry for libc++_shared.so in the final .so)
 //
-// Linked via cpp_link_stdlib("c++_shared") so the resulting .so still carries
-// a NEEDED entry for libc++_shared.so exactly like the Oboe build would.
-//
-// Same extern "C" export as E.4 so the linker CAN pull the symbol in if it
-// chooses to, but since Rust never calls it, it'll typically be dead-stripped.
-// The diagnostic value is in the build.rs link directives this compile
-// produces, not in the file's actual code being linked.
+// If this crashes, we've conclusively proven the trigger is one of those
+// two things — not any C++ code behavior.
 
-#include <atomic>
-
-namespace {
-    std::atomic<int> g_counter{0};
-}
-
-extern "C" int wzp_cpp_smoke(void) {
-    return g_counter.fetch_add(1);
+extern "C" int wzp_cpp_hello(void) {
+    return 42;
 }
