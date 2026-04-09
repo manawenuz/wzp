@@ -246,6 +246,9 @@ impl WzpEngine {
 
     /// Start persistent signaling connection for direct calls.
     /// Spawns a background task that maintains the `_signal` connection.
+    /// Start persistent signaling for direct calls.
+    /// Blocks the calling thread (Kotlin provides a Thread with 8MB stack).
+    /// Same pattern as start_call: tokio block_on on the caller's thread.
     pub fn start_signaling(
         &mut self,
         relay_addr: &str,
@@ -253,52 +256,34 @@ impl WzpEngine {
         token: Option<&str>,
         alias: Option<&str>,
     ) -> Result<(), anyhow::Error> {
-        // Capture lightweight params only — all crypto work happens on the spawned thread
-        let addr_str = relay_addr.to_string();
-        let seed_str = seed_hex.to_string();
+        use wzp_proto::{MediaTransport, SignalMessage};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let addr: SocketAddr = relay_addr.parse()?;
+        let seed = if seed_hex.is_empty() {
+            wzp_crypto::Seed::generate()
+        } else {
+            wzp_crypto::Seed::from_hex(seed_hex).map_err(|e| anyhow::anyhow!(e))?
+        };
+        let identity = seed.derive_identity();
+        let pub_id = identity.public_identity();
+        let identity_pub = *pub_id.signing.as_bytes();
+        let fp = pub_id.fingerprint.to_string();
         let token = token.map(|s| s.to_string());
         let alias = alias.map(|s| s.to_string());
         let state = self.state.clone();
 
+        info!(fingerprint = %fp, relay = %addr, "starting signaling");
+
         self.state.running.store(true, Ordering::Release);
 
-        // Spawn on a dedicated thread — Android's Kotlin dispatcher has ~1MB stack,
-        // too small for rustls + QUIC + tokio + crypto. Do ALL work on this thread.
-        std::thread::Builder::new()
-            .name("wzp-signal".into())
-            .stack_size(8 * 1024 * 1024) // 8MB stack
-            .spawn(move || {
-                use wzp_proto::{MediaTransport, SignalMessage};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
 
-                let _ = rustls::crypto::ring::default_provider().install_default();
-
-                let addr: SocketAddr = match addr_str.parse() {
-                    Ok(a) => a,
-                    Err(e) => { error!("bad relay addr: {e}"); return; }
-                };
-                let seed = if seed_str.is_empty() {
-                    wzp_crypto::Seed::generate()
-                } else {
-                    match wzp_crypto::Seed::from_hex(&seed_str) {
-                        Ok(s) => s,
-                        Err(e) => { error!("bad seed: {e}"); return; }
-                    }
-                };
-                let identity = seed.derive_identity();
-                let pub_id = identity.public_identity();
-                let identity_pub = *pub_id.signing.as_bytes();
-                let fp = pub_id.fingerprint.to_string();
-
-                info!(fingerprint = %fp, relay = %addr, "starting signaling");
-
-                let signal_state = state.clone();
-
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tokio runtime");
-                rt.block_on(async move {
-            let _ = rustls::crypto::ring::default_provider().install_default();
+        let signal_state = state.clone();
+        rt.block_on(async move {
             let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
             let endpoint = match wzp_transport::create_endpoint(bind, None) {
                 Ok(e) => e,
@@ -389,8 +374,7 @@ impl WzpEngine {
 
             let mut stats = signal_state.stats.lock().unwrap();
             stats.state = crate::stats::CallState::Closed;
-                }); // block_on
-            })?; // thread spawn
+        }); // block_on
 
         Ok(())
     }
