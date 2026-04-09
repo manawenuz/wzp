@@ -141,9 +141,9 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _targetFingerprint = MutableStateFlow("")
     val targetFingerprint: StateFlow<String> = _targetFingerprint.asStateFlow()
 
-    /** Signal connection state: 0=idle, 5=registered, 6=ringing, 7=incoming */
-    private val _signalState = MutableStateFlow(0)
-    val signalState: StateFlow<Int> = _signalState.asStateFlow()
+    /** Signal state string: "idle", "registered", "ringing", "incoming", "setup" */
+    private val _signalState = MutableStateFlow("idle")
+    val signalState: StateFlow<String> = _signalState.asStateFlow()
 
     /** Incoming call info */
     private val _incomingCallId = MutableStateFlow<String?>(null)
@@ -155,37 +155,65 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _incomingCallerAlias = MutableStateFlow<String?>(null)
     val incomingCallerAlias: StateFlow<String?> = _incomingCallerAlias.asStateFlow()
 
+    /** Separate signal manager (persistent, survives calls) */
+    private var signalManager: com.wzp.engine.SignalManager? = null
+    private var signalPollJob: Job? = null
+
     fun setCallMode(mode: Int) { _callMode.value = mode }
     fun setTargetFingerprint(fp: String) { _targetFingerprint.value = fp }
 
     /** Register on relay for direct calls */
     fun registerForCalls() {
-        if (engine == null) {
-            engine = WzpEngine(this).also { it.init() }
-        }
         val serverIdx = _selectedServer.value
         val serverList = _servers.value
         if (serverIdx >= serverList.size) return
 
         val relay = serverList[serverIdx].address
         val seed = _seedHex.value
-        val alias = _alias.value
-
-        // Start stats polling BEFORE blocking — startSignaling blocks the thread forever
-        startStatsPolling()
-
-        // Use a Java Thread with 8MB stack — blocks forever in signal recv loop
         val resolvedRelay = resolveToIp(relay) ?: relay
+
+        // Connect on a thread with 8MB stack (QUIC + TLS needs it)
         Thread(null, {
-            val result = engine?.startSignaling(resolvedRelay, seed, "", alias)
-            // Only reached if signaling disconnects
+            val mgr = com.wzp.engine.SignalManager()
+            val ok = mgr.connect(resolvedRelay, seed)
             viewModelScope.launch {
-                if (result != 0) {
-                    _errorMessage.value = "Signal connection lost"
+                if (ok) {
+                    signalManager = mgr
+                    startSignalPolling()
+                } else {
+                    _errorMessage.value = "Failed to register on relay"
                 }
-                _signalState.value = 0
             }
-        }, "wzp-register", 8 * 1024 * 1024).start()
+        }, "wzp-signal-connect", 8 * 1024 * 1024).start()
+    }
+
+    /** Poll signal manager state every 500ms */
+    private fun startSignalPolling() {
+        signalPollJob?.cancel()
+        signalPollJob = viewModelScope.launch {
+            while (isActive) {
+                val mgr = signalManager
+                if (mgr != null && mgr.isConnected) {
+                    val state = mgr.getState()
+                    _signalState.value = state.status
+                    _incomingCallId.value = state.incomingCallId
+                    _incomingCallerFp.value = state.incomingCallerFp
+                    _incomingCallerAlias.value = state.incomingCallerAlias
+
+                    // Auto-connect to media room when call is set up
+                    if (state.status == "setup" && state.callSetupRelay != null && state.callSetupRoom != null) {
+                        Log.i(TAG, "CallSetup: connecting to ${state.callSetupRelay} room ${state.callSetupRoom}")
+                        startCallInternal(state.callSetupRelay, state.callSetupRoom)
+                    }
+                }
+                delay(500L)
+            }
+        }
+    }
+
+    private fun stopSignalPolling() {
+        signalPollJob?.cancel()
+        signalPollJob = null
     }
 
     /** Place a direct call to the target fingerprint */
@@ -195,24 +223,28 @@ class CallViewModel : ViewModel(), WzpCallback {
             _errorMessage.value = "Enter a fingerprint to call"
             return
         }
-        engine?.placeCall(target)
-        _signalState.value = 6 // Ringing
+        signalManager?.placeCall(target)
     }
 
     /** Answer an incoming direct call */
     fun answerIncomingCall(mode: Int = 2) {
         val callId = _incomingCallId.value ?: return
-        engine?.answerCall(callId, mode)
+        signalManager?.answerCall(callId, mode)
     }
 
     /** Reject an incoming direct call */
     fun rejectIncomingCall() {
         val callId = _incomingCallId.value ?: return
-        engine?.answerCall(callId, 0) // 0 = Reject
-        _signalState.value = 5 // Back to registered
-        _incomingCallId.value = null
-        _incomingCallerFp.value = null
-        _incomingCallerAlias.value = null
+        signalManager?.answerCall(callId, 0)
+    }
+
+    /** Hang up direct call — media ends, signal stays alive */
+    fun hangupDirectCall() {
+        signalManager?.hangup()
+        engine?.stopCall()
+        engine?.destroy()
+        engine = null
+        engineInitialized = false
     }
 
     companion object {
@@ -690,29 +722,9 @@ class CallViewModel : ViewModel(), WzpCallback {
                         val s = CallStats.fromJson(json)
                         lastCallDuration = s.durationSecs
                         _stats.value = s
-                        // Track signal state changes for direct calling
-                        if (s.state in 5..7) {
-                            _signalState.value = s.state
-                            // Don't update callState for signal-only states
-                        } else if (s.state != 0) {
+                        // Only update callState from media engine stats (not signal)
+                        if (s.state != 0) {
                             _callState.value = s.state
-                        }
-                        // Incoming call detection
-                        if (s.state == 7) { // IncomingCall
-                            _incomingCallId.value = s.incomingCallId
-                            _incomingCallerFp.value = s.incomingCallerFp
-                            _incomingCallerAlias.value = s.incomingCallerAlias
-                        }
-                        // CallSetup: auto-connect to media room
-                        if (s.state == 1 && s.incomingCallId != null && s.incomingCallId.contains("|")) {
-                            // Format: "relay_addr|room_name"
-                            val parts = s.incomingCallId.split("|", limit = 2)
-                            if (parts.size == 2) {
-                                val mediaRelay = parts[0]
-                                val mediaRoom = parts[1]
-                                Log.i(TAG, "CallSetup: connecting to $mediaRelay room $mediaRoom")
-                                startCallInternal(mediaRelay, mediaRoom)
-                            }
                         }
                         if (s.state == 2 && !audioStarted) {
                             startAudio()

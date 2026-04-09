@@ -14,5 +14,6 @@ pub mod audio_ring;
 pub mod commands;
 pub mod engine;
 pub mod pipeline;
+pub mod signal_mgr;
 pub mod stats;
 pub mod jni_bridge;

@@ -390,87 +390,132 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeGetFingerprint
 
 // ── Direct calling JNI functions ──
 
-/// Start persistent signaling connection to relay for direct calls.
-/// Returns 0 immediately — the actual work happens on a dedicated thread.
-/// The JNI function MUST be minimal because Android's DefaultDispatch thread
-/// has a tiny stack that overflows with any Rust crypto/network code.
+// ── SignalManager JNI functions ──
+
+/// Opaque handle for SignalManager (separate from EngineHandle).
+struct SignalHandle {
+    mgr: crate::signal_mgr::SignalManager,
+}
+
+unsafe fn signal_ref(handle: jlong) -> &'static SignalHandle {
+    unsafe { &*(handle as *const SignalHandle) }
+}
+
+/// Connect to relay for signaling. Returns handle (jlong) or 0 on error.
+/// MUST be called from a thread with sufficient stack (8MB).
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartSignaling<'a>(
+pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalConnect<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    relay_j: JString,
+    seed_j: JString,
+) -> jlong {
+    let relay: String = env.get_string(&relay_j).map(|s| s.into()).unwrap_or_default();
+    let seed: String = env.get_string(&seed_j).map(|s| s.into()).unwrap_or_default();
+
+    match crate::signal_mgr::SignalManager::connect(&relay, &seed) {
+        Ok(mgr) => {
+            // Spawn recv loop on a dedicated thread
+            let mgr_ref = &mgr as *const crate::signal_mgr::SignalManager;
+            let handle = Box::new(SignalHandle { mgr });
+            let raw = Box::into_raw(handle);
+
+            // Get a reference for the recv thread
+            let recv_ref = unsafe { &(*raw).mgr };
+            std::thread::Builder::new()
+                .name("wzp-signal-recv".into())
+                .stack_size(4 * 1024 * 1024)
+                .spawn(move || {
+                    recv_ref.run_recv_loop();
+                })
+                .ok();
+
+            raw as jlong
+        }
+        Err(e) => {
+            error!("signal connect failed: {e}");
+            0
+        }
+    }
+}
+
+/// Get signal state as JSON string.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalGetState<'a>(
     mut env: JNIEnv<'a>,
     _class: JClass,
     handle: jlong,
-    relay_addr_j: JString,
-    seed_hex_j: JString,
-    token_j: JString,
-    alias_j: JString,
+) -> jstring {
+    if handle == 0 { return JObject::null().into_raw(); }
+    let h = signal_ref(handle);
+    let json = h.mgr.get_state_json();
+    env.new_string(&json)
+        .map(|s| s.into_raw())
+        .unwrap_or(JObject::null().into_raw())
+}
+
+/// Place a direct call.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalPlaceCall<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    handle: jlong,
+    target_j: JString,
 ) -> jint {
-    // Extract JNI strings — this is all we do on the caller's thread
-    let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
-    let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
-    let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
-    let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
-
-    // Use the existing start_call pattern — create engine, call start_signaling
-    // which spawns a thread internally. This is the same pattern that works for room calls.
-    let h = unsafe { handle_ref(handle) };
-
-    match h.engine.start_signaling(
-        &relay_addr,
-        &seed_hex,
-        if token.is_empty() { None } else { Some(&token) },
-        if alias.is_empty() { None } else { Some(&alias) },
-    ) {
+    if handle == 0 { return -1; }
+    let h = signal_ref(handle);
+    let target: String = env.get_string(&target_j).map(|s| s.into()).unwrap_or_default();
+    match h.mgr.place_call(&target) {
         Ok(()) => 0,
-        Err(e) => { error!("start_signaling failed: {e}"); -1 }
+        Err(e) => { error!("place_call: {e}"); -1 }
     }
 }
 
-/// Place a direct call to a target fingerprint.
-/// Returns 0 on success, -1 on error.
+/// Answer an incoming call.
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePlaceCall<'a>(
-    mut env: JNIEnv<'a>,
-    _class: JClass,
-    handle: jlong,
-    target_fp_j: JString,
-) -> jint {
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        let h = unsafe { handle_ref(handle) };
-        let target: String = env.get_string(&target_fp_j).map(|s| s.into()).unwrap_or_default();
-        h.engine.place_call(&target)
-    }));
-
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => { error!("place_call failed: {e}"); -1 }
-        Err(_) => { error!("place_call panicked"); -1 }
-    }
-}
-
-/// Answer an incoming direct call.
-/// mode: 0=Reject, 1=AcceptTrusted, 2=AcceptGeneric
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeAnswerCall<'a>(
+pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalAnswerCall<'a>(
     mut env: JNIEnv<'a>,
     _class: JClass,
     handle: jlong,
     call_id_j: JString,
     mode: jint,
 ) -> jint {
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        let h = unsafe { handle_ref(handle) };
-        let call_id: String = env.get_string(&call_id_j).map(|s| s.into()).unwrap_or_default();
-        let accept_mode = match mode {
-            0 => wzp_proto::CallAcceptMode::Reject,
-            1 => wzp_proto::CallAcceptMode::AcceptTrusted,
-            _ => wzp_proto::CallAcceptMode::AcceptGeneric,
-        };
-        h.engine.answer_call(&call_id, accept_mode)
-    }));
-
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => { error!("answer_call failed: {e}"); -1 }
-        Err(_) => { error!("answer_call panicked"); -1 }
+    if handle == 0 { return -1; }
+    let h = signal_ref(handle);
+    let call_id: String = env.get_string(&call_id_j).map(|s| s.into()).unwrap_or_default();
+    let accept_mode = match mode {
+        0 => wzp_proto::CallAcceptMode::Reject,
+        1 => wzp_proto::CallAcceptMode::AcceptTrusted,
+        _ => wzp_proto::CallAcceptMode::AcceptGeneric,
+    };
+    match h.mgr.answer_call(&call_id, accept_mode) {
+        Ok(()) => 0,
+        Err(e) => { error!("answer_call: {e}"); -1 }
     }
+}
+
+/// Send hangup signal.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalHangup(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 { return; }
+    let h = signal_ref(handle);
+    h.mgr.hangup();
+}
+
+/// Destroy the signal manager and free resources.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalDestroy(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 { return; }
+    let h = signal_ref(handle);
+    h.mgr.stop();
+    // Reclaim the Box
+    let _ = unsafe { Box::from_raw(handle as *mut SignalHandle) };
 }

@@ -219,7 +219,7 @@ fun InCallScreen(
 
                 // Mode toggle: Room vs Direct Call
                 val callMode by viewModel.callMode.collectAsState()
-                val signalState by viewModel.signalState.collectAsState()
+                val signalState by viewModel.signalState.collectAsState()  // "idle"/"registered"/"ringing"/etc
                 val targetFp by viewModel.targetFingerprint.collectAsState()
                 val incomingCallId by viewModel.incomingCallId.collectAsState()
                 val incomingCallerFp by viewModel.incomingCallerFp.collectAsState()
@@ -309,7 +309,7 @@ fun InCallScreen(
                     }
                 } else {
                     // ── Direct call mode ──
-                    if (signalState < 5) {
+                    if (signalState == "idle") {
                         // Not registered yet
                         SectionLabel("ALIAS")
                         OutlinedTextField(
@@ -333,7 +333,7 @@ fun InCallScreen(
                                 color = Color.White
                             )
                         }
-                    } else if (signalState == 5) {
+                    } else if (signalState == "registered" || signalState == "incoming") {
                         // Registered — show dial pad
                         Text(
                             "\u2705 Registered — waiting for calls",
@@ -403,8 +403,7 @@ fun InCallScreen(
                                 color = Color.White
                             )
                         }
-                    } else if (signalState == 6) {
-                        // Ringing
+                    } else if (signalState == "ringing") {
                         Text(
                             "\uD83D\uDD14 Ringing...",
                             color = Yellow,
@@ -412,11 +411,10 @@ fun InCallScreen(
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
-                    } else if (signalState == 7) {
-                        // Incoming call (state 7 also handled above in registered view)
+                    } else if (signalState == "setup") {
                         Text(
-                            "\uD83D\uDCDE Incoming call...",
-                            color = Green,
+                            "Connecting to call...",
+                            color = Accent,
                             style = MaterialTheme.typography.titleMedium,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
