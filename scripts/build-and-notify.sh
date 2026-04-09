@@ -53,7 +53,9 @@ if [ "$DO_PULL" = "1" ]; then
     cd "$BASE_DIR/data/source"
     git reset --hard HEAD 2>/dev/null || true
     git clean -fd 2>/dev/null || true
-    git pull origin feat/android-voip-client 2>&1 | tail -3
+    git gc --prune=now 2>/dev/null || true
+    git fetch origin feat/android-voip-client 2>&1 | tail -3
+    git reset --hard origin/feat/android-voip-client 2>/dev/null || true
 fi
 
 # Clean Rust if requested
