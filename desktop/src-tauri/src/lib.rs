@@ -7,9 +7,15 @@
 )]
 
 // Call engine — now compiled on every platform. On desktop it runs the real
-// CPAL/VPIO audio pipeline; on Android `CallEngine::start()` currently returns
-// an error stub (see engine.rs — that's step C of the Oboe integration).
+// CPAL/VPIO audio pipeline; on Android the engine calls into the standalone
+// wzp-native cdylib (via the wzp_native module) for Oboe-backed audio.
 mod engine;
+
+// Android runtime binding to libwzp_native.so (Oboe audio backend, built as
+// a standalone cdylib with cargo-ndk to avoid the Tauri staticlib symbol
+// leak — see docs/incident-tauri-android-init-tcb.md).
+#[cfg(target_os = "android")]
+mod wzp_native;
 
 // CallEngine is only referenced from the non-Android connect/disconnect/etc
 // commands; the Android stubs return errors directly.
@@ -536,40 +542,24 @@ pub fn run() {
             tracing::info!("app data dir: {data_dir:?}");
             let _ = APP_DATA_DIR.set(data_dir);
 
-            // Phase 1 smoke test of the separate-cdylib approach to the
-            // __init_tcb crash (see docs/incident-tauri-android-init-tcb.md):
-            // dlopen the sibling libwzp_native.so that gradle dropped into
-            // our jniLibs directory and call its exported wzp_native_version()
-            // + wzp_native_hello() functions. If this logs
-            //   "wzp-native dlopen OK: version=42 msg=...",
-            // we've validated the whole cdylib-split pipeline and can move
-            // to Phase 2 (port the Oboe bridge into wzp-native).
+            // Load the standalone wzp-native cdylib (Oboe audio bridge) and
+            // cache its exported function pointers. The library handle is
+            // kept alive in a 'static OnceLock for the lifetime of the
+            // process, so CallEngine::start() can invoke its audio FFI
+            // from anywhere. See src/wzp_native.rs and the incident report
+            // in docs/incident-tauri-android-init-tcb.md.
             #[cfg(target_os = "android")]
             {
-                match unsafe { libloading::Library::new("libwzp_native.so") } {
-                    Ok(lib) => {
-                        unsafe {
-                            match lib.get::<unsafe extern "C" fn() -> i32>(b"wzp_native_version") {
-                                Ok(version_fn) => {
-                                    let v = version_fn();
-                                    let mut buf = [0u8; 64];
-                                    let msg = match lib.get::<unsafe extern "C" fn(*mut u8, usize) -> usize>(b"wzp_native_hello") {
-                                        Ok(hello_fn) => {
-                                            let n = hello_fn(buf.as_mut_ptr(), buf.len());
-                                            String::from_utf8_lossy(&buf[..n]).into_owned()
-                                        }
-                                        Err(e) => format!("<no hello: {e}>"),
-                                    };
-                                    tracing::info!("wzp-native dlopen OK: version={v} msg=\"{msg}\"");
-                                }
-                                Err(e) => {
-                                    tracing::warn!("wzp-native loaded but dlsym(wzp_native_version) failed: {e}");
-                                }
-                            }
-                        }
+                match wzp_native::init() {
+                    Ok(()) => {
+                        tracing::info!(
+                            "wzp-native loaded: version={} msg=\"{}\"",
+                            wzp_native::version(),
+                            wzp_native::hello()
+                        );
                     }
                     Err(e) => {
-                        tracing::warn!("wzp-native dlopen failed: {e}");
+                        tracing::warn!("wzp-native init failed: {e}");
                     }
                 }
             }

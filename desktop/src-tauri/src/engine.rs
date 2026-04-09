@@ -14,23 +14,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::Mutex;
-// tracing is used heavily inside the desktop CallEngine::start body but never
-// from the 6-line Android stub — keep it gated to avoid an unused_imports
-// warning on Android.
-#[cfg(not(target_os = "android"))]
 use tracing::{error, info};
 
 // CPAL audio I/O is only available on desktop (wzp-client's `audio` feature).
 #[cfg(not(target_os = "android"))]
 use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 
-// call / CallEncoder / CallConfig are platform-independent (pure Rust codec
-// plumbing) but we only use them from the non-Android CallEngine::start body.
-#[cfg(not(target_os = "android"))]
+// Codec + handshake pipelines are platform-independent Rust (no CPAL
+// dependency) so they're available from wzp-client on both desktop and
+// Android (where wzp-client is pulled in with default-features=false).
 use wzp_client::call::{CallConfig, CallEncoder};
 
-// wzp_proto types are platform-independent and referenced from
-// resolve_quality() which is compiled on every platform.
 use wzp_proto::{CodecId, MediaTransport, QualityProfile};
 
 const FRAME_SAMPLES_40MS: usize = 1920;
@@ -100,23 +94,273 @@ pub struct CallEngine {
 }
 
 impl CallEngine {
-    /// Android stub — the real audio pipeline depends on wzp_client's
-    /// CPAL-backed audio_io module, which isn't available here. Returns an
-    /// error so the `connect` Tauri command fails cleanly. We'll replace
-    /// this in a later step with an Oboe-backed implementation.
+    /// Android engine path — uses the standalone `wzp-native` cdylib
+    /// (loaded at startup via `crate::wzp_native::init()`) for Oboe-backed
+    /// capture and playout instead of CPAL. Mirrors the desktop send/recv
+    /// task structure otherwise.
     #[cfg(target_os = "android")]
     pub async fn start<F>(
-        _relay: String,
-        _room: String,
-        _alias: String,
+        relay: String,
+        room: String,
+        alias: String,
         _os_aec: bool,
-        _quality: String,
-        _event_cb: F,
+        quality: String,
+        event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
-        Err(anyhow::anyhow!("audio engine not yet wired on Android (step C)"))
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let relay_addr: SocketAddr = relay.parse()?;
+
+        // Identity via shared helper (uses Tauri path().app_data_dir()).
+        let seed = crate::load_or_create_seed()
+            .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
+        let fp = seed.derive_identity().public_identity().fingerprint;
+        let fingerprint = fp.to_string();
+        info!(%fp, "identity loaded");
+
+        // QUIC transport + handshake.
+        let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+        let client_config = wzp_transport::client_config();
+        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config).await?;
+        let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
+
+        let _session = wzp_client::handshake::perform_handshake(
+            &*transport,
+            &seed.0,
+            Some(&alias),
+        )
+        .await?;
+        info!("connected to relay, handshake complete");
+        event_cb("connected", &format!("joined room {room}"));
+
+        // Oboe audio via the wzp-native cdylib that was dlopen'd at
+        // startup. `wzp_native::audio_start()` brings up the capture +
+        // playout streams; send/recv tasks below pull/push PCM through
+        // the extern "C" bridge rings.
+        if !crate::wzp_native::is_loaded() {
+            return Err(anyhow::anyhow!(
+                "wzp-native not loaded — dlopen failed at startup"
+            ));
+        }
+        if let Err(code) = crate::wzp_native::audio_start() {
+            return Err(anyhow::anyhow!("wzp_native_audio_start failed: code {code}"));
+        }
+        info!("wzp-native audio started");
+
+        let running = Arc::new(AtomicBool::new(true));
+        let mic_muted = Arc::new(AtomicBool::new(false));
+        let spk_muted = Arc::new(AtomicBool::new(false));
+        let participants: Arc<Mutex<Vec<ParticipantInfo>>> = Arc::new(Mutex::new(vec![]));
+        let frames_sent = Arc::new(AtomicU64::new(0));
+        let frames_received = Arc::new(AtomicU64::new(0));
+        let audio_level = Arc::new(AtomicU32::new(0));
+        let tx_codec = Arc::new(Mutex::new(String::new()));
+        let rx_codec = Arc::new(Mutex::new(String::new()));
+
+        // Send task — drain Oboe capture ring, Opus-encode, push to transport.
+        let send_t = transport.clone();
+        let send_r = running.clone();
+        let send_mic = mic_muted.clone();
+        let send_fs = frames_sent.clone();
+        let send_level = audio_level.clone();
+        let send_drops = Arc::new(AtomicU64::new(0));
+        let send_quality = quality.clone();
+        let send_tx_codec = tx_codec.clone();
+        tokio::spawn(async move {
+            let profile = resolve_quality(&send_quality);
+            let config = match profile {
+                Some(p) => CallConfig {
+                    noise_suppression: false,
+                    suppression_enabled: false,
+                    ..CallConfig::from_profile(p)
+                },
+                None => CallConfig {
+                    noise_suppression: false,
+                    suppression_enabled: false,
+                    ..CallConfig::default()
+                },
+            };
+            let frame_samples = (config.profile.frame_duration_ms as usize) * 48;
+            info!(codec = ?config.profile.codec, frame_samples, "send task starting (android/oboe)");
+            *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
+            let mut encoder = CallEncoder::new(&config);
+            encoder.set_aec_enabled(false);
+            let mut buf = vec![0i16; frame_samples];
+
+            loop {
+                if !send_r.load(Ordering::Relaxed) {
+                    break;
+                }
+                // wzp-native doesn't expose `available()`, so we just try
+                // to read a full frame and sleep briefly if the ring is
+                // short. Oboe's capture callback fills at a steady rate
+                // so in steady state this spins once per frame.
+                let read = crate::wzp_native::audio_read_capture(&mut buf);
+                if read < frame_samples {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    continue;
+                }
+
+                // RMS for UI meter
+                let sum_sq: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
+                let rms = (sum_sq / buf.len() as f64).sqrt() as u32;
+                send_level.store(rms, Ordering::Relaxed);
+
+                if send_mic.load(Ordering::Relaxed) {
+                    buf.fill(0);
+                }
+                match encoder.encode_frame(&buf) {
+                    Ok(pkts) => {
+                        for pkt in &pkts {
+                            if let Err(e) = send_t.send_media(pkt).await {
+                                send_drops.fetch_add(1, Ordering::Relaxed);
+                                if send_drops.load(Ordering::Relaxed) <= 3 {
+                                    tracing::warn!("send_media error (dropping packet): {e}");
+                                }
+                            }
+                        }
+                        send_fs.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => error!("encode: {e}"),
+                }
+            }
+        });
+
+        // Recv task — decode incoming packets, push PCM into Oboe playout.
+        let recv_t = transport.clone();
+        let recv_r = running.clone();
+        let recv_spk = spk_muted.clone();
+        let recv_fr = frames_received.clone();
+        let recv_rx_codec = rx_codec.clone();
+        tokio::spawn(async move {
+            let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
+            let mut decoder = wzp_codec::create_decoder(initial_profile);
+            let mut current_codec = initial_profile.codec;
+            let mut agc = wzp_codec::AutoGainControl::new();
+            let mut pcm = vec![0i16; FRAME_SAMPLES_40MS];
+
+            loop {
+                if !recv_r.load(Ordering::Relaxed) {
+                    break;
+                }
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    recv_t.recv_media(),
+                )
+                .await
+                {
+                    Ok(Ok(Some(pkt))) => {
+                        if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
+                            {
+                                let mut rx = recv_rx_codec.lock().await;
+                                let codec_name = format!("{:?}", pkt.header.codec_id);
+                                if *rx != codec_name { *rx = codec_name; }
+                            }
+                            if pkt.header.codec_id != current_codec {
+                                let new_profile = match pkt.header.codec_id {
+                                    CodecId::Opus24k => QualityProfile::GOOD,
+                                    CodecId::Opus6k => QualityProfile::DEGRADED,
+                                    CodecId::Opus32k => QualityProfile::STUDIO_32K,
+                                    CodecId::Opus48k => QualityProfile::STUDIO_48K,
+                                    CodecId::Opus64k => QualityProfile::STUDIO_64K,
+                                    CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
+                                    CodecId::Codec2_3200 => QualityProfile {
+                                        codec: CodecId::Codec2_3200,
+                                        fec_ratio: 0.5, frame_duration_ms: 20, frames_per_block: 5,
+                                    },
+                                    other => QualityProfile { codec: other, ..QualityProfile::GOOD },
+                                };
+                                info!(from = ?current_codec, to = ?pkt.header.codec_id, "recv: switching decoder");
+                                let _ = decoder.set_profile(new_profile);
+                                current_codec = pkt.header.codec_id;
+                            }
+                            if let Ok(n) = decoder.decode(&pkt.payload, &mut pcm) {
+                                agc.process_frame(&mut pcm[..n]);
+                                if !recv_spk.load(Ordering::Relaxed) {
+                                    crate::wzp_native::audio_write_playout(&pcm[..n]);
+                                }
+                            }
+                        }
+                        recv_fr.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        if msg.contains("closed") || msg.contains("reset") {
+                            error!("recv fatal: {e}");
+                            break;
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+
+        // Signal task (presence — same shape as desktop).
+        let sig_t = transport.clone();
+        let sig_r = running.clone();
+        let sig_p = participants.clone();
+        let event_cb = Arc::new(event_cb);
+        let sig_cb = event_cb.clone();
+        tokio::spawn(async move {
+            loop {
+                if !sig_r.load(Ordering::Relaxed) {
+                    break;
+                }
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    sig_t.recv_signal(),
+                )
+                .await
+                {
+                    Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate {
+                        participants: parts,
+                        ..
+                    }))) => {
+                        let mut seen = std::collections::HashSet::new();
+                        let unique: Vec<ParticipantInfo> = parts
+                            .into_iter()
+                            .filter(|p| seen.insert((p.fingerprint.clone(), p.alias.clone())))
+                            .map(|p| ParticipantInfo {
+                                fingerprint: p.fingerprint,
+                                alias: p.alias,
+                                relay_label: p.relay_label,
+                            })
+                            .collect();
+                        let count = unique.len();
+                        *sig_p.lock().await = unique;
+                        sig_cb("room-update", &format!("{count} participants"));
+                    }
+                    Ok(Ok(Some(_))) => {}
+                    Ok(Ok(None)) => break,
+                    Ok(Err(_)) => break,
+                    Err(_) => {}
+                }
+            }
+        });
+
+        Ok(Self {
+            running,
+            mic_muted,
+            spk_muted,
+            participants,
+            frames_sent,
+            frames_received,
+            audio_level,
+            transport,
+            start_time: Instant::now(),
+            fingerprint,
+            tx_codec,
+            rx_codec,
+            // No CPAL / VPIO handle to keep alive on Android — wzp_native
+            // is a static dlopen'd library, the audio streams live inside
+            // the standalone cdylib's process-global singleton.
+            _audio_handle: SyncWrapper(Box::new(())),
+        })
     }
 
     #[cfg(not(target_os = "android"))]
