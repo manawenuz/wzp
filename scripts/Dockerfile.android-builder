@@ -74,6 +74,30 @@ RUN yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/nu
         "platform-tools" \
         2>&1 | grep -v '^\[' > /dev/null
 
+# Work around the API-24 libc.a stub in the NDK. Any C++ static lib we
+# link into libwzp_desktop_lib.so (e.g. the Oboe audio bridge) pulls in
+# bionic's static pthread_create from API-24 libc.a via libc++_shared,
+# and that pthread_create crashes at __init_tcb+4 when called from a
+# .so loaded via dlopen (the static stub expects libc init state that
+# only exists for main executables). API-26 has the proper runtime
+# bindings. Tauri-cli hard-codes aarch64-linux-android24-clang as the
+# linker and ignores .cargo/config.toml overrides, so the only sure
+# fix is to replace the NDK's ${abi}24-clang binary itself with a
+# shim that exec()s the ${abi}26-clang equivalent. Applies to all four
+# ABIs × {clang, clang++}. The legacy wzp-android crate works without
+# this because cargo-ndk honours a crate-level linker override; the
+# shim is the minimal targeted fix for the cargo-tauri build path.
+# Added as Option 3 for the incremental Step E regression (commit 4250f1b).
+RUN set -eux; \
+    BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin; \
+    for abi in aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android; do \
+        for suffix in clang clang++; do \
+            mv "$BIN/${abi}24-${suffix}" "$BIN/${abi}24-${suffix}.orig"; \
+            printf '#!/bin/sh\nexec "%s/%s26-%s" "$@"\n' "$BIN" "$abi" "$suffix" > "$BIN/${abi}24-${suffix}"; \
+            chmod +x "$BIN/${abi}24-${suffix}"; \
+        done; \
+    done
+
 # Make SDK world-readable so builder user can access it
 RUN chmod -R a+rX $ANDROID_HOME
 
