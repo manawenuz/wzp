@@ -243,8 +243,17 @@ async fn connect(
         return Err("already connected".into());
     }
 
+    // If we previously opened a quinn::Endpoint for the signaling connection
+    // (direct-call path), reuse it so the media connection shares the same
+    // UDP socket. This side-steps the Android issue where a second
+    // quinn::Endpoint silently hangs in the QUIC handshake.
+    let reuse_endpoint = state.signal.lock().await.endpoint.clone();
+    if reuse_endpoint.is_some() {
+        tracing::info!("connect: reusing existing signal endpoint for media connection");
+    }
+
     let app_clone = app.clone();
-    match CallEngine::start(relay, room, alias, os_aec, quality, move |event_kind, message| {
+    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, move |event_kind, message| {
         let _ = app_clone.emit(
             "call-event",
             CallEvent {
@@ -341,6 +350,11 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
 
 struct SignalState {
     transport: Option<Arc<wzp_transport::QuinnTransport>>,
+    /// The quinn::Endpoint backing the signal connection. Reused for the
+    /// media connection when a direct call is accepted — Android phones
+    /// silently drop packets from a second quinn::Endpoint to the same
+    /// relay, so every call after register_signal MUST share this socket.
+    endpoint: Option<wzp_transport::Endpoint>,
     fingerprint: String,
     signal_status: String,
     incoming_call_id: Option<String>,
@@ -380,7 +394,7 @@ async fn register_signal(
         _ => return Err("registration failed".into()),
     }
 
-    { let mut sig = state.signal.lock().await; sig.transport = Some(transport.clone()); sig.fingerprint = fp.clone(); sig.signal_status = "registered".into(); }
+    { let mut sig = state.signal.lock().await; sig.transport = Some(transport.clone()); sig.endpoint = Some(endpoint.clone()); sig.fingerprint = fp.clone(); sig.signal_status = "registered".into(); }
 
     tracing::info!(%fp, "signal registered, spawning recv loop");
     let signal_state = Arc::clone(&state.signal);
@@ -483,7 +497,7 @@ pub fn run() {
     let state = Arc::new(AppState {
         engine: Mutex::new(None),
         signal: Arc::new(Mutex::new(SignalState {
-            transport: None, fingerprint: String::new(), signal_status: "idle".into(),
+            transport: None, endpoint: None, fingerprint: String::new(), signal_status: "idle".into(),
             incoming_call_id: None, incoming_caller_fp: None, incoming_caller_alias: None,
         })),
     });

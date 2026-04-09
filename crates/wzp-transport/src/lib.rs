@@ -27,3 +27,8 @@ pub use connection::{accept, connect, create_endpoint};
 pub use path_monitor::PathMonitor;
 pub use quic::QuinnTransport;
 pub use wzp_proto::{MediaTransport, PathQuality, TransportError};
+
+// Re-export the quinn Endpoint type so downstream crates (wzp-desktop) can
+// thread a shared endpoint between signaling and media connections without
+// needing to depend on quinn directly.
+pub use quinn::Endpoint;

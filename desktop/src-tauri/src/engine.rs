@@ -105,12 +105,13 @@ impl CallEngine {
         alias: String,
         _os_aec: bool,
         quality: String,
+        reuse_endpoint: Option<wzp_transport::Endpoint>,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
-        info!(%relay, %room, %alias, %quality, "CallEngine::start (android) invoked");
+        info!(%relay, %room, %alias, %quality, has_reuse = reuse_endpoint.is_some(), "CallEngine::start (android) invoked");
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
@@ -124,14 +125,38 @@ impl CallEngine {
         info!(%fp, "identity loaded");
 
         // QUIC transport + handshake.
-        let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let endpoint = wzp_transport::create_endpoint(bind_addr, None)
-            .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
-        info!("endpoint created, dialing relay");
+        //
+        // If a `reuse_endpoint` was passed in (the direct-call path, where we
+        // already opened a quinn::Endpoint for the signal connection), reuse
+        // it: a second quinn::Endpoint on Android silently fails to complete
+        // the QUIC handshake against the same relay. Reusing the existing
+        // socket lets quinn multiplex the signal + media connections on one
+        // UDP port.
+        let endpoint = if let Some(ep) = reuse_endpoint {
+            info!(local_addr = ?ep.local_addr().ok(), "reusing signal endpoint for media connection");
+            ep
+        } else {
+            let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            let ep = wzp_transport::create_endpoint(bind_addr, None)
+                .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+            info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
+            ep
+        };
         let client_config = wzp_transport::client_config();
-        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config)
-            .await
-            .map_err(|e| { error!("connect failed: {e}"); e })?;
+        let conn = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            wzp_transport::connect(&endpoint, relay_addr, &room, client_config),
+        ).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                error!("connect failed: {e}");
+                return Err(e.into());
+            }
+            Err(_) => {
+                error!("connect TIMED OUT after 10s — QUIC handshake never completed. Relay may be unreachable from this endpoint.");
+                return Err(anyhow::anyhow!("QUIC connect timeout (10s)"));
+            }
+        };
         info!("QUIC connection established, performing handshake");
         let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
 
@@ -378,6 +403,7 @@ impl CallEngine {
         alias: String,
         _os_aec: bool,
         quality: String,
+        reuse_endpoint: Option<wzp_transport::Endpoint>,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
@@ -418,9 +444,15 @@ impl CallEngine {
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
 
-        // Connect
-        let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+        // Connect — reuse the signal endpoint if the direct-call path gave us
+        // one, otherwise create a fresh one (SFU room join path).
+        let endpoint = if let Some(ep) = reuse_endpoint {
+            info!("reusing signal endpoint for media connection");
+            ep
+        } else {
+            let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            wzp_transport::create_endpoint(bind_addr, None)?
+        };
         let client_config = wzp_transport::client_config();
         let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config).await?;
         let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
