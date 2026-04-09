@@ -402,7 +402,7 @@ unsafe fn signal_ref(handle: jlong) -> &'static SignalHandle {
 }
 
 /// Connect to relay for signaling. Returns handle (jlong) or 0 on error.
-/// MUST be called from a thread with sufficient stack (8MB).
+/// Blocks up to 10s waiting for the internal signal thread to connect.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalConnect<'a>(
     mut env: JNIEnv<'a>,
@@ -413,12 +413,24 @@ pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalConn
     let relay: String = env.get_string(&relay_j).map(|s| s.into()).unwrap_or_default();
     let seed: String = env.get_string(&seed_j).map(|s| s.into()).unwrap_or_default();
 
-    // start() spawns its own thread internally — connect + register + recv loop
-    // all run on ONE thread with ONE runtime to avoid TLS conflicts.
+    // start() connects + registers synchronously (blocks briefly).
+    // Then we spawn run() on a thread for the recv loop.
     match crate::signal_mgr::SignalManager::start(&relay, &seed) {
         Ok(mgr) => {
             let handle = Box::new(SignalHandle { mgr });
-            Box::into_raw(handle) as jlong
+            let raw = Box::into_raw(handle);
+
+            // Spawn recv loop on a small thread (no crypto init, just recv)
+            let recv_ref: &'static SignalHandle = unsafe { &*raw };
+            std::thread::Builder::new()
+                .name("wzp-signal-recv".into())
+                .stack_size(2 * 1024 * 1024) // 2MB is enough for recv-only
+                .spawn(move || {
+                    recv_ref.mgr.run();
+                })
+                .ok();
+
+            raw as jlong
         }
         Err(e) => {
             error!("signal connect failed: {e}");
