@@ -1,30 +1,19 @@
-// cpp_smoke.cpp — minimal C++ test that exercises the libc++_shared
-// features Oboe uses (std::thread, std::mutex, std::atomic) without being
-// Oboe itself.
+// cpp_smoke.cpp — Step E.2 minimal stub: std::atomic only, no thread/mutex.
 //
-// Built via cc::Build::new().cpp(true).cpp_link_stdlib("c++_shared") and
-// replaces the full Oboe bridge compile during the Step E bisection of
-// the __init_tcb+4 crash. The function is `extern "C"` and exported so
-// the linker can't dead-code-eliminate it — the std::thread /
-// std::lock_guard / std::atomic::fetch_add uses pull in libc++'s
-// bindings to bionic pthread, matching what Oboe would force.
+// Linked via cpp_link_stdlib("c++_shared") so the resulting .so still carries
+// a NEEDED entry for libc++_shared.so exactly like the Oboe build would.
 //
-// The function is NEVER called from Rust. If we crash anyway, the trigger
-// is just *linking* this code in. If it launches cleanly, Oboe itself
-// (size, static ctors, specific headers) is the culprit.
+// Same extern "C" export as E.4 so the linker CAN pull the symbol in if it
+// chooses to, but since Rust never calls it, it'll typically be dead-stripped.
+// The diagnostic value is in the build.rs link directives this compile
+// produces, not in the file's actual code being linked.
 
 #include <atomic>
-#include <mutex>
-#include <thread>
 
 namespace {
     std::atomic<int> g_counter{0};
-    std::mutex g_mutex;
 }
 
 extern "C" int wzp_cpp_smoke(void) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::thread t([]() { g_counter.fetch_add(1); });
-    t.join();
-    return g_counter.load();
+    return g_counter.fetch_add(1);
 }
