@@ -45,6 +45,14 @@ wzp-transport = { path = "../../crates/wzp-transport" }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 
+# Step B: depend on wzp-client on Android WITHOUT the audio/vpio features,
+# so we pull in only the platform-independent modules (call, handshake,
+# audio_ring, codec bindings). Deliberately no imports in lib.rs yet — we
+# only want to verify that compiling + linking these crates on android
+# doesn't regress the working build.
+[target.'cfg(target_os = "android")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", default-features = false }
+
 # Platform-specific
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-rs = "0.11"
