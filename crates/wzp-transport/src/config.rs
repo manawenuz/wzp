@@ -6,20 +6,74 @@ use std::time::Duration;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
 
-/// Create a server configuration with a self-signed certificate (for testing).
+/// Create a server configuration with a self-signed certificate (random keypair).
 ///
-/// Tunes QUIC transport parameters for lossy VoIP:
-/// - 30s idle timeout
-/// - 5s keep-alive interval
-/// - DATAGRAM extension enabled
-/// - Conservative flow control for bandwidth-constrained links
+/// The certificate changes on every call. Use `server_config_from_seed` for
+/// a deterministic certificate that survives relay restarts.
 pub fn server_config() -> (quinn::ServerConfig, Vec<u8>) {
     let cert_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("failed to generate self-signed cert");
     let cert_der = rustls::pki_types::CertificateDer::from(cert_key.cert);
     let key_der =
         rustls::pki_types::PrivateKeyDer::try_from(cert_key.key_pair.serialize_der()).unwrap();
+    build_server_config(cert_der, key_der)
+}
 
+/// Create a server configuration with a deterministic self-signed certificate
+/// derived from a 32-byte seed. Same seed = same cert = same TLS fingerprint.
+pub fn server_config_from_seed(seed: &[u8; 32]) -> (quinn::ServerConfig, Vec<u8>) {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::SigningKey;
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    // Derive Ed25519 key bytes from seed via HKDF
+    let hk = Hkdf::<Sha256>::new(None, seed);
+    let mut ed_bytes = [0u8; 32];
+    hk.expand(b"wzp-tls-ed25519", &mut ed_bytes)
+        .expect("HKDF expand failed");
+
+    // Create Ed25519 signing key and export as PKCS8 DER
+    let signing_key = SigningKey::from_bytes(&ed_bytes);
+    let pkcs8_doc = signing_key.to_pkcs8_der()
+        .expect("failed to encode Ed25519 key as PKCS8");
+    let key_der_for_rcgen = rustls::pki_types::PrivateKeyDer::try_from(pkcs8_doc.as_bytes().to_vec())
+        .expect("failed to wrap PKCS8 DER");
+
+    // Create rcgen KeyPair from DER
+    let key_pair = rcgen::KeyPair::from_der_and_sign_algo(
+        &key_der_for_rcgen,
+        &rcgen::PKCS_ED25519,
+    )
+    .expect("failed to create KeyPair from seed-derived Ed25519 key");
+
+    // Build self-signed cert with this deterministic keypair
+    let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .expect("failed to create CertificateParams");
+    let cert = params.self_signed(&key_pair).expect("failed to self-sign cert");
+    let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+    let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
+        .expect("failed to serialize key DER");
+
+    build_server_config(cert_der, key_der)
+}
+
+/// Compute a hex-formatted SHA-256 fingerprint of a DER-encoded certificate.
+///
+/// Format: `xx:xx:xx:xx:...` (32 bytes = 64 hex chars with colons).
+pub fn tls_fingerprint(cert_der: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let hash = Sha256::digest(cert_der);
+    hash.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn build_server_config(
+    cert_der: rustls::pki_types::CertificateDer<'static>,
+    key_der: rustls::pki_types::PrivateKeyDer<'static>,
+) -> (quinn::ServerConfig, Vec<u8>) {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der.clone()], key_der)

@@ -33,7 +33,38 @@
             </label>
             <button id="settings-btn-home" class="icon-btn" title="Settings (Cmd+,)">&#9881;</button>
           </div>
-          <button id="connect-btn" class="primary">Connect</button>
+          <!-- Mode toggle -->
+          <div class="mode-toggle" style="display:flex;gap:8px;margin-bottom:8px;">
+            <button id="mode-room" class="mode-btn active" style="flex:1">Room</button>
+            <button id="mode-direct" class="mode-btn" style="flex:1">Direct Call</button>
+          </div>
+
+          <!-- Room mode (default) -->
+          <div id="room-mode">
+            <button id="connect-btn" class="primary">Connect</button>
+          </div>
+
+          <!-- Direct call mode -->
+          <div id="direct-mode" class="hidden">
+            <button id="register-btn" class="primary" style="background:#2196F3">Register on Relay</button>
+            <div id="direct-registered" class="hidden" style="margin-top:12px">
+              <p style="color:var(--green);font-size:13px">&#x2705; Registered — waiting for calls</p>
+              <div id="incoming-call-panel" class="hidden" style="background:#1B5E20;padding:12px;border-radius:8px;margin:8px 0">
+                <p style="font-weight:bold;margin:0 0 4px 0">Incoming Call</p>
+                <p id="incoming-caller" style="font-size:12px;opacity:0.8;margin:0 0 8px 0">From: unknown</p>
+                <div style="display:flex;gap:8px">
+                  <button id="accept-call-btn" style="flex:1;background:var(--green);color:white;border:none;padding:8px;border-radius:6px;cursor:pointer">Accept</button>
+                  <button id="reject-call-btn" style="flex:1;background:var(--red);color:white;border:none;padding:8px;border-radius:6px;cursor:pointer">Reject</button>
+                </div>
+              </div>
+              <label style="margin-top:8px">Call by fingerprint
+                <input id="target-fp" type="text" placeholder="xxxx:xxxx:xxxx:..." />
+              </label>
+              <button id="call-btn" class="primary" style="margin-top:8px">Call</button>
+              <p id="call-status-text" style="color:var(--yellow);font-size:13px;margin-top:4px"></p>
+            </div>
+          </div>
+
           <p id="connect-error" class="error"></p>
         </div>
         <div class="identity-info">

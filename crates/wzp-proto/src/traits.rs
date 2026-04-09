@@ -132,6 +132,14 @@ pub trait CryptoSession: Send + Sync {
     fn overhead(&self) -> usize {
         16 // ChaCha20-Poly1305 tag
     }
+
+    /// Short Authentication String (SAS) — 4-digit code for verbal verification.
+    /// Both peers derive the same code from the shared secret + identity keys.
+    /// If a MITM relay is intercepting, the codes will differ.
+    /// Returns None if SAS was not computed (e.g., relay-side sessions).
+    fn sas_code(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Key exchange using the Warzone identity model.

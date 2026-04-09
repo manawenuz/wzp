@@ -16,6 +16,13 @@ pub struct RelayMetrics {
     pub bytes_forwarded: IntCounter,
     pub auth_attempts: IntCounterVec,
     pub handshake_duration: Histogram,
+    // Federation metrics
+    pub federation_peer_status: IntGaugeVec,
+    pub federation_peer_rtt_ms: GaugeVec,
+    pub federation_packets_forwarded: IntCounterVec,
+    pub federation_packets_deduped: IntCounter,
+    pub federation_packets_rate_limited: IntCounter,
+    pub federation_active_rooms: IntGauge,
     // Per-session metrics
     pub session_buffer_depth: IntGaugeVec,
     pub session_loss_pct: GaugeVec,
@@ -59,6 +66,28 @@ impl RelayMetrics {
             .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]),
         )
         .expect("metric");
+
+        let federation_peer_status = IntGaugeVec::new(
+            Opts::new("wzp_federation_peer_status", "Peer connection status (0=disconnected, 1=connected)"),
+            &["peer"],
+        ).expect("metric");
+        let federation_peer_rtt_ms = GaugeVec::new(
+            Opts::new("wzp_federation_peer_rtt_ms", "QUIC RTT to federated peer in milliseconds"),
+            &["peer"],
+        ).expect("metric");
+        let federation_packets_forwarded = IntCounterVec::new(
+            Opts::new("wzp_federation_packets_forwarded_total", "Packets forwarded to/from federated peers"),
+            &["peer", "direction"],
+        ).expect("metric");
+        let federation_packets_deduped = IntCounter::with_opts(
+            Opts::new("wzp_federation_packets_deduped_total", "Duplicate federation packets dropped"),
+        ).expect("metric");
+        let federation_packets_rate_limited = IntCounter::with_opts(
+            Opts::new("wzp_federation_packets_rate_limited_total", "Federation packets dropped by rate limiter"),
+        ).expect("metric");
+        let federation_active_rooms = IntGauge::with_opts(
+            Opts::new("wzp_federation_active_rooms", "Number of federated rooms currently active"),
+        ).expect("metric");
 
         let session_buffer_depth = IntGaugeVec::new(
             Opts::new(
@@ -107,6 +136,12 @@ impl RelayMetrics {
         registry.register(Box::new(bytes_forwarded.clone())).expect("register");
         registry.register(Box::new(auth_attempts.clone())).expect("register");
         registry.register(Box::new(handshake_duration.clone())).expect("register");
+        registry.register(Box::new(federation_peer_status.clone())).expect("register");
+        registry.register(Box::new(federation_peer_rtt_ms.clone())).expect("register");
+        registry.register(Box::new(federation_packets_forwarded.clone())).expect("register");
+        registry.register(Box::new(federation_packets_deduped.clone())).expect("register");
+        registry.register(Box::new(federation_packets_rate_limited.clone())).expect("register");
+        registry.register(Box::new(federation_active_rooms.clone())).expect("register");
         registry.register(Box::new(session_buffer_depth.clone())).expect("register");
         registry.register(Box::new(session_loss_pct.clone())).expect("register");
         registry.register(Box::new(session_rtt_ms.clone())).expect("register");
@@ -120,6 +155,12 @@ impl RelayMetrics {
             bytes_forwarded,
             auth_attempts,
             handshake_duration,
+            federation_peer_status,
+            federation_peer_rtt_ms,
+            federation_packets_forwarded,
+            federation_packets_deduped,
+            federation_packets_rate_limited,
+            federation_active_rooms,
             session_buffer_depth,
             session_loss_pct,
             session_rtt_ms,

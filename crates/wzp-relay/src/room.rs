@@ -18,6 +18,38 @@ use wzp_proto::MediaTransport;
 use crate::metrics::RelayMetrics;
 use crate::trunk::TrunkBatcher;
 
+/// Debug tap: logs packet metadata for matching rooms.
+#[derive(Clone)]
+pub struct DebugTap {
+    /// Room name filter ("*" = all rooms, or specific room name/hash).
+    pub room_filter: String,
+}
+
+impl DebugTap {
+    pub fn matches(&self, room_name: &str) -> bool {
+        self.room_filter == "*" || self.room_filter == room_name
+    }
+
+    pub fn log_packet(&self, room: &str, dir: &str, addr: &std::net::SocketAddr, pkt: &wzp_proto::MediaPacket, fan_out: usize) {
+        let h = &pkt.header;
+        info!(
+            target: "debug_tap",
+            room = %room,
+            dir = dir,
+            addr = %addr,
+            seq = h.seq,
+            codec = ?h.codec_id,
+            ts = h.timestamp,
+            fec_block = h.fec_block,
+            fec_sym = h.fec_symbol,
+            repair = h.is_repair,
+            len = pkt.payload.len(),
+            fan_out,
+            "TAP"
+        );
+    }
+}
+
 /// Unique participant ID within a room.
 pub type ParticipantId = u64;
 
@@ -25,6 +57,22 @@ static NEXT_PARTICIPANT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_id() -> ParticipantId {
     NEXT_PARTICIPANT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Events emitted by RoomManager for federation to observe.
+#[derive(Clone, Debug)]
+pub enum RoomEvent {
+    /// First local participant joined this room.
+    LocalJoin { room: String },
+    /// Last local participant left this room.
+    LocalLeave { room: String },
+}
+
+/// Outbound federation media from a local participant.
+pub struct FederationMediaOut {
+    pub room_name: String,
+    pub room_hash: [u8; 8],
+    pub data: Bytes,
 }
 
 /// How to send data to a participant — either via QUIC transport or WebSocket channel.
@@ -132,6 +180,7 @@ impl Room {
             .map(|p| wzp_proto::packet::RoomParticipant {
                 fingerprint: p.fingerprint.clone().unwrap_or_default(),
                 alias: p.alias.clone(),
+                relay_label: None, // local participant
             })
             .collect()
     }
@@ -139,17 +188,6 @@ impl Room {
     /// Get all senders (for broadcasting to everyone including the joiner).
     fn all_senders(&self) -> Vec<ParticipantSender> {
         self.participants.iter().map(|p| p.sender.clone()).collect()
-    }
-
-    /// Update a participant's alias. Returns true if the participant was found.
-    fn set_alias(&mut self, id: ParticipantId, alias: String) -> bool {
-        if let Some(p) = self.participants.iter_mut().find(|p| p.id == id) {
-            info!(participant = id, %alias, "alias updated");
-            p.alias = Some(alias);
-            true
-        } else {
-            false
-        }
     }
 
     fn is_empty(&self) -> bool {
@@ -168,22 +206,33 @@ pub struct RoomManager {
     /// When `None`, rooms are open (no auth mode). When `Some`, only listed
     /// fingerprints can join the corresponding room.
     acl: Option<HashMap<String, HashSet<String>>>,
+    /// Channel for room lifecycle events (federation subscribes).
+    event_tx: tokio::sync::broadcast::Sender<RoomEvent>,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             rooms: HashMap::new(),
             acl: None,
+            event_tx,
         }
     }
 
     /// Create a room manager with ACL enforcement enabled.
     pub fn with_acl() -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             rooms: HashMap::new(),
             acl: Some(HashMap::new()),
+            event_tx,
         }
+    }
+
+    /// Subscribe to room lifecycle events (for federation).
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<RoomEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Grant a fingerprint access to a room.
@@ -224,8 +273,13 @@ impl RoomManager {
             warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
             return Err("not authorized for this room".to_string());
         }
+        let was_empty = !self.rooms.contains_key(room_name)
+            || self.rooms.get(room_name).map_or(true, |r| r.is_empty());
         let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
         let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()));
+        if was_empty {
+            let _ = self.event_tx.send(RoomEvent::LocalJoin { room: room_name.to_string() });
+        }
         let update = wzp_proto::SignalMessage::RoomUpdate {
             count: room.len() as u32,
             participants: room.participant_list(),
@@ -246,12 +300,34 @@ impl RoomManager {
         Ok(id)
     }
 
+    /// Get list of active room names.
+    pub fn active_rooms(&self) -> Vec<String> {
+        self.rooms.keys().cloned().collect()
+    }
+
+    /// Get participant list for a room (fingerprint + alias).
+    pub fn local_participant_list(&self, room_name: &str) -> Vec<wzp_proto::packet::RoomParticipant> {
+        self.rooms.get(room_name)
+            .map(|room| room.participant_list())
+            .unwrap_or_default()
+    }
+
+    /// Get all senders for participants in a room (for federation inbound media delivery).
+    pub fn local_senders(&self, room_name: &str) -> Vec<ParticipantSender> {
+        self.rooms.get(room_name)
+            .map(|room| room.participants.iter()
+                .map(|p| p.sender.clone())
+                .collect())
+            .unwrap_or_default()
+    }
+
     /// Leave a room. Returns (room_update_msg, remaining_senders) for broadcasting, or None if room is now empty.
     pub fn leave(&mut self, room_name: &str, participant_id: ParticipantId) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
         if let Some(room) = self.rooms.get_mut(room_name) {
             room.remove(participant_id);
             if room.is_empty() {
                 self.rooms.remove(room_name);
+                let _ = self.event_tx.send(RoomEvent::LocalLeave { room: room_name.to_string() });
                 info!(room = room_name, "room closed (empty)");
                 return None;
             }
@@ -264,26 +340,6 @@ impl RoomManager {
         } else {
             None
         }
-    }
-
-    /// Update a participant's alias and return a RoomUpdate + senders for broadcasting.
-    pub fn set_alias(
-        &mut self,
-        room_name: &str,
-        participant_id: ParticipantId,
-        alias: String,
-    ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
-        if let Some(room) = self.rooms.get_mut(room_name) {
-            if room.set_alias(participant_id, alias) {
-                let update = wzp_proto::SignalMessage::RoomUpdate {
-                    count: room.len() as u32,
-                    participants: room.participant_list(),
-                };
-                let senders = room.all_senders();
-                return Some((update, senders));
-            }
-        }
-        None
     }
 
     /// Get senders for all OTHER participants in a room.
@@ -381,6 +437,9 @@ pub async fn run_participant(
     metrics: Arc<RelayMetrics>,
     session_id: &str,
     trunking_enabled: bool,
+    debug_tap: Option<DebugTap>,
+    federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
+    federation_room_hash: Option<[u8; 8]>,
 ) {
     if trunking_enabled {
         run_participant_trunked(
@@ -389,7 +448,7 @@ pub async fn run_participant(
         .await;
     } else {
         run_participant_plain(
-            room_mgr, room_name, participant_id, transport, metrics, session_id,
+            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap, federation_tx, federation_room_hash,
         )
         .await;
     }
@@ -403,168 +462,164 @@ async fn run_participant_plain(
     transport: Arc<wzp_transport::QuinnTransport>,
     metrics: Arc<RelayMetrics>,
     session_id: &str,
+    debug_tap: Option<DebugTap>,
+    federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
+    federation_room_hash: Option<[u8; 8]>,
 ) {
     let addr = transport.connection().remote_address();
+    let mut packets_forwarded = 0u64;
+    let mut last_recv_instant = std::time::Instant::now();
+    let mut max_recv_gap_ms = 0u64;
+    let mut max_forward_ms = 0u64;
+    let mut send_errors = 0u64;
+    let mut last_log_instant = std::time::Instant::now();
 
-    // Media forwarding task (with debug logging from Android fixes)
-    let media_room_mgr = room_mgr.clone();
-    let media_room_name = room_name.clone();
-    let media_transport = transport.clone();
-    let media_metrics = metrics.clone();
-    let media_session_id = session_id.to_string();
-    let media_task = async move {
-        let mut packets_forwarded = 0u64;
-        let mut last_recv_instant = std::time::Instant::now();
-        let mut max_recv_gap_ms = 0u64;
-        let mut max_forward_ms = 0u64;
-        let mut send_errors = 0u64;
-        let mut last_log_instant = std::time::Instant::now();
+    info!(
+        room = %room_name,
+        participant = participant_id,
+        %addr,
+        session = session_id,
+        "forwarding loop started (plain)"
+    );
 
-        info!(
-            room = %media_room_name,
-            participant = participant_id,
-            %addr,
-            session = %media_session_id,
-            "forwarding loop started (plain)"
-        );
-
-        loop {
-            let pkt = match media_transport.recv_media().await {
-                Ok(Some(pkt)) => pkt,
-                Ok(None) => {
-                    info!(%addr, participant = participant_id, forwarded = packets_forwarded, "disconnected (stream ended)");
-                    break;
+    loop {
+        let recv_start = std::time::Instant::now();
+        let pkt = match transport.recv_media().await {
+            Ok(Some(pkt)) => pkt,
+            Ok(None) => {
+                info!(%addr, participant = participant_id, forwarded = packets_forwarded, "disconnected (stream ended)");
+                break;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("timed out") || msg.contains("reset") || msg.contains("closed") {
+                    info!(%addr, participant = participant_id, forwarded = packets_forwarded, "connection closed: {e}");
+                } else {
+                    error!(%addr, participant = participant_id, forwarded = packets_forwarded, "recv error: {e}");
                 }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("timed out") || msg.contains("reset") || msg.contains("closed") {
-                        info!(%addr, participant = participant_id, forwarded = packets_forwarded, "connection closed: {e}");
-                    } else {
-                        error!(%addr, participant = participant_id, forwarded = packets_forwarded, "recv error: {e}");
-                    }
-                    break;
-                }
-            };
-
-            let recv_gap_ms = last_recv_instant.elapsed().as_millis() as u64;
-            last_recv_instant = std::time::Instant::now();
-            if recv_gap_ms > max_recv_gap_ms {
-                max_recv_gap_ms = recv_gap_ms;
+                break;
             }
-            if recv_gap_ms > 200 {
-                warn!(
-                    room = %media_room_name,
-                    participant = participant_id,
-                    recv_gap_ms,
-                    seq = pkt.header.seq,
-                    "large recv gap"
-                );
-            }
+        };
 
-            if let Some(ref report) = pkt.quality_report {
-                media_metrics.update_session_quality(&media_session_id, report);
-            }
+        let recv_gap_ms = last_recv_instant.elapsed().as_millis() as u64;
+        last_recv_instant = std::time::Instant::now();
+        if recv_gap_ms > max_recv_gap_ms {
+            max_recv_gap_ms = recv_gap_ms;
+        }
+        // Log if recv gap is suspiciously large (>200ms = missed ~10 packets)
+        if recv_gap_ms > 200 {
+            warn!(
+                room = %room_name,
+                participant = participant_id,
+                recv_gap_ms,
+                seq = pkt.header.seq,
+                "large recv gap"
+            );
+        }
 
-            let lock_start = std::time::Instant::now();
-            let others = {
-                let mgr = media_room_mgr.lock().await;
-                mgr.others(&media_room_name, participant_id)
-            };
-            let lock_ms = lock_start.elapsed().as_millis() as u64;
-            if lock_ms > 10 {
-                warn!(room = %media_room_name, participant = participant_id, lock_ms, "slow room_mgr lock");
-            }
+        // Update per-session quality metrics if a quality report is present
+        if let Some(ref report) = pkt.quality_report {
+            metrics.update_session_quality(session_id, report);
+        }
 
-            let fwd_start = std::time::Instant::now();
-            let pkt_bytes = pkt.payload.len() as u64;
-            for other in &others {
-                match other {
-                    ParticipantSender::Quic(t) => {
-                        if let Err(e) = t.send_media(&pkt).await {
-                            send_errors += 1;
-                            if send_errors <= 5 || send_errors % 100 == 0 {
-                                warn!(
-                                    room = %media_room_name,
-                                    participant = participant_id,
-                                    peer = %t.connection().remote_address(),
-                                    total_send_errors = send_errors,
-                                    "send_media error: {e}"
-                                );
-                            }
+        // Get current list of other participants
+        let lock_start = std::time::Instant::now();
+        let others = {
+            let mgr = room_mgr.lock().await;
+            mgr.others(&room_name, participant_id)
+        };
+        let lock_ms = lock_start.elapsed().as_millis() as u64;
+        if lock_ms > 10 {
+            warn!(
+                room = %room_name,
+                participant = participant_id,
+                lock_ms,
+                "slow room_mgr lock"
+            );
+        }
+
+        // Debug tap: log packet metadata
+        if let Some(ref tap) = debug_tap {
+            if tap.matches(&room_name) {
+                tap.log_packet(&room_name, "in", &addr, &pkt, others.len());
+            }
+        }
+
+        // Forward to all others
+        let fwd_start = std::time::Instant::now();
+        let pkt_bytes = pkt.payload.len() as u64;
+        for other in &others {
+            match other {
+                ParticipantSender::Quic(t) => {
+                    if let Err(e) = t.send_media(&pkt).await {
+                        send_errors += 1;
+                        if send_errors <= 5 || send_errors % 100 == 0 {
+                            warn!(
+                                room = %room_name,
+                                participant = participant_id,
+                                peer = %t.connection().remote_address(),
+                                total_send_errors = send_errors,
+                                "send_media error: {e}"
+                            );
                         }
                     }
-                    ParticipantSender::WebSocket(_) => {
-                        let _ = other.send_raw(&pkt.payload).await;
-                    }
                 }
-            }
-            let fwd_ms = fwd_start.elapsed().as_millis() as u64;
-            if fwd_ms > max_forward_ms { max_forward_ms = fwd_ms; }
-            if fwd_ms > 50 {
-                warn!(room = %media_room_name, participant = participant_id, fwd_ms, fan_out = others.len(), "slow forward");
-            }
-
-            let fan_out = others.len() as u64;
-            media_metrics.packets_forwarded.inc_by(fan_out);
-            media_metrics.bytes_forwarded.inc_by(pkt_bytes * fan_out);
-            packets_forwarded += 1;
-
-            if last_log_instant.elapsed() >= Duration::from_secs(5) {
-                let room_size = {
-                    let mgr = media_room_mgr.lock().await;
-                    mgr.room_size(&media_room_name)
-                };
-                info!(
-                    room = %media_room_name,
-                    participant = participant_id,
-                    forwarded = packets_forwarded,
-                    room_size, fan_out, max_recv_gap_ms, max_forward_ms, send_errors,
-                    "participant stats"
-                );
-                max_recv_gap_ms = 0;
-                max_forward_ms = 0;
-                last_log_instant = std::time::Instant::now();
-            }
-        }
-    };
-
-    // Signal handling task — processes SetAlias and other in-call signals
-    let signal_room_mgr = room_mgr.clone();
-    let signal_room_name = room_name.clone();
-    let signal_transport = transport.clone();
-    let signal_task = async move {
-        loop {
-            match signal_transport.recv_signal().await {
-                Ok(Some(wzp_proto::SignalMessage::SetAlias { alias })) => {
-                    info!(%addr, participant = participant_id, %alias, "SetAlias received");
-                    let mut mgr = signal_room_mgr.lock().await;
-                    if let Some((update, senders)) =
-                        mgr.set_alias(&signal_room_name, participant_id, alias)
-                    {
-                        drop(mgr);
-                        broadcast_signal(&senders, &update).await;
-                    }
-                }
-                Ok(Some(wzp_proto::SignalMessage::Hangup { .. })) => {
-                    info!(%addr, participant = participant_id, "hangup received");
-                    break;
-                }
-                Ok(Some(msg)) => {
-                    info!(%addr, participant = participant_id, "signal: {:?}", std::mem::discriminant(&msg));
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    warn!(%addr, participant = participant_id, "signal recv error: {e}");
-                    break;
+                ParticipantSender::WebSocket(_) => {
+                    let _ = other.send_raw(&pkt.payload).await;
                 }
             }
         }
-    };
 
-    // Run both in parallel — exit when either finishes (disconnection)
-    tokio::select! {
-        _ = media_task => {}
-        _ = signal_task => {}
+        // Federation: forward to active peer relays via channel
+        if let Some(ref fed_tx) = federation_tx {
+            let data = pkt.to_bytes();
+            let _ = fed_tx.try_send(FederationMediaOut {
+                room_name: room_name.clone(),
+                room_hash: federation_room_hash.unwrap_or_else(|| crate::federation::room_hash(&room_name)),
+                data,
+            });
+        }
+
+        let fwd_ms = fwd_start.elapsed().as_millis() as u64;
+        if fwd_ms > max_forward_ms {
+            max_forward_ms = fwd_ms;
+        }
+        if fwd_ms > 50 {
+            warn!(
+                room = %room_name,
+                participant = participant_id,
+                fwd_ms,
+                fan_out = others.len(),
+                "slow forward"
+            );
+        }
+
+        let fan_out = others.len() as u64;
+        metrics.packets_forwarded.inc_by(fan_out);
+        metrics.bytes_forwarded.inc_by(pkt_bytes * fan_out);
+        packets_forwarded += 1;
+
+        // Periodic stats log every 5 seconds
+        if last_log_instant.elapsed() >= Duration::from_secs(5) {
+            let room_size = {
+                let mgr = room_mgr.lock().await;
+                mgr.room_size(&room_name)
+            };
+            info!(
+                room = %room_name,
+                participant = participant_id,
+                forwarded = packets_forwarded,
+                room_size,
+                fan_out,
+                max_recv_gap_ms,
+                max_forward_ms,
+                send_errors,
+                "participant stats"
+            );
+            max_recv_gap_ms = 0;
+            max_forward_ms = 0;
+            last_log_instant = std::time::Instant::now();
+        }
     }
 
     // Clean up — leave room and broadcast update to remaining participants

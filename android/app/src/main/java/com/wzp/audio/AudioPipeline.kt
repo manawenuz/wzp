@@ -19,6 +19,8 @@ import java.io.FileOutputStream
 import java.io.OutputStreamWriter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -55,9 +57,22 @@ class AudioPipeline(private val context: Context) {
     /** Whether to attach hardware AEC. Must be set before start(). */
     var aecEnabled: Boolean = true
     /** Enable debug recording of PCM + RMS histogram to cache dir. */
-    var debugRecording: Boolean = true
+    var debugRecording: Boolean = false
     private var captureThread: Thread? = null
     private var playoutThread: Thread? = null
+
+    // DirectByteBuffers for zero-copy JNI audio transfer.
+    // Allocated as class fields (NOT locals) because ART's JIT OSR
+    // can null local variables when it replaces the stack frame mid-loop.
+    // These survive OSR because they're on the heap.
+    private val captureDirectBuf: ByteBuffer =
+        ByteBuffer.allocateDirect(FRAME_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
+    private val playoutDirectBuf: ByteBuffer =
+        ByteBuffer.allocateDirect(FRAME_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
+
+    /** Latch counted down by each audio thread after exiting its loop.
+     *  stop() does NOT wait on this — teardown waits via awaitDrain(). */
+    private var drainLatch: CountDownLatch? = null
 
     private val debugDir: File by lazy {
         File(context.cacheDir, "wzp_debug").also { it.mkdirs() }
@@ -66,9 +81,11 @@ class AudioPipeline(private val context: Context) {
     fun start(engine: WzpEngine) {
         if (running) return
         running = true
+        drainLatch = CountDownLatch(2) // one for capture, one for playout
 
         captureThread = Thread({
             runCapture(engine)
+            drainLatch?.countDown() // signal: capture loop exited, no more JNI calls
             // Park thread forever — exiting triggers a libcrypto TLS destructor
             // crash (SIGSEGV in OPENSSL_free) on Android when a JNI-calling thread exits.
             parkThread()
@@ -80,6 +97,7 @@ class AudioPipeline(private val context: Context) {
 
         playoutThread = Thread({
             runPlayout(engine)
+            drainLatch?.countDown() // signal: playout loop exited
             parkThread()
         }, "wzp-playout").apply {
             isDaemon = true
@@ -92,10 +110,20 @@ class AudioPipeline(private val context: Context) {
 
     fun stop() {
         running = false
-        // Don't join — threads are parked as daemons to avoid native TLS crash
+        // Don't join threads — they are parked as daemons to avoid native TLS crash.
+        // Don't null thread refs or drainLatch — teardown() needs awaitDrain().
+        Log.i(TAG, "audio pipeline stopped (running=false)")
+    }
+
+    /** Block until both audio threads have exited their loops (max 200ms).
+     *  After this returns, no more JNI calls to the engine will be made. */
+    fun awaitDrain(): Boolean {
+        val ok = drainLatch?.await(200, TimeUnit.MILLISECONDS) ?: true
+        if (!ok) Log.w(TAG, "awaitDrain: audio threads did not drain in 200ms")
         captureThread = null
         playoutThread = null
-        Log.i(TAG, "audio pipeline stopped")
+        drainLatch = null
+        return ok
     }
 
     private fun applyGain(pcm: ShortArray, count: Int, db: Float) {
@@ -206,7 +234,10 @@ class AudioPipeline(private val context: Context) {
                 val read = recorder.read(pcm, 0, FRAME_SAMPLES)
                 if (read > 0) {
                     applyGain(pcm, read, captureGainDb)
-                    engine.writeAudio(pcm)
+                    // Zero-copy write via DirectByteBuffer (class field, survives JIT OSR)
+                    captureDirectBuf.clear()
+                    captureDirectBuf.asShortBuffer().put(pcm, 0, read)
+                    engine.writeAudioDirect(captureDirectBuf, read)
 
                     // Debug: write raw PCM + RMS
                     if (pcmOut != null) {
@@ -285,8 +316,12 @@ class AudioPipeline(private val context: Context) {
         }
         try {
             while (running) {
-                val read = engine.readAudio(pcm)
+                // Zero-copy read via DirectByteBuffer (class field, survives JIT OSR)
+                playoutDirectBuf.clear()
+                val read = engine.readAudioDirect(playoutDirectBuf, FRAME_SAMPLES)
                 if (read >= FRAME_SAMPLES) {
+                    playoutDirectBuf.rewind()
+                    playoutDirectBuf.asShortBuffer().get(pcm, 0, read)
                     applyGain(pcm, read, playoutGainDb)
                     track.write(pcm, 0, read)
 

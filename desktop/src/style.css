@@ -870,3 +870,23 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .settings-section select:focus {
   border-color: var(--accent);
 }
+
+/* Direct calling mode toggle */
+.mode-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--surface2);
+  background: var(--surface);
+  color: var(--dim);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+.mode-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.mode-btn:hover:not(.active) {
+  background: var(--surface2);
+}

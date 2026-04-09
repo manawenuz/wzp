@@ -14,23 +14,17 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
 use wzp_proto::MediaTransport;
 
-const FRAME_SAMPLES_20MS: usize = 960; // 20ms @ 48kHz
-const FRAME_SAMPLES_40MS: usize = 1920; // 40ms @ 48kHz
-
-/// Compute frame samples at 48kHz for a given profile.
-fn frame_samples_for(profile: &wzp_proto::QualityProfile) -> usize {
-    (profile.frame_duration_ms as usize) * 48 // 48000 / 1000
-}
+const FRAME_SAMPLES: usize = 960; // 20ms @ 48kHz
 
 /// Generate a sine wave tone.
-fn generate_sine_frame(freq_hz: f32, sample_rate: u32, frame_offset: u64, frame_samples: usize) -> Vec<i16> {
-    let start_sample = frame_offset * frame_samples as u64;
-    (0..frame_samples)
+fn generate_sine_frame(freq_hz: f32, sample_rate: u32, frame_offset: u64) -> Vec<i16> {
+    let start_sample = frame_offset * FRAME_SAMPLES as u64;
+    (0..FRAME_SAMPLES)
         .map(|i| {
             let t = (start_sample + i as u64) as f32 / sample_rate as f32;
             (f32::sin(2.0 * std::f32::consts::PI * freq_hz * t) * 16000.0) as i16
@@ -51,32 +45,17 @@ struct CliArgs {
     seed_hex: Option<String>,
     mnemonic: Option<String>,
     room: Option<String>,
-    raw_room: bool,
-    alias: Option<String>,
-    no_denoise: bool,
-    no_aec: bool,
-    no_agc: bool,
-    no_fec: bool,
-    no_silence: bool,
-    direct_playout: bool,
-    aec_delay_ms: Option<u32>,
-    os_aec: bool,
     token: Option<String>,
     _metrics_file: Option<String>,
-    /// Force a quality profile: "good", "degraded", "catastrophic", "codec2-3200"
-    profile_override: Option<String>,
-}
-
-/// Default identity file path: ~/.wzp/identity
-fn default_identity_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".wzp").join("identity")
+    version_check: bool,
+    /// Connect to relay for persistent signaling (direct calls).
+    signal: bool,
+    /// Place a direct call to a fingerprint (requires --signal).
+    call_target: Option<String>,
 }
 
 impl CliArgs {
-    /// Resolve the identity seed from --seed, --mnemonic, or persistent file.
-    ///
-    /// Priority: --seed > --mnemonic > ~/.wzp/identity > generate + save.
+    /// Resolve the identity seed from --seed, --mnemonic, or generate a new one.
     pub fn resolve_seed(&self) -> wzp_crypto::Seed {
         if let Some(ref hex_str) = self.seed_hex {
             let seed = wzp_crypto::Seed::from_hex(hex_str).expect("invalid --seed hex");
@@ -91,55 +70,11 @@ impl CliArgs {
             info!(fingerprint = %fp, "identity from --mnemonic");
             seed
         } else {
-            let path = default_identity_path();
-            // Try loading existing identity
-            if path.exists() {
-                if let Ok(hex_str) = std::fs::read_to_string(&path) {
-                    let hex_str = hex_str.trim();
-                    if let Ok(seed) = wzp_crypto::Seed::from_hex(hex_str) {
-                        let id = seed.derive_identity();
-                        let fp = id.public_identity().fingerprint;
-                        info!(fingerprint = %fp, path = %path.display(), "loaded persistent identity");
-                        return seed;
-                    }
-                }
-            }
-            // Generate new and save
             let seed = wzp_crypto::Seed::generate();
             let id = seed.derive_identity();
             let fp = id.public_identity().fingerprint;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            // Encode seed as hex manually (avoid dep on `hex` crate in binary)
-            let hex_str: String = seed.0.iter().map(|b| format!("{b:02x}")).collect();
-            std::fs::write(&path, hex_str).ok();
-            info!(fingerprint = %fp, path = %path.display(), "generated and saved new identity");
+            info!(fingerprint = %fp, "generated ephemeral identity");
             seed
-        }
-    }
-}
-
-/// Resolve a profile name to a QualityProfile.
-fn resolve_profile(name: &str) -> wzp_proto::QualityProfile {
-    use wzp_proto::{CodecId, QualityProfile};
-    match name.to_lowercase().as_str() {
-        "good" | "opus" | "opus24k" => QualityProfile::GOOD,
-        "degraded" | "opus6k" => QualityProfile::DEGRADED,
-        "catastrophic" | "codec2-1200" | "c2-1200" | "1200" => QualityProfile::CATASTROPHIC,
-        "codec2-3200" | "c2-3200" | "3200" => QualityProfile {
-            codec: CodecId::Codec2_3200,
-            fec_ratio: 0.5,
-            frame_duration_ms: 20,
-            frames_per_block: 5,
-        },
-        "studio-32k" | "opus32k" | "32k" => QualityProfile::STUDIO_32K,
-        "studio-48k" | "opus48k" | "48k" | "studio" => QualityProfile::STUDIO_48K,
-        "studio-64k" | "opus64k" | "64k" | "studio-high" => QualityProfile::STUDIO_64K,
-        other => {
-            eprintln!("unknown profile: {other}");
-            eprintln!("valid: good, degraded, catastrophic, codec2-3200, codec2-1200, studio-32k, studio-48k, studio-64k");
-            std::process::exit(1);
         }
     }
 }
@@ -156,25 +91,22 @@ fn parse_args() -> CliArgs {
     let mut seed_hex = None;
     let mut mnemonic = None;
     let mut room = None;
-    let mut raw_room = false;
-    let mut alias = None;
-    let mut no_denoise = false;
-    let mut no_aec = false;
-    let mut no_agc = false;
-    let mut no_fec = false;
-    let mut no_silence = false;
-    let mut direct_playout = false;
-    let mut aec_delay_ms = None;
-    let mut os_aec = false;
     let mut token = None;
     let mut metrics_file = None;
-    let mut profile_override = None;
+    let mut version_check = false;
     let mut relay_str = None;
+    let mut signal = false;
+    let mut call_target = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--live" => live = true,
+            "--signal" => signal = true,
+            "--call" => {
+                i += 1;
+                call_target = Some(args.get(i).expect("--call requires a fingerprint").to_string());
+            }
             "--send-tone" => {
                 i += 1;
                 send_tone_secs = Some(
@@ -210,27 +142,6 @@ fn parse_args() -> CliArgs {
             "--room" => {
                 i += 1;
                 room = Some(args.get(i).expect("--room requires a name").to_string());
-            }
-            "--raw-room" => raw_room = true,
-            "--no-denoise" => no_denoise = true,
-            "--no-aec" => no_aec = true,
-            "--no-agc" => no_agc = true,
-            "--no-fec" => no_fec = true,
-            "--no-silence" => no_silence = true,
-            "--direct-playout" | "--android" => direct_playout = true,
-            "--os-aec" => os_aec = true,
-            "--aec-delay" => {
-                i += 1;
-                aec_delay_ms = Some(
-                    args.get(i)
-                        .expect("--aec-delay requires milliseconds")
-                        .parse()
-                        .expect("--aec-delay value must be a number"),
-                );
-            }
-            "--alias" => {
-                i += 1;
-                alias = Some(args.get(i).expect("--alias requires a name").to_string());
             }
             "--token" => {
                 i += 1;
@@ -270,15 +181,8 @@ fn parse_args() -> CliArgs {
                         .expect("--drift-test value must be a number"),
                 );
             }
-            "--profile" | "--codec" => {
-                i += 1;
-                profile_override = Some(
-                    args.get(i)
-                        .expect("--profile requires a value (good, degraded, catastrophic, codec2-3200)")
-                        .to_string(),
-                );
-            }
             "--sweep" => sweep = true,
+            "--version-check" => { version_check = true; }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
                 eprintln!();
@@ -289,28 +193,14 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
                 eprintln!("  --drift-test <secs>    Run automated clock-drift measurement");
-                eprintln!("  --profile <name>       Force quality profile: good, degraded, catastrophic, codec2-3200");
-                eprintln!("  --codec <name>         Alias for --profile");
                 eprintln!("  --sweep                Run jitter buffer parameter sweep (local, no network)");
                 eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
                 eprintln!("  --room <name>          Room name (hashed for privacy before sending)");
-                eprintln!("  --raw-room             Send room name as-is (no hash, for Android compat)");
-                eprintln!("  --alias <name>         Display name shown to other participants");
-                eprintln!("  --no-denoise           Disable RNNoise noise suppression");
-                eprintln!("  --no-aec              Disable acoustic echo cancellation");
-                eprintln!("  --no-agc              Disable automatic gain control");
-                eprintln!("  --no-fec              Disable forward error correction");
-                eprintln!("  --no-silence          Disable silence suppression");
-                eprintln!("  --direct-playout      Bypass jitter buffer (decode on recv, like Android)");
-                eprintln!("  --aec-delay <ms>      AEC far-end delay compensation (default: 40ms)");
-                eprintln!("  --os-aec              Use macOS VoiceProcessingIO for hardware AEC (requires --vpio feature)");
-                eprintln!("  --android             Alias for --no-denoise --no-silence --direct-playout");
                 eprintln!("  --token <token>        featherChat bearer token for relay auth");
                 eprintln!("  --metrics-file <path>  Write JSONL telemetry to file (1 line/sec)");
                 eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
                 eprintln!();
-                eprintln!("Identity is auto-saved to ~/.wzp/identity on first run.");
                 eprintln!("Default relay: 127.0.0.1:4433");
                 std::process::exit(0);
             }
@@ -343,19 +233,11 @@ fn parse_args() -> CliArgs {
         seed_hex,
         mnemonic,
         room,
-        raw_room,
-        alias,
-        no_denoise,
-        no_aec,
-        no_agc,
-        no_fec,
-        no_silence,
-        direct_playout,
-        aec_delay_ms,
-        os_aec,
         token,
         _metrics_file: metrics_file,
-        profile_override,
+        version_check,
+        signal,
+        call_target,
     }
 }
 
@@ -374,13 +256,33 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let seed = cli.resolve_seed();
-
-    // Resolve profile override
-    let profile = cli.profile_override.as_deref().map(resolve_profile);
-    if let Some(ref p) = profile {
-        info!(codec = ?p.codec, frame_ms = p.frame_duration_ms, fec = p.fec_ratio, "forced profile");
+    // --version-check: query relay version over QUIC and exit
+    if cli.version_check {
+        let client_config = wzp_transport::client_config();
+        let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+        let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+        let conn = wzp_transport::connect(&endpoint, cli.relay_addr, "version", client_config).await?;
+        match conn.accept_uni().await {
+            Ok(mut recv) => {
+                let data = recv.read_to_end(256).await.unwrap_or_default();
+                let version = String::from_utf8_lossy(&data);
+                println!("{} {}", cli.relay_addr, version.trim());
+            }
+            Err(e) => {
+                eprintln!("relay {} does not support version query: {e}", cli.relay_addr);
+            }
+        }
+        endpoint.close(0u32.into(), b"done");
+        return Ok(());
     }
+
+    // --signal mode: persistent signaling for direct calls
+    if cli.signal {
+        let seed = cli.resolve_seed();
+        return run_signal_mode(cli.relay_addr, seed, cli.token, cli.call_target).await;
+    }
+
+    let seed = cli.resolve_seed();
 
     info!(
         relay = %cli.relay_addr,
@@ -388,22 +290,14 @@ async fn main() -> anyhow::Result<()> {
         send_tone = ?cli.send_tone_secs,
         record = ?cli.record_file,
         room = ?cli.room,
-        profile = ?cli.profile_override,
         "WarzonePhone client"
     );
 
-    // Compute SNI from room name.
-    // --raw-room sends the name as-is (for Android compat — Android doesn't hash).
-    // Default behaviour hashes for privacy.
+    // Use raw room name as SNI (consistent with Android + Desktop clients for federation)
     let sni = match &cli.room {
-        Some(name) if cli.raw_room => {
-            info!(room = %name, "using raw room name as SNI (no hash)");
-            name.clone()
-        }
         Some(name) => {
-            let hashed = wzp_crypto::hash_room_name(name);
-            info!(room = %name, hashed = %hashed, "room name hashed for SNI");
-            hashed
+            info!(room = %name, "using room name as SNI");
+            name.clone()
         }
         None => "default".to_string(),
     };
@@ -422,6 +316,26 @@ async fn main() -> anyhow::Result<()> {
 
     let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
+    // Register shutdown handler so SIGTERM/SIGINT always closes QUIC cleanly.
+    // Without this, killed clients leave zombie connections on the relay for ~30s.
+    {
+        let shutdown_transport = transport.clone();
+        tokio::spawn(async move {
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to register SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => { info!("SIGTERM received, closing connection..."); }
+                _ = sigint.recv() => { info!("SIGINT received, closing connection..."); }
+            }
+            // Close the QUIC connection immediately (APPLICATION_CLOSE frame).
+            // Don't call process::exit — let the main task detect the closed
+            // connection and perform clean shutdown (e.g., save recordings).
+            shutdown_transport.connection().close(0u32.into(), b"shutdown");
+        });
+    }
+
     // Send auth token if provided (relay with --auth-url expects this first)
     if let Some(ref token) = cli.token {
         let auth = wzp_proto::SignalMessage::AuthToken {
@@ -435,25 +349,14 @@ async fn main() -> anyhow::Result<()> {
     let _crypto_session = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
-        cli.alias.as_deref(),
+        None, // alias — desktop client doesn't set one yet
     ).await?;
     info!("crypto handshake complete");
 
     if cli.live {
         #[cfg(feature = "audio")]
         {
-            let audio_opts = AudioOpts {
-                no_denoise: cli.no_denoise || cli.direct_playout,
-                no_aec: cli.no_aec,
-                no_agc: cli.no_agc,
-                no_fec: cli.no_fec,
-                no_silence: cli.no_silence || cli.direct_playout,
-                direct_playout: cli.direct_playout,
-                aec_delay_ms: cli.aec_delay_ms,
-                os_aec: cli.os_aec,
-                profile_override: profile,
-            };
-            return run_live(transport, audio_opts).await;
+            return run_live(transport).await;
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -474,23 +377,19 @@ async fn main() -> anyhow::Result<()> {
         transport.close().await?;
         Ok(())
     } else if cli.send_tone_secs.is_some() || cli.send_file.is_some() || cli.record_file.is_some() {
-        run_file_mode(transport, cli.send_tone_secs, cli.send_file, cli.record_file, profile).await
+        run_file_mode(transport, cli.send_tone_secs, cli.send_file, cli.record_file).await
     } else {
-        run_silence(transport, profile).await
+        run_silence(transport).await
     }
 }
 
 /// Send silence frames (connectivity test).
-async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>, profile: Option<wzp_proto::QualityProfile>) -> anyhow::Result<()> {
-    let config = match profile {
-        Some(p) => CallConfig::from_profile(p),
-        None => CallConfig::default(),
-    };
-    let frame_samples = frame_samples_for(&config.profile);
+async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
+    let config = CallConfig::default();
     let mut encoder = CallEncoder::new(&config);
 
-    let frame_duration = tokio::time::Duration::from_millis(config.profile.frame_duration_ms as u64);
-    let pcm = vec![0i16; frame_samples];
+    let frame_duration = tokio::time::Duration::from_millis(20);
+    let pcm = vec![0i16; FRAME_SAMPLES];
 
     let mut total_source = 0u64;
     let mut total_repair = 0u64;
@@ -506,7 +405,8 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>, profile: Opt
             }
             total_bytes += pkt.payload.len() as u64;
             if let Err(e) = transport.send_media(pkt).await {
-                warn!("send_media error (dropping packet): {e}");
+                error!("send error: {e}");
+                break;
             }
         }
         if (i + 1) % 50 == 0 {
@@ -536,20 +436,13 @@ async fn run_file_mode(
     send_tone_secs: Option<u32>,
     send_file: Option<String>,
     record_file: Option<String>,
-    profile: Option<wzp_proto::QualityProfile>,
 ) -> anyhow::Result<()> {
-    let config = match profile {
-        Some(p) => CallConfig::from_profile(p),
-        None => CallConfig::default(),
-    };
-    let frame_samples = frame_samples_for(&config.profile);
-    let frame_duration_ms = config.profile.frame_duration_ms as u64;
+    let config = CallConfig::default();
 
     // --- Send task: generate tone or play file ---
     let send_transport = transport.clone();
     let send_handle = tokio::spawn(async move {
         // Load PCM frames from file or generate tone
-        let frames_per_sec = 1000 / frame_duration_ms;
         let pcm_frames: Vec<Vec<i16>> = if let Some(ref path) = send_file {
             // Read raw PCM file (48kHz mono s16le)
             let bytes = match std::fs::read(path) {
@@ -561,14 +454,14 @@ async fn run_file_mode(
                 .collect();
             let duration = samples.len() as f64 / 48_000.0;
             info!(file = %path, duration = format!("{:.1}s", duration), "sending audio file");
-            samples.chunks(frame_samples)
-                .filter(|c| c.len() == frame_samples)
+            samples.chunks(FRAME_SAMPLES)
+                .filter(|c| c.len() == FRAME_SAMPLES)
                 .map(|c| c.to_vec())
                 .collect()
         } else if let Some(secs) = send_tone_secs {
-            let total = (secs as u64) * frames_per_sec;
-            info!(seconds = secs, frames = total, frame_samples, frame_ms = frame_duration_ms, "sending 440Hz tone");
-            (0..total).map(|i| generate_sine_frame(440.0, 48_000, i, frame_samples)).collect()
+            let total = (secs as u64) * 50;
+            info!(seconds = secs, frames = total, "sending 440Hz tone");
+            (0..total).map(|i| generate_sine_frame(440.0, 48_000, i)).collect()
         } else {
             // No sending, just wait
             tokio::signal::ctrl_c().await.ok();
@@ -577,7 +470,7 @@ async fn run_file_mode(
 
         let mut encoder = CallEncoder::new(&config);
         let _total_frames = pcm_frames.len() as u64;
-        let frame_duration = tokio::time::Duration::from_millis(frame_duration_ms);
+        let frame_duration = tokio::time::Duration::from_millis(20);
 
         let mut total_source = 0u64;
         let mut total_repair = 0u64;
@@ -598,7 +491,8 @@ async fn run_file_mode(
                     total_source += 1;
                 }
                 if let Err(e) = send_transport.send_media(pkt).await {
-                    warn!("send_media error (dropping packet): {e}");
+                    error!("send error: {e}");
+                    return;
                 }
             }
             if (frame_idx + 1) % 250 == 0 {
@@ -627,13 +521,8 @@ async fn run_file_mode(
             }
         };
 
-        let recv_config = match profile {
-            Some(p) => CallConfig::from_profile(p),
-            None => CallConfig::default(),
-        };
-        let recv_frame_samples = frame_samples_for(&recv_config.profile);
-        let mut decoder = CallDecoder::new(&recv_config);
-        let mut pcm_buf = vec![0i16; recv_frame_samples.max(FRAME_SAMPLES_40MS)];
+        let mut decoder = CallDecoder::new(&CallConfig::default());
+        let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
         let mut all_pcm: Vec<i16> = Vec::new();
         let mut frames_received = 0u64;
 
@@ -722,534 +611,270 @@ async fn run_file_mode(
 }
 
 /// Live mode: capture from mic, encode, send; receive, decode, play.
-///
-/// Architecture (mirrors wzp-android/engine.rs):
-///   CPAL capture callback → AudioRing → send task (5ms poll) → QUIC
-///   QUIC → recv task → jitter buffer → decode tick (20ms) → AudioRing → CPAL playback callback
-///
-/// All lock-free: CPAL callbacks use atomic ring buffers, no Mutex on the audio path.
-/// RAII guard for terminal raw mode. Restores on drop.
-struct RawModeGuard {
-    orig: libc::termios,
-}
-
-impl RawModeGuard {
-    fn enter() -> Option<Self> {
-        unsafe {
-            let mut orig: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut orig) != 0 {
-                return None;
-            }
-            let mut raw = orig;
-            // ICANON: character-at-a-time input
-            // ECHO: don't echo typed characters
-            // ISIG: let us handle Ctrl+C as a byte
-            raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-            // IXON: disable Ctrl+S/Ctrl+Q flow control so we receive them
-            raw.c_iflag &= !libc::IXON;
-            raw.c_cc[libc::VMIN] = 1;
-            raw.c_cc[libc::VTIME] = 0;
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
-            Some(Self { orig })
-        }
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.orig);
-        }
-    }
-}
-
-struct AudioOpts {
-    no_denoise: bool,
-    no_aec: bool,
-    no_agc: bool,
-    no_fec: bool,
-    no_silence: bool,
-    direct_playout: bool,
-    aec_delay_ms: Option<u32>,
-    os_aec: bool,
-    profile_override: Option<wzp_proto::QualityProfile>,
-}
-
 #[cfg(feature = "audio")]
-async fn run_live(
-    transport: Arc<wzp_transport::QuinnTransport>,
-    opts: AudioOpts,
-) -> anyhow::Result<()> {
-    use std::sync::Arc as StdArc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
     use wzp_client::audio_io::{AudioCapture, AudioPlayback};
-    use wzp_client::audio_ring::AudioRing;
-    use wzp_client::call::JitterTelemetry;
 
-    // Audio I/O: either VPIO (OS-level AEC) or separate CPAL streams.
-    #[cfg(all(target_os = "macos", feature = "vpio"))]
-    let vpio;
-    let (capture_ring, playout_ring) = if opts.os_aec {
-        #[cfg(all(target_os = "macos", feature = "vpio"))]
-        {
-            vpio = wzp_client::audio_vpio::VpioAudio::start()?;
-            (vpio.capture_ring().clone(), vpio.playout_ring().clone())
-        }
-        #[cfg(all(target_os = "macos", not(feature = "vpio")))]
-        {
-            anyhow::bail!("--os-aec requires the 'vpio' feature (build with: cargo build --features audio,vpio)");
-        }
-        #[cfg(target_os = "windows")]
-        {
-            warn!("--os-aec on Windows is experimental and not yet tested");
-            warn!("Windows Voice Capture DSP (MFT) AEC is not yet implemented");
-            warn!("falling back to CPAL without AEC — please report issues");
-            let capture = AudioCapture::start()?;
-            let playback = AudioPlayback::start()?;
-            let cr = capture.ring().clone();
-            let pr = playback.ring().clone();
-            std::mem::forget(capture);
-            std::mem::forget(playback);
-            (cr, pr)
-        }
-        #[cfg(target_os = "linux")]
-        {
-            warn!("--os-aec on Linux is experimental and not yet tested");
-            warn!("PipeWire/PulseAudio echo-cancel module AEC is not yet implemented");
-            warn!("falling back to CPAL without AEC — please report issues");
-            let capture = AudioCapture::start()?;
-            let playback = AudioPlayback::start()?;
-            let cr = capture.ring().clone();
-            let pr = playback.ring().clone();
-            std::mem::forget(capture);
-            std::mem::forget(playback);
-            (cr, pr)
-        }
-    } else {
-        let capture = AudioCapture::start()?;
-        let playback = AudioPlayback::start()?;
-        let cr = capture.ring().clone();
-        let pr = playback.ring().clone();
-        // Keep handles alive (streams stop when dropped)
-        std::mem::forget(capture);
-        std::mem::forget(playback);
-        (cr, pr)
-    };
-    info!(os_aec = opts.os_aec, "audio I/O started — press Ctrl+C to stop");
+    let capture = AudioCapture::start()?;
+    let playback = AudioPlayback::start()?;
+    info!("Audio I/O started — press Ctrl+C to stop");
 
-    // Far-end reference ring (only used when NOT using OS AEC).
-    let farend_ring = StdArc::new(AudioRing::new());
-
-    let running = StdArc::new(AtomicBool::new(true));
-    let mic_muted = StdArc::new(AtomicBool::new(false));
-    let spk_muted = StdArc::new(AtomicBool::new(false));
-
-    // --- Signal handler: set running=false on first Ctrl+C, force-quit on second ---
-    let signal_running = running.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        eprintln!(); // newline after ^C
-        info!("Ctrl+C received, shutting down...");
-        signal_running.store(false, Ordering::SeqCst);
-
-        tokio::signal::ctrl_c().await.ok();
-        eprintln!("\nForce quit");
-        std::process::exit(1);
-    });
-
-    let base_config = match opts.profile_override {
-        Some(p) => CallConfig::from_profile(p),
-        None => CallConfig::default(),
-    };
-    let config = CallConfig {
-        noise_suppression: !opts.no_denoise,
-        suppression_enabled: !opts.no_silence,
-        aec_delay_ms: opts.aec_delay_ms.unwrap_or(40),
-        ..base_config
-    };
-    let frame_samples = frame_samples_for(&config.profile);
-    info!(codec = ?config.profile.codec, frame_samples, frame_ms = config.profile.frame_duration_ms, "call config");
-    {
-        let mut flags = Vec::new();
-        if opts.no_denoise { flags.push("denoise"); }
-        if opts.no_aec { flags.push("aec"); }
-        if opts.no_agc { flags.push("agc"); }
-        if opts.no_fec { flags.push("fec"); }
-        if opts.no_silence { flags.push("silence"); }
-        if opts.direct_playout { flags.push("jitter-buffer (direct playout)"); }
-        if !flags.is_empty() {
-            info!(disabled = %flags.join(", "), "audio processing overrides");
-        }
-    }
-
-    // --- Send task: poll capture ring → encode → send via async ---
     let send_transport = transport.clone();
-    let send_running = running.clone();
-    let send_mic_muted = mic_muted.clone();
-    let no_aec = opts.no_aec || opts.os_aec; // OS AEC replaces software AEC
-    let no_agc = opts.no_agc;
-    let _no_fec = opts.no_fec;
-    let send_farend = farend_ring.clone();
-    let send_task = async move {
-        let mut encoder = CallEncoder::new(&config);
-        if no_aec { encoder.set_aec_enabled(false); }
-        if no_agc { encoder.set_agc_enabled(false); }
-        let mut capture_buf = vec![0i16; frame_samples];
-        let mut farend_buf = vec![0i16; frame_samples];
-        let mut frames_sent: u64 = 0;
-        let mut frames_dropped: u64 = 0;
-        let mut send_errors: u64 = 0;
-        let mut last_send_err = std::time::Instant::now();
-        let mut polls: u64 = 0;
-        let mut last_diag = std::time::Instant::now();
-
-        loop {
-            if !send_running.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let avail = capture_ring.available();
-            if avail < frame_samples {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                polls += 1;
-                // Diagnostic every 2 seconds
-                if last_diag.elapsed().as_secs() >= 2 {
-                    info!(avail, polls, frames_sent, frame_samples, "send: ring starved");
-                    last_diag = std::time::Instant::now();
-                }
-                continue;
-            }
-
-            let read = capture_ring.read(&mut capture_buf);
-            if read < frame_samples {
-                continue;
-            }
-
-            // Mic mute: zero out capture buffer (still encode + send silence to keep stream alive)
-            if send_mic_muted.load(Ordering::Relaxed) {
-                capture_buf.fill(0);
-            }
-
-            // Feed AEC far-end reference: what was played through the speaker.
-            // Must be called BEFORE encode_frame processes the mic signal.
-            if !no_aec {
-                while send_farend.available() >= frame_samples {
-                    send_farend.read(&mut farend_buf);
-                    encoder.feed_aec_farend(&farend_buf);
-                }
-            }
-
-            let t0 = std::time::Instant::now();
-            let packets = match encoder.encode_frame(&capture_buf) {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("encode error: {e}");
-                    continue;
-                }
-            };
-            let encode_us = t0.elapsed().as_micros();
-
-            let mut dropped = false;
-            for pkt in &packets {
-                if let Err(e) = send_transport.send_media(pkt).await {
-                    send_errors += 1;
-                    frames_dropped += 1;
-                    dropped = true;
-                    if send_errors <= 3 || last_send_err.elapsed().as_secs() >= 1 {
-                        warn!(send_errors, frames_dropped,
-                              "send_media error (dropping packet): {e}");
-                        last_send_err = std::time::Instant::now();
+    let rt_handle = tokio::runtime::Handle::current();
+    let send_handle = std::thread::Builder::new()
+        .name("wzp-send-loop".into())
+        .spawn(move || {
+            let config = CallConfig::default();
+            let mut encoder = CallEncoder::new(&config);
+            loop {
+                let frame = match capture.read_frame() {
+                    Some(f) => f,
+                    None => break,
+                };
+                let packets = match encoder.encode_frame(&frame) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("encode error: {e}");
+                        continue;
+                    }
+                };
+                for pkt in &packets {
+                    if let Err(e) = rt_handle.block_on(send_transport.send_media(pkt)) {
+                        error!("send error: {e}");
+                        return;
                     }
                 }
             }
+        })?;
 
-            if !dropped {
-                send_errors = 0; // reset on success
-            }
-            frames_sent += 1;
-            if frames_sent <= 5 || frames_sent % 500 == 0 {
-                info!(frames_sent, encode_us, pkts = packets.len(), "send progress");
-            }
-        }
-    };
-
-    // --- Recv + playout ---
     let recv_transport = transport.clone();
-    let recv_running = running.clone();
-    let recv_spk_muted = spk_muted.clone();
-    let direct_playout = opts.direct_playout;
-    let recv_profile = opts.profile_override;
-    let playout_profile = recv_profile; // Copy for playout_task
-
-    // Direct playout: decode on recv, write straight to playout ring (like Android).
-    // Jitter buffer mode: ingest into jitter buffer, decode on 20ms tick.
-    let recv_task = {
-        let playout_ring = playout_ring.clone();
-        let farend_ring = farend_ring.clone();
+    let recv_handle = tokio::spawn(async move {
         let config = CallConfig::default();
-        let decoder = StdArc::new(tokio::sync::Mutex::new(CallDecoder::new(&config)));
-        let decoder_recv = decoder.clone();
-
-        async move {
-            let mut packets_received: u64 = 0;
-            let mut recv_errors: u64 = 0;
-            let mut timeouts: u64 = 0;
-            // For direct playout: raw codec decoder + AGC
-            let direct_profile = recv_profile.unwrap_or(wzp_proto::QualityProfile::GOOD);
-            let mut opus_dec = if direct_playout {
-                Some(wzp_codec::create_decoder(direct_profile))
-            } else {
-                None
-            };
-            let mut playout_agc = wzp_codec::AutoGainControl::new();
-            let mut pcm_buf = vec![0i16; frame_samples.max(FRAME_SAMPLES_40MS)];
-
-            loop {
-                if !recv_running.load(Ordering::Relaxed) {
+        let mut decoder = CallDecoder::new(&config);
+        let mut pcm_buf = vec![0i16; FRAME_SAMPLES];
+        loop {
+            match recv_transport.recv_media().await {
+                Ok(Some(pkt)) => {
+                    let is_repair = pkt.header.is_repair;
+                    decoder.ingest(pkt);
+                    // Only decode for source packets (1 source = 1 audio frame).
+                    // Repair packets feed the FEC decoder but don't produce audio.
+                    if !is_repair {
+                        if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
+                            playback.write_frame(&pcm_buf);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    info!("connection closed");
                     break;
                 }
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
-                    recv_transport.recv_media(),
-                )
-                .await;
-                match result {
-                    Ok(Ok(Some(pkt))) => {
-                        packets_received += 1;
+                Err(e) => {
+                    error!("recv error: {e}");
+                    break;
+                }
+            }
+        }
+    });
 
-                        if direct_playout {
-                            // Android path: decode immediately, AGC, write to ring
-                            if !pkt.header.is_repair {
-                                if let Some(ref mut dec) = opus_dec {
-                                    match dec.decode(&pkt.payload, &mut pcm_buf) {
-                                        Ok(n) => {
-                                            if !no_agc {
-                                                playout_agc.process_frame(&mut pcm_buf[..n]);
-                                            }
-                                            // Always feed AEC (even when speaker muted)
-                                            farend_ring.write(&pcm_buf[..n]);
-                                            // Speaker mute: don't write to playout ring
-                                            if !recv_spk_muted.load(Ordering::Relaxed) {
-                                                playout_ring.write(&pcm_buf[..n]);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if let Ok(n) = dec.decode_lost(&mut pcm_buf) {
-                                                if !recv_spk_muted.load(Ordering::Relaxed) {
-                                                    playout_ring.write(&pcm_buf[..n]);
+    tokio::signal::ctrl_c().await?;
+    info!("Shutting down...");
+
+    recv_handle.abort();
+    drop(send_handle);
+    transport.close().await?;
+    info!("done");
+    Ok(())
+}
+
+/// Persistent signaling mode for direct 1:1 calls.
+async fn run_signal_mode(
+    relay_addr: SocketAddr,
+    seed: wzp_crypto::Seed,
+    token: Option<String>,
+    call_target: Option<String>,
+) -> anyhow::Result<()> {
+    use wzp_proto::SignalMessage;
+
+    let identity = seed.derive_identity();
+    let pub_id = identity.public_identity();
+    let fp = pub_id.fingerprint.to_string();
+    let identity_pub = *pub_id.signing.as_bytes();
+    info!(fingerprint = %fp, "signal mode");
+
+    // Connect to relay with SNI "_signal"
+    let client_config = wzp_transport::client_config();
+    let bind_addr: SocketAddr = if relay_addr.is_ipv6() {
+        "[::]:0".parse()?
+    } else {
+        "0.0.0.0:0".parse()?
+    };
+    let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+    let conn = wzp_transport::connect(&endpoint, relay_addr, "_signal", client_config).await?;
+    let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
+    info!("connected to relay (signal channel)");
+
+    // Auth if token provided
+    if let Some(ref tok) = token {
+        transport.send_signal(&SignalMessage::AuthToken { token: tok.clone() }).await?;
+    }
+
+    // Register presence (signature not verified in Phase 1)
+    transport.send_signal(&SignalMessage::RegisterPresence {
+        identity_pub,
+        signature: vec![], // Phase 1: not verified
+        alias: None,
+    }).await?;
+
+    // Wait for ack
+    match transport.recv_signal().await? {
+        Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {
+            info!(fingerprint = %fp, "registered on relay — waiting for calls");
+        }
+        Some(SignalMessage::RegisterPresenceAck { success: false, error }) => {
+            anyhow::bail!("registration failed: {}", error.unwrap_or_default());
+        }
+        other => {
+            anyhow::bail!("unexpected response: {other:?}");
+        }
+    }
+
+    // If --call specified, place the call
+    if let Some(ref target) = call_target {
+        info!(target = %target, "placing direct call...");
+        let call_id = format!("{:016x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+        transport.send_signal(&SignalMessage::DirectCallOffer {
+            caller_fingerprint: fp.clone(),
+            caller_alias: None,
+            target_fingerprint: target.clone(),
+            call_id: call_id.clone(),
+            identity_pub,
+            ephemeral_pub: [0u8; 32], // Phase 1: not used for key exchange
+            signature: vec![],
+            supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+        }).await?;
+    }
+
+    // Signal recv loop — handle incoming signals
+    let signal_transport = transport.clone();
+    let relay = relay_addr;
+    let my_fp = fp.clone();
+    let my_seed = seed.0;
+
+    loop {
+        match signal_transport.recv_signal().await {
+            Ok(Some(msg)) => match msg {
+                SignalMessage::CallRinging { call_id } => {
+                    info!(call_id = %call_id, "ringing...");
+                }
+                SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, .. } => {
+                    info!(
+                        from = %caller_fingerprint,
+                        alias = ?caller_alias,
+                        call_id = %call_id,
+                        "incoming call — auto-accepting (generic)"
+                    );
+                    // Auto-accept for CLI testing
+                    let _ = signal_transport.send_signal(&SignalMessage::DirectCallAnswer {
+                        call_id,
+                        accept_mode: wzp_proto::CallAcceptMode::AcceptGeneric,
+                        identity_pub: Some(identity_pub),
+                        ephemeral_pub: None,
+                        signature: None,
+                        chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
+                    }).await;
+                }
+                SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
+                    info!(call_id = %call_id, mode = ?accept_mode, "call answered");
+                }
+                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay } => {
+                    info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
+
+                    // Connect to the media room
+                    let media_relay: SocketAddr = setup_relay.parse().unwrap_or(relay);
+                    let media_cfg = wzp_transport::client_config();
+                    match wzp_transport::connect(&endpoint, media_relay, &room, media_cfg).await {
+                        Ok(media_conn) => {
+                            let media_transport = Arc::new(wzp_transport::QuinnTransport::new(media_conn));
+
+                            // Crypto handshake
+                            match wzp_client::handshake::perform_handshake(&*media_transport, &my_seed, None).await {
+                                Ok(_session) => {
+                                    info!("media connected — sending tone (press Ctrl+C to hang up)");
+
+                                    // Simple tone sender for testing
+                                    let mt = media_transport.clone();
+                                    let send_task = tokio::spawn(async move {
+                                        let config = wzp_client::call::CallConfig::default();
+                                        let mut encoder = wzp_client::call::CallEncoder::new(&config);
+                                        let duration = tokio::time::Duration::from_millis(20);
+                                        loop {
+                                            let pcm: Vec<i16> = (0..FRAME_SAMPLES)
+                                                .map(|_| 0i16) // silence — could be tone
+                                                .collect();
+                                            if let Ok(pkts) = encoder.encode_frame(&pcm) {
+                                                for pkt in &pkts {
+                                                    if mt.send_media(pkt).await.is_err() { return; }
                                                 }
                                             }
-                                            if packets_received < 10 {
-                                                warn!("decode error: {e}");
+                                            tokio::time::sleep(duration).await;
+                                        }
+                                    });
+
+                                    // Wait for hangup or ctrl+c
+                                    loop {
+                                        tokio::select! {
+                                            sig = signal_transport.recv_signal() => {
+                                                match sig {
+                                                    Ok(Some(SignalMessage::Hangup { .. })) => {
+                                                        info!("remote hung up");
+                                                        break;
+                                                    }
+                                                    Ok(None) | Err(_) => break,
+                                                    _ => {}
+                                                }
+                                            }
+                                            _ = tokio::signal::ctrl_c() => {
+                                                info!("hanging up...");
+                                                let _ = signal_transport.send_signal(&SignalMessage::Hangup {
+                                                    reason: wzp_proto::HangupReason::Normal,
+                                                }).await;
+                                                break;
                                             }
                                         }
                                     }
+
+                                    send_task.abort();
+                                    media_transport.close().await.ok();
+                                    info!("call ended");
                                 }
+                                Err(e) => error!("media handshake failed: {e}"),
                             }
-                        } else {
-                            // Jitter buffer path
-                            let mut dec = decoder_recv.lock().await;
-                            dec.ingest(pkt);
                         }
-
-                        if packets_received == 1 || packets_received % 500 == 0 {
-                            info!(packets_received, direct_playout, "recv progress");
-                        }
-                        timeouts = 0;
-                    }
-                    Ok(Ok(None)) => {
-                        info!("connection closed");
-                        break;
-                    }
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        if msg.contains("closed") || msg.contains("reset") {
-                            error!("recv fatal: {e}");
-                            break;
-                        }
-                        recv_errors += 1;
-                        if recv_errors <= 3 {
-                            warn!("recv error (continuing): {e}");
-                        }
-                    }
-                    Err(_) => {
-                        timeouts += 1;
-                        if timeouts == 50 {
-                            info!("recv: no media packets received in 5s");
-                        }
+                        Err(e) => error!("media connect failed: {e}"),
                     }
                 }
-            }
-        }
-    };
-
-    // Playout tick — only used when NOT in direct playout mode
-    let playout_running = running.clone();
-    let playout_task = async move {
-        if direct_playout {
-            // Direct playout handles everything in recv_task — just park here
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if !playout_running.load(Ordering::Relaxed) {
-                    break;
+                SignalMessage::Hangup { reason } => {
+                    info!(reason = ?reason, "call ended by remote");
                 }
-            }
-            return;
-        }
-
-        let playout_config = match playout_profile {
-            Some(p) => CallConfig::from_profile(p),
-            None => CallConfig::default(),
-        };
-        let playout_frame_ms = playout_config.profile.frame_duration_ms as u64;
-        let playout_frame_samples = frame_samples_for(&playout_config.profile);
-        let mut decoder = CallDecoder::new(&playout_config);
-        let mut pcm_buf = vec![0i16; playout_frame_samples.max(FRAME_SAMPLES_40MS)];
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(playout_frame_ms));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut telemetry = JitterTelemetry::new(5);
-        loop {
-            interval.tick().await;
-            if !playout_running.load(Ordering::Relaxed) {
+                SignalMessage::Pong { .. } => {}
+                other => {
+                    info!("signal: {:?}", std::mem::discriminant(&other));
+                }
+            },
+            Ok(None) => {
+                info!("signal connection closed");
                 break;
             }
-
-            let mut decoded_this_tick = 0;
-            while let Some(n) = decoder.decode_next(&mut pcm_buf) {
-                playout_ring.write(&pcm_buf[..n]);
-                decoded_this_tick += 1;
-                if decoded_this_tick >= 2 {
-                    break;
-                }
-            }
-
-            telemetry.maybe_log(decoder.stats());
-        }
-    };
-
-    // --- Signal task: listen for RoomUpdate and display presence ---
-    let signal_transport = transport.clone();
-    let signal_running = running.clone();
-    let signal_task = async move {
-        loop {
-            if !signal_running.load(Ordering::Relaxed) {
+            Err(e) => {
+                error!("signal error: {e}");
                 break;
             }
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                signal_transport.recv_signal(),
-            )
-            .await;
-            match result {
-                Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate { participants, .. }))) => {
-                    // Dedup by (fingerprint, alias) — same peer may appear multiple times
-                    let mut seen = std::collections::HashSet::new();
-                    let unique: Vec<_> = participants
-                        .iter()
-                        .filter(|p| seen.insert((&p.fingerprint, &p.alias)))
-                        .collect();
-                    info!(count = unique.len(), "room update");
-                    for p in &unique {
-                        let name = p
-                            .alias
-                            .as_deref()
-                            .unwrap_or("(no alias)");
-                        let fp = if p.fingerprint.is_empty() {
-                            "(no fingerprint)"
-                        } else {
-                            &p.fingerprint
-                        };
-                        info!("  participant: {name} [{fp}]");
-                    }
-                }
-                Ok(Ok(Some(msg))) => {
-                    info!("signal: {:?}", std::mem::discriminant(&msg));
-                }
-                Ok(Ok(None)) => {
-                    info!("signal stream closed");
-                    break;
-                }
-                Ok(Err(e)) => {
-                    error!("signal recv error: {e}");
-                    break;
-                }
-                Err(_) => {} // timeout — loop and check running flag
-            }
         }
-    };
-
-    // --- Keyboard task: Ctrl+M = toggle mic mute, Ctrl+S = toggle speaker mute ---
-    let kb_running = running.clone();
-    let kb_mic = mic_muted.clone();
-    let kb_spk = spk_muted.clone();
-    let keyboard_task = async move {
-        use tokio::io::AsyncReadExt;
-
-        // Put terminal in raw mode so we get individual keypresses
-        let _raw_guard = RawModeGuard::enter();
-
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 1];
-        loop {
-            if !kb_running.load(Ordering::Relaxed) {
-                break;
-            }
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                stdin.read(&mut buf),
-            )
-            .await
-            {
-                Ok(Ok(1)) => match buf[0] {
-                    b'm' | b'M' | 0x0D => {
-                        // 'm' or Ctrl+M
-                        let was = kb_mic.fetch_xor(true, Ordering::SeqCst);
-                        let state = if !was { "MUTED" } else { "unmuted" };
-                        eprintln!("\r[mic {state}]");
-                    }
-                    b's' | b'S' | 0x13 => {
-                        // 's' or Ctrl+S
-                        let was = kb_spk.fetch_xor(true, Ordering::SeqCst);
-                        let state = if !was { "MUTED" } else { "unmuted" };
-                        eprintln!("\r[speaker {state}]");
-                    }
-                    0x03 => {
-                        // Ctrl+C
-                        eprintln!();
-                        info!("Ctrl+C received, shutting down...");
-                        kb_running.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                    b'q' | b'Q' => {
-                        eprintln!("\r[quit]");
-                        kb_running.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                    _ => {}
-                },
-                Ok(Ok(_)) | Ok(Err(_)) => break,
-                Err(_) => {} // timeout
-            }
-        }
-    };
-
-    // --- Run all tasks, exit when any finishes (or running flag cleared by Ctrl+C) ---
-    tokio::select! {
-        _ = send_task => info!("send task ended"),
-        _ = recv_task => info!("recv task ended"),
-        _ = playout_task => info!("playout task ended"),
-        _ = signal_task => info!("signal task ended"),
-        _ = keyboard_task => info!("keyboard task ended"),
     }
 
-    running.store(false, Ordering::SeqCst);
-    // Audio streams stop when their handles are dropped (via mem::forget above or VPIO drop).
-
-    // Give transport 2s to close gracefully, then bail
-    match tokio::time::timeout(std::time::Duration::from_secs(2), transport.close()).await {
-        Ok(Ok(())) => info!("done"),
-        Ok(Err(e)) => info!("close error (non-fatal): {e}"),
-        Err(_) => info!("close timed out, exiting anyway"),
-    }
+    transport.close().await.ok();
     Ok(())
 }

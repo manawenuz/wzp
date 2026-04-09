@@ -78,31 +78,26 @@ pub async fn accept_handshake(
     };
     transport.send_signal(&answer).await?;
 
-    // Derive caller fingerprint from their identity public key (first 8 bytes as hex)
-    let caller_fp = caller_identity_pub[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    // Derive caller fingerprint: SHA-256(Ed25519 pub)[:16], formatted as xxxx:xxxx:...
+    // Must match the format used in signal registration and presence.
+    let caller_fp = {
+        use sha2::{Sha256, Digest};
+        let hash = Sha256::digest(&caller_identity_pub);
+        let fp = wzp_crypto::Fingerprint([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+            hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+        ]);
+        fp.to_string()
+    };
 
     Ok((session, chosen_profile, caller_fp, caller_alias))
 }
 
 /// Select the best quality profile from those the caller supports.
 fn choose_profile(supported: &[QualityProfile]) -> QualityProfile {
-    // Prefer higher-quality profiles. Use GOOD as default if supported list is empty.
-    if supported.is_empty() {
-        return QualityProfile::GOOD;
-    }
-    // Pick the profile with the highest bitrate.
-    supported
-        .iter()
-        .max_by(|a, b| {
-            a.total_bitrate_kbps()
-                .partial_cmp(&b.total_bitrate_kbps())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .copied()
-        .unwrap_or(QualityProfile::GOOD)
+    // Cap at GOOD (24k) for now — studio tiers (32k/48k/64k) not yet tested
+    // for federation reliability (large packets may exceed path MTU).
+    QualityProfile::GOOD
 }
 
 #[cfg(test)]

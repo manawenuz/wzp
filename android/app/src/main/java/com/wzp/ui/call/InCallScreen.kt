@@ -1,6 +1,8 @@
 package com.wzp.ui.call
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -29,10 +32,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,12 +45,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wzp.engine.CallStats
+import com.wzp.ui.components.CopyableFingerprint
+import com.wzp.ui.components.Identicon
 import kotlin.math.roundToInt
+
+// Desktop-style dark theme colors
+private val DarkBg = Color(0xFF0F0F1A)
+private val DarkSurface = Color(0xFF1A1A2E)
+private val DarkSurface2 = Color(0xFF222244)
+private val Accent = Color(0xFFE94560)
+private val Green = Color(0xFF4ADE80)
+private val Yellow = Color(0xFFFACC15)
+private val Red = Color(0xFFEF4444)
+private val TextDim = Color(0xFF777777)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -65,172 +81,417 @@ fun InCallScreen(
     val roomName by viewModel.roomName.collectAsState()
     val selectedServer by viewModel.selectedServer.collectAsState()
     val servers by viewModel.servers.collectAsState()
-    val preferIPv6 by viewModel.preferIPv6.collectAsState()
-    val playoutGainDb by viewModel.playoutGainDb.collectAsState()
-    val captureGainDb by viewModel.captureGainDb.collectAsState()
+    val aecEnabled by viewModel.aecEnabled.collectAsState()
     val debugReportAvailable by viewModel.debugReportAvailable.collectAsState()
     val debugReportStatus by viewModel.debugReportStatus.collectAsState()
+    val seedHex by viewModel.seedHex.collectAsState()
+    val alias by viewModel.alias.collectAsState()
+    val recentRooms by viewModel.recentRooms.collectAsState()
+    val pingResults by viewModel.pingResults.collectAsState()
 
-    var showAddServerDialog by remember { mutableStateOf(false) }
+    var showManageRelays by remember { mutableStateOf(false) }
+    val keyWarning by viewModel.keyWarning.collectAsState()
+
+    // Key-change warning dialog
+    keyWarning?.let { info ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissKeyWarning() },
+            title = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    Text("\u26A0\uFE0F", fontSize = 40.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Server Key Changed", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "The relay's identity has changed since you last connected. " +
+                        "This usually happens when the server was restarted.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Previously known", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(info.oldFp, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("New key", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(info.newFp, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.acceptNewFingerprint() },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFACC15))
+                ) {
+                    Text("Accept New Key", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissKeyWarning() }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Ping once on launch, then every 5 minutes
+    LaunchedEffect(Unit) {
+        viewModel.loadSavedFingerprints()
+        viewModel.pingAllServers()
+        while (true) {
+            kotlinx.coroutines.delay(300_000) // 5 minutes
+            viewModel.pingAllServers()
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+        color = DarkBg
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp)
+                .padding(horizontal = 24.dp, vertical = 16.dp)
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Settings button (top-right)
             if (callState == 0) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onOpenSettings) {
-                        Text("Settings")
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(if (callState == 0) 16.dp else 48.dp))
-
-            Text(
-                text = "WZ Phone",
-                style = MaterialTheme.typography.headlineMedium.copy(
-                    fontWeight = FontWeight.Bold
-                ),
-                color = MaterialTheme.colorScheme.primary
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            CallStateLabel(callState)
-
-            if (callState == 0) {
+                // ── IDLE / CONNECT SCREEN ──
                 Spacer(modifier = Modifier.height(32.dp))
 
-                // Server selector
                 Text(
-                    text = "Server",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "WarzonePhone",
+                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    servers.forEachIndexed { idx, entry ->
-                        val isSelected = selectedServer == idx
-                        FilledTonalIconButton(
-                            onClick = { viewModel.selectServer(idx) },
-                            modifier = Modifier
-                                .padding(2.dp)
-                                .height(36.dp)
-                                .width(140.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = if (isSelected) {
-                                IconButtonDefaults.filledTonalIconButtonColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            } else {
-                                IconButtonDefaults.filledTonalIconButtonColors()
-                            }
-                        ) {
-                            Text(
-                                text = entry.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                    // + Add button
-                    OutlinedButton(
-                        onClick = { showAddServerDialog = true },
-                        modifier = Modifier
-                            .padding(2.dp)
-                            .height(36.dp),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("+", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-
-                // IPv4/IPv6 preference
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = "IPv4",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (!preferIPv6) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Switch(
-                        checked = preferIPv6,
-                        onCheckedChange = { viewModel.setPreferIPv6(it) },
-                        modifier = Modifier.padding(horizontal = 8.dp)
-                    )
-                    Text(
-                        text = "IPv6",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (preferIPv6) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                // Selected server address
-                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = servers.getOrNull(selectedServer)?.address ?: "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = roomName,
-                    onValueChange = { viewModel.setRoomName(it) },
-                    label = { Text("Room") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(0.6f)
+                    text = "ENCRYPTED VOICE",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 3.sp),
+                    color = TextDim
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                Button(
-                    onClick = { viewModel.startCall() },
-                    modifier = Modifier
-                        .size(120.dp)
-                        .clip(CircleShape),
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF4CAF50)
-                    )
+                // Relay selector button
+                val selServer = servers.getOrNull(selectedServer)
+                val selPing = selServer?.let { pingResults[it.address] }
+                val selLock = selServer?.let { viewModel.lockStatus(it.address) } ?: LockStatus.UNKNOWN
+                val lockEmoji = when (selLock) {
+                    LockStatus.VERIFIED -> "\uD83D\uDD12"
+                    LockStatus.NEW -> "\uD83D\uDD13"
+                    LockStatus.CHANGED -> "\u26A0\uFE0F"
+                    LockStatus.OFFLINE -> "\uD83D\uDD34"
+                    LockStatus.UNKNOWN -> "\u26AA"
+                }
+
+                SectionLabel("RELAY")
+                Surface(
+                    onClick = { showManageRelays = true },
+                    shape = RoundedCornerShape(8.dp),
+                    color = DarkSurface,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "CALL",
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontWeight = FontWeight.Bold
-                        ),
-                        color = Color.White
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(text = lockEmoji, fontSize = 16.sp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = selServer?.let { "${it.label} (${it.address})" } ?: "No relay",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        selPing?.let {
+                            Text(
+                                text = "${it.rttMs}ms",
+                                color = if (it.rttMs > 200) Yellow else Green,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "\u2699", color = TextDim, fontSize = 16.sp) // ⚙
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Mode toggle: Room vs Direct Call
+                val callMode by viewModel.callMode.collectAsState()
+                val signalState by viewModel.signalState.collectAsState()
+                val targetFp by viewModel.targetFingerprint.collectAsState()
+                val incomingCallId by viewModel.incomingCallId.collectAsState()
+                val incomingCallerFp by viewModel.incomingCallerFp.collectAsState()
+                val incomingCallerAlias by viewModel.incomingCallerAlias.collectAsState()
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.setCallMode(0) },
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (callMode == 0) Accent else Color(0xFF333333)
+                        )
+                    ) { Text("Room", color = Color.White, fontSize = 13.sp) }
+                    Button(
+                        onClick = { viewModel.setCallMode(1) },
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (callMode == 1) Accent else Color(0xFF333333)
+                        )
+                    ) { Text("Direct Call", color = Color.White, fontSize = 13.sp) }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (callMode == 0) {
+                    // ── Room mode ──
+                    SectionLabel("ROOM")
+                    OutlinedTextField(
+                        value = roomName,
+                        onValueChange = { viewModel.setRoomName(it) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    SectionLabel("ALIAS")
+                    OutlinedTextField(
+                        value = alias,
+                        onValueChange = { viewModel.setAlias(it) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = aecEnabled,
+                            onCheckedChange = { viewModel.setAecEnabled(it) }
+                        )
+                        Text("OS ECHO CANCEL", color = TextDim, style = MaterialTheme.typography.labelSmall)
+                        Spacer(modifier = Modifier.weight(1f))
+                        Surface(
+                            onClick = onOpenSettings,
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color.Transparent,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text("\u2699", fontSize = 18.sp, color = TextDim)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = { viewModel.startCall() },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent)
+                    ) {
+                        Text(
+                            "Connect",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                    }
+                } else {
+                    // ── Direct call mode ──
+                    if (signalState < 5) {
+                        // Not registered yet
+                        SectionLabel("ALIAS")
+                        OutlinedTextField(
+                            value = alias,
+                            onValueChange = { viewModel.setAlias(it) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = { viewModel.registerForCalls() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3))
+                        ) {
+                            Text(
+                                "Register on Relay",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    } else if (signalState == 5) {
+                        // Registered — show dial pad
+                        Text(
+                            "\u2705 Registered — waiting for calls",
+                            color = Green,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Incoming call notification
+                        if (incomingCallId != null && incomingCallerFp != null) {
+                            Surface(
+                                color = Color(0xFF1B5E20),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Text(
+                                        "Incoming Call",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        "From: ${incomingCallerAlias ?: incomingCallerFp?.take(16) ?: "unknown"}",
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = { viewModel.answerIncomingCall(2) },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Green),
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Accept", color = Color.White) }
+                                        Button(
+                                            onClick = { viewModel.rejectIncomingCall() },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Red),
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Reject", color = Color.White) }
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
+
+                        SectionLabel("CALL BY FINGERPRINT")
+                        OutlinedTextField(
+                            value = targetFp,
+                            onValueChange = { viewModel.setTargetFingerprint(it) },
+                            singleLine = true,
+                            placeholder = { Text("Paste fingerprint (xxxx:xxxx:...)") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = { viewModel.placeDirectCall() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                            enabled = targetFp.isNotBlank()
+                        ) {
+                            Text(
+                                "Call",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    } else if (signalState == 6) {
+                        // Ringing
+                        Text(
+                            "\uD83D\uDD14 Ringing...",
+                            color = Yellow,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else if (signalState == 7) {
+                        // Incoming call (state 7 also handled above in registered view)
+                        Text(
+                            "\uD83D\uDCDE Incoming call...",
+                            color = Green,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
 
                 errorMessage?.let { err ->
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = err,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = err, color = Red, style = MaterialTheme.typography.bodySmall)
                 }
 
-                // Debug report card — shown after call ends
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Identity
+                val fp = if (seedHex.length >= 16) seedHex.take(16) else ""
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (fp.isNotEmpty()) {
+                        Identicon(fingerprint = seedHex, size = 28.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CopyableFingerprint(
+                            fingerprint = fp.chunked(4).joinToString(":"),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = TextDim
+                        )
+                    }
+                }
+
+                // Recent rooms — grouped by server
+                if (recentRooms.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    val grouped = recentRooms.groupBy { it.relay }
+                    val serverColors = listOf(
+                        Color(0xFF0F3460), Color(0xFF3D0F60), Color(0xFF0F6034),
+                        Color(0xFF60300F), Color(0xFF0F4D60)
+                    )
+                    grouped.entries.forEachIndexed { sIdx, (relay, rooms) ->
+                        val serverLabel = servers.find { it.address == relay }?.label ?: relay
+                        val bgColor = serverColors[sIdx % serverColors.size]
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            rooms.forEach { recent ->
+                                Surface(
+                                    onClick = {
+                                        viewModel.setRoomName(recent.room)
+                                        val idx = servers.indexOfFirst { it.address == recent.relay }
+                                        if (idx >= 0) viewModel.selectServer(idx)
+                                    },
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = bgColor,
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = recent.room,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color.White
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = serverLabel,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                            color = Color.White.copy(alpha = 0.5f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Debug report card
                 if (debugReportAvailable || debugReportStatus != null) {
                     Spacer(modifier = Modifier.height(24.dp))
                     DebugReportCard(
@@ -240,260 +501,418 @@ fun InCallScreen(
                         onDismiss = { viewModel.dismissDebugReport() }
                     )
                 }
+
             } else {
-                // In-call UI
-                Spacer(modifier = Modifier.height(16.dp))
-
-                DurationDisplay(stats.durationSecs)
-
+                // ── IN-CALL SCREEN ──
                 Spacer(modifier = Modifier.height(24.dp))
 
-                QualityIndicator(qualityTier, stats.qualityLabel)
-
-                if (stats.roomParticipantCount > 0) {
-                    // Dedup by fingerprint — same key = same person, even if
-                    // relay hasn't cleaned up stale entries yet.
-                    val unique = stats.roomParticipants
-                        .distinctBy { it.fingerprint.ifEmpty { it.displayName } }
-                    Spacer(modifier = Modifier.height(8.dp))
+                // Room name + settings gear
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "${unique.size} in room",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = roomName,
+                        style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White
                     )
-                    unique.forEach { member ->
-                        Text(
-                            text = member.displayName,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        onClick = onOpenSettings,
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color.Transparent,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("\u2699", fontSize = 14.sp, color = TextDim)
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(32.dp))
+                // Green dot + timer
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Green)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    DurationDisplay(stats.durationSecs)
+                }
 
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Audio level meter
                 AudioLevelBar(stats.audioLevel)
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Gain sliders
-                GainSlider(
-                    label = "Voice Volume",
-                    gainDb = playoutGainDb,
-                    onGainChange = { viewModel.setPlayoutGainDb(it) }
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                GainSlider(
-                    label = "Mic Gain",
-                    gainDb = captureGainDb,
-                    onGainChange = { viewModel.setCaptureGainDb(it) }
-                )
+                // Participants card
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = DarkSurface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .height(280.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        if (stats.roomParticipantCount > 0) {
+                            val unique = stats.roomParticipants
+                                .distinctBy { it.fingerprint.ifEmpty { it.displayName } }
+                            // Group by relay
+                            val grouped = unique.groupBy { it.relayLabel ?: "This Relay" }
+                            grouped.forEach { (relay, members) ->
+                                // Relay header
+                                val isLocal = relay == "This Relay"
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isLocal) Green else Color(0xFF60A5FA))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = relay.uppercase(),
+                                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
+                                        color = TextDim
+                                    )
+                                }
+                                members.forEach { member ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(vertical = 4.dp)
+                                    ) {
+                                        Identicon(
+                                            fingerprint = member.fingerprint.ifEmpty { member.displayName },
+                                            size = 40.dp,
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text(
+                                                text = member.displayName,
+                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                                color = Color.White
+                                            )
+                                            if (member.fingerprint.isNotEmpty()) {
+                                                CopyableFingerprint(
+                                                    fingerprint = member.fingerprint.take(16),
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        fontSize = 10.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                    ),
+                                                    color = TextDim,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = "Waiting for participants...",
+                                color = TextDim,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
+                // Controls: Mic / End / Spk
                 ControlRow(
                     isMuted = isMuted,
                     isSpeaker = isSpeaker,
                     onToggleMute = viewModel::toggleMute,
                     onToggleSpeaker = viewModel::toggleSpeaker,
-                    onHangUp = {
-                        viewModel.stopCall()
-                    }
+                    onHangUp = { viewModel.stopCall() }
                 )
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                StatsOverlay(stats)
+                // Codec + Stats
+                if (stats.currentCodec.isNotEmpty()) {
+                    val codecLabel = formatCodecName(stats.currentCodec)
+                    val peerLabel = if (stats.peerCodec.isNotEmpty()) formatCodecName(stats.peerCodec) else null
+                    val autoTag = if (stats.autoMode) " [Auto]" else ""
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Our codec badge
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = codecColor(stats.currentCodec)
+                        ) {
+                            Text(
+                                text = "TX $codecLabel$autoTag",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp
+                                ),
+                                color = Color.White
+                            )
+                        }
+                        if (peerLabel != null) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = codecColor(stats.peerCodec)
+                            ) {
+                                Text(
+                                    text = "RX $peerLabel",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp
+                                    ),
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+                Text(
+                    text = "TX: ${stats.framesEncoded} | RX: ${stats.framesDecoded}",
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = TextDim
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }
 
-    if (showAddServerDialog) {
-        AddServerDialog(
-            onDismiss = { showAddServerDialog = false },
-            onAdd = { host, port, label ->
-                viewModel.addServer("$host:$port", label)
-                showAddServerDialog = false
-            }
+    // ── Manage Relays Dialog ──
+    if (showManageRelays) {
+        ManageRelaysDialog(
+            servers = servers,
+            selectedServer = selectedServer,
+            pingResults = pingResults,
+            viewModel = viewModel,
+            onSelect = { idx -> viewModel.selectServer(idx) },
+            onDelete = { idx -> viewModel.removeServer(idx) },
+            onAdd = { addr, label -> viewModel.addServer(addr, label) },
+            onRefresh = { viewModel.pingAllServers() },
+            onDismiss = { showManageRelays = false }
         )
     }
 }
 
+// ── Section label ──
 @Composable
-private fun AddServerDialog(
-    onDismiss: () -> Unit,
-    onAdd: (host: String, port: String, label: String) -> Unit
+private fun SectionLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+        color = TextDim,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp)
+    )
+}
+
+// ── Manage Relays Dialog ──
+@Composable
+private fun ManageRelaysDialog(
+    servers: List<ServerEntry>,
+    selectedServer: Int,
+    pingResults: Map<String, PingResult>,
+    viewModel: CallViewModel,
+    onSelect: (Int) -> Unit,
+    onDelete: (Int) -> Unit,
+    onAdd: (String, String) -> Unit,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit
 ) {
-    var host by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf("4433") }
-    var label by remember { mutableStateOf("") }
+    var addName by remember { mutableStateOf("") }
+    var addAddr by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Server") },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("Host (IP or domain)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it },
-                    label = { Text("Port") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = { label = it },
-                    label = { Text("Label (optional)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    if (host.isNotBlank()) {
-                        val displayLabel = label.ifBlank { host }
-                        onAdd(host.trim(), port.trim(), displayLabel)
+        containerColor = DarkBg,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Manage Relays", color = Color.White, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        onClick = onRefresh,
+                        shape = RoundedCornerShape(8.dp),
+                        color = DarkSurface2,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("\u21BB", color = TextDim, fontSize = 16.sp)
+                        }
+                    }
+                    Surface(
+                        onClick = onDismiss,
+                        shape = RoundedCornerShape(8.dp),
+                        color = DarkSurface2,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("\u00D7", color = TextDim, fontSize = 18.sp)
+                        }
                     }
                 }
-            ) { Text("Add") }
+            }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
+        text = {
+            Column {
+                servers.forEachIndexed { idx, entry ->
+                    val isSelected = idx == selectedServer
+                    val ping = pingResults[entry.address]
+                    val lock = viewModel.lockStatus(entry.address)
+                    val lockEmoji = when (lock) {
+                        LockStatus.VERIFIED -> "\uD83D\uDD12"
+                        LockStatus.NEW -> "\uD83D\uDD13"
+                        LockStatus.CHANGED -> "\u26A0\uFE0F"
+                        LockStatus.OFFLINE -> "\uD83D\uDD34"
+                        LockStatus.UNKNOWN -> ""
+                    }
+
+                    Surface(
+                        onClick = { onSelect(idx) },
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) Color(0xFF0F3460) else DarkSurface,
+                        border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Accent) else null,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(10.dp)
+                        ) {
+                            Identicon(
+                                fingerprint = ping?.serverFingerprint ?: entry.address,
+                                size = 36.dp,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(entry.label, color = Color.White, fontWeight = FontWeight.Medium)
+                                Text(
+                                    entry.address,
+                                    color = TextDim,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                if (lockEmoji.isNotEmpty()) Text(lockEmoji, fontSize = 14.sp)
+                                ping?.let {
+                                    Text(
+                                        "${it.rttMs}ms",
+                                        color = if (it.rttMs > 200) Yellow else Green,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Surface(
+                                onClick = { onDelete(idx) },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color.Transparent,
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text("\u00D7", color = TextDim, fontSize = 18.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Add relay inputs
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedTextField(
+                        value = addName,
+                        onValueChange = { addName = it },
+                        placeholder = { Text("Name", color = TextDim) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = addAddr,
+                        onValueChange = { addAddr = it },
+                        placeholder = { Text("host:port", color = TextDim) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        if (addAddr.isNotBlank()) {
+                            onAdd(addAddr.trim(), addName.ifBlank { addAddr }.trim())
+                            addName = ""; addAddr = ""
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent)
+                ) {
+                    Text("Add Relay", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        confirmButton = {}
     )
 }
 
-@Composable
-private fun CallStateLabel(state: Int) {
-    val label = when (state) {
-        0 -> "Ready to connect"
-        1 -> "Connecting..."
-        2 -> "Active"
-        3 -> "Reconnecting..."
-        4 -> "Call Ended"
-        else -> "Unknown"
-    }
-    val color = when (state) {
-        2 -> Color(0xFF4CAF50)
-        1, 3 -> Color(0xFFFFC107)
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Text(
-        text = label,
-        style = MaterialTheme.typography.titleMedium,
-        color = color
-    )
-}
-
+// ── Duration display ──
 @Composable
 private fun DurationDisplay(durationSecs: Double) {
     val totalSeconds = durationSecs.roundToInt()
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     Text(
-        text = "%02d:%02d".format(minutes, seconds),
-        style = MaterialTheme.typography.displayLarge.copy(
-            fontWeight = FontWeight.Light,
-            letterSpacing = 4.sp
-        ),
-        color = MaterialTheme.colorScheme.onBackground
+        text = "%d:%02d".format(minutes, seconds),
+        style = MaterialTheme.typography.bodyMedium,
+        color = TextDim
     )
 }
 
-@Composable
-private fun QualityIndicator(tier: Int, label: String) {
-    val dotColor = when (tier) {
-        0 -> Color(0xFF4CAF50)
-        1 -> Color(0xFFFFC107)
-        2 -> Color(0xFFF44336)
-        else -> Color.Gray
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .size(12.dp)
-                .clip(CircleShape)
-                .background(dotColor)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
+// ── Audio level bar ──
 @Composable
 private fun AudioLevelBar(audioLevel: Int) {
     val level = if (audioLevel > 0) {
-        (audioLevel.toFloat() / 8000f).coerceIn(0.02f, 1f)
-    } else {
-        0f
-    }
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = "Audio Level",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(4.dp))
+        (kotlin.math.ln(audioLevel.toFloat()) / kotlin.math.ln(32767f)).coerceIn(0f, 1f)
+    } else 0f
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(DarkSurface)
+    ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.6f)
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(level)
-                    .height(6.dp)
-                    .background(MaterialTheme.colorScheme.primary)
-            )
-        }
-    }
-}
-
-@Composable
-private fun GainSlider(label: String, gainDb: Float, onGainChange: (Float) -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxWidth(0.8f),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        val sign = if (gainDb >= 0) "+" else ""
-        Text(
-            text = "$label: ${sign}${"%.0f".format(gainDb)} dB",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Slider(
-            value = gainDb,
-            onValueChange = { onGainChange(Math.round(it).toFloat()) },
-            valueRange = -20f..20f,
-            steps = 0,
-            modifier = Modifier.fillMaxWidth()
+                .fillMaxWidth(level)
+                .height(4.dp)
+                .background(
+                    brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
+                        colors = listOf(Green, Yellow, Red)
+                    )
+                )
         )
     }
 }
 
+// ── Control row: Mic / End / Spk ──
 @Composable
 private fun ControlRow(
     isMuted: Boolean,
@@ -507,57 +926,56 @@ private fun ControlRow(
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // Mic
         FilledTonalIconButton(
             onClick = onToggleMute,
             modifier = Modifier.size(56.dp),
             colors = if (isMuted) {
                 IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    containerColor = Red, contentColor = Color.White
                 )
             } else {
-                IconButtonDefaults.filledTonalIconButtonColors()
+                IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = DarkSurface2, contentColor = Color.White
+                )
             }
         ) {
             Text(
-                text = if (isMuted) "MIC\nOFF" else "MIC",
+                text = if (isMuted) "Mic\nOff" else "Mic",
                 textAlign = TextAlign.Center,
                 style = MaterialTheme.typography.labelSmall,
                 lineHeight = 12.sp
             )
         }
 
+        // End
         FilledIconButton(
             onClick = onHangUp,
-            modifier = Modifier.size(72.dp),
+            modifier = Modifier.size(64.dp),
             shape = CircleShape,
             colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = Color(0xFFF44336),
-                contentColor = Color.White
+                containerColor = Accent, contentColor = Color.White
             )
         ) {
-            Text(
-                text = "END",
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.Bold
-                )
-            )
+            Text("End", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
         }
 
+        // Speaker
         FilledTonalIconButton(
             onClick = onToggleSpeaker,
             modifier = Modifier.size(56.dp),
             colors = if (isSpeaker) {
                 IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    containerColor = Color(0xFF0F3460), contentColor = Color.White
                 )
             } else {
-                IconButtonDefaults.filledTonalIconButtonColors()
+                IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = DarkSurface2, contentColor = Color.White
+                )
             }
         ) {
             Text(
-                text = if (isSpeaker) "SPK\nON" else "SPK",
+                text = if (isSpeaker) "Spk\nOn" else "Spk",
                 textAlign = TextAlign.Center,
                 style = MaterialTheme.typography.labelSmall,
                 lineHeight = 12.sp
@@ -566,60 +984,7 @@ private fun ControlRow(
     }
 }
 
-@Composable
-private fun StatsOverlay(stats: CallStats) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(8.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = "Stats",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                StatItem("Loss", "%.1f%%".format(stats.lossPct))
-                StatItem("RTT", "${stats.rttMs}ms")
-                StatItem("Jitter", "${stats.jitterMs}ms")
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                StatItem("Sent", "${stats.framesEncoded}")
-                StatItem("Recv", "${stats.framesDecoded}")
-                StatItem("FEC", "${stats.fecRecovered}")
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatItem(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
+// ── Debug report card ──
 @Composable
 private fun DebugReportCard(
     available: Boolean,
@@ -629,7 +994,7 @@ private fun DebugReportCard(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+        color = DarkSurface,
         shape = RoundedCornerShape(12.dp)
     ) {
         Column(
@@ -639,25 +1004,19 @@ private fun DebugReportCard(
             Text(
                 text = "Debug Report",
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onSurface
+                color = Color.White
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "Email call recordings, logs & stats for analysis",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = TextDim,
                 textAlign = TextAlign.Center
             )
-
             Spacer(modifier = Modifier.height(12.dp))
-
             when {
                 status != null && status.startsWith("Error") -> {
-                    Text(
-                        text = status,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Text(text = status, style = MaterialTheme.typography.bodySmall, color = Red)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = onSend) { Text("Retry") }
@@ -665,24 +1024,40 @@ private fun DebugReportCard(
                     }
                 }
                 status != null && status != "ready" -> {
-                    // Preparing zip...
-                    Text(
-                        text = status,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text(text = status, style = MaterialTheme.typography.bodySmall, color = TextDim)
                 }
                 available -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onSend) {
-                            Text("Email Report")
-                        }
-                        TextButton(onClick = onDismiss) {
-                            Text("Skip")
-                        }
+                        Button(
+                            onClick = onSend,
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent)
+                        ) { Text("Email Report") }
+                        TextButton(onClick = onDismiss) { Text("Skip") }
                     }
                 }
             }
         }
     }
+}
+
+/** Map Rust CodecId debug name to a human-readable label. */
+private fun formatCodecName(codecId: String): String = when (codecId) {
+    "Opus64k" -> "Opus 64k"
+    "Opus48k" -> "Opus 48k"
+    "Opus32k" -> "Opus 32k"
+    "Opus24k" -> "Opus 24k"
+    "Opus16k" -> "Opus 16k"
+    "Opus6k" -> "Opus 6k"
+    "Codec2_3200" -> "C2 3.2k"
+    "Codec2_1200" -> "C2 1.2k"
+    else -> codecId
+}
+
+/** Color-code codec badges by quality tier. */
+private fun codecColor(codecId: String): Color = when (codecId) {
+    "Opus64k", "Opus48k", "Opus32k" -> Color(0xFF0D6EFD) // blue — studio
+    "Opus24k", "Opus16k" -> Color(0xFF198754) // green — good
+    "Opus6k" -> Color(0xFFCC8800) // amber — degraded
+    "Codec2_3200", "Codec2_1200" -> Color(0xFFDC3545) // red — catastrophic
+    else -> Color(0xFF6C757D) // gray
 }

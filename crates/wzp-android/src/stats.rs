@@ -11,6 +11,12 @@ pub enum CallState {
     Active,
     Reconnecting,
     Closed,
+    /// Connected to relay signal channel, registered for direct calls.
+    Registered,
+    /// Outgoing call ringing on callee's side.
+    Ringing,
+    /// Incoming call received, waiting for user to accept/reject.
+    IncomingCall,
 }
 
 impl serde::Serialize for CallState {
@@ -21,6 +27,9 @@ impl serde::Serialize for CallState {
             CallState::Active => 2,
             CallState::Reconnecting => 3,
             CallState::Closed => 4,
+            CallState::Registered => 5,
+            CallState::Ringing => 6,
+            CallState::IncomingCall => 7,
         };
         serializer.serialize_u8(n)
     }
@@ -51,12 +60,36 @@ pub struct CallStats {
     pub underruns: u64,
     /// Frames recovered by FEC.
     pub fec_recovered: u64,
+    /// Playout ring overflow count (reader was lapped by writer).
+    pub playout_overflows: u64,
+    /// Playout ring underrun count (reader found empty buffer).
+    pub playout_underruns: u64,
+    /// Capture ring overflow count.
+    pub capture_overflows: u64,
     /// Current mic audio level (RMS of i16 samples, 0-32767).
     pub audio_level: u32,
+    /// Our current outgoing codec name (e.g. "Opus24k", "Codec2_1200").
+    pub current_codec: String,
+    /// Last seen incoming codec from other participants.
+    pub peer_codec: String,
+    /// Whether auto quality mode is active.
+    pub auto_mode: bool,
     /// Number of participants in the room (from last RoomUpdate).
     pub room_participant_count: u32,
     /// Participant list (fingerprint + optional alias) serialized as JSON array.
     pub room_participants: Vec<RoomMember>,
+    /// SAS code for verbal verification (None if not in a call).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sas_code: Option<u32>,
+    /// Incoming call info (present when state == IncomingCall).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_call_id: Option<String>,
+    /// Fingerprint of the caller (present when state == IncomingCall).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_caller_fp: Option<String>,
+    /// Alias of the caller (present when state == IncomingCall).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_caller_alias: Option<String>,
 }
 
 /// A room member entry, serialized into the stats JSON.
@@ -64,4 +97,5 @@ pub struct CallStats {
 pub struct RoomMember {
     pub fingerprint: String,
     pub alias: Option<String>,
+    pub relay_label: Option<String>,
 }

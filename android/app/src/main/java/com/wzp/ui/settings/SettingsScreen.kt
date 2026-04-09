@@ -1,5 +1,6 @@
 package com.wzp.ui.settings
 
+import androidx.compose.foundation.clickable
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -22,6 +23,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -158,20 +160,30 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Fingerprint display
+            // Fingerprint display with identicon
             val fingerprint = if (draftSeedHex.length >= 16) draftSeedHex.take(16).uppercase() else "Not generated"
             Text(
                 text = "Fingerprint",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text(
-                text = fingerprint.chunked(4).joinToString(" "),
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace
-                ),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 4.dp)
+            ) {
+                com.wzp.ui.components.Identicon(
+                    fingerprint = draftSeedHex,
+                    size = 40.dp,
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                com.wzp.ui.components.CopyableFingerprint(
+                    fingerprint = fingerprint.chunked(4).joinToString(" "),
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -229,6 +241,51 @@ fun SettingsScreen(
                     checked = draftAecEnabled,
                     onCheckedChange = { draftAecEnabled = it }
                 )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Quality selection — slider from best (studio 64k) to worst (codec2 1.2k) + auto
+            val qualityLabels = listOf(
+                "Studio 64k", "Studio 48k", "Studio 32k", "Auto",
+                "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"
+            )
+            // Map slider position to JNI profile int:
+            // 0=Studio64k(6), 1=Studio48k(5), 2=Studio32k(4), 3=Auto(7),
+            // 4=Opus24k(0), 5=Opus6k(1), 6=Codec2_3.2k(3), 7=Codec2_1.2k(2)
+            val sliderToProfile = intArrayOf(6, 5, 4, 7, 0, 1, 3, 2)
+            val profileToSlider = mapOf(6 to 0, 5 to 1, 4 to 2, 7 to 3, 0 to 4, 1 to 5, 3 to 6, 2 to 7)
+            val qualityColors = listOf(
+                Color(0xFF22C55E), Color(0xFF4ADE80), Color(0xFF86EFAC), Color(0xFFA3E635),
+                Color(0xFFA3E635), Color(0xFFFACC15), Color(0xFFE97320), Color(0xFF991B1B)
+            )
+            val currentCodec by viewModel.codecChoice.collectAsState()
+            val sliderPos = profileToSlider[currentCodec] ?: 3
+            Text("Quality", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = "Decode always accepts all codecs",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = qualityLabels[sliderPos],
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = qualityColors[sliderPos]
+            )
+            Slider(
+                value = sliderPos.toFloat(),
+                onValueChange = { viewModel.setCodecChoice(sliderToProfile[it.toInt()]) },
+                valueRange = 0f..7f,
+                steps = 6,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Best", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E))
+                Text("Lowest", style = MaterialTheme.typography.labelSmall, color = Color(0xFF991B1B))
             }
 
             Spacer(modifier = Modifier.height(24.dp))

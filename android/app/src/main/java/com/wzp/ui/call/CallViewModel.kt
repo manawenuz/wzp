@@ -12,6 +12,7 @@ import com.wzp.engine.CallStats
 import com.wzp.service.CallService
 import com.wzp.engine.WzpCallback
 import com.wzp.engine.WzpEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,12 +20,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 
 data class ServerEntry(val address: String, val label: String)
+
+data class PingResult(
+    val rttMs: Int,
+    val serverFingerprint: String = "",
+    val reachable: Boolean = rttMs > 0,
+)
+
+enum class LockStatus { UNKNOWN, OFFLINE, NEW, VERIFIED, CHANGED }
 
 class CallViewModel : ViewModel(), WzpCallback {
 
@@ -70,6 +81,16 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _preferIPv6 = MutableStateFlow(false)
     val preferIPv6: StateFlow<Boolean> = _preferIPv6.asStateFlow()
 
+    private val _recentRooms = MutableStateFlow<List<com.wzp.data.SettingsRepository.RecentRoom>>(emptyList())
+    val recentRooms: StateFlow<List<com.wzp.data.SettingsRepository.RecentRoom>> = _recentRooms.asStateFlow()
+
+    /** Ping results keyed by server address. */
+    private val _pingResults = MutableStateFlow<Map<String, PingResult>>(emptyMap())
+    val pingResults: StateFlow<Map<String, PingResult>> = _pingResults.asStateFlow()
+
+    /** Known server fingerprints (TOFU). */
+    private val _knownFingerprints = MutableStateFlow<Map<String, String>>(emptyMap())
+
     private val _playoutGainDb = MutableStateFlow(0f)
     val playoutGainDb: StateFlow<Float> = _playoutGainDb.asStateFlow()
 
@@ -85,6 +106,18 @@ class CallViewModel : ViewModel(), WzpCallback {
     private val _aecEnabled = MutableStateFlow(true)
     val aecEnabled: StateFlow<Boolean> = _aecEnabled.asStateFlow()
 
+    private val _debugRecording = MutableStateFlow(false)
+    val debugRecording: StateFlow<Boolean> = _debugRecording.asStateFlow()
+
+    // Quality profile index (matches JNI bridge profile_from_int)
+    private val _codecChoice = MutableStateFlow(0)
+    val codecChoice: StateFlow<Int> = _codecChoice.asStateFlow()
+
+    /** Key-change warning dialog state. */
+    data class KeyWarningInfo(val address: String, val oldFp: String, val newFp: String)
+    private val _keyWarning = MutableStateFlow<KeyWarningInfo?>(null)
+    val keyWarning: StateFlow<KeyWarningInfo?> = _keyWarning.asStateFlow()
+
     /** True when a call just ended and debug report can be sent. */
     private val _debugReportAvailable = MutableStateFlow(false)
     val debugReportAvailable: StateFlow<Boolean> = _debugReportAvailable.asStateFlow()
@@ -99,13 +132,91 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private var statsJob: Job? = null
 
+    // ── Direct calling state ──
+    /** 0=room mode, 1=direct call mode */
+    private val _callMode = MutableStateFlow(0)
+    val callMode: StateFlow<Int> = _callMode.asStateFlow()
+
+    /** Target fingerprint for direct call */
+    private val _targetFingerprint = MutableStateFlow("")
+    val targetFingerprint: StateFlow<String> = _targetFingerprint.asStateFlow()
+
+    /** Signal connection state: 0=idle, 5=registered, 6=ringing, 7=incoming */
+    private val _signalState = MutableStateFlow(0)
+    val signalState: StateFlow<Int> = _signalState.asStateFlow()
+
+    /** Incoming call info */
+    private val _incomingCallId = MutableStateFlow<String?>(null)
+    val incomingCallId: StateFlow<String?> = _incomingCallId.asStateFlow()
+
+    private val _incomingCallerFp = MutableStateFlow<String?>(null)
+    val incomingCallerFp: StateFlow<String?> = _incomingCallerFp.asStateFlow()
+
+    private val _incomingCallerAlias = MutableStateFlow<String?>(null)
+    val incomingCallerAlias: StateFlow<String?> = _incomingCallerAlias.asStateFlow()
+
+    fun setCallMode(mode: Int) { _callMode.value = mode }
+    fun setTargetFingerprint(fp: String) { _targetFingerprint.value = fp }
+
+    /** Register on relay for direct calls */
+    fun registerForCalls() {
+        if (engine == null) {
+            engine = WzpEngine(this).also { it.init() }
+        }
+        val serverIdx = _selectedServer.value
+        val serverList = _servers.value
+        if (serverIdx >= serverList.size) return
+
+        val relay = serverList[serverIdx].address
+        val seed = _seedHex.value
+        val alias = _alias.value
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolvedRelay = resolveToIp(relay) ?: relay
+            val result = engine?.startSignaling(resolvedRelay, seed, "", alias)
+            if (result == 0) {
+                _signalState.value = 5 // Registered
+                startStatsPolling()
+            } else {
+                _errorMessage.value = "Failed to register on relay"
+            }
+        }
+    }
+
+    /** Place a direct call to the target fingerprint */
+    fun placeDirectCall() {
+        val target = _targetFingerprint.value.trim()
+        if (target.isEmpty()) {
+            _errorMessage.value = "Enter a fingerprint to call"
+            return
+        }
+        engine?.placeCall(target)
+        _signalState.value = 6 // Ringing
+    }
+
+    /** Answer an incoming direct call */
+    fun answerIncomingCall(mode: Int = 2) {
+        val callId = _incomingCallId.value ?: return
+        engine?.answerCall(callId, mode)
+    }
+
+    /** Reject an incoming direct call */
+    fun rejectIncomingCall() {
+        val callId = _incomingCallId.value ?: return
+        engine?.answerCall(callId, 0) // 0 = Reject
+        _signalState.value = 5 // Back to registered
+        _incomingCallId.value = null
+        _incomingCallerFp.value = null
+        _incomingCallerAlias.value = null
+    }
+
     companion object {
         private const val TAG = "WzpCall"
         val DEFAULT_SERVERS = listOf(
             ServerEntry("172.16.81.175:4433", "LAN (172.16.81.175)"),
             ServerEntry("193.180.213.68:4433", "Pangolin (IP)"),
         )
-        const val DEFAULT_ROOM = "android"
+        const val DEFAULT_ROOM = "general"
     }
 
     fun setContext(context: Context) {
@@ -139,6 +250,9 @@ class CallViewModel : ViewModel(), WzpCallback {
         _captureGainDb.value = s.loadCaptureGain()
         _seedHex.value = s.getOrCreateSeedHex()
         _aecEnabled.value = s.loadAecEnabled()
+        _debugRecording.value = s.loadDebugRecording()
+        _codecChoice.value = s.loadCodecChoice()
+        _recentRooms.value = s.loadRecentRooms()
     }
 
     fun selectServer(index: Int) {
@@ -182,6 +296,70 @@ class CallViewModel : ViewModel(), WzpCallback {
         settings?.saveSelectedServer(_selectedServer.value)
     }
 
+    /**
+     * Ping all servers via native QUIC. Requires engine to be initialized.
+     * Creates engine if needed, pings, keeps engine alive for subsequent Connect.
+     */
+    fun pingAllServers() {
+        viewModelScope.launch {
+            // Ensure engine exists
+            if (engine == null || engine?.isInitialized != true) {
+                try {
+                    engine = WzpEngine(this@CallViewModel).also { it.init() }
+                    engineInitialized = true
+                } catch (e: Exception) {
+                    Log.w(TAG, "engine init for ping failed: $e")
+                    return@launch
+                }
+            }
+            val eng = engine ?: return@launch
+
+            val results = mutableMapOf<String, PingResult>()
+            val known = mutableMapOf<String, String>()
+            _servers.value.forEach { server ->
+                val json = withContext(Dispatchers.IO) {
+                    eng.pingRelay(server.address)
+                }
+                if (json != null) {
+                    try {
+                        val obj = JSONObject(json)
+                        val rtt = obj.getInt("rtt_ms")
+                        val fp = obj.optString("server_fingerprint", "")
+                        results[server.address] = PingResult(rttMs = rtt, serverFingerprint = fp)
+                        // TOFU
+                        if (fp.isNotEmpty()) {
+                            val saved = settings?.loadServerFingerprint(server.address)
+                            if (saved == null) settings?.saveServerFingerprint(server.address, fp)
+                            known[server.address] = saved ?: fp
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+            _pingResults.value = results
+            _knownFingerprints.value = known
+        }
+    }
+
+    /** Load saved TOFU fingerprints. */
+    fun loadSavedFingerprints() {
+        val known = mutableMapOf<String, String>()
+        _servers.value.forEach { server ->
+            settings?.loadServerFingerprint(server.address)?.let {
+                known[server.address] = it
+            }
+        }
+        _knownFingerprints.value = known
+    }
+
+    /** Get lock status for a server. */
+    fun lockStatus(address: String): LockStatus {
+        val pr = _pingResults.value[address] ?: return LockStatus.UNKNOWN
+        if (!pr.reachable) return LockStatus.OFFLINE
+        val known = _knownFingerprints.value[address] ?: return LockStatus.NEW
+        if (pr.serverFingerprint.isEmpty()) return LockStatus.NEW
+        return if (pr.serverFingerprint == known) LockStatus.VERIFIED else LockStatus.CHANGED
+    }
+
     fun setRoomName(name: String) {
         _roomName.value = name
         settings?.saveRoom(name)
@@ -212,6 +390,16 @@ class CallViewModel : ViewModel(), WzpCallback {
     fun setAecEnabled(enabled: Boolean) {
         _aecEnabled.value = enabled
         settings?.saveAecEnabled(enabled)
+    }
+
+    fun setDebugRecording(enabled: Boolean) {
+        _debugRecording.value = enabled
+        settings?.saveDebugRecording(enabled)
+    }
+
+    fun setCodecChoice(choice: Int) {
+        _codecChoice.value = choice
+        settings?.saveCodecChoice(choice)
     }
 
     /**
@@ -254,8 +442,17 @@ class CallViewModel : ViewModel(), WzpCallback {
         Log.i(TAG, "teardown: stopping audio, stopService=$stopService")
         val hadCall = audioStarted
         CallService.onStopFromNotification = null
-        stopAudio()
+        stopAudio()             // sets running=false (non-blocking)
         stopStatsPolling()
+
+        // Wait for audio threads to exit their loops before destroying the engine.
+        // This guarantees no in-flight JNI calls to writeAudio/readAudio.
+        val drained = audioPipeline?.awaitDrain() ?: true
+        if (!drained) {
+            Log.w(TAG, "teardown: audio threads did not drain in time")
+        }
+        audioPipeline = null
+
         Log.i(TAG, "teardown: stopping engine")
         try { engine?.stopCall() } catch (e: Exception) { Log.w(TAG, "stopCall err: $e") }
         try { engine?.destroy() } catch (e: Exception) { Log.w(TAG, "destroy err: $e") }
@@ -271,13 +468,82 @@ class CallViewModel : ViewModel(), WzpCallback {
         Log.i(TAG, "teardown: done")
     }
 
+    /** Accept the new server key and proceed with the call. */
+    fun acceptNewFingerprint() {
+        val info = _keyWarning.value ?: return
+        _knownFingerprints.value = _knownFingerprints.value.toMutableMap().also {
+            it[info.address] = info.newFp
+        }
+        settings?.saveServerFingerprint(info.address, info.newFp)
+        _keyWarning.value = null
+        startCallInternal()
+    }
+
+    fun dismissKeyWarning() {
+        _keyWarning.value = null
+    }
+
     fun startCall() {
+        val serverEntry = _servers.value[_selectedServer.value]
+        // Check for key change before connecting
+        val ls = lockStatus(serverEntry.address)
+        if (ls == LockStatus.CHANGED) {
+            val known = _knownFingerprints.value[serverEntry.address] ?: ""
+            val current = _pingResults.value[serverEntry.address]?.serverFingerprint ?: ""
+            _keyWarning.value = KeyWarningInfo(serverEntry.address, known, current)
+            return
+        }
+        startCallInternal()
+    }
+
+    /** Start a call to a specific relay + room (used by direct call setup). */
+    private fun startCallInternal(relay: String, room: String) {
+        Log.i(TAG, "startCallDirect: relay=$relay room=$room")
+        try {
+            // Don't teardown — keep the signal connection alive
+            engine = WzpEngine(this)
+            engine!!.init()
+            engineInitialized = true
+            _callState.value = 1
+            _errorMessage.value = null
+            try { appContext?.let { CallService.start(it) } } catch (e: Exception) {
+                Log.w(TAG, "service start err: $e")
+            }
+            startStatsPolling()
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val seed = _seedHex.value
+                    val name = _alias.value
+                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name, profile = _codecChoice.value) ?: -1
+                    CallService.onStopFromNotification = { stopCall() }
+                    if (result != 0) {
+                        _callState.value = 0
+                        _errorMessage.value = "Failed to connect to call room (code $result)"
+                        appContext?.let { CallService.stop(it) }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "startCallDirect error", e)
+                    _callState.value = 0
+                    _errorMessage.value = "Engine error: ${e.message}"
+                    appContext?.let { CallService.stop(it) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startCallDirect error", e)
+            _callState.value = 0
+            _errorMessage.value = "Engine error: ${e.message}"
+        }
+    }
+
+    private fun startCallInternal() {
         val serverEntry = _servers.value[_selectedServer.value]
         val room = _roomName.value
         Log.i(TAG, "startCall: server=${serverEntry.address} room=$room")
         _debugReportAvailable.value = false
         _debugReportStatus.value = null
         lastCallServer = serverEntry.address
+        settings?.addRecentRoom(serverEntry.address, room)
+        _recentRooms.value = settings?.loadRecentRooms() ?: emptyList()
         debugReporter?.prepareForCall()
         try {
             // Teardown previous call but don't stop the service (we're about to restart it)
@@ -300,7 +566,7 @@ class CallViewModel : ViewModel(), WzpCallback {
                     val seed = _seedHex.value
                     val name = _alias.value
                     Log.i(TAG, "startCall: resolved=$relay, alias=$name, calling engine.startCall")
-                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name) ?: -1
+                    val result = engine?.startCall(relay, room, seedHex = seed, alias = name, profile = _codecChoice.value) ?: -1
                     Log.i(TAG, "startCall: engine returned $result")
                     // Only wire up notification callback after engine is running
                     CallService.onStopFromNotification = { stopCall() }
@@ -391,6 +657,7 @@ class CallViewModel : ViewModel(), WzpCallback {
             it.playoutGainDb = _playoutGainDb.value
             it.captureGainDb = _captureGainDb.value
             it.aecEnabled = _aecEnabled.value
+            it.debugRecording = _debugRecording.value
             it.start(e)
         }
         audioRouteManager?.register()
@@ -399,8 +666,7 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private fun stopAudio() {
         if (!audioStarted) return
-        audioPipeline?.stop()
-        audioPipeline = null
+        audioPipeline?.stop()    // sets running=false; DON'T null — teardown needs awaitDrain()
         audioRouteManager?.unregister()
         audioRouteManager?.setSpeaker(false)
         _isSpeaker.value = false
@@ -421,6 +687,27 @@ class CallViewModel : ViewModel(), WzpCallback {
                         _stats.value = s
                         if (s.state != 0) {
                             _callState.value = s.state
+                        }
+                        // Track signal state changes for direct calling
+                        if (s.state in 5..7) {
+                            _signalState.value = s.state
+                        }
+                        // Incoming call detection
+                        if (s.state == 7) { // IncomingCall
+                            _incomingCallId.value = s.incomingCallId
+                            _incomingCallerFp.value = s.incomingCallerFp
+                            _incomingCallerAlias.value = s.incomingCallerAlias
+                        }
+                        // CallSetup: auto-connect to media room
+                        if (s.state == 1 && s.incomingCallId != null && s.incomingCallId.contains("|")) {
+                            // Format: "relay_addr|room_name"
+                            val parts = s.incomingCallId.split("|", limit = 2)
+                            if (parts.size == 2) {
+                                val mediaRelay = parts[0]
+                                val mediaRoom = parts[1]
+                                Log.i(TAG, "CallSetup: connecting to $mediaRelay room $mediaRoom")
+                                startCallInternal(mediaRelay, mediaRoom)
+                            }
                         }
                         if (s.state == 2 && !audioStarted) {
                             startAudio()

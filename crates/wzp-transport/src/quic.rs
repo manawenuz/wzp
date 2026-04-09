@@ -33,6 +33,13 @@ impl QuinnTransport {
         &self.connection
     }
 
+    /// Send raw bytes as a QUIC datagram (no MediaPacket framing).
+    pub fn send_raw_datagram(&self, data: &[u8]) -> Result<(), TransportError> {
+        self.connection
+            .send_datagram(bytes::Bytes::copy_from_slice(data))
+            .map_err(|e| TransportError::Internal(format!("datagram: {e}")))
+    }
+
     /// Close the QUIC connection immediately (synchronous, no async needed).
     /// The relay will detect the close and remove this participant from the room.
     pub fn close_now(&self) {
@@ -136,7 +143,7 @@ impl MediaTransport for QuinnTransport {
             }
         };
 
-        match datagram::deserialize_media(data) {
+        match datagram::deserialize_media(data.clone()) {
             Some(packet) => {
                 // Record receive observation
                 {
@@ -149,8 +156,10 @@ impl MediaTransport for QuinnTransport {
                 Ok(Some(packet))
             }
             None => {
-                tracing::warn!("received malformed media datagram");
-                Ok(None)
+                tracing::warn!(len = data.len(), "skipping malformed media datagram, continuing");
+                // Don't return Ok(None) — that signals connection closed.
+                // Recurse to read the next datagram instead.
+                Box::pin(self.recv_media()).await
             }
         }
     }

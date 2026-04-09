@@ -28,6 +28,9 @@ class SettingsRepository(context: Context) {
         private const val KEY_PREFER_IPV6 = "prefer_ipv6"
         private const val KEY_IDENTITY_SEED = "identity_seed_hex"
         private const val KEY_AEC_ENABLED = "aec_enabled"
+        private const val KEY_DEBUG_RECORDING = "debug_recording"
+        private const val KEY_RECENT_ROOMS = "recent_rooms"
+        private const val TOFU_PREFIX = "tofu_"
     }
 
     // --- Servers ---
@@ -118,6 +121,16 @@ class SettingsRepository(context: Context) {
     fun saveAecEnabled(enabled: Boolean) { prefs.edit().putBoolean(KEY_AEC_ENABLED, enabled).apply() }
     fun loadAecEnabled(): Boolean = prefs.getBoolean(KEY_AEC_ENABLED, true)
 
+    // --- Debug recording ---
+
+    fun saveDebugRecording(enabled: Boolean) { prefs.edit().putBoolean(KEY_DEBUG_RECORDING, enabled).apply() }
+    fun loadDebugRecording(): Boolean = prefs.getBoolean(KEY_DEBUG_RECORDING, false)
+
+    // --- Codec choice ---
+    // 0 = Opus (GOOD), 1 = Opus Low (DEGRADED), 2 = Codec2 (CATASTROPHIC)
+    fun saveCodecChoice(choice: Int) { prefs.edit().putInt("codec_choice", choice).apply() }
+    fun loadCodecChoice(): Int = prefs.getInt("codec_choice", 0)
+
     // --- Identity seed ---
 
     /**
@@ -137,5 +150,54 @@ class SettingsRepository(context: Context) {
 
     fun saveSeedHex(hex: String) {
         prefs.edit().putString(KEY_IDENTITY_SEED, hex).apply()
+    }
+
+    // --- Recent rooms ---
+
+    data class RecentRoom(val relay: String, val room: String)
+
+    fun addRecentRoom(relay: String, room: String) {
+        val rooms = loadRecentRooms().toMutableList()
+        rooms.removeAll { it.relay == relay && it.room == room }
+        rooms.add(0, RecentRoom(relay, room))
+        if (rooms.size > 5) rooms.subList(5, rooms.size).clear()
+        val arr = JSONArray()
+        rooms.forEach { arr.put(JSONObject().apply { put("relay", it.relay); put("room", it.room) }) }
+        prefs.edit().putString(KEY_RECENT_ROOMS, arr.toString()).apply()
+    }
+
+    fun loadRecentRooms(): List<RecentRoom> {
+        val json = prefs.getString(KEY_RECENT_ROOMS, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                RecentRoom(o.getString("relay"), o.getString("room"))
+            }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    fun clearRecentRooms() {
+        prefs.edit().remove(KEY_RECENT_ROOMS).apply()
+    }
+
+    // --- Server fingerprint TOFU ---
+
+    fun saveServerFingerprint(address: String, fingerprint: String) {
+        prefs.edit().putString("$TOFU_PREFIX$address", fingerprint).apply()
+    }
+
+    fun loadServerFingerprint(address: String): String? {
+        return prefs.getString("$TOFU_PREFIX$address", null)
+    }
+
+    // --- Ping RTT cache ---
+
+    fun savePingRtt(address: String, rttMs: Int) {
+        prefs.edit().putInt("ping_rtt_$address", rttMs).apply()
+    }
+
+    fun loadPingRtt(address: String): Int {
+        return prefs.getInt("ping_rtt_$address", -1)
     }
 }

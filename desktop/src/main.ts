@@ -666,3 +666,124 @@ document.addEventListener("keydown", (e) => {
     else if (!settingsPanel.classList.contains("hidden")) closeSettings();
   }
 });
+
+// ── Direct Calling UI ──
+const modeRoom = document.getElementById("mode-room")!;
+const modeDirect = document.getElementById("mode-direct")!;
+const roomModeDiv = document.getElementById("room-mode")!;
+const directModeDiv = document.getElementById("direct-mode")!;
+const registerBtn = document.getElementById("register-btn") as HTMLButtonElement;
+const directRegistered = document.getElementById("direct-registered")!;
+const incomingCallPanel = document.getElementById("incoming-call-panel")!;
+const incomingCaller = document.getElementById("incoming-caller")!;
+const acceptCallBtn = document.getElementById("accept-call-btn")!;
+const rejectCallBtn = document.getElementById("reject-call-btn")!;
+const targetFpInput = document.getElementById("target-fp") as HTMLInputElement;
+const callBtn = document.getElementById("call-btn") as HTMLButtonElement;
+const callStatusText = document.getElementById("call-status-text")!;
+
+let currentCallMode = "room";
+
+modeRoom.addEventListener("click", () => {
+  currentCallMode = "room";
+  modeRoom.classList.add("active");
+  modeDirect.classList.remove("active");
+  roomModeDiv.classList.remove("hidden");
+  directModeDiv.classList.add("hidden");
+  // Show room/alias inputs
+  (document.querySelector('label:has(#room)') as HTMLElement)?.classList.remove("hidden");
+  (document.querySelector('label:has(#alias)') as HTMLElement)?.classList.remove("hidden");
+});
+
+modeDirect.addEventListener("click", () => {
+  currentCallMode = "direct";
+  modeDirect.classList.add("active");
+  modeRoom.classList.remove("active");
+  directModeDiv.classList.remove("hidden");
+  roomModeDiv.classList.add("hidden");
+  // Hide room input, keep alias
+  (document.querySelector('label:has(#room)') as HTMLElement)?.classList.add("hidden");
+});
+
+registerBtn.addEventListener("click", async () => {
+  const relay = getSelectedRelay();
+  if (!relay) { connectError.textContent = "No relay selected"; return; }
+  registerBtn.disabled = true;
+  registerBtn.textContent = "Registering...";
+  try {
+    const fp = await invoke<string>("register_signal", { relay: relay.address });
+    registerBtn.classList.add("hidden");
+    directRegistered.classList.remove("hidden");
+    callStatusText.textContent = `Your fingerprint: ${fp}`;
+  } catch (e: any) {
+    connectError.textContent = String(e);
+    registerBtn.disabled = false;
+    registerBtn.textContent = "Register on Relay";
+  }
+});
+
+callBtn.addEventListener("click", async () => {
+  const target = targetFpInput.value.trim();
+  if (!target) return;
+  callStatusText.textContent = "Calling...";
+  try {
+    await invoke("place_call", { targetFp: target });
+  } catch (e: any) {
+    callStatusText.textContent = `Error: ${e}`;
+  }
+});
+
+acceptCallBtn.addEventListener("click", async () => {
+  const status = await invoke<any>("get_signal_status");
+  if (status.incoming_call_id) {
+    await invoke("answer_call", { callId: status.incoming_call_id, mode: 2 });
+    incomingCallPanel.classList.add("hidden");
+  }
+});
+
+rejectCallBtn.addEventListener("click", async () => {
+  const status = await invoke<any>("get_signal_status");
+  if (status.incoming_call_id) {
+    await invoke("answer_call", { callId: status.incoming_call_id, mode: 0 });
+    incomingCallPanel.classList.add("hidden");
+  }
+});
+
+// Listen for signal events from Rust backend
+listen("signal-event", (event: any) => {
+  const data = event.payload;
+  switch (data.type) {
+    case "ringing":
+      callStatusText.textContent = "🔔 Ringing...";
+      break;
+    case "incoming":
+      incomingCallPanel.classList.remove("hidden");
+      incomingCaller.textContent = `From: ${data.caller_alias || data.caller_fp?.substring(0, 16) || "unknown"}`;
+      break;
+    case "answered":
+      callStatusText.textContent = `Call answered (${data.mode})`;
+      break;
+    case "setup":
+      callStatusText.textContent = "Connecting to media...";
+      // Auto-connect to the call room
+      (async () => {
+        try {
+          await invoke("connect", {
+            relay: data.relay_addr,
+            room: data.room,
+            alias: aliasInput.value,
+            osAec: osAecCheckbox.checked,
+            quality: loadSettings().quality || "auto",
+          });
+          showCallScreen();
+        } catch (e: any) {
+          callStatusText.textContent = `Media connect failed: ${e}`;
+        }
+      })();
+      break;
+    case "hangup":
+      callStatusText.textContent = "";
+      incomingCallPanel.classList.add("hidden");
+      break;
+  }
+});

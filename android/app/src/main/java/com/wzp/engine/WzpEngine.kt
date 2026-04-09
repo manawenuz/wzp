@@ -38,9 +38,12 @@ class WzpEngine(private val callback: WzpCallback) {
      * @param alias     display name sent to relay for room participant list
      * @return 0 on success, negative error code on failure
      */
-    fun startCall(relayAddr: String, room: String, seedHex: String = "", token: String = "", alias: String = ""): Int {
+    /**
+     * @param profile 0 = Opus GOOD, 1 = Opus DEGRADED, 2 = Codec2 CATASTROPHIC
+     */
+    fun startCall(relayAddr: String, room: String, seedHex: String = "", token: String = "", alias: String = "", profile: Int = 0): Int {
         check(nativeHandle != 0L) { "Engine not initialized" }
-        val result = nativeStartCall(nativeHandle, relayAddr, room, seedHex, token, alias)
+        val result = nativeStartCall(nativeHandle, relayAddr, room, seedHex, token, alias, profile)
         if (result == 0) {
             callback.onCallStateChanged(CallStateConstants.CONNECTING)
         } else {
@@ -50,6 +53,7 @@ class WzpEngine(private val callback: WzpCallback) {
     }
 
     /** Stop the active call. Safe to call when no call is active. */
+    @Synchronized
     fun stopCall() {
         if (nativeHandle != 0L) {
             nativeStopCall(nativeHandle)
@@ -73,6 +77,7 @@ class WzpEngine(private val callback: WzpCallback) {
      *
      * @return JSON-serialised [CallStats], or `"{}"` if the engine is not initialised.
      */
+    @Synchronized
     fun getStats(): String {
         if (nativeHandle == 0L) return "{}"
         return try {
@@ -92,6 +97,7 @@ class WzpEngine(private val callback: WzpCallback) {
     }
 
     /** Destroy the native engine and free all resources. The instance must not be reused. */
+    @Synchronized
     fun destroy() {
         if (nativeHandle != 0L) {
             nativeDestroy(nativeHandle)
@@ -117,11 +123,31 @@ class WzpEngine(private val callback: WzpCallback) {
         return nativeReadAudio(nativeHandle, pcm)
     }
 
+    /**
+     * Write captured PCM from a DirectByteBuffer — zero JNI array copy.
+     * The buffer must be a direct ByteBuffer with native byte order containing i16 samples.
+     * Called from the AudioRecord capture thread.
+     */
+    fun writeAudioDirect(buffer: java.nio.ByteBuffer, sampleCount: Int): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeWriteAudioDirect(nativeHandle, buffer, sampleCount)
+    }
+
+    /**
+     * Read decoded PCM into a DirectByteBuffer — zero JNI array copy.
+     * The buffer must be a direct ByteBuffer with native byte order.
+     * Called from the AudioTrack playout thread.
+     */
+    fun readAudioDirect(buffer: java.nio.ByteBuffer, maxSamples: Int): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeReadAudioDirect(nativeHandle, buffer, maxSamples)
+    }
+
     // -- JNI native methods --------------------------------------------------
 
     private external fun nativeInit(): Long
     private external fun nativeStartCall(
-        handle: Long, relay: String, room: String, seed: String, token: String, alias: String
+        handle: Long, relay: String, room: String, seed: String, token: String, alias: String, profile: Int
     ): Int
     private external fun nativeStopCall(handle: Long)
     private external fun nativeSetMute(handle: Long, muted: Boolean)
@@ -130,7 +156,57 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeForceProfile(handle: Long, profile: Int)
     private external fun nativeWriteAudio(handle: Long, pcm: ShortArray): Int
     private external fun nativeReadAudio(handle: Long, pcm: ShortArray): Int
+    private external fun nativeWriteAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, sampleCount: Int): Int
+    private external fun nativeReadAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, maxSamples: Int): Int
     private external fun nativeDestroy(handle: Long)
+    private external fun nativePingRelay(handle: Long, relay: String): String?
+    private external fun nativeStartSignaling(handle: Long, relay: String, seed: String, token: String, alias: String): Int
+    private external fun nativePlaceCall(handle: Long, targetFp: String): Int
+    private external fun nativeAnswerCall(handle: Long, callId: String, mode: Int): Int
+
+    /**
+     * Ping a relay server. Requires engine to be initialized.
+     * Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}` or null.
+     */
+    fun pingRelay(address: String): String? {
+        if (nativeHandle == 0L) return null
+        return nativePingRelay(nativeHandle, address)
+    }
+
+    /**
+     * Start persistent signaling connection for direct 1:1 calls.
+     * The engine registers on the relay and listens for incoming calls.
+     * Call state updates are available via [getStats].
+     *
+     * @return 0 on success, -1 on error
+     */
+    fun startSignaling(relay: String, seed: String = "", token: String = "", alias: String = ""): Int {
+        check(nativeHandle != 0L) { "Engine not initialized" }
+        return nativeStartSignaling(nativeHandle, relay, seed, token, alias)
+    }
+
+    /**
+     * Place a direct call to a peer by fingerprint.
+     * Requires [startSignaling] to have been called first.
+     *
+     * @return 0 on success, -1 on error
+     */
+    fun placeCall(targetFingerprint: String): Int {
+        check(nativeHandle != 0L) { "Engine not initialized" }
+        return nativePlaceCall(nativeHandle, targetFingerprint)
+    }
+
+    /**
+     * Answer an incoming direct call.
+     *
+     * @param callId The call ID from the incoming call (available in stats.incoming_call_id)
+     * @param mode 0=Reject, 1=AcceptTrusted (P2P in Phase 2), 2=AcceptGeneric (relay-mediated)
+     * @return 0 on success, -1 on error
+     */
+    fun answerCall(callId: String, mode: Int = 2): Int {
+        check(nativeHandle != 0L) { "Engine not initialized" }
+        return nativeAnswerCall(nativeHandle, callId, mode)
+    }
 
     companion object {
         init {
