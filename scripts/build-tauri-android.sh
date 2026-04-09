@@ -179,6 +179,26 @@ if [ "${DO_INIT}" = "1" ] || [ ! -x gen/android/gradlew ]; then
     cargo tauri android init 2>&1 | tail -20
 fi
 
+# ─── wzp-native standalone cdylib (built with cargo-ndk, not cargo-tauri) ──
+# Produces libwzp_native.so which wzp-desktop dlopens at runtime via
+# libloading. Split exists because cargo-tauri`s linker wiring pulls
+# bionic private symbols into any cdylib with cc::Build C++, causing
+# __init_tcb+4 SIGSEGV. cargo-ndk uses the same linker path as the
+# legacy wzp-android crate which works.
+echo ">>> cargo ndk build -p wzp-native --release"
+JNI_ABI_DIR=gen/android/app/src/main/jniLibs/arm64-v8a
+mkdir -p "$JNI_ABI_DIR"
+(
+    cd /build/source
+    cargo ndk -t arm64-v8a -o desktop/src-tauri/gen/android/app/src/main/jniLibs \
+        build --release -p wzp-native 2>&1 | tail -10
+)
+if [ -f "$JNI_ABI_DIR/libwzp_native.so" ]; then
+    ls -lh "$JNI_ABI_DIR/libwzp_native.so"
+else
+    echo ">>> WARNING: libwzp_native.so not produced"
+fi
+
 echo ">>> cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk"
 cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk
 

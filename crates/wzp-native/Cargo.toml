@@ -1,0 +1,22 @@
+[package]
+name = "wzp-native"
+version = "0.1.0"
+edition = "2024"
+description = "WarzonePhone native audio library — standalone Android cdylib that eventually owns all C++ (Oboe bridge) and exposes a pure-C FFI. Built with cargo-ndk, loaded at runtime by the Tauri desktop cdylib via libloading."
+
+# Crate-type is DELIBERATELY only cdylib (no rlib, no staticlib). This crate
+# is built with `cargo ndk -t arm64-v8a build --release -p wzp-native` as a
+# standalone .so, which is the same path the legacy wzp-android crate uses
+# successfully on the same phone / same NDK. Keeping the crate-type single
+# avoids the rust-lang/rust#104707 symbol leak that bit us when Tauri's
+# desktop crate had ["staticlib", "cdylib", "rlib"] and any C++ static
+# archive pulled bionic's internal pthread_create into the final .so.
+[lib]
+name = "wzp_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Phase 1 scaffold: no dependencies at all. Pure Rust FFI smoke test so we
+# can validate the standalone-cdylib + libloading runtime pipeline before
+# bringing Oboe / wzp-codec / etc. back in. Phase 2 will add the Oboe cc
+# build and the actual audio pipeline.

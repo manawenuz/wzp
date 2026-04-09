@@ -535,6 +535,45 @@ pub fn run() {
             }
             tracing::info!("app data dir: {data_dir:?}");
             let _ = APP_DATA_DIR.set(data_dir);
+
+            // Phase 1 smoke test of the separate-cdylib approach to the
+            // __init_tcb crash (see docs/incident-tauri-android-init-tcb.md):
+            // dlopen the sibling libwzp_native.so that gradle dropped into
+            // our jniLibs directory and call its exported wzp_native_version()
+            // + wzp_native_hello() functions. If this logs
+            //   "wzp-native dlopen OK: version=42 msg=...",
+            // we've validated the whole cdylib-split pipeline and can move
+            // to Phase 2 (port the Oboe bridge into wzp-native).
+            #[cfg(target_os = "android")]
+            {
+                match unsafe { libloading::Library::new("libwzp_native.so") } {
+                    Ok(lib) => {
+                        unsafe {
+                            match lib.get::<unsafe extern "C" fn() -> i32>(b"wzp_native_version") {
+                                Ok(version_fn) => {
+                                    let v = version_fn();
+                                    let mut buf = [0u8; 64];
+                                    let msg = match lib.get::<unsafe extern "C" fn(*mut u8, usize) -> usize>(b"wzp_native_hello") {
+                                        Ok(hello_fn) => {
+                                            let n = hello_fn(buf.as_mut_ptr(), buf.len());
+                                            String::from_utf8_lossy(&buf[..n]).into_owned()
+                                        }
+                                        Err(e) => format!("<no hello: {e}>"),
+                                    };
+                                    tracing::info!("wzp-native dlopen OK: version={v} msg=\"{msg}\"");
+                                }
+                                Err(e) => {
+                                    tracing::warn!("wzp-native loaded but dlsym(wzp_native_version) failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("wzp-native dlopen failed: {e}");
+                    }
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

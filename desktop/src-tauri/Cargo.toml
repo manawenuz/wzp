@@ -29,10 +29,9 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# Step A: minimal cc addition — lets build.rs compile cpp/hello.c on Android.
-# build-dependencies are resolved against the HOST, not the target, so this
-# line is unconditional (the actual cc::Build call is gated on TARGET).
-cc = "1"
+# cc is no longer needed — all C++ moved to crates/wzp-native (built with
+# cargo-ndk and loaded via libloading at runtime). wzp-desktop's .so on
+# Android is now pure Rust.
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -64,6 +63,11 @@ wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 # doesn't regress the working build.
 [target.'cfg(target_os = "android")'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", default-features = false }
+# libloading: runtime dlopen of libwzp_native.so — the standalone cdylib
+# crate that owns all C++ (Oboe bridge). Keeps wzp-desktop's .so free of
+# any C/C++ static archives that would otherwise leak bionic's internal
+# pthread_create into our cdylib and trigger the __init_tcb crash.
+libloading = "0.8"
 
 # Platform-specific
 [target.'cfg(target_os = "macos")'.dependencies]
