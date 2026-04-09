@@ -14,20 +14,24 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::Mutex;
+// tracing is used heavily inside the desktop CallEngine::start body but never
+// from the 6-line Android stub — keep it gated to avoid an unused_imports
+// warning on Android.
 #[cfg(not(target_os = "android"))]
 use tracing::{error, info};
 
+// CPAL audio I/O is only available on desktop (wzp-client's `audio` feature).
 #[cfg(not(target_os = "android"))]
 use wzp_client::audio_io::{AudioCapture, AudioPlayback};
+
+// call / CallEncoder / CallConfig are platform-independent (pure Rust codec
+// plumbing) but we only use them from the non-Android CallEngine::start body.
 #[cfg(not(target_os = "android"))]
 use wzp_client::call::{CallConfig, CallEncoder};
-#[cfg(not(target_os = "android"))]
-use wzp_proto::{CodecId, MediaTransport, QualityProfile};
 
-// On Android we still need MediaTransport (for transport.close()) and nothing
-// else from wzp_proto — this keeps the struct/stop()/status() code compiling.
-#[cfg(target_os = "android")]
-use wzp_proto::MediaTransport;
+// wzp_proto types are platform-independent and referenced from
+// resolve_quality() which is compiled on every platform.
+use wzp_proto::{CodecId, MediaTransport, QualityProfile};
 
 const FRAME_SAMPLES_40MS: usize = 1920;
 
