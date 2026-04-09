@@ -83,6 +83,11 @@ static std::atomic<float> g_playout_latency_ms{0.0f};
 
 class CaptureCallback : public oboe::AudioStreamDataCallback {
 public:
+    uint64_t calls = 0;
+    uint64_t total_frames = 0;
+    uint64_t total_written = 0;
+    uint64_t ring_full_drops = 0;
+
     oboe::DataCallbackResult onAudioReady(
             oboe::AudioStream* stream,
             void* audioData,
@@ -102,6 +107,32 @@ public:
                        g_rings.capture_write_idx, g_rings.capture_read_idx,
                        src, to_write);
         }
+        total_frames += numFrames;
+        total_written += to_write;
+        if (to_write < numFrames) {
+            ring_full_drops += (numFrames - to_write);
+        }
+
+        // Sample-range probe on the FIRST callback to prove we get real audio
+        if (calls == 0 && numFrames > 0) {
+            int16_t lo = src[0], hi = src[0];
+            int32_t sumsq = 0;
+            for (int32_t i = 0; i < numFrames; i++) {
+                if (src[i] < lo) lo = src[i];
+                if (src[i] > hi) hi = src[i];
+                sumsq += (int32_t)src[i] * (int32_t)src[i];
+            }
+            int32_t rms = (int32_t) (numFrames > 0 ? (int32_t)__builtin_sqrt((double)sumsq / (double)numFrames) : 0);
+            LOGI("capture cb#0: numFrames=%d sample_range=[%d..%d] rms=%d to_write=%d",
+                 numFrames, lo, hi, rms, to_write);
+        }
+        // Heartbeat every 50 callbacks (~1s at 20ms/burst)
+        calls++;
+        if ((calls % 50) == 0) {
+            LOGI("capture heartbeat: calls=%llu numFrames=%d ring_avail_write=%d to_write=%d full_drops=%llu total_written=%llu",
+                 (unsigned long long)calls, numFrames, avail, to_write,
+                 (unsigned long long)ring_full_drops, (unsigned long long)total_written);
+        }
 
         // Update latency estimate
         auto result = stream->calculateLatencyMillis();
@@ -120,6 +151,12 @@ public:
 
 class PlayoutCallback : public oboe::AudioStreamDataCallback {
 public:
+    uint64_t calls = 0;
+    uint64_t total_frames = 0;
+    uint64_t total_played_real = 0;
+    uint64_t underrun_frames = 0;
+    uint64_t nonempty_calls = 0;
+
     oboe::DataCallbackResult onAudioReady(
             oboe::AudioStream* stream,
             void* audioData,
@@ -140,10 +177,43 @@ public:
             ring_read(g_rings.playout_buf, g_rings.playout_capacity,
                       g_rings.playout_write_idx, g_rings.playout_read_idx,
                       dst, to_read);
+            nonempty_calls++;
         }
         // Fill remainder with silence on underrun
         if (to_read < numFrames) {
             memset(dst + to_read, 0, (numFrames - to_read) * sizeof(int16_t));
+            underrun_frames += (numFrames - to_read);
+        }
+        total_frames += numFrames;
+        total_played_real += to_read;
+
+        // First callback: log requested config + prove we're being called
+        if (calls == 0) {
+            LOGI("playout cb#0: numFrames=%d ring_avail_read=%d to_read=%d",
+                 numFrames, avail, to_read);
+        }
+        // On the first callback that actually has data, log the sample range
+        // so we can tell if the samples coming out of the ring look like real
+        // audio vs constant-zeroes vs garbage.
+        if (to_read > 0 && nonempty_calls == 1) {
+            int16_t lo = dst[0], hi = dst[0];
+            int32_t sumsq = 0;
+            for (int32_t i = 0; i < to_read; i++) {
+                if (dst[i] < lo) lo = dst[i];
+                if (dst[i] > hi) hi = dst[i];
+                sumsq += (int32_t)dst[i] * (int32_t)dst[i];
+            }
+            int32_t rms = (to_read > 0) ? (int32_t)__builtin_sqrt((double)sumsq / (double)to_read) : 0;
+            LOGI("playout FIRST nonempty read: to_read=%d sample_range=[%d..%d] rms=%d",
+                 to_read, lo, hi, rms);
+        }
+        // Heartbeat every 50 callbacks (~1s at 20ms/burst)
+        calls++;
+        if ((calls % 50) == 0) {
+            LOGI("playout heartbeat: calls=%llu nonempty=%llu numFrames=%d ring_avail_read=%d to_read=%d underrun_frames=%llu total_played_real=%llu",
+                 (unsigned long long)calls, (unsigned long long)nonempty_calls,
+                 numFrames, avail, to_read,
+                 (unsigned long long)underrun_frames, (unsigned long long)total_played_real);
         }
 
         // Update latency estimate
@@ -193,6 +263,15 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         LOGE("Failed to open capture stream: %s", oboe::convertToText(result));
         return -2;
     }
+    LOGI("capture stream opened: actualSR=%d actualCh=%d actualFormat=%d actualFramesPerBurst=%d actualFramesPerDataCallback=%d bufferCapacityInFrames=%d sharing=%d perfMode=%d",
+         g_capture_stream->getSampleRate(),
+         g_capture_stream->getChannelCount(),
+         (int)g_capture_stream->getFormat(),
+         g_capture_stream->getFramesPerBurst(),
+         g_capture_stream->getFramesPerDataCallback(),
+         g_capture_stream->getBufferCapacityInFrames(),
+         (int)g_capture_stream->getSharingMode(),
+         (int)g_capture_stream->getPerformanceMode());
 
     // Build playout stream
     //
@@ -224,6 +303,15 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         g_capture_stream.reset();
         return -3;
     }
+    LOGI("playout stream opened: actualSR=%d actualCh=%d actualFormat=%d actualFramesPerBurst=%d actualFramesPerDataCallback=%d bufferCapacityInFrames=%d sharing=%d perfMode=%d",
+         g_playout_stream->getSampleRate(),
+         g_playout_stream->getChannelCount(),
+         (int)g_playout_stream->getFormat(),
+         g_playout_stream->getFramesPerBurst(),
+         g_playout_stream->getFramesPerDataCallback(),
+         g_playout_stream->getBufferCapacityInFrames(),
+         (int)g_playout_stream->getSharingMode(),
+         (int)g_playout_stream->getPerformanceMode());
 
     g_running.store(true, std::memory_order_release);
 

@@ -172,6 +172,8 @@ struct AudioBackend {
     capture: RingBuffer,
     playout: RingBuffer,
     started: std::sync::Mutex<bool>,
+    /// Per-write logging throttle counter for wzp_native_audio_write_playout.
+    playout_write_log_count: std::sync::atomic::AtomicU64,
 }
 
 static BACKEND: OnceLock<&'static AudioBackend> = OnceLock::new();
@@ -182,6 +184,7 @@ fn backend() -> &'static AudioBackend {
             capture: RingBuffer::new(RING_CAPACITY),
             playout: RingBuffer::new(RING_CAPACITY),
             started: std::sync::Mutex::new(false),
+            playout_write_log_count: std::sync::atomic::AtomicU64::new(0),
         }))
     })
 }
@@ -258,8 +261,55 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
         return 0;
     }
     let slice = unsafe { std::slice::from_raw_parts(input, in_len) };
-    backend().playout.write(slice)
+    let b = backend();
+    let before_w = b.playout.write_idx.load(std::sync::atomic::Ordering::Relaxed);
+    let before_r = b.playout.read_idx.load(std::sync::atomic::Ordering::Relaxed);
+    let written = b.playout.write(slice);
+    // First few writes: log ring state + sample range so we can compare what
+    // engine.rs hands us to what the C++ playout callback reads.
+    let first_writes = b.playout_write_log_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if first_writes < 3 || first_writes % 50 == 0 {
+        let (mut lo, mut hi, mut sumsq) = (i16::MAX, i16::MIN, 0i64);
+        for &s in slice.iter() {
+            if s < lo { lo = s; }
+            if s > hi { hi = s; }
+            sumsq += (s as i64) * (s as i64);
+        }
+        let rms = (sumsq as f64 / slice.len() as f64).sqrt() as i32;
+        let avail_w_after = b.playout.available_write();
+        let avail_r_after = b.playout.available_read();
+        let msg = format!(
+            "playout WRITE #{first_writes}: in_len={} written={} range=[{lo}..{hi}] rms={rms} before_w={before_w} before_r={before_r} avail_read_after={avail_r_after} avail_write_after={avail_w_after}",
+            slice.len(), written
+        );
+        unsafe {
+            android_log(msg.as_str());
+        }
+    }
+    written
 }
+
+// Minimal android logcat shim so we can print from the cdylib without pulling
+// in android_logger crate (which would add another dep that has to build with
+// cargo-ndk). Uses libc's __android_log_print via extern linkage.
+#[cfg(target_os = "android")]
+unsafe extern "C" {
+    fn __android_log_write(prio: i32, tag: *const u8, text: *const u8) -> i32;
+}
+
+#[cfg(target_os = "android")]
+unsafe fn android_log(msg: &str) {
+    // ANDROID_LOG_INFO = 4. Tag and text must be NUL-terminated.
+    let tag = b"wzp-native\0";
+    let mut buf = Vec::with_capacity(msg.len() + 1);
+    buf.extend_from_slice(msg.as_bytes());
+    buf.push(0);
+    unsafe { __android_log_write(4, tag.as_ptr(), buf.as_ptr()); }
+}
+
+#[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
+unsafe fn android_log(_msg: &str) {}
 
 /// Current capture latency reported by Oboe, in milliseconds. Returns
 /// NaN / 0.0 if the stream isn't running.

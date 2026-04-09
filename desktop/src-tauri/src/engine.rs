@@ -351,11 +351,34 @@ impl CallEngine {
                                 Ok(n) => {
                                     last_decode_n = n;
                                     decoded_frames += 1;
+                                    // Log sample range for the first few decoded frames and periodically
+                                    if decoded_frames <= 3 || decoded_frames % 100 == 0 {
+                                        let slice = &pcm[..n];
+                                        let (mut lo, mut hi, mut sumsq) = (i16::MAX, i16::MIN, 0i64);
+                                        for &s in slice.iter() {
+                                            if s < lo { lo = s; }
+                                            if s > hi { hi = s; }
+                                            sumsq += (s as i64) * (s as i64);
+                                        }
+                                        let rms = (sumsq as f64 / n as f64).sqrt() as i32;
+                                        info!(
+                                            decoded_frames,
+                                            n,
+                                            sample_lo = lo,
+                                            sample_hi = hi,
+                                            rms,
+                                            codec = ?current_codec,
+                                            "recv: decoded PCM sample range"
+                                        );
+                                    }
                                     agc.process_frame(&mut pcm[..n]);
                                     if !recv_spk.load(Ordering::Relaxed) {
                                         let w = crate::wzp_native::audio_write_playout(&pcm[..n]);
                                         last_written = w;
                                         written_samples = written_samples.saturating_add(w as u64);
+                                        if w < n && decoded_frames <= 10 {
+                                            tracing::warn!(n, w, "recv: partial playout write (ring nearly full)");
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -377,6 +400,22 @@ impl CallEngine {
                         }
                     }
                     Err(_) => {}
+                }
+
+                // Heartbeat every 2s with decode+playout state
+                if heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                    let fr = recv_fr.load(Ordering::Relaxed);
+                    info!(
+                        recv_fr = fr,
+                        decoded_frames,
+                        last_decode_n,
+                        last_written,
+                        written_samples,
+                        decode_errs,
+                        codec = ?current_codec,
+                        "recv heartbeat (android)"
+                    );
+                    heartbeat = std::time::Instant::now();
                 }
             }
         });
