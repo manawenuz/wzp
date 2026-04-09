@@ -378,6 +378,31 @@ async fn main() -> anyhow::Result<()> {
     }
     let endpoint = wzp_transport::create_endpoint(config.listen_addr, Some(server_config))?;
 
+    // Compute the IP address we should advertise in CallSetup for direct
+    // calls. If the relay is bound to a specific IP, use it as-is; if bound
+    // to 0.0.0.0, use the trick of "connect" a UDP socket to an arbitrary
+    // external address and read its local_addr — the OS binds to whichever
+    // local interface IP would route packets to that destination, which is
+    // the primary outbound interface. This is the same IP clients on the
+    // LAN use to reach us.
+    let advertised_ip: std::net::IpAddr = {
+        let listen_ip = config.listen_addr.ip();
+        if !listen_ip.is_unspecified() {
+            listen_ip
+        } else {
+            // Probe via a dummy "connected" UDP socket. Never actually sends.
+            match std::net::UdpSocket::bind("0.0.0.0:0")
+                .and_then(|s| { s.connect("8.8.8.8:80").map(|_| s) })
+                .and_then(|s| s.local_addr())
+            {
+                Ok(a) if !a.ip().is_loopback() => a.ip(),
+                _ => std::net::IpAddr::from([127u8, 0, 0, 1]),
+            }
+        }
+    };
+    let advertised_addr_str = format!("{}:{}", advertised_ip, config.listen_addr.port());
+    info!(%advertised_addr_str, "relay advertised address for CallSetup");
+
     // Forward mode
     let remote_transport: Option<Arc<wzp_transport::QuinnTransport>> =
         if let Some(remote_addr) = config.remote_relay {
@@ -475,9 +500,19 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening for connections...");
 
     loop {
-        let connection = match wzp_transport::accept(&endpoint).await {
-            Ok(conn) => conn,
-            Err(e) => { error!("accept: {e}"); continue; }
+        // Pull the next Incoming off the queue. Deliberately do NOT await
+        // the QUIC handshake here — move that into the per-connection
+        // spawned task below. Previously we used wzp_transport::accept
+        // which did both, which meant a single slow handshake would block
+        // the entire accept loop and prevent ALL subsequent connections
+        // from being processed. Surfaced as direct-call hangs where the
+        // callee's call-* connection never completes its QUIC handshake.
+        let incoming = match endpoint.accept().await {
+            Some(inc) => inc,
+            None => {
+                error!("endpoint.accept() returned None — endpoint closed");
+                break;
+            }
         };
 
         let remote_transport = remote_transport.clone();
@@ -493,9 +528,22 @@ async fn main() -> anyhow::Result<()> {
         let federation_mgr = federation_mgr.clone();
         let signal_hub = signal_hub.clone();
         let call_registry = call_registry.clone();
-        let listen_addr_str = config.listen_addr.to_string();
+        let advertised_addr_str = advertised_addr_str.clone();
+
+        let incoming_addr = incoming.remote_address();
+        info!(%incoming_addr, "accept queue: new Incoming, spawning handshake task");
 
         tokio::spawn(async move {
+            // Drive the QUIC handshake inside the spawned task so that
+            // slow or hung handshakes never block the outer accept loop.
+            let connection = match incoming.await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!(%incoming_addr, "QUIC handshake failed: {e}");
+                    return;
+                }
+            };
+            info!(%incoming_addr, "QUIC handshake complete");
             let addr = connection.remote_address();
 
             let room_name = connection
@@ -793,22 +841,18 @@ async fn main() -> anyhow::Result<()> {
                                             let _ = hub.send_to(&peer_fp, &msg).await;
                                         }
 
-                                        // Send CallSetup to both parties
-                                        // Use the address the client connected to (their remote addr
-                                        // is our perspective, but we need our listen addr).
-                                        // Replace 0.0.0.0 with the client's destination IP.
-                                        let relay_addr_for_setup = if listen_addr_str.starts_with("0.0.0.0:") {
-                                            let port = &listen_addr_str[8..];
-                                            // Use the local IP from the client's connection
-                                            let local_ip = addr.ip();
-                                            if local_ip.is_loopback() {
-                                                format!("127.0.0.1:{port}")
-                                            } else {
-                                                format!("{local_ip}:{port}")
-                                            }
-                                        } else {
-                                            listen_addr_str.clone()
-                                        };
+                                        // Send CallSetup to both parties.
+                                        //
+                                        // BUG FIX: the previous version of this used `addr.ip()`
+                                        // which is `connection.remote_address()` — the CLIENT'S
+                                        // IP, not the relay's. So CallSetup told both parties to
+                                        // dial the answerer's own IP, which meant the caller was
+                                        // sending QUIC Initials into the callee's client (no
+                                        // server listening there) and the callee was sending to
+                                        // itself. In both cases endpoint.connect() hung forever.
+                                        //
+                                        // Use the relay's precomputed advertised address instead.
+                                        let relay_addr_for_setup = advertised_addr_str.clone();
                                         let setup = SignalMessage::CallSetup {
                                             call_id: call_id.clone(),
                                             room: room.clone(),
@@ -1153,4 +1197,5 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    Ok(())
 }

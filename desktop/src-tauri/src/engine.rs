@@ -224,6 +224,11 @@ impl CallEngine {
             encoder.set_aec_enabled(false);
             let mut buf = vec![0i16; frame_samples];
 
+            let mut heartbeat = std::time::Instant::now();
+            let mut last_rms: u32 = 0;
+            let mut last_pkt_bytes: usize = 0;
+            let mut short_reads: u64 = 0;
+
             loop {
                 if !send_r.load(Ordering::Relaxed) {
                     break;
@@ -234,6 +239,7 @@ impl CallEngine {
                 // so in steady state this spins once per frame.
                 let read = crate::wzp_native::audio_read_capture(&mut buf);
                 if read < frame_samples {
+                    short_reads += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     continue;
                 }
@@ -242,6 +248,7 @@ impl CallEngine {
                 let sum_sq: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
                 let rms = (sum_sq / buf.len() as f64).sqrt() as u32;
                 send_level.store(rms, Ordering::Relaxed);
+                last_rms = rms;
 
                 if send_mic.load(Ordering::Relaxed) {
                     buf.fill(0);
@@ -249,6 +256,7 @@ impl CallEngine {
                 match encoder.encode_frame(&buf) {
                     Ok(pkts) => {
                         for pkt in &pkts {
+                            last_pkt_bytes = pkt.payload.len();
                             if let Err(e) = send_t.send_media(pkt).await {
                                 send_drops.fetch_add(1, Ordering::Relaxed);
                                 if send_drops.load(Ordering::Relaxed) <= 3 {
@@ -259,6 +267,21 @@ impl CallEngine {
                         send_fs.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(e) => error!("encode: {e}"),
+                }
+
+                // Heartbeat every 2s with capture+encode+send state
+                if heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                    let fs = send_fs.load(Ordering::Relaxed);
+                    let drops = send_drops.load(Ordering::Relaxed);
+                    info!(
+                        frames_sent = fs,
+                        last_rms,
+                        last_pkt_bytes,
+                        short_reads,
+                        send_drops = drops,
+                        "send heartbeat (android)"
+                    );
+                    heartbeat = std::time::Instant::now();
                 }
             }
         });
@@ -275,6 +298,15 @@ impl CallEngine {
             let mut current_codec = initial_profile.codec;
             let mut agc = wzp_codec::AutoGainControl::new();
             let mut pcm = vec![0i16; FRAME_SAMPLES_40MS];
+            info!(codec = ?current_codec, "recv task starting (android/oboe)");
+
+            let mut heartbeat = std::time::Instant::now();
+            let mut decoded_frames: u64 = 0;
+            let mut written_samples: u64 = 0;
+            let mut last_decode_n: usize = 0;
+            let mut last_written: usize = 0;
+            let mut decode_errs: u64 = 0;
+            let mut first_packet_logged = false;
 
             loop {
                 if !recv_r.load(Ordering::Relaxed) {
@@ -287,6 +319,10 @@ impl CallEngine {
                 .await
                 {
                     Ok(Ok(Some(pkt))) => {
+                        if !first_packet_logged {
+                            info!(codec_id = ?pkt.header.codec_id, payload_bytes = pkt.payload.len(), is_repair = pkt.header.is_repair, "recv: first media packet received");
+                            first_packet_logged = true;
+                        }
                         if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
                             {
                                 let mut rx = recv_rx_codec.lock().await;
@@ -311,10 +347,22 @@ impl CallEngine {
                                 let _ = decoder.set_profile(new_profile);
                                 current_codec = pkt.header.codec_id;
                             }
-                            if let Ok(n) = decoder.decode(&pkt.payload, &mut pcm) {
-                                agc.process_frame(&mut pcm[..n]);
-                                if !recv_spk.load(Ordering::Relaxed) {
-                                    crate::wzp_native::audio_write_playout(&pcm[..n]);
+                            match decoder.decode(&pkt.payload, &mut pcm) {
+                                Ok(n) => {
+                                    last_decode_n = n;
+                                    decoded_frames += 1;
+                                    agc.process_frame(&mut pcm[..n]);
+                                    if !recv_spk.load(Ordering::Relaxed) {
+                                        let w = crate::wzp_native::audio_write_playout(&pcm[..n]);
+                                        last_written = w;
+                                        written_samples = written_samples.saturating_add(w as u64);
+                                    }
+                                }
+                                Err(e) => {
+                                    decode_errs += 1;
+                                    if decode_errs <= 3 {
+                                        tracing::warn!("decode error: {e}");
+                                    }
                                 }
                             }
                         }

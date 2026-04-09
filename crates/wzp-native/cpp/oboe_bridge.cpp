@@ -195,6 +195,16 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     }
 
     // Build playout stream
+    //
+    // Usage::Media (NOT VoiceCommunication) routes to the media audio
+    // stream which plays through the loud speaker and uses the media
+    // volume slider. VoiceCommunication routes to the in-call earpiece
+    // stream which is silent unless AudioManager.setMode(IN_COMMUNICATION)
+    // has been called from the Activity, and even then only the earpiece
+    // (or a bluetooth headset) gets audio by default. For a debug-friendly
+    // smoke test we want loud speaker by default. A future polish step
+    // will wire setMode + setSpeakerphoneOn from MainActivity.kt so we
+    // can switch back to VoiceCommunication (for AEC benefits etc).
     oboe::AudioStreamBuilder playoutBuilder;
     playoutBuilder.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -203,7 +213,8 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         ->setChannelCount(config->channel_count)
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
-        ->setUsage(oboe::Usage::VoiceCommunication)
+        ->setUsage(oboe::Usage::Media)
+        ->setContentType(oboe::ContentType::Speech)
         ->setDataCallback(&g_playout_cb);
 
     result = playoutBuilder.openStream(g_playout_stream);
