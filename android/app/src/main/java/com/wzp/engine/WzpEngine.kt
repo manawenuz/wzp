@@ -159,6 +159,18 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeWriteAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, sampleCount: Int): Int
     private external fun nativeReadAudioDirect(handle: Long, buffer: java.nio.ByteBuffer, maxSamples: Int): Int
     private external fun nativeDestroy(handle: Long)
+
+    companion object {
+        init { System.loadLibrary("wzp_android") }
+
+        /** Get the identity fingerprint for a seed hex. No engine needed. */
+        @JvmStatic
+        private external fun nativeGetFingerprint(seedHex: String): String?
+
+        /** Compute the full identity fingerprint (xxxx:xxxx:...) from a seed hex string. */
+        @JvmStatic
+        fun getFingerprint(seedHex: String): String = nativeGetFingerprint(seedHex) ?: ""
+    }
     private external fun nativePingRelay(handle: Long, relay: String): String?
     private external fun nativeStartSignaling(handle: Long, relay: String, seed: String, token: String, alias: String): Int
     private external fun nativePlaceCall(handle: Long, targetFp: String): Int
@@ -208,11 +220,6 @@ class WzpEngine(private val callback: WzpCallback) {
         return nativeAnswerCall(nativeHandle, callId, mode)
     }
 
-    companion object {
-        init {
-            System.loadLibrary("wzp_android")
-        }
-    }
 }
 
 /** Integer constants matching the Rust [CallState] enum ordinals. */

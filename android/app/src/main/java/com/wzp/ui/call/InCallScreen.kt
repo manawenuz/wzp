@@ -431,14 +431,16 @@ fun InCallScreen(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Identity
-                val fp = if (seedHex.length >= 16) seedHex.take(16) else ""
+                // Identity — compute real fingerprint from seed
+                val fullFp = remember(seedHex) {
+                    if (seedHex.length >= 64) com.wzp.engine.WzpEngine.getFingerprint(seedHex) else ""
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (fp.isNotEmpty()) {
-                        Identicon(fingerprint = seedHex, size = 28.dp)
+                    if (fullFp.isNotEmpty()) {
+                        Identicon(fingerprint = fullFp, size = 28.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         CopyableFingerprint(
-                            fingerprint = fp.chunked(4).joinToString(":"),
+                            fingerprint = fullFp,
                             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                             color = TextDim
                         )

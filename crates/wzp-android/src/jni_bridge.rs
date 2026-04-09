@@ -363,6 +363,31 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePingRelay<'a>(
         .unwrap_or(JObject::null().into_raw())
 }
 
+/// Get the identity fingerprint for a seed hex string.
+/// Returns the full fingerprint (xxxx:xxxx:...) or empty string on error.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeGetFingerprint<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    seed_hex_j: JString,
+) -> jstring {
+    let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
+    let fp = if seed_hex.is_empty() {
+        String::new()
+    } else {
+        match wzp_crypto::Seed::from_hex(&seed_hex) {
+            Ok(seed) => {
+                let id = seed.derive_identity();
+                id.public_identity().fingerprint.to_string()
+            }
+            Err(_) => String::new(),
+        }
+    };
+    env.new_string(&fp)
+        .map(|s| s.into_raw())
+        .unwrap_or(JObject::null().into_raw())
+}
+
 // ── Direct calling JNI functions ──
 
 /// Start persistent signaling connection to relay for direct calls.
