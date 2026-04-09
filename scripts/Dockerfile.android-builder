@@ -1,11 +1,16 @@
 # =============================================================================
 # WZ Phone — Android build environment (Debian 12 / Bookworm)
 #
-# Matches the bare-metal build-android.sh environment:
+# Supports both:
+#   1. Legacy Kotlin+JNI Android app (via cargo-ndk + gradle)
+#   2. Tauri 2.x Mobile Android app (via tauri-cli + Node/npm)
+#
+# Toolchain:
 #   - Debian 12 (cmake 3.25, no Android cross-compilation bugs)
 #   - JDK 17 (Gradle 8.5 + AGP 8.2.0 compatible)
 #   - NDK 26.1 (last stable before scudo/MTE crash on NDK 27+)
-#   - Rust stable with aarch64-linux-android target + cargo-ndk
+#   - Node.js 20 LTS (for Tauri frontend build)
+#   - Rust stable with all 4 Android targets + cargo-ndk + tauri-cli 2.x
 #
 # Build:  docker build -t wzp-android-builder -f Dockerfile.android-builder .
 # =============================================================================
@@ -13,6 +18,11 @@ FROM debian:bookworm
 
 ARG NDK_VERSION=26.1.10909125
 ARG ANDROID_API=34
+# Tauri 2.x mobile targets compileSdk 36 + build-tools 35 by default. Install
+# both 34 (legacy Kotlin app) and 35/36 (Tauri mobile) so the same image works
+# for both pipelines.
+ARG ANDROID_API_TAURI=36
+ARG BUILD_TOOLS_TAURI=35.0.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ANDROID_HOME=/opt/android-sdk \
@@ -35,7 +45,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openjdk-17-jdk-headless \
         ca-certificates \
         libasound2-dev \
+        file \
+        xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 20 LTS (required by Tauri for frontend build) ────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version \
+    && npm --version
 
 # ── Android SDK + NDK 26.1 ──────────────────────────────────────────────────
 RUN mkdir -p $ANDROID_HOME/cmdline-tools \
@@ -49,6 +68,8 @@ RUN yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/nu
     && $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
         "platforms;android-${ANDROID_API}" \
         "build-tools;${ANDROID_API}.0.0" \
+        "platforms;android-${ANDROID_API_TAURI}" \
+        "build-tools;${BUILD_TOOLS_TAURI}" \
         "ndk;${NDK_VERSION}" \
         "platform-tools" \
         2>&1 | grep -v '^\[' > /dev/null
@@ -64,12 +85,22 @@ USER builder
 WORKDIR /home/builder
 
 # ── Rust toolchain ───────────────────────────────────────────────────────────
+# Install all 4 Android targets (Tauri Mobile builds for all ABIs by default;
+# cargo-ndk legacy path only needs arm64-v8a — both workflows supported).
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable \
     && . $HOME/.cargo/env \
-    && rustup target add aarch64-linux-android \
-    && cargo install cargo-ndk
+    && rustup target add \
+        aarch64-linux-android \
+        armv7-linux-androideabi \
+        i686-linux-android \
+        x86_64-linux-android \
+    && cargo install cargo-ndk \
+    && cargo install tauri-cli --version "^2.0" --locked
 
 ENV PATH="/home/builder/.cargo/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
+
+# NDK_HOME is the env var tauri-cli checks (in addition to ANDROID_NDK_HOME)
+ENV NDK_HOME=$ANDROID_NDK_HOME
 
 WORKDIR /build/source
