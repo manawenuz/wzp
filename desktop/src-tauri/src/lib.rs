@@ -382,32 +382,50 @@ async fn register_signal(
 
     { let mut sig = state.signal.lock().await; sig.transport = Some(transport.clone()); sig.fingerprint = fp.clone(); sig.signal_status = "registered".into(); }
 
+    tracing::info!(%fp, "signal registered, spawning recv loop");
     let signal_state = Arc::clone(&state.signal);
     let app_clone = app.clone();
     tokio::spawn(async move {
         loop {
             match transport.recv_signal().await {
                 Ok(Some(SignalMessage::CallRinging { call_id })) => {
+                    tracing::info!(%call_id, "signal: CallRinging");
                     let mut sig = signal_state.lock().await; sig.signal_status = "ringing".into();
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"ringing","call_id":call_id}));
                 }
                 Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, .. })) => {
+                    tracing::info!(%call_id, caller = %caller_fingerprint, "signal: DirectCallOffer");
                     let mut sig = signal_state.lock().await; sig.signal_status = "incoming".into();
                     sig.incoming_call_id = Some(call_id.clone()); sig.incoming_caller_fp = Some(caller_fingerprint.clone()); sig.incoming_caller_alias = caller_alias.clone();
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"incoming","call_id":call_id,"caller_fp":caller_fingerprint,"caller_alias":caller_alias}));
                 }
+                Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, .. })) => {
+                    tracing::info!(%call_id, ?accept_mode, "signal: DirectCallAnswer (forwarded by relay)");
+                }
                 Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr })) => {
+                    tracing::info!(%call_id, %room, %relay_addr, "signal: CallSetup — emitting setup event to JS");
                     let mut sig = signal_state.lock().await; sig.signal_status = "setup".into();
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"setup","call_id":call_id,"room":room,"relay_addr":relay_addr}));
                 }
-                Ok(Some(SignalMessage::Hangup { .. })) => {
+                Ok(Some(SignalMessage::Hangup { reason })) => {
+                    tracing::info!(?reason, "signal: Hangup");
                     let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None;
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
                 }
-                Ok(None) | Err(_) => break,
-                _ => {}
+                Ok(Some(other)) => {
+                    tracing::debug!(?other, "signal: unhandled message");
+                }
+                Ok(None) => {
+                    tracing::warn!("signal recv returned None — peer closed");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "signal recv error — breaking loop");
+                    break;
+                }
             }
         }
+        tracing::warn!("signal recv loop exited — signal_status=idle, transport dropped");
         let mut sig = signal_state.lock().await; sig.signal_status = "idle".into(); sig.transport = None;
     });
     Ok(fp)
@@ -419,6 +437,7 @@ async fn place_call(state: tauri::State<'_, Arc<AppState>>, target_fp: String) -
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or("not registered")?;
     let call_id = format!("{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    tracing::info!(%call_id, %target_fp, "place_call: sending DirectCallOffer");
     transport.send_signal(&SignalMessage::DirectCallOffer {
         caller_fingerprint: sig.fingerprint.clone(), caller_alias: None, target_fingerprint: target_fp,
         call_id, identity_pub: [0u8; 32], ephemeral_pub: [0u8; 32], signature: vec![],
@@ -431,12 +450,20 @@ async fn place_call(state: tauri::State<'_, Arc<AppState>>, target_fp: String) -
 async fn answer_call(state: tauri::State<'_, Arc<AppState>>, call_id: String, mode: i32) -> Result<(), String> {
     use wzp_proto::SignalMessage;
     let sig = state.signal.lock().await;
-    let transport = sig.transport.as_ref().ok_or("not registered")?;
+    let transport = sig.transport.as_ref().ok_or_else(|| {
+        tracing::warn!("answer_call: not registered (no transport)");
+        "not registered".to_string()
+    })?;
     let accept_mode = match mode { 0 => wzp_proto::CallAcceptMode::Reject, 1 => wzp_proto::CallAcceptMode::AcceptTrusted, _ => wzp_proto::CallAcceptMode::AcceptGeneric };
+    tracing::info!(%call_id, ?accept_mode, "answer_call: sending DirectCallAnswer");
     transport.send_signal(&SignalMessage::DirectCallAnswer {
-        call_id, accept_mode, identity_pub: None, ephemeral_pub: None, signature: None,
+        call_id: call_id.clone(), accept_mode, identity_pub: None, ephemeral_pub: None, signature: None,
         chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
-    }).await.map_err(|e| format!("{e}"))?;
+    }).await.map_err(|e| {
+        tracing::error!(%call_id, error = %e, "answer_call: send_signal failed");
+        format!("{e}")
+    })?;
+    tracing::info!(%call_id, "answer_call: DirectCallAnswer sent successfully");
     Ok(())
 }
 

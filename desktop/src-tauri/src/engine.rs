@@ -110,9 +110,11 @@ impl CallEngine {
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
+        info!(%relay, %room, %alias, %quality, "CallEngine::start (android) invoked");
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
+        info!(%relay_addr, "resolved relay addr");
 
         // Identity via shared helper (uses Tauri path().app_data_dir()).
         let seed = crate::load_or_create_seed()
@@ -123,9 +125,14 @@ impl CallEngine {
 
         // QUIC transport + handshake.
         let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+        let endpoint = wzp_transport::create_endpoint(bind_addr, None)
+            .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+        info!("endpoint created, dialing relay");
         let client_config = wzp_transport::client_config();
-        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config).await?;
+        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config)
+            .await
+            .map_err(|e| { error!("connect failed: {e}"); e })?;
+        info!("QUIC connection established, performing handshake");
         let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
 
         let _session = wzp_client::handshake::perform_handshake(
@@ -133,7 +140,8 @@ impl CallEngine {
             &seed.0,
             Some(&alias),
         )
-        .await?;
+        .await
+        .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
         info!("connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));
 
