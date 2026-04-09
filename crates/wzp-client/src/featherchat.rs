@@ -113,6 +113,12 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::FederationHello { .. }
         | SignalMessage::GlobalRoomActive { .. }
         | SignalMessage::GlobalRoomInactive { .. } => CallSignalType::Offer, // relay-only
+        SignalMessage::DirectCallOffer { .. } => CallSignalType::Offer,
+        SignalMessage::DirectCallAnswer { .. } => CallSignalType::Answer,
+        SignalMessage::CallSetup { .. } => CallSignalType::Offer, // relay-only
+        SignalMessage::CallRinging { .. } => CallSignalType::Ringing,
+        SignalMessage::RegisterPresence { .. }
+        | SignalMessage::RegisterPresenceAck { .. } => CallSignalType::Offer, // relay-only
     }
 }
 

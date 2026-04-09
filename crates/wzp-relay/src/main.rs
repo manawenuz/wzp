@@ -424,6 +424,10 @@ async fn main() -> anyhow::Result<()> {
     // Session manager — enforces max concurrent sessions
     let session_mgr = Arc::new(Mutex::new(SessionManager::new(config.max_sessions)));
 
+    // Signal hub + call registry for direct 1:1 calls
+    let signal_hub = Arc::new(Mutex::new(wzp_relay::signal_hub::SignalHub::new()));
+    let call_registry = Arc::new(Mutex::new(wzp_relay::call_registry::CallRegistry::new()));
+
     // Spawn inter-relay health probes via ProbeMesh coordinator
     if !config.probe_targets.is_empty() {
         let mesh = wzp_relay::probe::ProbeMesh::new(
@@ -487,6 +491,9 @@ async fn main() -> anyhow::Result<()> {
         let presence = presence.clone();
         let route_resolver = route_resolver.clone();
         let federation_mgr = federation_mgr.clone();
+        let signal_hub = signal_hub.clone();
+        let call_registry = call_registry.clone();
+        let listen_addr_str = config.listen_addr.to_string();
 
         tokio::spawn(async move {
             let addr = connection.remote_address();
@@ -638,6 +645,244 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     info!(%addr, "federation connection rejected (no federation configured)");
                 }
+                return;
+            }
+
+            // Direct calling: persistent signaling connection
+            if room_name == "_signal" {
+                info!(%addr, "signal connection");
+
+                // Optional auth
+                let auth_fp: Option<String> = if let Some(ref url) = auth_url {
+                    match transport.recv_signal().await {
+                        Ok(Some(SignalMessage::AuthToken { token })) => {
+                            match wzp_relay::auth::validate_token(url, &token).await {
+                                Ok(client) => Some(client.fingerprint),
+                                Err(e) => {
+                                    error!(%addr, "signal auth failed: {e}");
+                                    return;
+                                }
+                            }
+                        }
+                        _ => { warn!(%addr, "signal: expected AuthToken"); return; }
+                    }
+                } else {
+                    None
+                };
+
+                // Wait for RegisterPresence
+                let (client_fp, client_alias) = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    transport.recv_signal(),
+                ).await {
+                    Ok(Ok(Some(SignalMessage::RegisterPresence { identity_pub, signature: _, alias }))) => {
+                        // Compute fingerprint: SHA-256(Ed25519 pub key)[:16] as hex pairs with colons
+                        let hash = {
+                            use sha2::{Sha256, Digest};
+                            Sha256::digest(&identity_pub)
+                        };
+                        let fp = hash[..16].iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .chunks(2)
+                            .map(|c| c.join(""))
+                            .collect::<Vec<_>>()
+                            .join(":");
+                        let fp = auth_fp.unwrap_or(fp);
+                        (fp, alias)
+                    }
+                    _ => {
+                        warn!(%addr, "signal: no RegisterPresence received");
+                        return;
+                    }
+                };
+
+                // Register in signal hub + presence
+                {
+                    let mut hub = signal_hub.lock().await;
+                    hub.register(client_fp.clone(), transport.clone(), client_alias.clone());
+                }
+                {
+                    let mut reg = presence.lock().await;
+                    reg.register_local(&client_fp, client_alias.clone(), None);
+                }
+
+                // Send ack
+                let _ = transport.send_signal(&SignalMessage::RegisterPresenceAck {
+                    success: true,
+                    error: None,
+                }).await;
+
+                info!(%addr, fingerprint = %client_fp, alias = ?client_alias, "signal client registered");
+
+                // Signal recv loop
+                loop {
+                    match transport.recv_signal().await {
+                        Ok(Some(msg)) => {
+                            match msg {
+                                SignalMessage::DirectCallOffer { ref target_fingerprint, ref call_id, ref caller_alias, .. } => {
+                                    let target_fp = target_fingerprint.clone();
+                                    let call_id = call_id.clone();
+
+                                    // Check if target is online
+                                    let online = {
+                                        let hub = signal_hub.lock().await;
+                                        hub.is_online(&target_fp)
+                                    };
+                                    if !online {
+                                        info!(%addr, target = %target_fp, "call target not online");
+                                        let _ = transport.send_signal(&SignalMessage::Hangup {
+                                            reason: wzp_proto::HangupReason::Normal,
+                                        }).await;
+                                        continue;
+                                    }
+
+                                    // Create call in registry
+                                    {
+                                        let mut reg = call_registry.lock().await;
+                                        reg.create_call(call_id.clone(), client_fp.clone(), target_fp.clone());
+                                    }
+
+                                    // Forward offer to callee
+                                    info!(caller = %client_fp, callee = %target_fp, call_id = %call_id, "routing direct call offer");
+                                    let hub = signal_hub.lock().await;
+                                    if let Err(e) = hub.send_to(&target_fp, &msg).await {
+                                        warn!("failed to forward call offer: {e}");
+                                    }
+
+                                    // Send ringing to caller
+                                    drop(hub);
+                                    let _ = transport.send_signal(&SignalMessage::CallRinging {
+                                        call_id: call_id.clone(),
+                                    }).await;
+                                }
+
+                                SignalMessage::DirectCallAnswer { ref call_id, ref accept_mode, .. } => {
+                                    let call_id = call_id.clone();
+                                    let mode = *accept_mode;
+
+                                    let peer_fp = {
+                                        let reg = call_registry.lock().await;
+                                        reg.peer_fingerprint(&call_id, &client_fp).map(|s| s.to_string())
+                                    };
+
+                                    let Some(peer_fp) = peer_fp else {
+                                        warn!(call_id = %call_id, "answer for unknown call");
+                                        continue;
+                                    };
+
+                                    if mode == wzp_proto::CallAcceptMode::Reject {
+                                        info!(call_id = %call_id, "call rejected");
+                                        let mut reg = call_registry.lock().await;
+                                        reg.end_call(&call_id);
+                                        drop(reg);
+                                        let hub = signal_hub.lock().await;
+                                        let _ = hub.send_to(&peer_fp, &SignalMessage::Hangup {
+                                            reason: wzp_proto::HangupReason::Normal,
+                                        }).await;
+                                    } else {
+                                        // Accept — create private room
+                                        let room = format!("call-{call_id}");
+                                        {
+                                            let mut reg = call_registry.lock().await;
+                                            reg.set_active(&call_id, mode, room.clone());
+                                        }
+                                        info!(call_id = %call_id, room = %room, mode = ?mode, "call accepted, creating room");
+
+                                        // Forward answer to caller
+                                        {
+                                            let hub = signal_hub.lock().await;
+                                            let _ = hub.send_to(&peer_fp, &msg).await;
+                                        }
+
+                                        // Send CallSetup to both parties
+                                        let setup = SignalMessage::CallSetup {
+                                            call_id: call_id.clone(),
+                                            room: room.clone(),
+                                            relay_addr: listen_addr_str.clone(),
+                                        };
+                                        {
+                                            let hub = signal_hub.lock().await;
+                                            let _ = hub.send_to(&peer_fp, &setup).await;
+                                            let _ = hub.send_to(&client_fp, &setup).await;
+                                        }
+                                    }
+                                }
+
+                                SignalMessage::Hangup { .. } => {
+                                    // Forward hangup to all active calls for this user
+                                    let calls = {
+                                        let reg = call_registry.lock().await;
+                                        reg.calls_for_fingerprint(&client_fp)
+                                            .iter()
+                                            .map(|c| (c.call_id.clone(), if c.caller_fingerprint == client_fp {
+                                                c.callee_fingerprint.clone()
+                                            } else {
+                                                c.caller_fingerprint.clone()
+                                            }))
+                                            .collect::<Vec<_>>()
+                                    };
+                                    for (call_id, peer_fp) in &calls {
+                                        let hub = signal_hub.lock().await;
+                                        let _ = hub.send_to(peer_fp, &msg).await;
+                                        drop(hub);
+                                        let mut reg = call_registry.lock().await;
+                                        reg.end_call(call_id);
+                                    }
+                                }
+
+                                SignalMessage::Ping { timestamp_ms } => {
+                                    let _ = transport.send_signal(&SignalMessage::Pong { timestamp_ms }).await;
+                                }
+
+                                other => {
+                                    warn!(%addr, "signal: unexpected message: {:?}", std::mem::discriminant(&other));
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            info!(%addr, "signal connection closed");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(%addr, "signal recv error: {e}");
+                            break;
+                        }
+                    }
+                }
+
+                // Cleanup: unregister + end active calls
+                let active_calls = {
+                    let reg = call_registry.lock().await;
+                    reg.calls_for_fingerprint(&client_fp)
+                        .iter()
+                        .map(|c| (c.call_id.clone(), if c.caller_fingerprint == client_fp {
+                            c.callee_fingerprint.clone()
+                        } else {
+                            c.caller_fingerprint.clone()
+                        }))
+                        .collect::<Vec<_>>()
+                };
+                for (call_id, peer_fp) in &active_calls {
+                    let hub = signal_hub.lock().await;
+                    let _ = hub.send_to(peer_fp, &SignalMessage::Hangup {
+                        reason: wzp_proto::HangupReason::Normal,
+                    }).await;
+                    drop(hub);
+                    let mut reg = call_registry.lock().await;
+                    reg.end_call(call_id);
+                }
+
+                {
+                    let mut hub = signal_hub.lock().await;
+                    hub.unregister(&client_fp);
+                }
+                {
+                    let mut reg = presence.lock().await;
+                    reg.unregister_local(&client_fp);
+                }
+
+                transport.close().await.ok();
                 return;
             }
 

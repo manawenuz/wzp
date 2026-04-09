@@ -677,6 +677,91 @@ pub enum SignalMessage {
     GlobalRoomInactive {
         room: String,
     },
+
+    // ── Direct calling signals (client ↔ relay signaling) ──
+
+    /// Register on relay for direct calls. Sent on `_signal` connections
+    /// after optional AuthToken.
+    RegisterPresence {
+        /// Client's Ed25519 identity public key.
+        identity_pub: [u8; 32],
+        /// Signature over ("register-presence" || identity_pub).
+        signature: Vec<u8>,
+        /// Optional display name.
+        alias: Option<String>,
+    },
+
+    /// Relay confirms presence registration.
+    RegisterPresenceAck {
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
+    /// Direct call offer routed through the relay to a specific peer.
+    DirectCallOffer {
+        /// Caller's fingerprint.
+        caller_fingerprint: String,
+        /// Caller's display name.
+        caller_alias: Option<String>,
+        /// Target's fingerprint.
+        target_fingerprint: String,
+        /// Unique call session ID (UUID).
+        call_id: String,
+        /// Caller's Ed25519 identity pub.
+        identity_pub: [u8; 32],
+        /// Caller's ephemeral X25519 pub (for key exchange on media connect).
+        ephemeral_pub: [u8; 32],
+        /// Signature over (ephemeral_pub || target_fingerprint || call_id).
+        signature: Vec<u8>,
+        /// Supported quality profiles.
+        supported_profiles: Vec<crate::QualityProfile>,
+    },
+
+    /// Callee's response to a direct call.
+    DirectCallAnswer {
+        call_id: String,
+        /// How the callee accepts (or rejects).
+        accept_mode: CallAcceptMode,
+        /// Callee's identity pub (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        identity_pub: Option<[u8; 32]>,
+        /// Callee's ephemeral pub (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ephemeral_pub: Option<[u8; 32]>,
+        /// Signature (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<Vec<u8>>,
+        /// Chosen quality profile (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chosen_profile: Option<crate::QualityProfile>,
+    },
+
+    /// Relay tells both parties: media room is ready.
+    CallSetup {
+        call_id: String,
+        /// Room name on the relay for the media session (e.g., "_call:a1b2c3d4").
+        room: String,
+        /// Relay address for the QUIC media connection.
+        relay_addr: String,
+    },
+
+    /// Ringing notification (relay → caller, callee received the offer).
+    CallRinging {
+        call_id: String,
+    },
+}
+
+/// How the callee responds to a direct call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallAcceptMode {
+    /// Reject the call.
+    Reject,
+    /// Accept with trust — in Phase 2, this enables P2P (reveals IP).
+    /// In Phase 1, behaves the same as AcceptGeneric.
+    AcceptTrusted,
+    /// Accept with privacy — relay always mediates media.
+    AcceptGeneric,
 }
 
 /// A participant entry in a RoomUpdate message.
