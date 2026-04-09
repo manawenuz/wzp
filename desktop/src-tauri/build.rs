@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -16,134 +15,24 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
 
+    // ─── Step A: single trivial cpp/hello.c compiled via cc::Build ─────────
+    // ─── Step D: also compile getauxval_fix.c (legacy wzp-android shim) ────
+    // getauxval_fix.c overrides the broken static getauxval stub that
+    // compiler-rt pulls in for Android targets. It's been shipping in the
+    // legacy wzp-android .so for months without issue, so including it here
+    // is low-risk — but it's an incremental variable we want to isolate.
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("android") {
-        build_android_native();
+        println!("cargo:rerun-if-changed=cpp/hello.c");
+        cc::Build::new()
+            .file("cpp/hello.c")
+            .compile("wzp_hello");
+
+        println!("cargo:rerun-if-changed=cpp/getauxval_fix.c");
+        cc::Build::new()
+            .file("cpp/getauxval_fix.c")
+            .compile("getauxval_fix");
     }
 
     tauri_build::build()
-}
-
-fn build_android_native() {
-    // ─── Step A: cpp/hello.c sanity static lib ─────────────────────────────
-    println!("cargo:rerun-if-changed=cpp/hello.c");
-    cc::Build::new()
-        .file("cpp/hello.c")
-        .compile("wzp_hello");
-
-    // ─── Step D: getauxval_fix shim ────────────────────────────────────────
-    println!("cargo:rerun-if-changed=cpp/getauxval_fix.c");
-    cc::Build::new()
-        .file("cpp/getauxval_fix.c")
-        .compile("getauxval_fix");
-
-    // ─── Step E.minus-1: cpp_smoke.cpp → cpp_smoke.c, compile as plain C ──
-    // E.0 (cpp(true), no stdlib, empty extern-C function) still crashed.
-    // libc++ linkage ruled out in all forms. Remaining variable: is it the
-    // .cpp(true) compile mode itself — cc-rs invoking clang++ instead of
-    // clang, or emitting language-specific flags?
-    //
-    // The content of cpp_smoke is already zero-C++ (just an extern "C"
-    // function returning 42). Rename the file to .c and drop .cpp(true)
-    // so cc-rs uses the plain C compile path — exactly like hello.c in
-    // Step A, which worked. If THIS crashes, cc::Build is being accused
-    // wrongly and the crash is triggered by literally _adding any
-    // additional static archive_ to the link (in which case Step A
-    // should also have crashed and clearly didn't). If this launches,
-    // the trigger is the cpp(true) → clang++ pipeline, and we need to
-    // find out exactly what clang++ differs on for Android cdylibs.
-    println!("cargo:rerun-if-changed=cpp/cpp_smoke.c");
-    cc::Build::new()
-        .file("cpp/cpp_smoke.c")
-        .compile("wzp_cpp_smoke");
-
-    // Copy libc++_shared.so next to libwzp_desktop_lib.so in the Tauri
-    // jniLibs directory so the dynamic linker can resolve it at runtime.
-    if let Ok(ndk) = std::env::var("ANDROID_NDK_HOME")
-        .or_else(|_| std::env::var("NDK_HOME"))
-    {
-        let (triple, abi) = match target_os_abi() {
-            Some(v) => v,
-            None => ("aarch64-linux-android", "arm64-v8a"),
-        };
-        let lib_dir = format!(
-            "{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{triple}"
-        );
-        println!("cargo:rustc-link-search=native={lib_dir}");
-
-        let shared_so = format!("{lib_dir}/libc++_shared.so");
-        if std::path::Path::new(&shared_so).exists() {
-            let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-            let jni_dir = format!("{manifest}/gen/android/app/src/main/jniLibs/{abi}");
-            if std::fs::create_dir_all(&jni_dir).is_ok() {
-                let _ = std::fs::copy(&shared_so, format!("{jni_dir}/libc++_shared.so"));
-                println!("cargo:warning=Copied libc++_shared.so to {jni_dir}");
-            }
-        }
-    }
-
-    // Step E.4 drops the Oboe-specific -llog / -lOpenSLES link requirements
-    // since cpp_smoke.cpp doesn't call into Android's logging or audio HAL.
-    // Keep libc++_shared.so in jniLibs (copied above) because the smoke
-    // file still dynamically links against libc++.
-}
-
-fn target_os_abi() -> Option<(&'static str, &'static str)> {
-    let target = std::env::var("TARGET").ok()?;
-    if target.contains("aarch64") {
-        Some(("aarch64-linux-android", "arm64-v8a"))
-    } else if target.contains("armv7") {
-        Some(("arm-linux-androideabi", "armeabi-v7a"))
-    } else if target.contains("x86_64") {
-        Some(("x86_64-linux-android", "x86_64"))
-    } else if target.contains("i686") {
-        Some(("i686-linux-android", "x86"))
-    } else {
-        None
-    }
-}
-
-/// Recursively add all .cpp files from a directory to a cc::Build.
-#[allow(dead_code)] // re-enabled when Step E.x restores the full Oboe compile
-fn add_cpp_files_recursive(build: &mut cc::Build, dir: &std::path::Path) {
-    if !dir.is_dir() {
-        return;
-    }
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.is_dir() {
-            add_cpp_files_recursive(build, &path);
-        } else if path.extension().map_or(false, |e| e == "cpp") {
-            build.file(&path);
-        }
-    }
-}
-
-/// Try to find or fetch Oboe headers + source (v1.8.1).
-#[allow(dead_code)] // re-enabled when Step E.x restores the full Oboe compile
-fn fetch_oboe() -> Option<PathBuf> {
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let oboe_dir = out_dir.join("oboe");
-
-    if oboe_dir.join("include").join("oboe").join("Oboe.h").exists() {
-        return Some(oboe_dir);
-    }
-
-    let status = Command::new("git")
-        .args([
-            "clone",
-            "--depth=1",
-            "--branch=1.8.1",
-            "https://github.com/google/oboe.git",
-            oboe_dir.to_str().unwrap(),
-        ])
-        .status();
-
-    match status {
-        Ok(s) if s.success() && oboe_dir.join("include").join("oboe").join("Oboe.h").exists() => {
-            Some(oboe_dir)
-        }
-        _ => None,
-    }
 }
