@@ -165,7 +165,7 @@ fun InCallScreen(
                     color = Color.White
                 )
                 Text(
-                    text = "ENCRYPTED VOICE",
+                    text = "ENCRYPTED VOICE  \u2022  direct-call-v1",
                     style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 3.sp),
                     color = TextDim
                 )

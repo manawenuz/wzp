@@ -272,14 +272,19 @@ impl WzpEngine {
 
         info!(fingerprint = %fp, relay = %addr, "starting signaling");
 
-        // Create runtime for signaling (separate from call runtime)
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()?;
-
+        self.state.running.store(true, Ordering::Release);
         let signal_state = state.clone();
-        rt.spawn(async move {
+
+        // Spawn on a dedicated thread with sufficient stack (Android IO dispatcher stack is too small)
+        std::thread::Builder::new()
+            .name("wzp-signal".into())
+            .stack_size(4 * 1024 * 1024) // 4MB stack
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                rt.block_on(async move {
             let _ = rustls::crypto::ring::default_provider().install_default();
             let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
             let endpoint = match wzp_transport::create_endpoint(bind, None) {
@@ -371,9 +376,9 @@ impl WzpEngine {
 
             let mut stats = signal_state.stats.lock().unwrap();
             stats.state = crate::stats::CallState::Closed;
-        });
+                }); // block_on
+            })?; // thread spawn
 
-        self.tokio_runtime = Some(rt);
         Ok(())
     }
 
