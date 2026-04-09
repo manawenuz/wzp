@@ -18,13 +18,13 @@ use jni::JavaVM;
 /// mobile runtime sets up at process startup.
 fn jvm_and_activity() -> Result<(JavaVM, JObject<'static>), String> {
     let ctx = ndk_context::android_context();
-    let vm_ptr = ctx.vm().cast();
+    let vm_ptr = ctx.vm() as *mut jni::sys::JavaVM;
     if vm_ptr.is_null() {
         return Err("ndk_context: JavaVM pointer is null".into());
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr) }
         .map_err(|e| format!("JavaVM::from_raw: {e}"))?;
-    let activity_ptr = ctx.context().cast();
+    let activity_ptr = ctx.context() as jni::sys::jobject;
     if activity_ptr.is_null() {
         return Err("ndk_context: activity pointer is null".into());
     }
