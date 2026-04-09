@@ -279,29 +279,33 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
 
     // Build playout stream.
     //
-    // Usage::Media was a failed experiment — diagnosis from build 96be740
-    // showed the whole pipeline is healthy (capture → encode → network →
-    // decode → playout ring → C++ callback reads 960 samples every 20ms
-    // with real audio content) but nothing was audible. This means Oboe
-    // received the PCM and routed it to a silent output. Usage::Media
-    // alone is not enough — the AudioManager must also be switched to
-    // MODE_IN_COMMUNICATION and speakerphone explicitly turned on from
-    // the Activity side, which MainActivity.kt now does on startup.
+    // Regression triangulation between builds:
+    //   96be740 (Usage::Media, default API): playout callback DID drain
+    //   the ring at steady 50Hz (playout heartbeat: calls=1100,
+    //   total_played_real=1055040). Audio not audible because OS routing
+    //   sent it to a silent output.
     //
-    // Reverting to Usage::VoiceCommunication + ContentType::Speech +
-    // explicit AAudio API (more reliable routing than OpenSLES default)
-    // on top of the Kotlin-side setMode/setSpeakerphoneOn changes.
+    //   8c36fb5 (Usage::VoiceCommunication + setAudioApi(AAudio) +
+    //   ContentType::Speech): playout callback fired cb#0 once then
+    //   stopped draining the ring entirely. written_samples stuck at
+    //   ring capacity (7679) across all subsequent heartbeats, so Oboe
+    //   accepted zero samples after startup. Still inaudible.
+    //
+    // Hypothesis: forcing setAudioApi(AAudio) + VoiceCommunication on
+    // Pixel 6 / Android 15 opens a stream that succeeds at cb#0 but
+    // then detaches from the real audio driver. Reverting to the
+    // config that at least drove callbacks correctly, plus the
+    // Kotlin-side MODE_IN_COMMUNICATION + setSpeakerphoneOn(true)
+    // handled in MainActivity.kt to route audio to the loud speaker.
     oboe::AudioStreamBuilder playoutBuilder;
     playoutBuilder.setDirection(oboe::Direction::Output)
-        ->setAudioApi(oboe::AudioApi::AAudio)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
         ->setSharingMode(oboe::SharingMode::Exclusive)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(config->channel_count)
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
-        ->setUsage(oboe::Usage::VoiceCommunication)
-        ->setContentType(oboe::ContentType::Speech)
+        ->setUsage(oboe::Usage::Media)
         ->setDataCallback(&g_playout_cb);
 
     result = playoutBuilder.openStream(g_playout_stream);

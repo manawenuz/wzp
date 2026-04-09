@@ -57,40 +57,35 @@ class MainActivity : TauriActivity() {
   }
 
   /**
-   * Put the phone into VoIP-call audio mode so that the Oboe playout stream
-   * (opened with Usage::VoiceCommunication) actually routes to the loud
-   * speaker and uses the in-call volume slider. Without this, the stream is
-   * accepted by AAudio, the callback is driven at realtime with valid PCM,
-   * and nothing is audible because the OS routes the stream to a muted or
-   * unavailable output. See build 96be740's logcat for the full proof:
-   * playout callback played 1055040 samples in 22s with RMS up to 2318 and
-   * still produced zero audible output, which was the smoking gun pointing
-   * at this AudioManager state rather than the Rust pipeline.
+   * Max out STREAM_MUSIC so the Oboe playout stream (opened with
+   * Usage::Media, which routes to STREAM_MUSIC) is actually audible.
    *
-   * This is a temporary "call mode always on" setup — fine for smoke tests
-   * and the current single-purpose VoIP app. A polished version should
-   * setMode(IN_COMMUNICATION) only while a call is active and restore
-   * MODE_NORMAL on hangup, with proper audio-focus requests.
+   * DELIBERATELY does NOT call setMode(IN_COMMUNICATION) or
+   * setSpeakerphoneOn: build 8c36fb5 confirmed that combining those with
+   * Usage::Media OR with Usage::VoiceCommunication (both tried) broke the
+   * Oboe playout callback entirely — the ring filled once at startup and
+   * Oboe stopped draining it. Keeping audio mode in MODE_NORMAL so the
+   * Media stream follows the normal speaker-output path, controlled by
+   * the media volume slider.
+   *
+   * A polished version of the app will setMode/setSpeakerphoneOn on a
+   * per-call basis once we've figured out the correct combo with AAudio.
    */
   private fun configureAudioForCall() {
     try {
       val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-      Log.i(TAG, "audio mode before: ${am.mode} speaker=${am.isSpeakerphoneOn} " +
+      Log.i(TAG, "audio state before: mode=${am.mode} speaker=${am.isSpeakerphoneOn} " +
         "voiceVol=${am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)}/" +
         "${am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)} " +
         "musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/" +
         "${am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}")
 
-      am.mode = AudioManager.MODE_IN_COMMUNICATION
-      am.isSpeakerphoneOn = true
+      // Crank media volume to max — STREAM_MUSIC is what Usage::Media
+      // plays through. User can adjust with hardware volume buttons.
+      val maxMusic = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+      am.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
 
-      // Nudge volumes to max so the smoke test can actually hear something.
-      // Users can adjust with the hardware volume buttons afterwards.
-      val maxVoice = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-      am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoice, 0)
-
-      Log.i(TAG, "audio mode after: ${am.mode} speaker=${am.isSpeakerphoneOn} " +
-        "voiceVol=${am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)}/$maxVoice")
+      Log.i(TAG, "audio state after: mode=${am.mode} musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/$maxMusic")
     } catch (e: Throwable) {
       Log.e(TAG, "configureAudioForCall failed: ${e.message}", e)
     }
