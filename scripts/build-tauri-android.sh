@@ -179,6 +179,45 @@ if [ "${DO_INIT}" = "1" ] || [ ! -x gen/android/gradlew ]; then
     cargo tauri android init 2>&1 | tail -20
 fi
 
+# ── Post-init patches: runtime mic permission + jniLibs dir ─────────────────
+MANIFEST=gen/android/app/src/main/AndroidManifest.xml
+if ! grep -q "RECORD_AUDIO" "$MANIFEST"; then
+    echo ">>> injecting RECORD_AUDIO + MODIFY_AUDIO_SETTINGS into AndroidManifest"
+    sed -i "s|<uses-permission android:name=\"android.permission.INTERNET\" />|<uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission android:name=\"android.permission.RECORD_AUDIO\" />\n    <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />|" "$MANIFEST"
+fi
+
+# Overwrite MainActivity to request the mic permission on launch. Idempotent —
+# Tauri re-init would reset it, and we re-write it here on every build.
+MAIN_ACTIVITY=gen/android/app/src/main/java/com/wzp/desktop/MainActivity.kt
+cat > "$MAIN_ACTIVITY" <<KOTLIN_EOF
+package com.wzp.desktop
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Bundle
+import androidx.activity.enableEdgeToEdge
+import androidx.core.app.ActivityCompat
+
+class MainActivity : TauriActivity() {
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge()
+    super.onCreate(savedInstanceState)
+
+    // Auto-request RECORD_AUDIO + MODIFY_AUDIO_SETTINGS on first launch — Oboe
+    // capture fails silently without them.
+    val needed = arrayOf(
+      Manifest.permission.RECORD_AUDIO,
+      Manifest.permission.MODIFY_AUDIO_SETTINGS,
+    ).filter {
+      ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+    }.toTypedArray()
+    if (needed.isNotEmpty()) {
+      ActivityCompat.requestPermissions(this, needed, 1337)
+    }
+  }
+}
+KOTLIN_EOF
+
 echo ">>> cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk"
 cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk
 
