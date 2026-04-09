@@ -719,5 +719,13 @@ impl CallEngine {
     pub async fn stop(self) {
         self.running.store(false, Ordering::SeqCst);
         self.transport.close().await.ok();
+        // On Android, the Oboe capture/playout streams live inside the
+        // wzp-native cdylib as a process-global singleton. Explicitly stop
+        // them here so the mic + speaker are released between calls, matching
+        // the desktop behaviour where dropping _audio_handle tears down CPAL.
+        #[cfg(target_os = "android")]
+        {
+            crate::wzp_native::audio_stop();
+        }
     }
 }

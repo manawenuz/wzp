@@ -17,9 +17,9 @@ mod engine;
 #[cfg(target_os = "android")]
 mod wzp_native;
 
-// CallEngine is only referenced from the non-Android connect/disconnect/etc
-// commands; the Android stubs return errors directly.
-#[cfg(not(target_os = "android"))]
+// CallEngine has a unified impl on both targets now — the Android branch of
+// CallEngine::start() routes audio through the standalone wzp-native cdylib
+// (loaded via the wzp_native module below), the desktop branch uses CPAL.
 use engine::CallEngine;
 
 use serde::Serialize;
@@ -91,7 +91,6 @@ struct CallStatus {
 }
 
 struct AppState {
-    #[cfg(not(target_os = "android"))]
     engine: Mutex<Option<CallEngine>>,
     signal: Arc<Mutex<SignalState>>,
 }
@@ -229,7 +228,6 @@ fn get_app_info() -> Result<AppInfo, String> {
     })
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn connect(
     state: tauri::State<'_, Arc<AppState>>,
@@ -265,7 +263,6 @@ async fn connect(
     }
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
     let mut engine_lock = state.engine.lock().await;
@@ -277,7 +274,6 @@ async fn disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<String, St
     }
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn toggle_mic(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
@@ -288,7 +284,6 @@ async fn toggle_mic(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, Stri
     }
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn toggle_speaker(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
@@ -299,7 +294,6 @@ async fn toggle_speaker(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, 
     }
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus, String> {
     let engine_lock = state.engine.lock().await;
@@ -341,62 +335,6 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
             rx_codec: String::new(),
         })
     }
-}
-
-// ─── Android stubs for engine-backed commands ────────────────────────────────
-//
-// Step 1 of the Android rewrite: signal-only. Audio is wired up in Step 3.
-// These keep the JS frontend happy (same `invoke` surface) without pulling
-// in CPAL, which doesn't support Android.
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn connect(
-    _state: tauri::State<'_, Arc<AppState>>,
-    _app: tauri::AppHandle,
-    _relay: String,
-    _room: String,
-    _alias: String,
-    _os_aec: bool,
-    _quality: String,
-) -> Result<String, String> {
-    Err("audio backend not yet wired on Android (step 3)".into())
-}
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn disconnect(_state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
-    Ok("not connected".into())
-}
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn toggle_mic(_state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    Err("not connected".into())
-}
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn toggle_speaker(_state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    Err("not connected".into())
-}
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn get_status(_state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus, String> {
-    Ok(CallStatus {
-        active: false,
-        mic_muted: false,
-        spk_muted: false,
-        participants: vec![],
-        encode_fps: 0,
-        recv_fps: 0,
-        audio_level: 0,
-        call_duration_secs: 0.0,
-        fingerprint: String::new(),
-        tx_codec: String::new(),
-        rx_codec: String::new(),
-    })
 }
 
 // ─── Signaling commands — platform independent ───────────────────────────────
@@ -516,7 +454,6 @@ pub fn run() {
     tracing_subscriber::fmt().init();
 
     let state = Arc::new(AppState {
-        #[cfg(not(target_os = "android"))]
         engine: Mutex::new(None),
         signal: Arc::new(Mutex::new(SignalState {
             transport: None, fingerprint: String::new(), signal_status: "idle".into(),
