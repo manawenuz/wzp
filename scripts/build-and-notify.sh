@@ -106,7 +106,7 @@ ls -lh android/app/src/main/jniLibs/arm64-v8a/
 
 echo ">>> APK build..."
 cd android && chmod +x gradlew
-./gradlew clean assembleDebug --no-daemon --warning-mode=none 2>&1 | tail -3
+./gradlew clean assembleDebug --no-daemon --warning-mode=none 2>&1 | tail -50
 echo "APK_BUILT"
 '
 
