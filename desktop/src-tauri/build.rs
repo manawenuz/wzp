@@ -32,6 +32,15 @@ fn main() {
         cc::Build::new()
             .file("cpp/getauxval_fix.c")
             .compile("getauxval_fix");
+
+        // Step D+1: identical-content clone of hello.c as a third cc::Build
+        // static library. Tests the "any 3rd static lib triggers the crash"
+        // theory in isolation — no C++, no external deps, same C content as
+        // the known-working hello.c.
+        println!("cargo:rerun-if-changed=cpp/hello2.c");
+        cc::Build::new()
+            .file("cpp/hello2.c")
+            .compile("wzp_hello2");
     }
 
     tauri_build::build()
