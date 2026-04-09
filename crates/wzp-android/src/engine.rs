@@ -207,7 +207,6 @@ impl WzpEngine {
     /// Returns JSON `{"rtt_ms":N,"server_fingerprint":"hex"}` or error.
     pub fn ping_relay(&self, address: &str) -> Result<String, anyhow::Error> {
         let addr: SocketAddr = address.parse()?;
-        let _ = rustls::crypto::ring::default_provider().install_default();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -264,7 +263,6 @@ impl WzpEngine {
     ) -> Result<(), anyhow::Error> {
         use wzp_proto::{MediaTransport, SignalMessage};
 
-        let _ = rustls::crypto::ring::default_provider().install_default();
 
         let addr: SocketAddr = relay_addr.parse()?;
         let seed = if seed_hex.is_empty() {
@@ -512,7 +510,6 @@ async fn run_call(
     alias: Option<&str>,
     state: Arc<EngineState>,
 ) -> Result<(), anyhow::Error> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;

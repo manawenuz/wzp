@@ -77,6 +77,9 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeInit(
 ) -> jlong {
     let result = panic::catch_unwind(|| {
         init_logging();
+        // Install rustls crypto provider ONCE on the main thread.
+        // Must not be called per-thread — conflicts with Android's system libcrypto.so TLS keys.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let handle = Box::new(EngineHandle {
             engine: WzpEngine::new(),
         });
