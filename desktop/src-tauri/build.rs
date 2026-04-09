@@ -38,14 +38,6 @@ fn build_oboe_android(target: &str) {
         .file("cpp/getauxval_fix.c")
         .compile("getauxval_fix");
 
-    // pthread_shim: interpose pthread_create so Rust libstd can't use the
-    // broken static pthread_create stub (which calls __init_tcb, crashing
-    // in a .so). Our shim forwards to libc.so's real one via RTLD_NEXT.
-    // Compiled as its own static lib so the linker links it ahead of libstd.
-    cc::Build::new()
-        .file("cpp/pthread_shim.c")
-        .compile("pthread_shim");
-
     let oboe_dir = fetch_oboe();
     match oboe_dir {
         Some(oboe_path) => {
@@ -112,12 +104,6 @@ fn build_oboe_android(target: &str) {
     // Oboe requires Android log + OpenSLES backends
     println!("cargo:rustc-link-lib=log");
     println!("cargo:rustc-link-lib=OpenSLES");
-
-    // Wrap pthread_create: redirect every `pthread_create` reference to our
-    // `__wrap_pthread_create` in pthread_shim.c, which forwards to the real
-    // libc.so symbol via dlsym. Without this the linker binds to libstd's
-    // bundled broken static pthread_create stub (see pthread_shim.c).
-    println!("cargo:rustc-link-arg=-Wl,--wrap=pthread_create");
 }
 
 /// Recursively add all .cpp files from a directory to a cc::Build.
