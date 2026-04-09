@@ -169,7 +169,15 @@ class CallViewModel : ViewModel(), WzpCallback {
         if (serverIdx >= serverList.size) return
 
         val relay = serverList[serverIdx].address
-        val seed = _seedHex.value
+        var seed = _seedHex.value
+        // Generate seed if empty (fresh install or cleared storage)
+        if (seed.isEmpty()) {
+            val newSeed = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+            seed = newSeed.joinToString("") { "%02x".format(it) }
+            _seedHex.value = seed
+            settings?.saveSeedHex(seed)
+            Log.i(TAG, "generated new identity seed")
+        }
         val resolvedRelay = resolveToIp(relay) ?: relay
 
         // nativeSignalConnect has JNI overhead — must be on a thread with enough stack.
