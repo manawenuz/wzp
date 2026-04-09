@@ -34,13 +34,46 @@ fn main() {
             .compile("getauxval_fix");
 
         // Step D+1: identical-content clone of hello.c as a third cc::Build
-        // static library. Tests the "any 3rd static lib triggers the crash"
-        // theory in isolation — no C++, no external deps, same C content as
-        // the known-working hello.c.
+        // static library. Kept around as a sanity check: if this C compile
+        // suddenly started crashing, we'd know the environment regressed.
         println!("cargo:rerun-if-changed=cpp/hello2.c");
         cc::Build::new()
             .file("cpp/hello2.c")
             .compile("wzp_hello2");
+
+        // ─── minSdkVersion theory test: the original E.1 crashing cpp ──────
+        // Re-add the smallest crashing variant (cpp_smoke.cpp with cpp(true)
+        // + cpp_link_stdlib("c++_shared")) on top of the working Step D+1
+        // baseline. The only additional variable compared to the previous
+        // crashing runs is tauri.conf.json bundle.android.minSdkVersion=26,
+        // which may make tauri-cli stop hardcoding API 24 in its rustc
+        // invocation. If THIS build launches, the minSdkVersion fix is
+        // validated and we can proceed with Oboe integration.
+        println!("cargo:rerun-if-changed=cpp/cpp_smoke.cpp");
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .cpp_link_stdlib(Some("c++_shared"))
+            .file("cpp/cpp_smoke.cpp")
+            .compile("wzp_cpp_smoke");
+
+        // Copy libc++_shared.so from the NDK sysroot to gen/android jniLibs
+        // so the runtime linker can find it at dlopen time (it's now in the
+        // .so's NEEDED list thanks to cpp_link_stdlib("c++_shared") above).
+        if let Ok(ndk) = std::env::var("ANDROID_NDK_HOME").or_else(|_| std::env::var("NDK_HOME")) {
+            let lib_dir = format!(
+                "{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
+            );
+            println!("cargo:rustc-link-search=native={lib_dir}");
+            let shared_so = format!("{lib_dir}/libc++_shared.so");
+            if std::path::Path::new(&shared_so).exists() {
+                let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+                let jni_dir = format!("{manifest}/gen/android/app/src/main/jniLibs/arm64-v8a");
+                if std::fs::create_dir_all(&jni_dir).is_ok() {
+                    let _ = std::fs::copy(&shared_so, format!("{jni_dir}/libc++_shared.so"));
+                }
+            }
+        }
     }
 
     tauri_build::build()
