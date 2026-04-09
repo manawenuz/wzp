@@ -37,48 +37,23 @@ fn build_android_native() {
         .file("cpp/getauxval_fix.c")
         .compile("getauxval_fix");
 
-    // ─── Step E: full Oboe C++ bridge ──────────────────────────────────────
-    // Clones google/oboe@1.8.1 into OUT_DIR and compiles the bridge + all
-    // Oboe source files as a single static library. NOT yet called from
-    // Rust — this step only verifies that the C++ compile + link path
-    // doesn't regress the known-good build. Same approach as the legacy
-    // crates/wzp-android/build.rs, copied verbatim below.
-    println!("cargo:rerun-if-changed=cpp/oboe_bridge.cpp");
-    println!("cargo:rerun-if-changed=cpp/oboe_bridge.h");
-    println!("cargo:rerun-if-changed=cpp/oboe_stub.cpp");
-
-    match fetch_oboe() {
-        Some(oboe_path) => {
-            println!("cargo:warning=Building with Oboe from {:?}", oboe_path);
-
-            let mut build = cc::Build::new();
-            build
-                .cpp(true)
-                .std("c++17")
-                // Shared libc++ — static pulls broken libc stubs that crash
-                // in .so libraries (getauxval, __init_tcb, pthread_create).
-                // Google's official NDK guidance.
-                .cpp_link_stdlib(Some("c++_shared"))
-                .include("cpp")
-                .include(oboe_path.join("include"))
-                .include(oboe_path.join("src"))
-                .define("WZP_HAS_OBOE", None)
-                .file("cpp/oboe_bridge.cpp");
-
-            add_cpp_files_recursive(&mut build, &oboe_path.join("src"));
-            build.compile("oboe_bridge");
-        }
-        None => {
-            println!("cargo:warning=Oboe not found, building with stub");
-            cc::Build::new()
-                .cpp(true)
-                .std("c++17")
-                .cpp_link_stdlib(Some("c++_shared"))
-                .file("cpp/oboe_stub.cpp")
-                .include("cpp")
-                .compile("oboe_bridge");
-        }
-    }
+    // ─── Step E.4: minimal C++ smoke file instead of full Oboe ─────────────
+    // The full Oboe compile (Step E, commit 4250f1b) triggered the
+    // __init_tcb+4 crash at launch — even without any FFI call from Rust.
+    // Bisection jump: replace the 200+ Oboe source files with ONE tiny
+    // cpp/cpp_smoke.cpp that uses the same libc++ features Oboe does
+    // (std::atomic, std::mutex, std::thread), still linked via
+    // libc++_shared. If this crashes too, the trigger is just "any C++
+    // link that references libc++ threads/mutexes". If it passes, Oboe
+    // itself (size, specific headers, static ctors) is the culprit.
+    println!("cargo:rerun-if-changed=cpp/cpp_smoke.cpp");
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        // Shared libc++ — same linkage Oboe uses.
+        .cpp_link_stdlib(Some("c++_shared"))
+        .file("cpp/cpp_smoke.cpp")
+        .compile("wzp_cpp_smoke");
 
     // Copy libc++_shared.so next to libwzp_desktop_lib.so in the Tauri
     // jniLibs directory so the dynamic linker can resolve it at runtime.
@@ -105,9 +80,10 @@ fn build_android_native() {
         }
     }
 
-    // Oboe requires Android log + OpenSLES backends
-    println!("cargo:rustc-link-lib=log");
-    println!("cargo:rustc-link-lib=OpenSLES");
+    // Step E.4 drops the Oboe-specific -llog / -lOpenSLES link requirements
+    // since cpp_smoke.cpp doesn't call into Android's logging or audio HAL.
+    // Keep libc++_shared.so in jniLibs (copied above) because the smoke
+    // file still dynamically links against libc++.
 }
 
 fn target_os_abi() -> Option<(&'static str, &'static str)> {
@@ -126,6 +102,7 @@ fn target_os_abi() -> Option<(&'static str, &'static str)> {
 }
 
 /// Recursively add all .cpp files from a directory to a cc::Build.
+#[allow(dead_code)] // re-enabled when Step E.x restores the full Oboe compile
 fn add_cpp_files_recursive(build: &mut cc::Build, dir: &std::path::Path) {
     if !dir.is_dir() {
         return;
@@ -142,6 +119,7 @@ fn add_cpp_files_recursive(build: &mut cc::Build, dir: &std::path::Path) {
 }
 
 /// Try to find or fetch Oboe headers + source (v1.8.1).
+#[allow(dead_code)] // re-enabled when Step E.x restores the full Oboe compile
 fn fetch_oboe() -> Option<PathBuf> {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let oboe_dir = out_dir.join("oboe");
