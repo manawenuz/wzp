@@ -413,24 +413,12 @@ pub unsafe extern "system" fn Java_com_wzp_engine_SignalManager_nativeSignalConn
     let relay: String = env.get_string(&relay_j).map(|s| s.into()).unwrap_or_default();
     let seed: String = env.get_string(&seed_j).map(|s| s.into()).unwrap_or_default();
 
-    match crate::signal_mgr::SignalManager::connect(&relay, &seed) {
+    // start() spawns its own thread internally — connect + register + recv loop
+    // all run on ONE thread with ONE runtime to avoid TLS conflicts.
+    match crate::signal_mgr::SignalManager::start(&relay, &seed) {
         Ok(mgr) => {
-            // Spawn recv loop on a dedicated thread
-            let mgr_ref = &mgr as *const crate::signal_mgr::SignalManager;
             let handle = Box::new(SignalHandle { mgr });
-            let raw = Box::into_raw(handle);
-
-            // Get a reference for the recv thread
-            let recv_ref = unsafe { &(*raw).mgr };
-            std::thread::Builder::new()
-                .name("wzp-signal-recv".into())
-                .stack_size(4 * 1024 * 1024)
-                .spawn(move || {
-                    recv_ref.run_recv_loop();
-                })
-                .ok();
-
-            raw as jlong
+            Box::into_raw(handle) as jlong
         }
         Err(e) => {
             error!("signal connect failed: {e}");

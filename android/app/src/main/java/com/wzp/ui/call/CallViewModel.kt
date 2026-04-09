@@ -172,19 +172,22 @@ class CallViewModel : ViewModel(), WzpCallback {
         val seed = _seedHex.value
         val resolvedRelay = resolveToIp(relay) ?: relay
 
-        // Connect on a thread with 8MB stack (QUIC + TLS needs it)
-        Thread(null, {
-            val mgr = com.wzp.engine.SignalManager()
-            val ok = mgr.connect(resolvedRelay, seed)
-            viewModelScope.launch {
+        // nativeSignalConnect blocks up to 10s (waits for QUIC connect + register).
+        // Internal thread does the actual work; we just wait for the result.
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val mgr = com.wzp.engine.SignalManager()
+                val ok = mgr.connect(resolvedRelay, seed)
                 if (ok) {
                     signalManager = mgr
                     startSignalPolling()
                 } else {
                     _errorMessage.value = "Failed to register on relay"
                 }
+            } catch (e: Exception) {
+                _errorMessage.value = "Register error: ${e.message}"
             }
-        }, "wzp-signal-connect", 8 * 1024 * 1024).start()
+        }
     }
 
     /** Poll signal manager state every 500ms */
