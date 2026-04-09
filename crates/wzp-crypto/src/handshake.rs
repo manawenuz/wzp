@@ -110,7 +110,18 @@ impl KeyExchange for WarzoneKeyExchange {
         hk.expand(b"warzone-session-key", &mut session_key)
             .expect("HKDF expand for session key should not fail");
 
-        Ok(Box::new(ChaChaSession::new(session_key)))
+        // Derive SAS (Short Authentication String) from shared secret only.
+        // The shared secret is identical on both sides (X25519 DH property).
+        // A MITM would produce a different shared secret → different SAS.
+        // We use a dedicated HKDF label so SAS is independent of the session key.
+        let mut sas_key = [0u8; 4];
+        hk.expand(b"warzone-sas-code", &mut sas_key)
+            .expect("HKDF expand for SAS should not fail");
+        let sas_code = u32::from_be_bytes(sas_key) % 10000;
+
+        let mut session = ChaChaSession::new(session_key);
+        session.set_sas(sas_code);
+        Ok(Box::new(session))
     }
 }
 
@@ -210,5 +221,48 @@ mod tests {
             .unwrap();
 
         assert_eq!(&decrypted, plaintext);
+    }
+
+    #[test]
+    fn sas_codes_match_between_peers() {
+        let mut alice = WarzoneKeyExchange::from_identity_seed(&[0xAA; 32]);
+        let mut bob = WarzoneKeyExchange::from_identity_seed(&[0xBB; 32]);
+
+        let alice_eph_pub = alice.generate_ephemeral();
+        let bob_eph_pub = bob.generate_ephemeral();
+
+        let alice_session = alice.derive_session(&bob_eph_pub).unwrap();
+        let bob_session = bob.derive_session(&alice_eph_pub).unwrap();
+
+        let alice_sas = alice_session.sas_code();
+        let bob_sas = bob_session.sas_code();
+
+        assert!(alice_sas.is_some(), "Alice should have SAS");
+        assert!(bob_sas.is_some(), "Bob should have SAS");
+        assert_eq!(alice_sas, bob_sas, "SAS codes must match between peers");
+        assert!(alice_sas.unwrap() < 10000, "SAS should be 4 digits");
+    }
+
+    #[test]
+    fn sas_differs_for_different_peers() {
+        let mut alice = WarzoneKeyExchange::from_identity_seed(&[0xAA; 32]);
+        let mut bob = WarzoneKeyExchange::from_identity_seed(&[0xBB; 32]);
+        let mut eve = WarzoneKeyExchange::from_identity_seed(&[0xEE; 32]);
+
+        let alice_eph = alice.generate_ephemeral();
+        let bob_eph = bob.generate_ephemeral();
+        let eve_eph = eve.generate_ephemeral();
+
+        let alice_bob_session = alice.derive_session(&bob_eph).unwrap();
+
+        // Eve does separate handshake with Bob (MITM scenario)
+        let eve_bob_session = eve.derive_session(&bob_eph).unwrap();
+
+        // SAS codes should differ — Eve's session has different shared secret
+        assert_ne!(
+            alice_bob_session.sas_code(),
+            eve_bob_session.sas_code(),
+            "MITM session should produce different SAS"
+        );
     }
 }
