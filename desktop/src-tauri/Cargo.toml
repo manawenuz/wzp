@@ -5,6 +5,16 @@ edition = "2024"
 description = "WarzonePhone Desktop — encrypted VoIP client"
 default-run = "wzp-desktop"
 
+# Library target — required for Tauri mobile (Android/iOS link the app as a cdylib)
+# and also used by the desktop binary below.
+[lib]
+name = "wzp_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "wzp-desktop"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -19,12 +29,16 @@ tracing-subscriber = "0.3"
 anyhow = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
-# WarzonePhone crates
+# WarzonePhone crates — protocol layer is platform-independent
 wzp-proto = { path = "../../crates/wzp-proto" }
 wzp-codec = { path = "../../crates/wzp-codec" }
 wzp-fec = { path = "../../crates/wzp-fec" }
 wzp-crypto = { path = "../../crates/wzp-crypto" }
 wzp-transport = { path = "../../crates/wzp-transport" }
+
+# wzp-client pulls CPAL + (on macOS) VoiceProcessingIO — desktop only.
+# Android gets an oboe/AAudio backend in Step 3 of the Tauri mobile rewrite.
+[target.'cfg(not(target_os = "android"))'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 
 # Platform-specific
