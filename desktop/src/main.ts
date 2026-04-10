@@ -819,6 +819,15 @@ function directionIcon(dir: string): string {
   }
 }
 
+function directionLabel(dir: string): string {
+  switch (dir) {
+    case "placed":   return "Outgoing";
+    case "received": return "Incoming";
+    case "missed":   return "Missed";
+    default:         return dir;
+  }
+}
+
 function directionClass(dir: string): string {
   return `dir-${dir}`;
 }
@@ -866,7 +875,7 @@ async function refreshHistory() {
           <span class="history-dir">${directionIcon(e.direction)}</span>
           <div class="history-meta">
             <span class="history-peer">${label}</span>
-            <span class="history-time">${fmtTimestamp(e.timestamp_unix)}</span>
+            <span class="history-time">${directionLabel(e.direction)} · ${fmtTimestamp(e.timestamp_unix)}</span>
           </div>
           <button class="history-call-btn" title="Call back">Call</button>
         `;

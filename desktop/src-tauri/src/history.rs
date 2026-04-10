@@ -100,14 +100,33 @@ pub fn log(
     peer_alias: Option<String>,
     direction: CallDirection,
 ) {
+    tracing::info!(
+        %call_id, %peer_fp, ?direction,
+        alias = ?peer_alias,
+        "history::log"
+    );
     let entry = CallHistoryEntry {
-        call_id,
+        call_id: call_id.clone(),
         peer_fp,
         peer_alias,
         direction,
         timestamp_unix: now_unix(),
     };
     let mut guard = store().write().unwrap();
+    // If an entry for this call_id already exists, update it in-place
+    // rather than appending a duplicate. Protects against the caller
+    // side adding a second Missed row when the callee's DirectCallOffer
+    // bounces back through federation / loopback, or when some future
+    // relay routing edge case double-emits a signal. The dedup keeps
+    // history tidy and matches what the user intuitively expects (one
+    // history row per call, not one per signal event).
+    if let Some(existing) = guard.iter_mut().rev().find(|e| e.call_id == call_id) {
+        tracing::info!(%call_id, from = ?existing.direction, to = ?direction, "history::log replacing existing entry");
+        existing.direction = direction;
+        existing.timestamp_unix = entry.timestamp_unix;
+        save_to_disk(&guard);
+        return;
+    }
     guard.push(entry);
     if guard.len() > MAX_ENTRIES {
         let drop_n = guard.len() - MAX_ENTRIES;
