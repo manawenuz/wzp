@@ -890,3 +890,142 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .mode-btn:hover:not(.active) {
   background: var(--surface2);
 }
+
+/* ── Direct call history + contacts ── */
+
+.direct-registered-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.secondary-btn.small {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 0 4px 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  text-decoration: underline;
+}
+.link-btn:hover { color: var(--text); }
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+/* Recent contacts — horizontally wrapping chips */
+#recent-contacts-list {
+  flex-direction: row;
+  flex-wrap: wrap;
+  max-height: none;
+}
+
+.contact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface2);
+  border: 1px solid var(--surface2);
+  color: var(--text);
+  border-radius: 16px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.contact-chip:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+.contact-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+.contact-chip .contact-label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Full history rows */
+.history-row {
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.history-row.dir-placed   .history-dir { color: var(--accent); }
+.history-row.dir-received .history-dir { color: var(--green); }
+.history-row.dir-missed   .history-dir { color: var(--red); }
+.history-dir {
+  text-align: center;
+  font-weight: 700;
+}
+.history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+.history-peer {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-time {
+  color: var(--dim);
+  font-size: 11px;
+}
+.history-call-btn {
+  background: var(--surface2);
+  border: 1px solid var(--surface2);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.history-call-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+/* Speaker routing button (non-muted earpiece state should not look red) */
+#spk-btn.speaker-on .icon {
+  color: var(--accent);
+}

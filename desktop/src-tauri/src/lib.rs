@@ -21,6 +21,9 @@ mod wzp_native;
 #[cfg(target_os = "android")]
 mod android_audio;
 
+// Direct-call history store (persisted JSON in app data dir).
+mod history;
+
 // CallEngine has a unified impl on both targets now — the Android branch of
 // CallEngine::start() routes audio through the standalone wzp-native cdylib
 // (loaded via the wzp_native module below), the desktop branch uses CPAL.
@@ -414,6 +417,24 @@ async fn is_speakerphone_on() -> Result<bool, String> {
     }
 }
 
+// ─── Call history commands ───────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_call_history() -> Vec<history::CallHistoryEntry> {
+    history::all()
+}
+
+#[tauri::command]
+fn get_recent_contacts() -> Vec<history::CallHistoryEntry> {
+    history::contacts()
+}
+
+#[tauri::command]
+fn clear_call_history() -> Result<(), String> {
+    history::clear();
+    Ok(())
+}
+
 // ─── Signaling commands — platform independent ───────────────────────────────
 
 struct SignalState {
@@ -479,7 +500,18 @@ async fn register_signal(
                     tracing::info!(%call_id, caller = %caller_fingerprint, "signal: DirectCallOffer");
                     let mut sig = signal_state.lock().await; sig.signal_status = "incoming".into();
                     sig.incoming_call_id = Some(call_id.clone()); sig.incoming_caller_fp = Some(caller_fingerprint.clone()); sig.incoming_caller_alias = caller_alias.clone();
+                    // Log as a Missed entry up-front. If the user accepts
+                    // the call, answer_call upgrades it to Received via
+                    // history::mark_received_if_pending(call_id). If they
+                    // reject or ignore, it stays Missed.
+                    history::log(
+                        call_id.clone(),
+                        caller_fingerprint.clone(),
+                        caller_alias.clone(),
+                        history::CallDirection::Missed,
+                    );
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"incoming","call_id":call_id,"caller_fp":caller_fingerprint,"caller_alias":caller_alias}));
+                    let _ = app_clone.emit("history-changed", ());
                 }
                 Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, .. })) => {
                     tracing::info!(%call_id, ?accept_mode, "signal: DirectCallAnswer (forwarded by relay)");
@@ -514,22 +546,33 @@ async fn register_signal(
 }
 
 #[tauri::command]
-async fn place_call(state: tauri::State<'_, Arc<AppState>>, target_fp: String) -> Result<(), String> {
+async fn place_call(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    target_fp: String,
+) -> Result<(), String> {
     use wzp_proto::SignalMessage;
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or("not registered")?;
     let call_id = format!("{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     tracing::info!(%call_id, %target_fp, "place_call: sending DirectCallOffer");
     transport.send_signal(&SignalMessage::DirectCallOffer {
-        caller_fingerprint: sig.fingerprint.clone(), caller_alias: None, target_fingerprint: target_fp,
-        call_id, identity_pub: [0u8; 32], ephemeral_pub: [0u8; 32], signature: vec![],
+        caller_fingerprint: sig.fingerprint.clone(), caller_alias: None, target_fingerprint: target_fp.clone(),
+        call_id: call_id.clone(), identity_pub: [0u8; 32], ephemeral_pub: [0u8; 32], signature: vec![],
         supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
     }).await.map_err(|e| format!("{e}"))?;
+    history::log(call_id, target_fp, None, history::CallDirection::Placed);
+    let _ = app.emit("history-changed", ());
     Ok(())
 }
 
 #[tauri::command]
-async fn answer_call(state: tauri::State<'_, Arc<AppState>>, call_id: String, mode: i32) -> Result<(), String> {
+async fn answer_call(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    call_id: String,
+    mode: i32,
+) -> Result<(), String> {
     use wzp_proto::SignalMessage;
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or_else(|| {
@@ -546,6 +589,13 @@ async fn answer_call(state: tauri::State<'_, Arc<AppState>>, call_id: String, mo
         format!("{e}")
     })?;
     tracing::info!(%call_id, "answer_call: DirectCallAnswer sent successfully");
+    // Upgrade the pending "Missed" entry to "Received" if the user
+    // accepted (mode != Reject). Mode 0 = Reject → leave as Missed.
+    if mode != 0 {
+        if history::mark_received_if_pending(&call_id) {
+            let _ = app.emit("history-changed", ());
+        }
+    }
     Ok(())
 }
 
@@ -553,6 +603,24 @@ async fn answer_call(state: tauri::State<'_, Arc<AppState>>, call_id: String, mo
 async fn get_signal_status(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let sig = state.signal.lock().await;
     Ok(serde_json::json!({"status":sig.signal_status,"fingerprint":sig.fingerprint,"incoming_call_id":sig.incoming_call_id,"incoming_caller_fp":sig.incoming_caller_fp}))
+}
+
+/// Tear down the signal connection so the user goes back to idle. Called
+/// when the user clicks "Deregister" on the direct-call screen. The
+/// spawned recv loop will break out naturally when the transport closes.
+#[tauri::command]
+async fn deregister(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut sig = state.signal.lock().await;
+    if let Some(transport) = sig.transport.take() {
+        tracing::info!("deregister: closing signal transport");
+        transport.close().await.ok();
+    }
+    sig.endpoint = None;
+    sig.signal_status = "idle".into();
+    sig.incoming_call_id = None;
+    sig.incoming_caller_fp = None;
+    sig.incoming_caller_alias = None;
+    Ok(())
 }
 
 // ─── App entry point ─────────────────────────────────────────────────────────
@@ -616,7 +684,9 @@ pub fn run() {
             ping_relay, get_identity, get_app_info,
             connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
+            deregister,
             set_speakerphone, is_speakerphone_on,
+            get_call_history, get_recent_contacts, clear_call_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarzonePhone");

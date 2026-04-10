@@ -21,7 +21,7 @@
             </button>
           </label>
           <label>Room
-            <input id="room" type="text" value="android" />
+            <input id="room" type="text" value="general" />
           </label>
           <label>Alias
             <input id="alias" type="text" placeholder="your name" />
@@ -48,7 +48,10 @@
           <div id="direct-mode" class="hidden">
             <button id="register-btn" class="primary" style="background:#2196F3">Register on Relay</button>
             <div id="direct-registered" class="hidden" style="margin-top:12px">
-              <p style="color:var(--green);font-size:13px">&#x2705; Registered — waiting for calls</p>
+              <div class="direct-registered-header">
+                <p style="color:var(--green);font-size:13px;margin:0">&#x2705; Registered — waiting for calls</p>
+                <button id="deregister-btn" class="secondary-btn small">Deregister</button>
+              </div>
               <div id="incoming-call-panel" class="hidden" style="background:#1B5E20;padding:12px;border-radius:8px;margin:8px 0">
                 <p style="font-weight:bold;margin:0 0 4px 0">Incoming Call</p>
                 <p id="incoming-caller" style="font-size:12px;opacity:0.8;margin:0 0 8px 0">From: unknown</p>
@@ -57,6 +60,22 @@
                   <button id="reject-call-btn" style="flex:1;background:var(--red);color:white;border:none;padding:8px;border-radius:6px;cursor:pointer">Reject</button>
                 </div>
               </div>
+
+              <!-- Recent contacts -->
+              <div id="recent-contacts-section" class="hidden">
+                <div class="history-header">Recent contacts</div>
+                <div id="recent-contacts-list" class="history-list"></div>
+              </div>
+
+              <!-- Call history -->
+              <div id="call-history-section" class="hidden">
+                <div class="history-header">
+                  History
+                  <button id="clear-history-btn" class="link-btn">clear</button>
+                </div>
+                <div id="call-history-list" class="history-list"></div>
+              </div>
+
               <label style="margin-top:8px">Call by fingerprint
                 <input id="target-fp" type="text" placeholder="xxxx:xxxx:xxxx:..." />
               </label>

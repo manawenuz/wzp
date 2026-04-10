@@ -115,7 +115,7 @@ function loadSettings(): Settings {
       { name: "Laptop", address: "172.16.81.125:4433" },
       { name: "Default", address: "193.180.213.68:4433" },
     ],
-    selectedRelay: 0, room: "android", alias: "",
+    selectedRelay: 0, room: "general", alias: "",
     osAec: true, agc: true, quality: "auto", recentRooms: [],
   };
   try {
@@ -749,6 +749,7 @@ const modeDirect = document.getElementById("mode-direct")!;
 const roomModeDiv = document.getElementById("room-mode")!;
 const directModeDiv = document.getElementById("direct-mode")!;
 const registerBtn = document.getElementById("register-btn") as HTMLButtonElement;
+const deregisterBtn = document.getElementById("deregister-btn") as HTMLButtonElement;
 const directRegistered = document.getElementById("direct-registered")!;
 const incomingCallPanel = document.getElementById("incoming-call-panel")!;
 const incomingCaller = document.getElementById("incoming-caller")!;
@@ -757,6 +758,11 @@ const rejectCallBtn = document.getElementById("reject-call-btn")!;
 const targetFpInput = document.getElementById("target-fp") as HTMLInputElement;
 const callBtn = document.getElementById("call-btn") as HTMLButtonElement;
 const callStatusText = document.getElementById("call-status-text")!;
+const recentContactsSection = document.getElementById("recent-contacts-section")!;
+const recentContactsList = document.getElementById("recent-contacts-list")!;
+const callHistorySection = document.getElementById("call-history-section")!;
+const callHistoryList = document.getElementById("call-history-list")!;
+const clearHistoryBtn = document.getElementById("clear-history-btn") as HTMLButtonElement;
 
 let currentCallMode = "room";
 
@@ -781,6 +787,114 @@ modeDirect.addEventListener("click", () => {
   (document.querySelector('label:has(#room)') as HTMLElement)?.classList.add("hidden");
 });
 
+// ── Call history + recent contacts rendering ──
+interface CallHistoryEntry {
+  call_id: string;
+  peer_fp: string;
+  peer_alias: string | null;
+  direction: "placed" | "received" | "missed";
+  timestamp_unix: number;
+}
+
+function fmtTimestamp(unix: number): string {
+  const d = new Date(unix * 1000);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) +
+    " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function directionIcon(dir: string): string {
+  switch (dir) {
+    case "placed":   return "↗";
+    case "received": return "↙";
+    case "missed":   return "✗";
+    default:         return "•";
+  }
+}
+
+function directionClass(dir: string): string {
+  return `dir-${dir}`;
+}
+
+function callByFingerprint(fp: string) {
+  targetFpInput.value = fp;
+  callBtn.click();
+}
+
+async function refreshHistory() {
+  try {
+    const [history, contacts] = await Promise.all([
+      invoke<CallHistoryEntry[]>("get_call_history"),
+      invoke<CallHistoryEntry[]>("get_recent_contacts"),
+    ]);
+
+    // Recent contacts (top 6)
+    if (contacts.length === 0) {
+      recentContactsSection.classList.add("hidden");
+    } else {
+      recentContactsSection.classList.remove("hidden");
+      recentContactsList.innerHTML = "";
+      contacts.slice(0, 6).forEach((c) => {
+        const btn = document.createElement("button");
+        btn.className = "contact-chip";
+        const label = c.peer_alias || c.peer_fp.substring(0, 16);
+        btn.innerHTML = `<span class="contact-dot"></span><span class="contact-label">${label}</span>`;
+        btn.title = c.peer_fp;
+        btn.addEventListener("click", () => callByFingerprint(c.peer_fp));
+        recentContactsList.appendChild(btn);
+      });
+    }
+
+    // Full history
+    if (history.length === 0) {
+      callHistorySection.classList.add("hidden");
+    } else {
+      callHistorySection.classList.remove("hidden");
+      callHistoryList.innerHTML = "";
+      history.slice(0, 50).forEach((e) => {
+        const row = document.createElement("div");
+        row.className = `history-row ${directionClass(e.direction)}`;
+        const label = e.peer_alias || e.peer_fp.substring(0, 16);
+        row.innerHTML = `
+          <span class="history-dir">${directionIcon(e.direction)}</span>
+          <div class="history-meta">
+            <span class="history-peer">${label}</span>
+            <span class="history-time">${fmtTimestamp(e.timestamp_unix)}</span>
+          </div>
+          <button class="history-call-btn" title="Call back">Call</button>
+        `;
+        row.title = e.peer_fp;
+        const cb = row.querySelector(".history-call-btn") as HTMLButtonElement;
+        cb.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          callByFingerprint(e.peer_fp);
+        });
+        callHistoryList.appendChild(row);
+      });
+    }
+  } catch (e) {
+    console.error("refreshHistory failed:", e);
+  }
+}
+
+// Live-refresh whenever the backend logs a new entry
+listen("history-changed", () => { refreshHistory(); });
+
+clearHistoryBtn.addEventListener("click", async () => {
+  if (!confirm("Clear call history?")) return;
+  try {
+    await invoke("clear_call_history");
+    refreshHistory();
+  } catch (e) { console.error(e); }
+});
+
 registerBtn.addEventListener("click", async () => {
   const relay = getSelectedRelay();
   if (!relay) { connectError.textContent = "No relay selected"; return; }
@@ -791,10 +905,25 @@ registerBtn.addEventListener("click", async () => {
     registerBtn.classList.add("hidden");
     directRegistered.classList.remove("hidden");
     callStatusText.textContent = `Your fingerprint: ${fp}`;
+    refreshHistory();
   } catch (e: any) {
     connectError.textContent = String(e);
     registerBtn.disabled = false;
     registerBtn.textContent = "Register on Relay";
+  }
+});
+
+deregisterBtn.addEventListener("click", async () => {
+  try {
+    await invoke("deregister");
+    directRegistered.classList.add("hidden");
+    registerBtn.classList.remove("hidden");
+    registerBtn.disabled = false;
+    registerBtn.textContent = "Register on Relay";
+    callStatusText.textContent = "";
+    incomingCallPanel.classList.add("hidden");
+  } catch (e) {
+    console.error("deregister failed:", e);
   }
 });
 
