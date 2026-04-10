@@ -48,14 +48,19 @@ windows = { version = "0.58", optional = true, features = [
 ] }
 
 # Linux-only: WebRTC AEC3 (Audio Processing Module) bindings for the
-# `linux-aec` feature. The `bundled` sub-feature of webrtc-audio-processing
-# statically compiles the vendored PulseAudio webrtc-audio-processing C++
-# sources via meson + ninja at cargo build time, avoiding Debian Bookworm's
-# stale system libwebrtc-audio-processing-dev 0.3 package (which predates
-# AEC3). Produces a self-contained static link — no runtime .so dep, same
-# algorithm on every Linux distro.
+# `linux-aec` feature. The `bundled` sub-feature statically compiles the
+# vendored PulseAudio webrtc-audio-processing C++ sources via meson+ninja
+# at cargo build time, avoiding Debian Bookworm's stale system
+# libwebrtc-audio-processing-dev 0.3 package (which predates AEC3).
+#
+# We pull from git (not crates.io) because the crates.io tarball of
+# webrtc-audio-processing-sys 2.0.3 does NOT include the vendored C++
+# submodule contents ("Directory does not contain a valid build tree"),
+# and cargo clones git deps with submodules auto-initialized since ~1.27,
+# so the git path gives us a complete source tree that bundled-mode can
+# build. Pinned to tag v2.0.3 for reproducibility.
 [target.'cfg(target_os = "linux")'.dependencies]
-webrtc-audio-processing = { version = "2", optional = true, features = ["bundled"] }
+webrtc-audio-processing = { git = "https://github.com/tonarino/webrtc-audio-processing", tag = "v2.0.3", optional = true, features = ["bundled"] }
 
 [features]
 default = []
