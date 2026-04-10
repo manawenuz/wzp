@@ -21,7 +21,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context};
 use tracing::{info, warn};
 use windows::core::{Interface, GUID};
-use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, BOOL, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     eCapture, eCommunications, AudioCategory_Communications, AudioClientProperties,
     IAudioCaptureClient, IAudioClient, IAudioClient2, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -320,9 +320,13 @@ unsafe fn capture_thread_main(
 /// PKEY_Device_FriendlyName requires IPropertyStore + PROPVARIANT plumbing
 /// that's far more ceremony than a log line justifies; the ID is already
 /// sufficient to confirm we opened the right endpoint.
+///
+/// Rust 2024 edition's `unsafe_op_in_unsafe_fn` lint requires explicit
+/// `unsafe { ... }` blocks inside `unsafe fn` bodies for each unsafe call,
+/// even though the whole function is already marked unsafe.
 unsafe fn device_name(
     device: &windows::Win32::Media::Audio::IMMDevice,
 ) -> Result<String, anyhow::Error> {
-    let id = device.GetId().context("IMMDevice::GetId failed")?;
-    Ok(id.to_string().unwrap_or_else(|_| "<non-utf16>".to_string()))
+    let id = unsafe { device.GetId() }.context("IMMDevice::GetId failed")?;
+    Ok(unsafe { id.to_string() }.unwrap_or_else(|_| "<non-utf16>".to_string()))
 }
