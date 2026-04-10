@@ -31,7 +31,7 @@ SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=
 REBUILD_RUST=0
 DO_PULL=1
 IMAGE_BUILD=0
-# WITH_AEC=1 enables the wzp-client `linux-aec` feature (WebRTC AEC3 via
+# WITH_AEC=1 enables the wzp-client `linux-aec` feature (WebRTC AEC via
 # webrtc-audio-processing) and renames the output artifacts with an `-aec`
 # suffix so both variants can coexist on disk.
 WITH_AEC=0
@@ -48,6 +48,15 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Variant suffix used locally to rename downloaded artifacts so the noAEC
+# baseline and the AEC build can coexist in $LOCAL_OUTPUT. Mirrors the
+# same VARIANT declaration inside the remote REMOTE_SCRIPT heredoc.
+if [ "$WITH_AEC" = "1" ]; then
+    VARIANT="aec"
+else
+    VARIANT="noAEC"
+fi
 
 log() { echo -e "\033[1;36m>>> $*\033[0m"; }
 ssh_cmd() { ssh $SSH_OPTS "$REMOTE_HOST" "$@"; }
