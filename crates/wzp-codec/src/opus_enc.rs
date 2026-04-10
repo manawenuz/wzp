@@ -17,22 +17,40 @@
 //! - Degraded tier (Opus 6k): 500 ms — users on 6k are by definition on a
 //!   bad link; longer DRED buys maximum burst resilience where it matters.
 //!
-//! # Why the 5% packet loss floor
+//! # Why the 15% packet loss floor
 //!
-//! libopus 1.5's DRED emitter is gated on a non-zero `OPUS_SET_PACKET_LOSS_PERC`.
-//! If the encoder thinks loss is 0, it skips DRED encoding even when the
-//! duration is set. We force a 5% minimum so DRED emits continuously; real
-//! measurements from the quality adapter override upward when loss exceeds
-//! the floor.
+//! libopus 1.5's DRED emitter is gated on `OPUS_SET_PACKET_LOSS_PERC` and
+//! scales the emitted window proportionally to the assumed loss:
+//!
+//! ```text
+//!   loss_pct  samples_available    effective_ms
+//!   5%         720                   15
+//!   10%        2640                  55
+//!   15%        4560                  95
+//!   20%        6480                 135
+//!   25%+       8400 (capped)        175  (≈ 87% of the 200ms configured max)
+//! ```
+//!
+//! Measured empirically against libopus 1.5.2 on Opus 24k / 200 ms DRED
+//! duration during Phase 3b. At 5% loss the window is only 15 ms — too
+//! small to even reconstruct a single 20 ms Opus frame. 15% gives 95 ms
+//! (enough for single-frame recovery plus modest burst margin) while
+//! keeping the bitrate overhead modest compared to 25%. Real measurements
+//! from the quality adapter override upward when loss exceeds the floor.
 
 use opusic_c::{Application, Bitrate, Channels, Encoder, InbandFec, SampleRate, Signal};
 use tracing::{debug, warn};
 use wzp_proto::{AudioEncoder, CodecError, CodecId, QualityProfile};
 
-/// Minimum `OPUS_SET_PACKET_LOSS_PERC` value used in DRED mode. libopus gates
-/// DRED emission on a non-zero loss hint, so we keep it clamped to at least
-/// this floor whenever DRED is active.
-const DRED_LOSS_FLOOR_PCT: u8 = 5;
+/// Minimum `OPUS_SET_PACKET_LOSS_PERC` value used in DRED mode. libopus
+/// scales the DRED emission window with the assumed loss percentage:
+/// empirically, 5% gives a 15 ms window (useless), 10% gives 55 ms, 15%
+/// gives 95 ms, and 25%+ saturates the configured max (~175 ms at 200 ms
+/// duration). 15% is the minimum value that produces a DRED window larger
+/// than a single 20 ms frame, making it the minimum floor that actually
+/// gives DRED something useful to reconstruct. Real loss measurements from
+/// the quality adapter override this upward.
+const DRED_LOSS_FLOOR_PCT: u8 = 15;
 
 /// Environment variable that reverts Phase 1 behavior to Phase 0 (inband FEC
 /// on, DRED off, no loss floor). Read once per encoder construction.

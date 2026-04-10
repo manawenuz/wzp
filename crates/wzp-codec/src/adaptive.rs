@@ -199,6 +199,27 @@ impl AdaptiveDecoder {
     fn codec2_frame_samples(&self) -> usize {
         self.codec2.frame_samples()
     }
+
+    /// Reconstruct a lost frame from a previously parsed DRED state.
+    ///
+    /// Phase 3b entry point for gap reconstruction. Dispatches to the
+    /// inner Opus decoder when active. Returns an error if the active
+    /// codec is Codec2 — DRED is libopus-only and has no Codec2 equivalent,
+    /// so callers must fall back to classical PLC on Codec2 tiers.
+    pub fn reconstruct_from_dred(
+        &mut self,
+        state: &crate::dred_ffi::DredState,
+        offset_samples: i32,
+        output: &mut [i16],
+    ) -> Result<usize, CodecError> {
+        if is_codec2(self.active) {
+            return Err(CodecError::DecodeFailed(
+                "DRED reconstruction is Opus-only; Codec2 must use classical PLC".into(),
+            ));
+        }
+        self.opus
+            .reconstruct_from_dred(state, offset_samples, output)
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
