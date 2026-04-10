@@ -872,3 +872,71 @@ warzonePhone/
 | wzp-relay | 40 + 4 integration | Room ACL, session mgmt, metrics, probes, mesh, trunking |
 | wzp-client | 30 + 2 integration | Encoder/decoder, quality adapter, silence, drift, sweep |
 | wzp-web | 2 | Metrics |
+
+## Audio Backend Architecture (Platform Matrix)
+
+WarzonePhone's audio I/O goes through one of four backends depending on the target platform and feature flags. All backends expose the same public API (`AudioCapture::start() → AudioCapture { ring(), stop() }`) via conditional re-exports in `crates/wzp-client/src/lib.rs`, so the `CallEngine` above the audio layer doesn't know or care which backend is running.
+
+```
+            ┌─────────────────────────────────────────────┐
+            │         CallEngine (platform-agnostic)       │
+            │    reads PCM from AudioCapture::ring()       │
+            │    writes PCM to   AudioPlayback::ring()     │
+            └────────────────────┬────────────────────────┘
+                                 │
+           ┌─────────────────────┼─────────────────────┐
+           │                     │                     │
+           ▼                     ▼                     ▼
+   ┌───────────────┐    ┌────────────────┐    ┌───────────────┐
+   │   audio_io    │    │  audio_vpio    │    │ audio_wasapi  │
+   │   (CPAL)      │    │ (Core Audio    │    │   (Windows    │
+   │               │    │  VoiceProc IO) │    │  IAudioClient2│
+   │ All platforms │    │   macOS only   │    │   Windows     │
+   │  (baseline)   │    │   feature=vpio │    │ feature=      │
+   │               │    │                │    │  windows-aec  │
+   └───────────────┘    └────────────────┘    └───────────────┘
+                                                       │
+                                                       ▼ on Android only
+                                               ┌───────────────┐
+                                               │  wzp-native   │
+                                               │ (Oboe bridge  │
+                                               │  via dlopen)  │
+                                               │               │
+                                               │ Android only  │
+                                               │  libloading   │
+                                               └───────────────┘
+```
+
+### Backend selection matrix
+
+| Platform | Capture | Playback | OS AEC | Feature flags |
+|---|---|---|---|---|
+| macOS | VoiceProcessingIO (native Core Audio) | CPAL | **Yes** — Apple's hardware-accelerated AEC (same AEC as FaceTime, iMessage audio, Voice Memos) | `audio`, `vpio` |
+| Windows (AEC build) | Direct WASAPI with `AudioCategory_Communications` | CPAL | **Yes** — Windows routes the capture stream through the driver's communications APO chain (AEC + NS + AGC), driver-dependent quality | `audio`, `windows-aec` |
+| Windows (baseline) | CPAL (WASAPI shared mode) | CPAL | No | `audio` |
+| Linux | CPAL (ALSA / PulseAudio) | CPAL | No | `audio` |
+| Android (Tauri Mobile) | Oboe via `wzp-native` cdylib, `Usage::VoiceCommunication` + `MODE_IN_COMMUNICATION` | Same Oboe stream | Depends on device (some Android devices apply AEC to the voice-communication stream, most do not) | none (`wzp-client` compiled with `default-features = false`) |
+
+### Why `wzp-native` is a standalone cdylib
+
+On Android, the audio backend lives in a separate cdylib crate (`crates/wzp-native`) that `wzp-desktop`'s lib crate loads at runtime via `libloading`. It is **not** linked as a regular Rust dep.
+
+This is deliberate. rust-lang/rust#104707 documents that a crate with `crate-type = ["cdylib", "staticlib"]` leaks non-exported symbols from the staticlib into the cdylib. On Android, that caused Bionic's private `__init_tcb` / `pthread_create` symbols to be bound LOCALLY inside our `.so` instead of resolved dynamically against `libc.so` at `dlopen` time — which crashed the app at launch as soon as `tao` tried to `std::thread::spawn()` from the JNI `onCreate` callback.
+
+Keeping `wzp-native` in its own cdylib and loading it via `libloading` means:
+
+1. The app's own `.so` has `crate-type = ["cdylib", "rlib"]` only — no `staticlib`, no symbol leak.
+2. `libwzp_native.so` is loaded via `System.loadLibrary` from the JVM side (or `dlopen` from Rust), which triggers the normal Bionic resolver and binds all private symbols against `libc.so` at load time.
+3. The C/C++ Oboe bridge is fully isolated inside `libwzp_native.so`'s symbol space — no chance of its archives leaking into `wzp-desktop`'s `.so`.
+
+See `docs/BRANCH-android-rewrite.md` for the full incident postmortem and `docs/incident-tauri-android-init-tcb.md` for the debug log.
+
+### Vendored `audiopus_sys` for libopus / clang-cl cross-compile
+
+The workspace root carries a vendored copy of `audiopus_sys` at `vendor/audiopus_sys/` with a patched `opus/CMakeLists.txt`. This is needed because libopus 1.3.1 gates its per-file `-msse4.1` / `-mssse3` `COMPILE_FLAGS` behind `if(NOT MSVC)`, and under `clang-cl` (used by `cargo-xwin` for Windows cross-compiles) CMake sets `MSVC=1` unconditionally — so the SIMD source files compile without the required target feature and fail to link the intrinsic `always_inline` functions.
+
+The patch introduces an `MSVC_CL` variable that is true only for real `cl.exe` (distinguished via `CMAKE_C_COMPILER_ID STREQUAL "MSVC"`), and flips the eight `if(NOT MSVC)` SIMD guards to `if(NOT MSVC_CL)` so clang-cl gets the GCC-style per-file flags. Wired in via `[patch.crates-io] audiopus_sys = { path = "vendor/audiopus_sys" }` at the workspace root.
+
+This does not affect macOS or Linux builds — on those platforms `MSVC=0` everywhere so the patched logic behaves identically to upstream.
+
+Upstream tracking: xiph/opus#256, xiph/opus PR #257 (both stale).

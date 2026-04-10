@@ -625,3 +625,123 @@ curl -s http://relay-host:9090/metrics | grep wzp_relay_active_sessions
 # Check federation probe health
 curl -s http://relay-host:9090/metrics | grep wzp_probe_up
 ```
+
+## Build Pipelines
+
+All production artifacts (Android APK, Linux x86_64 binaries, Windows `.exe`) are built on **SepehrHomeserverdk** using Docker, not on developer workstations. The pipelines are fire-and-forget: a local script invokes a `tmux` session on the remote, the build runs in a Docker container, and the artifact is uploaded to `paste.dk.manko.yoga` (rustypaste) with a notification sent to `ntfy.sh/wzp` on start and completion.
+
+### Docker images
+
+Two long-lived images live on the remote:
+
+| Image | Used by | Base | Key contents |
+|---|---|---|---|
+| `wzp-android-builder` | Android APK (Tauri mobile + legacy Kotlin), Linux x86_64 relay/CLI | Debian bookworm | Rust stable with Android targets, cargo-ndk, NDK 26.1, Android SDK (API 34 + 35 + 36), JDK 17, Gradle 8.5, Node.js 20, cmake, ninja, tauri-cli 2.x |
+| `wzp-windows-builder` | Windows x86_64 `.exe` | Debian bookworm | Rust stable with `x86_64-pc-windows-msvc` target, cargo-xwin (with pre-warmed MSVC CRT + Windows SDK cache), Node.js 20, cmake, ninja, clang, lld, nasm |
+
+Both images are rebuilt rarely — once the base toolchain is stable, rebuilds are only needed to pick up new dependencies or security patches.
+
+**Rebuilding an image** (fire-and-forget, ~10 min on a warm base):
+
+```bash
+# Windows
+./scripts/build-windows-docker.sh --image-build
+
+# Android (upload and rebuild handled by the Android build script itself — see
+# its --image-build flag or equivalent)
+```
+
+The `--image-build` flag uploads the local Dockerfile to the remote, kicks off `docker build` under `nohup`, and returns immediately. Monitor with:
+
+```bash
+ssh SepehrHomeserverdk 'tail -f /tmp/wzp-windows-image-build.log'
+```
+
+### Pipeline: Android APK (Tauri Mobile)
+
+```bash
+./scripts/build-tauri-android.sh                  # Full: pull + build + upload + notify
+./scripts/build-tauri-android.sh --no-pull        # Skip git fetch
+./scripts/build-tauri-android.sh --clean          # Force-clean Rust target
+```
+
+- **Branch**: `android-rewrite`
+- **Image**: `wzp-android-builder`
+- **Build command**: `cargo tauri android build --release`
+- **Output**: `wzp-release.apk` → uploaded to rustypaste
+- **Notifications**: start + completion to `ntfy.sh/wzp`
+- **Remote artifact path**: `/mnt/storage/manBuilder/data/cache-android/target/…/release/app-release.apk`
+
+### Pipeline: Linux x86_64 (relay + CLI + bench + web)
+
+```bash
+./scripts/build-linux-docker.sh                   # Fire-and-forget
+./scripts/build-linux-docker.sh --no-pull         # Skip git fetch
+./scripts/build-linux-docker.sh --clean           # Force-clean target
+./scripts/build-linux-docker.sh --install         # Wait for completion and download locally
+```
+
+- **Branch**: `feat/android-voip-client` (script default — override by editing the script or passing an env var)
+- **Image**: `wzp-android-builder` (shared, not a separate Linux-only image)
+- **Targets built**: `wzp-relay`, `wzp-client`, `wzp-client-audio` (with `--features audio`), `wzp-web`, `wzp-bench`
+- **Output**: `wzp-linux-x86_64.tar.gz` with all five binaries → uploaded to rustypaste
+- **Local landing dir** (with `--install`): `target/linux-x86_64/`
+
+### Pipeline: Windows x86_64 (`wzp-desktop.exe`)
+
+```bash
+./scripts/build-windows-docker.sh                 # Full: pull + build + download locally
+./scripts/build-windows-docker.sh --no-pull       # Skip git fetch
+./scripts/build-windows-docker.sh --rust          # Force-clean target-windows cache
+./scripts/build-windows-docker.sh --image-build   # Rebuild the Docker image (fire-and-forget)
+```
+
+- **Branch**: `feat/desktop-audio-rewrite`
+- **Image**: `wzp-windows-builder`
+- **Build command**: `cargo xwin build --release --target x86_64-pc-windows-msvc --bin wzp-desktop`
+- **Output**: `wzp-desktop.exe` (~16 MB) → downloaded to `target/windows-exe/wzp-desktop.exe`, also uploaded to rustypaste
+- **Target cache volume**: `target-windows` (separate from the Android target cache to avoid triple cross-contamination)
+- **Shared cache volumes**: `cargo-registry`, `cargo-git` (shared with Android — both pipelines pull the same crates)
+
+**A/B-preserving workflow** for testing audio backends: rename the prior `.exe` before re-running the build, so both coexist:
+
+```bash
+# Preserve prior build as the noAEC baseline
+mv target/windows-exe/wzp-desktop.exe target/windows-exe/wzp-desktop-noAEC.exe
+./scripts/build-windows-docker.sh
+ls -la target/windows-exe/
+# wzp-desktop-noAEC.exe  (previous build)
+# wzp-desktop.exe        (new build)
+```
+
+### Alternative pipeline: Windows via Hetzner Cloud VPS
+
+For situations where Docker image rebuilds would be disruptive, or for one-shot debug builds on a clean machine:
+
+```bash
+./scripts/build-windows-cloud.sh                  # Full: create VM → build → download → destroy
+./scripts/build-windows-cloud.sh --prepare        # Create VM + install deps, don't build
+./scripts/build-windows-cloud.sh --build          # Build on existing VM
+./scripts/build-windows-cloud.sh --transfer       # Download .exe from existing VM
+./scripts/build-windows-cloud.sh --destroy        # Delete the VM
+WZP_KEEP_VM=1 ./scripts/build-windows-cloud.sh    # Don't auto-destroy after successful build
+```
+
+- **Provider**: Hetzner Cloud
+- **Default server type**: `cx33` (8 GB RAM, 8 vCPU — `cx23` with 4 GB OOMs on the tauri+rustls cross-compile)
+- **Image**: `ubuntu-24.04`
+- **SSH key**: must be named `wz` in Hetzner and loaded in the local ssh-agent
+- **Reminder**: set `WZP_KEEP_VM=1` for multi-build sessions, then **remember to `--destroy` at end of day** so the VM isn't left running overnight. This is tracked in the auto-memory as `feedback_keep_windows_builder_vm.md`.
+
+### Notifications
+
+All pipelines post to `https://ntfy.sh/wzp`. Subscribe from your phone via the [ntfy.sh app](https://ntfy.sh/) to get push notifications on build start/success/failure. Messages include the short git hash and the rustypaste URL on success:
+
+```
+WZP Windows build OK [03a80a3] (16M)
+https://paste.dk.manko.yoga/<uuid>/wzp-desktop.exe
+```
+
+### Rustypaste credentials
+
+Build pipelines read `rusty_address` and `rusty_auth_token` from the `.env` file at `/mnt/storage/manBuilder/.env` on SepehrHomeserverdk. Local scripts that upload directly (`build-windows-cloud.sh` when run in `--transfer` mode) read from `~/.wzp/rustypaste.env` with the same variable names. Both files must be kept in sync manually if rotated.
