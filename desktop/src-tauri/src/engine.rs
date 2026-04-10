@@ -553,52 +553,45 @@ impl CallEngine {
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
+        info!(%relay, %room, %alias, %quality, has_reuse = reuse_endpoint.is_some(), "CallEngine::start (desktop) invoked");
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
 
-        // Load or generate identity
-        let seed = {
-            let path = {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                std::path::PathBuf::from(home).join(".wzp").join("identity")
-            };
-            if path.exists() {
-                if let Ok(hex) = std::fs::read_to_string(&path) {
-                    if let Ok(s) = wzp_crypto::Seed::from_hex(hex.trim()) {
-                        s
-                    } else {
-                        wzp_crypto::Seed::generate()
-                    }
-                } else {
-                    wzp_crypto::Seed::generate()
-                }
-            } else {
-                let s = wzp_crypto::Seed::generate();
-                if let Some(p) = path.parent() {
-                    std::fs::create_dir_all(p).ok();
-                }
-                let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
-                std::fs::write(&path, hex).ok();
-                s
-            }
-        };
-
+        // Identity via the SHARED helper — same path resolution as
+        // register_signal (Tauri app_data_dir, e.g. on macOS
+        // ~/Library/Application Support/com.wzp.desktop/.wzp/identity).
+        //
+        // The previous implementation loaded the seed manually from
+        // $HOME/.wzp/identity which is a DIFFERENT file on macOS, so
+        // register_signal and CallEngine::start were using different
+        // identities — direct calls placed from desktop were routed
+        // by the relay under the CallEngine fingerprint but the callee
+        // had registered under a different fingerprint, making the
+        // call unroutable.
+        let seed = crate::load_or_create_seed()
+            .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
         let fp = seed.derive_identity().public_identity().fingerprint;
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
 
-        // Connect — reuse the signal endpoint if the direct-call path gave us
-        // one, otherwise create a fresh one (SFU room join path).
+        // Connect — reuse the signal endpoint if the direct-call path gave
+        // us one, otherwise create a fresh one (SFU room join path).
         let endpoint = if let Some(ep) = reuse_endpoint {
-            info!("reusing signal endpoint for media connection");
+            info!(local_addr = ?ep.local_addr().ok(), "reusing signal endpoint for media connection");
             ep
         } else {
             let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-            wzp_transport::create_endpoint(bind_addr, None)?
+            let ep = wzp_transport::create_endpoint(bind_addr, None)
+                .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+            info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
+            ep
         };
         let client_config = wzp_transport::client_config();
-        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config).await?;
+        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config)
+            .await
+            .map_err(|e| { error!("connect failed: {e}"); e })?;
+        info!("QUIC connection established, performing handshake");
         let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
 
         // Handshake
@@ -607,7 +600,8 @@ impl CallEngine {
             &seed.0,
             Some(&alias),
         )
-        .await?;
+        .await
+        .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
 
         info!("connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));
