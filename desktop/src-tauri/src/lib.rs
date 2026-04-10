@@ -354,13 +354,31 @@ async fn get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<CallStatus
 
 /// Switch the call audio between earpiece (`on=false`) and loudspeaker
 /// (`on=true`). On Android this calls AudioManager.setSpeakerphoneOn via
-/// JNI; on desktop it's a no-op that always succeeds.
+/// JNI AND then stops and restarts the Oboe streams so AAudio reconfigures
+/// with the new routing — without the restart, changing the speakerphone
+/// state mid-call silently tears down the running AAudio streams on some
+/// OEMs and both capture + playout stop producing data.
+///
+/// The Rust send/recv tokio tasks keep running during the ~60ms restart
+/// window; they just observe empty reads / writes against the
+/// process-global ring buffers, which is fine because the ring state
+/// is preserved across stop+start.
 #[tauri::command]
 #[allow(unused_variables)]
 async fn set_speakerphone(on: bool) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        android_audio::set_speakerphone(on)
+        android_audio::set_speakerphone(on)?;
+        if wzp_native::is_loaded() && wzp_native::audio_is_running() {
+            tracing::info!(on, "set_speakerphone: restarting Oboe for route change");
+            wzp_native::audio_stop();
+            // Give AAudio a tick to finalise the stop before we re-open.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            wzp_native::audio_start()
+                .map_err(|code| format!("audio_start after speakerphone toggle: code {code}"))?;
+            tracing::info!("set_speakerphone: Oboe restarted");
+        }
+        Ok(())
     }
     #[cfg(not(target_os = "android"))]
     {

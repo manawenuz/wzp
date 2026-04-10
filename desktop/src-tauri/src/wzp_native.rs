@@ -123,7 +123,6 @@ pub fn audio_write_playout(input: &[i16]) -> usize {
     unsafe { f(input.as_ptr(), input.len()) }
 }
 
-#[allow(dead_code)]
 pub fn audio_is_running() -> bool {
     AUDIO_IS_RUNNING.get().map(|f| unsafe { f() } != 0).unwrap_or(false)
 }

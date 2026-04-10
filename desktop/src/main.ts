@@ -495,6 +495,12 @@ function showCallScreen() {
   roomName.textContent = roomInput.value;
   callStatus.className = "status-dot";
   statusInterval = window.setInterval(pollStatus, 250);
+  // Sync the Speaker/Earpiece label with the OS state (Android only; on
+  // desktop the command is a no-op returning false so we land on "Earpiece"
+  // which is fine because desktop has no routing concept).
+  invoke<boolean>("is_speakerphone_on")
+    .then((on) => { speakerphoneOn = !!on; updateSpkLabel(); })
+    .catch(() => { speakerphoneOn = false; updateSpkLabel(); });
 }
 
 function showConnectScreen() {
@@ -511,23 +517,36 @@ micBtn.addEventListener("click", async () => {
   try { const m: boolean = await invoke("toggle_mic"); micBtn.classList.toggle("muted", m); micIcon.textContent = m ? "Mic Off" : "Mic"; } catch {}
 });
 
-// Speaker routing (Android) — toggles AudioManager.setSpeakerphoneOn so the
-// same Oboe VoiceCommunication stream swaps between earpiece and
-// loudspeaker without restarting. Desktop callers get a no-op command so
-// the same UI works everywhere.
+// Speaker routing (Android) — toggles AudioManager.setSpeakerphoneOn + then
+// stops and restarts the Oboe streams so AAudio reconfigures with the new
+// routing. The Rust-side Tauri command handles the restart, we just swap
+// the button label.
+//
+// Earpiece is NOT a "muted" state, so DO NOT add the `.muted` CSS class
+// (which would tint the button red); that was a bug in 0178cbd that made
+// earpiece mode look like playback was off. A separate `.speaker-on` class
+// is available for css styling if we want to visually indicate loud mode.
 let speakerphoneOn = false;
+let speakerphoneBusy = false;
 function updateSpkLabel() {
-  spkBtn.classList.toggle("muted", !speakerphoneOn);
-  spkIcon.textContent = speakerphoneOn ? "Speaker" : "Earpiece";
+  spkBtn.classList.toggle("speaker-on", speakerphoneOn);
+  spkBtn.classList.remove("muted");
+  spkIcon.textContent = speakerphoneOn ? "🔊 Speaker" : "🔈 Earpiece";
 }
 spkBtn.addEventListener("click", async () => {
+  if (speakerphoneBusy) return;  // debounce — the restart takes ~60ms
+  speakerphoneBusy = true;
   const next = !speakerphoneOn;
+  spkBtn.disabled = true;
   try {
     await invoke("set_speakerphone", { on: next });
     speakerphoneOn = next;
     updateSpkLabel();
   } catch (e) {
     console.error("set_speakerphone failed:", e);
+  } finally {
+    spkBtn.disabled = false;
+    speakerphoneBusy = false;
   }
 });
 hangupBtn.addEventListener("click", async () => {
