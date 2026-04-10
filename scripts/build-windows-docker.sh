@@ -192,10 +192,31 @@ set -euo pipefail
 # the closing paren of the COMPILE_FLAGS setter. Idempotent across
 # runs — if the file already contains the sentinel line we skip.
 TOOLCHAIN_FILE=/home/builder/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake
-if ! grep -q "WZP_SSE_PATCH" "$TOOLCHAIN_FILE"; then
-    echo ">>> Patching cargo-xwin toolchain for SSE4.1 / SSSE3 intrinsics"
-    sed -i "s|/imsvc /home/builder/.cache/cargo-xwin/xwin/sdk/include/winrt)|/imsvc /home/builder/.cache/cargo-xwin/xwin/sdk/include/winrt\\n    # WZP_SSE_PATCH — enable SSE4.1/SSSE3 so libopus (audiopus_sys) builds\\n    /clang:-msse4.1\\n    /clang:-mssse3\\n    /clang:-msse3\\n    /clang:-msse2)|" "$TOOLCHAIN_FILE"
+echo ">>> Patching cargo-xwin toolchain for SSE4.1 / SSSE3 intrinsics"
+if grep -q WZP_SSE_PATCH "$TOOLCHAIN_FILE"; then
+    echo "    (already patched, skipping)"
+else
+    # The cleanest way to add flags is to append a pure-CMake block to
+    # the end of the toolchain file. Both CMAKE_C_FLAGS and
+    # CMAKE_CXX_FLAGS were already FORCE-set earlier in the toolchain;
+    # we override them again with the same content plus our SSE flags.
+    # This runs AFTER the original set(... FORCE) and the CMAKE_ARGS
+    # from the cmake-rs invocation, so it wins.
+    cat >> "$TOOLCHAIN_FILE" <<CMAKE_PATCH_EOF
+
+# ── WZP_SSE_PATCH ─────────────────────────────────────────────────────────
+# libopus (audiopus_sys) has per-file COMPILE_FLAGS "-msse4.1" on its
+# sse4_1.c sources, which clang-cl silently drops (expects /clang:-m…).
+# Force-add the flags globally so every C file in the opus cmake subbuild
+# compiles with the intrinsics target features enabled. All x86_64
+# Windows CPUs shipped since 2008 support these, so enabling them
+# globally on this target is safe.
+set(CMAKE_C_FLAGS   "\${CMAKE_C_FLAGS}   /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS "\${CMAKE_CXX_FLAGS} /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CACHE STRING "" FORCE)
+CMAKE_PATCH_EOF
 fi
+echo ">>> Toolchain tail after patch:"
+tail -15 "$TOOLCHAIN_FILE"
 
 cd /build/source/desktop
 
