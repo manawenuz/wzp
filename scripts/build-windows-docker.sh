@@ -182,12 +182,20 @@ set -euo pipefail
 #    feature sse4.1, but would be inlined into a function that is
 #    compiled without support for sse4.1"
 #
-# Workaround: set global CFLAGS for the Windows target so every C file
-# in libopus (and any other cc-rs crate) compiles with SSE4.1/SSSE3
-# enabled. All x86_64 Windows CPUs shipped since 2008 support these,
-# so the global enablement is safe for the target platform.
-export CFLAGS_x86_64_pc_windows_msvc="/clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2"
-export CXXFLAGS_x86_64_pc_windows_msvc="/clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2"
+# env-var CFLAGS do NOT help here: cargo-xwin ships its own CMake
+# toolchain file (~/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake)
+# which hardcodes COMPILE_FLAGS and FORCE-overrides CMAKE_C_FLAGS,
+# so anything we export via CFLAGS_$TARGET gets dropped. The only
+# place that actually reaches every C compilation inside the opus
+# cmake build is the toolchain file itself. Patch it in place with
+# a one-shot sed: append four /clang:-m* flags immediately before
+# the closing paren of the COMPILE_FLAGS setter. Idempotent across
+# runs — if the file already contains the sentinel line we skip.
+TOOLCHAIN_FILE=/home/builder/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake
+if ! grep -q "WZP_SSE_PATCH" "$TOOLCHAIN_FILE"; then
+    echo ">>> Patching cargo-xwin toolchain for SSE4.1 / SSSE3 intrinsics"
+    sed -i "s|/imsvc /home/builder/.cache/cargo-xwin/xwin/sdk/include/winrt)|/imsvc /home/builder/.cache/cargo-xwin/xwin/sdk/include/winrt\\n    # WZP_SSE_PATCH — enable SSE4.1/SSSE3 so libopus (audiopus_sys) builds\\n    /clang:-msse4.1\\n    /clang:-mssse3\\n    /clang:-msse3\\n    /clang:-msse2)|" "$TOOLCHAIN_FILE"
+fi
 
 cd /build/source/desktop
 
