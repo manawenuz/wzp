@@ -96,6 +96,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::Hangup { .. } => CallSignalType::Hangup,
         SignalMessage::Rekey { .. } => CallSignalType::Offer, // reuse
         SignalMessage::QualityUpdate { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::LossRecoveryUpdate { .. } => CallSignalType::Offer, // reuse (telemetry)
         SignalMessage::Ping { .. } | SignalMessage::Pong { .. } => CallSignalType::Offer,
         SignalMessage::AuthToken { .. } => CallSignalType::Offer,
         SignalMessage::Hold => CallSignalType::Hold,

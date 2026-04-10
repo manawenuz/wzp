@@ -29,6 +29,9 @@ pub struct RelayMetrics {
     pub session_rtt_ms: GaugeVec,
     pub session_underruns: IntCounterVec,
     pub session_overruns: IntCounterVec,
+    // Phase 4: loss-recovery breakdown per session.
+    pub session_dred_reconstructions: IntCounterVec,
+    pub session_classical_plc: IntCounterVec,
     registry: Registry,
 }
 
@@ -130,6 +133,23 @@ impl RelayMetrics {
         )
         .expect("metric");
 
+        let session_dred_reconstructions = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_session_dred_reconstructions_total",
+                "Frames reconstructed via DRED (Deep REDundancy) per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+        let session_classical_plc = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_session_classical_plc_total",
+                "Frames filled via classical Opus/Codec2 PLC per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+
         registry.register(Box::new(active_sessions.clone())).expect("register");
         registry.register(Box::new(active_rooms.clone())).expect("register");
         registry.register(Box::new(packets_forwarded.clone())).expect("register");
@@ -147,6 +167,8 @@ impl RelayMetrics {
         registry.register(Box::new(session_rtt_ms.clone())).expect("register");
         registry.register(Box::new(session_underruns.clone())).expect("register");
         registry.register(Box::new(session_overruns.clone())).expect("register");
+        registry.register(Box::new(session_dred_reconstructions.clone())).expect("register");
+        registry.register(Box::new(session_classical_plc.clone())).expect("register");
 
         Self {
             active_sessions,
@@ -166,6 +188,8 @@ impl RelayMetrics {
             session_rtt_ms,
             session_underruns,
             session_overruns,
+            session_dred_reconstructions,
+            session_classical_plc,
             registry,
         }
     }
@@ -217,6 +241,39 @@ impl RelayMetrics {
         }
     }
 
+    /// Phase 4: update per-session loss-recovery counters from a client's
+    /// `LossRecoveryUpdate` signal message. The client sends monotonic
+    /// totals (frames reconstructed since call start); we compute the
+    /// delta against the current Prometheus counter and increment by it.
+    /// IntCounterVec only increases, so a client restart that resets the
+    /// counter to 0 simply produces no delta until the new totals exceed
+    /// the Prometheus state.
+    pub fn update_session_loss_recovery(
+        &self,
+        session_id: &str,
+        dred_reconstructions: u64,
+        classical_plc: u64,
+    ) {
+        let cur_dred = self
+            .session_dred_reconstructions
+            .with_label_values(&[session_id])
+            .get();
+        if dred_reconstructions > cur_dred {
+            self.session_dred_reconstructions
+                .with_label_values(&[session_id])
+                .inc_by(dred_reconstructions - cur_dred);
+        }
+        let cur_plc = self
+            .session_classical_plc
+            .with_label_values(&[session_id])
+            .get();
+        if classical_plc > cur_plc {
+            self.session_classical_plc
+                .with_label_values(&[session_id])
+                .inc_by(classical_plc - cur_plc);
+        }
+    }
+
     /// Remove all per-session label values for a disconnected session.
     pub fn remove_session_metrics(&self, session_id: &str) {
         let _ = self.session_buffer_depth.remove_label_values(&[session_id]);
@@ -224,6 +281,10 @@ impl RelayMetrics {
         let _ = self.session_rtt_ms.remove_label_values(&[session_id]);
         let _ = self.session_underruns.remove_label_values(&[session_id]);
         let _ = self.session_overruns.remove_label_values(&[session_id]);
+        let _ = self
+            .session_dred_reconstructions
+            .remove_label_values(&[session_id]);
+        let _ = self.session_classical_plc.remove_label_values(&[session_id]);
     }
 
     /// Get a reference to the underlying Prometheus registry.
@@ -418,15 +479,67 @@ mod tests {
         };
         m.update_session_quality("sess-cleanup", &report);
         m.update_session_buffer("sess-cleanup", 42, 3, 1);
+        m.update_session_loss_recovery("sess-cleanup", 17, 4);
 
         // Verify they appear
         let output = m.metrics_handler();
         assert!(output.contains("sess-cleanup"));
+        assert!(output.contains("wzp_relay_session_dred_reconstructions_total"));
+        assert!(output.contains("wzp_relay_session_classical_plc_total"));
 
         // Remove and verify they are gone
         m.remove_session_metrics("sess-cleanup");
         let output = m.metrics_handler();
         assert!(!output.contains("sess-cleanup"));
+    }
+
+    /// Phase 4: LossRecoveryUpdate → per-session counters, monotonic delta
+    /// application.
+    #[test]
+    fn session_loss_recovery_monotonic_delta() {
+        let m = RelayMetrics::new();
+        let sess = "sess-dred";
+
+        // First update: 10 DRED, 2 PLC
+        m.update_session_loss_recovery(sess, 10, 2);
+        let dred1 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc1 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred1, 10);
+        assert_eq!(plc1, 2);
+
+        // Second update: 25 DRED, 5 PLC — counter advances by (15, 3)
+        m.update_session_loss_recovery(sess, 25, 5);
+        let dred2 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc2 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred2, 25);
+        assert_eq!(plc2, 5);
+
+        // Third update with LOWER values (e.g., client reset) — counters
+        // hold steady, no decrement.
+        m.update_session_loss_recovery(sess, 5, 1);
+        let dred3 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc3 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred3, 25, "counter must not decrease");
+        assert_eq!(plc3, 5, "counter must not decrease");
+
+        // Fourth update: client caught up and exceeded the old max.
+        m.update_session_loss_recovery(sess, 30, 8);
+        let dred4 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc4 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred4, 30);
+        assert_eq!(plc4, 8);
     }
 
     #[test]

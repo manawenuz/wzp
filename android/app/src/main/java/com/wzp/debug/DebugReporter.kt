@@ -46,6 +46,14 @@ class DebugReporter(private val context: Context) {
             val zipFile = File(context.cacheDir, "wzp_debug_${timestamp}.zip")
 
             ZipOutputStream(BufferedOutputStream(FileOutputStream(zipFile))).use { zos ->
+                // Phase 4: extract DRED / classical PLC counters from the
+                // stats JSON so they're visible in the meta preamble at a
+                // glance, not buried in the trailing JSON dump.
+                val dredReconstructions = extractLongField(finalStatsJson, "dred_reconstructions")
+                val classicalPlc = extractLongField(finalStatsJson, "classical_plc_invocations")
+                val framesDecoded = extractLongField(finalStatsJson, "frames_decoded")
+                val fecRecovered = extractLongField(finalStatsJson, "fec_recovered")
+
                 // 1. Call metadata
                 val meta = buildString {
                     appendLine("=== WZ Phone Debug Report ===")
@@ -57,6 +65,18 @@ class DebugReporter(private val context: Context) {
                     appendLine("AEC: ${if (aecEnabled) "ON" else "OFF"}")
                     appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
                     appendLine("Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
+                    appendLine()
+                    appendLine("=== Loss Recovery ===")
+                    appendLine("Frames decoded:           $framesDecoded")
+                    appendLine("DRED reconstructions:     $dredReconstructions (Opus neural recovery)")
+                    appendLine("Classical PLC:            $classicalPlc (fallback)")
+                    appendLine("RaptorQ FEC recovered:    $fecRecovered (Codec2 only)")
+                    if (framesDecoded > 0) {
+                        val dredPct = 100.0 * dredReconstructions / framesDecoded
+                        val plcPct = 100.0 * classicalPlc / framesDecoded
+                        appendLine("DRED rate:                ${"%.2f".format(dredPct)}%")
+                        appendLine("Classical PLC rate:       ${"%.2f".format(plcPct)}%")
+                    }
                     appendLine()
                     appendLine("=== Final Stats ===")
                     appendLine(finalStatsJson)
@@ -194,5 +214,29 @@ class DebugReporter(private val context: Context) {
         zos.putNextEntry(ZipEntry(name))
         FileInputStream(file).use { it.copyTo(zos) }
         zos.closeEntry()
+    }
+
+    /**
+     * Tiny JSON field extractor — pulls an integer value for a top-level
+     * field like `"dred_reconstructions":42`. We don't want to pull in a
+     * full JSON parser just for the debug preamble, and the CallStats
+     * output is a flat record with well-known field names.
+     *
+     * Returns 0 if the field is missing or unparseable.
+     */
+    private fun extractLongField(json: String, field: String): Long {
+        val key = "\"$field\":"
+        val idx = json.indexOf(key)
+        if (idx < 0) return 0
+        var i = idx + key.length
+        // Skip whitespace
+        while (i < json.length && json[i].isWhitespace()) i++
+        val start = i
+        while (i < json.length && (json[i].isDigit() || json[i] == '-')) i++
+        return try {
+            json.substring(start, i).toLong()
+        } catch (_: NumberFormatException) {
+            0
+        }
     }
 }
