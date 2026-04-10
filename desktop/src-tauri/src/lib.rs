@@ -371,11 +371,26 @@ async fn set_speakerphone(on: bool) -> Result<(), String> {
         android_audio::set_speakerphone(on)?;
         if wzp_native::is_loaded() && wzp_native::audio_is_running() {
             tracing::info!(on, "set_speakerphone: restarting Oboe for route change");
-            wzp_native::audio_stop();
-            // Give AAudio a tick to finalise the stop before we re-open.
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            wzp_native::audio_start()
-                .map_err(|code| format!("audio_start after speakerphone toggle: code {code}"))?;
+            // Oboe's stop/start are sync C-FFI calls that block for ~400ms
+            // on Nothing-class devices (Pixel is faster). Calling them
+            // directly from an async Tauri command stalls the tokio
+            // executor — the send/recv engine tasks were observed to
+            // freeze for ~20 seconds across a few rapid speaker toggles,
+            // piling up buffered QUIC datagrams and then flooding them
+            // all at once when the runtime finally caught up.
+            //
+            // Fix: run the audio teardown + reopen on a dedicated
+            // blocking thread so the runtime keeps scheduling everything
+            // else. AAudio's requestStop returns only after the stream
+            // is actually in Stopped state, so no explicit inter-call
+            // sleep is needed.
+            tokio::task::spawn_blocking(|| {
+                wzp_native::audio_stop();
+                wzp_native::audio_start()
+                    .map_err(|code| format!("audio_start after speakerphone toggle: code {code}"))
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking join: {e}"))??;
             tracing::info!("set_speakerphone: Oboe restarted");
         }
         Ok(())
