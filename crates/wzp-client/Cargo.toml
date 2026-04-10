@@ -31,6 +31,21 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-rs = { version = "0.11", optional = true }
 
+# Windows-only: direct WASAPI bindings for the `windows-aec` feature.
+# `windows` is Microsoft's official Rust COM bindings crate. We pull in
+# only the audio + COM subfeatures we need — the crate is organized as
+# a massive optional-feature tree, so enabling just these keeps compile
+# times reasonable (~5s for these features vs ~60s for the full crate).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+
 [features]
 default = []
 audio = ["cpal"]
@@ -38,6 +53,13 @@ audio = ["cpal"]
 # so enabling this feature on Windows/Linux is a no-op (the audio_vpio
 # module is also #[cfg(target_os = "macos")] in lib.rs).
 vpio = ["dep:coreaudio-rs"]
+# windows-aec enables a direct WASAPI capture backend that opens the
+# microphone under AudioCategory_Communications, turning on Windows's
+# OS-level communications audio processing (AEC + noise suppression +
+# AGC). The `windows` dep is itself target-gated to Windows above, so
+# enabling this feature on non-Windows targets is a no-op (the
+# audio_wasapi module is also #[cfg(target_os = "windows")] in lib.rs).
+windows-aec = ["dep:windows"]
 
 [[bin]]
 name = "wzp-client"

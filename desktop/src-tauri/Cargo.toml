@@ -62,10 +62,15 @@ wzp-transport = { path = "../../crates/wzp-transport" }
 [target.'cfg(target_os = "macos")'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 
-# Windows: CPAL only. Windows AEC (WASAPI Communications / MF Voice
-# Capture DSP) lands in a follow-up task. See task #24.
+# Windows: CPAL for playback + direct WASAPI for capture with OS-level
+# AEC (AudioCategory_Communications). The wzp-client `windows-aec`
+# feature swaps the default CPAL AudioCapture for a WASAPI one that
+# opens the mic under AudioCategory_Communications, turning on Windows's
+# communications audio processing chain (AEC, NS, AGC). The reference
+# signal for AEC is the system render mix, so echo from our CPAL
+# playback is cancelled automatically without extra plumbing.
 [target.'cfg(target_os = "windows")'.dependencies]
-wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
+wzp-client = { path = "../../crates/wzp-client", features = ["audio", "windows-aec"] }
 
 # Linux: same as Windows for now — plain CPAL.
 [target.'cfg(target_os = "linux")'.dependencies]
