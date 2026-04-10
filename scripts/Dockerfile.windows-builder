@@ -89,46 +89,11 @@ RUN set -eux; \
     cd / && rm -rf /tmp/xwin-warmup && \
     du -sh $HOME/.cache/cargo-xwin
 
-# ── Patch cargo-xwin's override.cmake to inject SSE4.1 / SSSE3 ────────────
-# libopus (via audiopus_sys) uses per-file COMPILE_FLAGS "-msse4.1" on
-# its opus/silk/x86/*_sse4_1.c sources, but clang-cl silently drops
-# bare -m flags (it expects /clang:-m… instead). The per-file intrinsic
-# functions then fail to compile because the containing function isn't
-# marked with the target feature.
-#
-# Previously tried patching CMAKE_C_FLAGS via the toolchain file — that
-# didn't stick because cmake-rs passes `-DCMAKE_C_FLAGS=` from the
-# command line, and its assembly of that value happens before the
-# toolchain's `set(... FORCE)` in the cache lookup path; the net effect
-# was that the toolchain patch never propagated into the final
-# CMakeCache.txt for the opus subbuild.
-#
-# The reliable fix is to inject the SSE flags directly into the
-# `CMAKE_C_COMPILE_OBJECT` command template via
-# `CMAKE_USER_MAKE_RULES_OVERRIDE` (which cargo-xwin already uses for
-# an unrelated clang-cl quirk). The command template is the string
-# cmake uses to build each compile command line, and manipulating it
-# with `string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 …" …)`
-# puts the flags into every C compile invocation without touching
-# CMAKE_C_FLAGS at all — it's the CMake equivalent of a compiler
-# wrapper.
-#
-# Baked into the image so the patch lives alongside cargo-xwin's own
-# override.cmake edits, and survives across container runs.
-RUN set -eux; \
-    OVERRIDE=$HOME/.cache/cargo-xwin/cmake/clang-cl/override.cmake; \
-    test -f "$OVERRIDE"; \
-    if ! grep -q WZP_SSE_PATCH "$OVERRIDE"; then \
-        printf '%s\n' \
-            '' \
-            '# WZP_SSE_PATCH — force SSE4.1 / SSSE3 on every C / C++ compile so the' \
-            '# libopus (audiopus_sys) sse4_1.c / ssse3.c sources link their' \
-            '# _mm_cvtepi16_epi32 / _mm_mul_epi32 / _mm_blend_epi16 intrinsics.' \
-            'string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_C_COMPILE_OBJECT "${CMAKE_C_COMPILE_OBJECT}")' \
-            'string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_CXX_COMPILE_OBJECT "${CMAKE_CXX_COMPILE_OBJECT}")' \
-            >> "$OVERRIDE"; \
-    fi; \
-    echo "=== Patched override.cmake tail ==="; \
-    tail -12 "$OVERRIDE"
+# Note: the libopus SSE4.1/SSSE3 intrinsic compile failure under clang-cl
+# is fixed at the source level by vendoring audiopus_sys and patching its
+# bundled libopus CMakeLists.txt (see desktop/vendor/audiopus_sys in the
+# source tree). Do NOT try to patch cargo-xwin's override.cmake at this
+# layer — cargo-xwin rewrites that file on every `cargo xwin build`
+# invocation, so any edits baked into the image are wiped at runtime.
 
 WORKDIR /build/source
