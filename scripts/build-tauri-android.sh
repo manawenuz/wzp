@@ -199,6 +199,26 @@ else
     echo ">>> WARNING: libwzp_native.so not produced"
 fi
 
+# ─── libc++_shared.so — required by wzp-native at runtime ──────────────
+# wzp-native/build.rs uses cpp_link_stdlib(Some("c++_shared")) which adds
+# a NEEDED entry for libc++_shared.so to libwzp_native.so. cargo-ndk does
+# NOT copy the actual libc++_shared.so into jniLibs, so unless we copy it
+# explicitly, the APK ships without it and Android's dynamic linker fails
+# the dlopen with "library libc++_shared.so not found" at runtime. Same
+# fix that build-and-notify.sh has had for the legacy wzp-android path
+# (lines 126-134 there) — ported here for the Tauri pipeline.
+if [ ! -f "$JNI_ABI_DIR/libc++_shared.so" ]; then
+    echo ">>> libc++_shared.so missing, copying from NDK..."
+    NDK_LIBCXX=$(find "$ANDROID_NDK_HOME" -name "libc++_shared.so" -path "*/aarch64-linux-android/*" | head -1)
+    if [ -n "$NDK_LIBCXX" ]; then
+        cp "$NDK_LIBCXX" "$JNI_ABI_DIR/"
+        ls -lh "$JNI_ABI_DIR/libc++_shared.so"
+    else
+        echo ">>> ERROR: libc++_shared.so not found in NDK — APK will crash at dlopen time"
+        exit 1
+    fi
+fi
+
 echo ">>> cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk"
 cargo tauri android build ${PROFILE_FLAG} --target aarch64 --apk
 
