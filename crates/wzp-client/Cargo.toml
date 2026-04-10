@@ -60,7 +60,7 @@ windows = { version = "0.58", optional = true, features = [
 # so the git path gives us a complete source tree that bundled-mode can
 # build. Pinned to tag v2.0.3 for reproducibility.
 [target.'cfg(target_os = "linux")'.dependencies]
-webrtc-audio-processing = { git = "https://github.com/tonarino/webrtc-audio-processing", tag = "v2.0.3", optional = true, features = ["bundled"] }
+webrtc-audio-processing = { git = "https://github.com/tonarino/webrtc-audio-processing", branch = "main", optional = true, features = ["bundled"] }
 
 [features]
 default = []
