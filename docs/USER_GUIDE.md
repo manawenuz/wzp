@@ -457,3 +457,52 @@ Auto mode uses three tiers (Good, Degraded, Catastrophic). It does not use the S
 When you select a specific profile (not Auto), adaptive switching is disabled. The encoder stays at the selected profile regardless of network conditions. This is useful when you know your network quality and want consistent encoding, or when you want to force a specific bitrate.
 
 Note: The decoder always accepts all codecs. A manual quality selection only affects what you send, not what you receive.
+
+## Direct 1:1 Calling (Desktop + Android)
+
+In addition to room-mode group calls, you can place direct calls to a specific peer by fingerprint. Direct calls bypass room state entirely — the relay is used purely as a signaling gateway and for media relay. There is no need for the callee to join a room beforehand; they just need to be registered with the same signal hub.
+
+### UI elements in the direct-call panel
+
+- **Place call field** — paste a fingerprint (the long hex string you see under your own identity) and click Call. The callee sees a ringing UI.
+- **Recent contacts row** — a horizontal strip of chips showing your most recently called/receiving peers. Click a chip to re-dial. Aliases are shown if the peer has one, otherwise a short fingerprint prefix.
+- **Call history list** — every direct call you've placed, received, or missed, with direction indicator (↗ Outgoing, ↙ Incoming, ✗ Missed), the peer's alias (if known) or fingerprint prefix, and a timestamp. Click an entry to re-dial.
+- **Deregister button** — drops your signal-hub registration without quitting the app. Useful when switching identities (e.g. testing with two accounts on one machine) or when you want to explicitly appear offline to peers.
+- **Clear history button** — wipes the call history store. Does not affect current calls.
+
+### Live updates
+
+The call history updates in real time across all views via Tauri events (`history-changed`). Placing, answering, or missing a call immediately refreshes the history list and the recent contacts row — no manual refresh needed.
+
+### Default room
+
+On first launch, the room name in the room-mode panel defaults to `general` (changed from the prior `android` default so the desktop and Android clients don't silently talk past each other). You can still change it to any room name, and the last-used room is remembered across launches.
+
+### Random alias
+
+New installations derive a human-friendly alias from your identity seed — something like `silent-forest-41` or `bold-river-07`. It's deterministic, so reinstalling without changing your seed gives you the same alias. The alias is shown alongside your fingerprint in the header and is what peers see in their call history when they receive your call.
+
+You can override the alias in Settings → Identity if you want a specific name.
+
+## Windows AEC Variants
+
+The Windows desktop build ships in two variants for echo cancellation, depending on which backend you want to exercise. Both are `wzp-desktop.exe` binaries — only the internal audio backend differs.
+
+| Build | File | Capture backend | AEC | When to use |
+|---|---|---|---|---|
+| **noAEC baseline** | `wzp-desktop-noAEC.exe` | CPAL (WASAPI shared mode) | None | Headphone-only use, or for A/B comparison against the AEC build |
+| **Communications AEC** | `wzp-desktop.exe` | Direct WASAPI with `AudioCategory_Communications` | **Yes** — Windows routes the capture stream through the driver's communications APO chain (AEC + noise suppression + automatic gain control) | Any speaker-mode call, laptop built-in speakers, anywhere echo is audible |
+
+**Quality caveat**: the communications AEC operates at the OS level and its algorithm depends on the audio driver's installed APO chain. On modern consumer laptops with Intel Smart Sound, Dolby, recent Realtek, or Windows 11 Voice Clarity, the quality is excellent (effectively matching what Teams/Zoom deliver). On generic class-compliant USB microphones or older drivers, the communications APO may not be present at all — in that case the build behaves identically to the noAEC baseline.
+
+If you hear echo on the AEC build, try these in order before escalating:
+
+1. **Check which capture device is selected as "Default Device - Communications"** in Windows Sound Settings → Recording tab. Right-click any device to set it. The AEC build opens the device marked as `eCommunications`, not `eConsole`, so changing the default-communications device changes what we capture from.
+2. **Verify the driver exposes a communications APO**. Sound Settings → Recording → your mic → Properties → Advanced → look for an "Enhancements" or "Signal Enhancements" tab. If it's absent, the driver has no APOs and the AEC build effectively has no AEC.
+3. **Try the classic Voice Capture DSP build** when it ships (tracked as task #26). That uses Microsoft's bundled software AEC (`CLSID_CWMAudioAEC`) which works on every Windows machine regardless of driver.
+
+### Installing the Windows builds
+
+1. Windows 10: install the [WebView2 Runtime Evergreen Bootstrapper](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) first. Windows 11 has it pre-installed.
+2. Copy `wzp-desktop.exe` (or `wzp-desktop-noAEC.exe`) to any directory and double-click. No installer needed.
+3. First launch creates the config + identity store at `%APPDATA%\com.wzp.phone\`.
