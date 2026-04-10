@@ -89,28 +89,48 @@ RUN set -eux; \
     cd / && rm -rf /tmp/xwin-warmup && \
     du -sh $HOME/.cache/cargo-xwin
 
-# ── Patch the cargo-xwin clang-cl toolchain to add SSE4.1 / SSSE3 ─────────
+# ── Patch cargo-xwin's override.cmake to inject SSE4.1 / SSSE3 ────────────
 # libopus (via audiopus_sys) uses per-file COMPILE_FLAGS "-msse4.1" on
-# its opus/silk/x86/*_sse4_1.c sources, but clang-cl silently drops the
-# bare -m flags (it expects /clang:-m… instead). The per-file
-# intrinsics functions then fail to compile because the surrounding
-# function isn't marked with the target feature. We fix this by
-# inserting /clang:-msse4.1 / /clang:-mssse3 directly into the
-# COMPILE_FLAGS list in the cargo-xwin-generated cmake toolchain so
-# EVERY C file in every cmake-driven subbuild gets the feature flags.
-# All x86_64 Windows CPUs shipped since 2008 have these, safe on target.
+# its opus/silk/x86/*_sse4_1.c sources, but clang-cl silently drops
+# bare -m flags (it expects /clang:-m… instead). The per-file intrinsic
+# functions then fail to compile because the containing function isn't
+# marked with the target feature.
 #
-# We do the patch inside the image (not at container run time) so
-# (a) it persists across container restarts without bash/awk/sed
-# escaping games inside docker-bash-c, and (b) it becomes part of
-# the shared image layer cache.
+# Previously tried patching CMAKE_C_FLAGS via the toolchain file — that
+# didn't stick because cmake-rs passes `-DCMAKE_C_FLAGS=` from the
+# command line, and its assembly of that value happens before the
+# toolchain's `set(... FORCE)` in the cache lookup path; the net effect
+# was that the toolchain patch never propagated into the final
+# CMakeCache.txt for the opus subbuild.
+#
+# The reliable fix is to inject the SSE flags directly into the
+# `CMAKE_C_COMPILE_OBJECT` command template via
+# `CMAKE_USER_MAKE_RULES_OVERRIDE` (which cargo-xwin already uses for
+# an unrelated clang-cl quirk). The command template is the string
+# cmake uses to build each compile command line, and manipulating it
+# with `string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 …" …)`
+# puts the flags into every C compile invocation without touching
+# CMAKE_C_FLAGS at all — it's the CMake equivalent of a compiler
+# wrapper.
+#
+# Baked into the image so the patch lives alongside cargo-xwin's own
+# override.cmake edits, and survives across container runs.
 RUN set -eux; \
-    TOOLCHAIN=$HOME/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake; \
-    test -f "$TOOLCHAIN"; \
-    grep -q WZP_SSE_PATCH "$TOOLCHAIN" || \
-    awk '/\/imsvc .*\/winrt\)/ {sub(/\)/, "", $0); print $0; print "    /clang:-msse4.1"; print "    /clang:-mssse3"; print "    /clang:-msse3"; print "    /clang:-msse2"; print "    # WZP_SSE_PATCH"; print "    )"; next} {print}' "$TOOLCHAIN" > "$TOOLCHAIN.new" && \
-    mv "$TOOLCHAIN.new" "$TOOLCHAIN"; \
-    echo "=== Patched toolchain ==="; \
-    grep -A 15 "set(COMPILE_FLAGS" "$TOOLCHAIN" | head -20
+    OVERRIDE=$HOME/.cache/cargo-xwin/cmake/clang-cl/override.cmake; \
+    test -f "$OVERRIDE"; \
+    grep -q WZP_SSE_PATCH "$OVERRIDE" || \
+    cat >> "$OVERRIDE" << 'SSE_PATCH_EOF' ; \
+# WZP_SSE_PATCH — force SSE4.1 / SSSE3 on every C / C++ compile so the
+# libopus (audiopus_sys) sse4_1.c / ssse3.c sources link their
+# _mm_cvtepi16_epi32 / _mm_mul_epi32 / _mm_blend_epi16 intrinsics.
+# Replaces the placeholder <FLAGS> in the CMAKE_C_COMPILE_OBJECT /
+# CMAKE_CXX_COMPILE_OBJECT command templates with the same placeholder
+# followed by four /clang:-m* flags, so the flags end up in every
+# compile command line without ever touching CMAKE_C_FLAGS.
+string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_C_COMPILE_OBJECT "${CMAKE_C_COMPILE_OBJECT}")
+string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_CXX_COMPILE_OBJECT "${CMAKE_CXX_COMPILE_OBJECT}")
+SSE_PATCH_EOF
+    echo "=== Patched override.cmake tail ==="; \
+    tail -12 "$OVERRIDE"
 
 WORKDIR /build/source
