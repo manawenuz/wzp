@@ -516,6 +516,19 @@ async fn run_call(
             t_opus_us += t0.elapsed().as_micros() as u64;
             let encoded = &encode_buf[..encoded_len];
 
+            // Phase 2: Opus tiers bypass RaptorQ (DRED handles loss recovery
+            // at the codec layer). Codec2 tiers keep RaptorQ unchanged.
+            let is_opus = current_profile.codec.is_opus();
+            let (hdr_fec_block, hdr_fec_symbol, hdr_fec_ratio) = if is_opus {
+                (0u8, 0u8, 0u8)
+            } else {
+                (
+                    block_id,
+                    frame_in_block,
+                    MediaHeader::encode_fec_ratio(current_profile.fec_ratio),
+                )
+            };
+
             // Build source packet
             let s = seq.fetch_add(1, Ordering::Relaxed);
             let t = ts.fetch_add(frame_samples as u32, Ordering::Relaxed);
@@ -526,11 +539,11 @@ async fn run_call(
                     is_repair: false,
                     codec_id: current_profile.codec,
                     has_quality_report: false,
-                    fec_ratio_encoded: MediaHeader::encode_fec_ratio(current_profile.fec_ratio),
+                    fec_ratio_encoded: hdr_fec_ratio,
                     seq: s,
                     timestamp: t,
-                    fec_block: block_id,
-                    fec_symbol: frame_in_block,
+                    fec_block: hdr_fec_block,
+                    fec_symbol: hdr_fec_symbol,
                     reserved: 0,
                     csrc_count: 0,
                 },
@@ -560,63 +573,66 @@ async fn run_call(
             t_send_us += t0.elapsed().as_micros() as u64;
             frames_sent += 1;
 
-            // Feed encoded frame to FEC encoder
+            // Codec2-only: feed RaptorQ and emit repair packets when the
+            // block is full. Opus tiers skip this entire block — DRED
+            // (enabled in Phase 1) provides codec-layer loss recovery.
             let t0 = Instant::now();
-            if let Err(e) = fec_enc.add_source_symbol(encoded) {
-                warn!("fec add_source error: {e}");
-            }
-            frame_in_block += 1;
+            if !is_opus {
+                if let Err(e) = fec_enc.add_source_symbol(encoded) {
+                    warn!("fec add_source error: {e}");
+                }
+                frame_in_block += 1;
 
-            // When block is full, generate repair packets
-            if frame_in_block >= current_profile.frames_per_block {
-                match fec_enc.generate_repair(current_profile.fec_ratio) {
-                    Ok(repairs) => {
-                        let repair_count = repairs.len();
-                        for (sym_idx, repair_data) in repairs {
-                            let rs = seq.fetch_add(1, Ordering::Relaxed);
-                            let repair_pkt = MediaPacket {
-                                header: MediaHeader {
-                                    version: 0,
-                                    is_repair: true,
-                                    codec_id: current_profile.codec,
-                                    has_quality_report: false,
-                                    fec_ratio_encoded: MediaHeader::encode_fec_ratio(
-                                        current_profile.fec_ratio,
-                                    ),
-                                    seq: rs,
-                                    timestamp: t,
-                                    fec_block: block_id,
-                                    fec_symbol: sym_idx,
-                                    reserved: 0,
-                                    csrc_count: 0,
-                                },
-                                payload: Bytes::from(repair_data),
-                                quality_report: None,
-                            };
-                            // Drop repair packets on error — never break
-                            if let Err(_e) = transport.send_media(&repair_pkt).await {
-                                send_errors += 1;
-                                frames_dropped += 1;
-                                // Don't log every repair failure — source error log covers it
+                if frame_in_block >= current_profile.frames_per_block {
+                    match fec_enc.generate_repair(current_profile.fec_ratio) {
+                        Ok(repairs) => {
+                            let repair_count = repairs.len();
+                            for (sym_idx, repair_data) in repairs {
+                                let rs = seq.fetch_add(1, Ordering::Relaxed);
+                                let repair_pkt = MediaPacket {
+                                    header: MediaHeader {
+                                        version: 0,
+                                        is_repair: true,
+                                        codec_id: current_profile.codec,
+                                        has_quality_report: false,
+                                        fec_ratio_encoded: MediaHeader::encode_fec_ratio(
+                                            current_profile.fec_ratio,
+                                        ),
+                                        seq: rs,
+                                        timestamp: t,
+                                        fec_block: block_id,
+                                        fec_symbol: sym_idx,
+                                        reserved: 0,
+                                        csrc_count: 0,
+                                    },
+                                    payload: Bytes::from(repair_data),
+                                    quality_report: None,
+                                };
+                                // Drop repair packets on error — never break
+                                if let Err(_e) = transport.send_media(&repair_pkt).await {
+                                    send_errors += 1;
+                                    frames_dropped += 1;
+                                    // Don't log every repair failure — source error log covers it
+                                }
+                            }
+                            if repair_count > 0 && (block_id % 50 == 0 || block_id == 0) {
+                                info!(
+                                    block_id,
+                                    repair_count,
+                                    fec_ratio = current_profile.fec_ratio,
+                                    "FEC block complete"
+                                );
                             }
                         }
-                        if repair_count > 0 && (block_id % 50 == 0 || block_id == 0) {
-                            info!(
-                                block_id,
-                                repair_count,
-                                fec_ratio = current_profile.fec_ratio,
-                                "FEC block complete"
-                            );
+                        Err(e) => {
+                            warn!("fec generate_repair error: {e}");
                         }
                     }
-                    Err(e) => {
-                        warn!("fec generate_repair error: {e}");
-                    }
-                }
 
-                let _ = fec_enc.finalize_block();
-                block_id = block_id.wrapping_add(1);
-                frame_in_block = 0;
+                    let _ = fec_enc.finalize_block();
+                    block_id = block_id.wrapping_add(1);
+                    frame_in_block = 0;
+                }
             }
             t_fec_us += t0.elapsed().as_micros() as u64;
             t_frames += 1;
@@ -701,14 +717,21 @@ async fn run_call(
                     let is_repair = pkt.header.is_repair;
                     let pkt_block = pkt.header.fec_block;
                     let pkt_symbol = pkt.header.fec_symbol;
+                    let pkt_is_opus = pkt.header.codec_id.is_opus();
 
-                    // Feed every packet (source + repair) to FEC decoder
-                    let _ = fec_dec.add_symbol(
-                        pkt_block,
-                        pkt_symbol,
-                        is_repair,
-                        &pkt.payload,
-                    );
+                    // Phase 2: Opus packets bypass RaptorQ entirely — DRED
+                    // (enabled Phase 1) handles codec-layer loss recovery,
+                    // and feeding these symbols into the RaptorQ decoder
+                    // would accumulate block_id=0 duplicates that never
+                    // decode. Codec2 packets still feed RaptorQ.
+                    if !pkt_is_opus {
+                        let _ = fec_dec.add_symbol(
+                            pkt_block,
+                            pkt_symbol,
+                            is_repair,
+                            &pkt.payload,
+                        );
+                    }
 
                     // Source packets: decode directly
                     if !is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
@@ -755,22 +778,29 @@ async fn run_call(
                         }
                     }
 
-                    // Try FEC recovery
-                    if let Ok(Some(recovered_frames)) = fec_dec.try_decode(pkt_block) {
-                        fec_recovered += recovered_frames.len() as u64;
-                        if fec_recovered % 50 == 1 {
-                            info!(
-                                fec_recovered,
-                                block = pkt_block,
-                                frames = recovered_frames.len(),
-                                "FEC block recovered"
-                            );
+                    // Codec2-only: try FEC recovery and expire old blocks.
+                    // Opus packets skip both — the Phase 2 Opus path has no
+                    // RaptorQ state to query or clean up. The `fec_recovered`
+                    // counter is now effectively Codec2-only, which is
+                    // correct because DRED reconstructions will be counted
+                    // separately once Phase 3 lands (new telemetry field).
+                    if !pkt_is_opus {
+                        if let Ok(Some(recovered_frames)) = fec_dec.try_decode(pkt_block) {
+                            fec_recovered += recovered_frames.len() as u64;
+                            if fec_recovered % 50 == 1 {
+                                info!(
+                                    fec_recovered,
+                                    block = pkt_block,
+                                    frames = recovered_frames.len(),
+                                    "FEC block recovered"
+                                );
+                            }
                         }
-                    }
 
-                    // Expire old blocks to prevent memory growth
-                    if pkt_block > 3 {
-                        fec_dec.expire_before(pkt_block.wrapping_sub(3));
+                        // Expire old blocks to prevent memory growth
+                        if pkt_block > 3 {
+                            fec_dec.expire_before(pkt_block.wrapping_sub(3));
+                        }
                     }
 
                     let mut stats = state.stats.lock().unwrap();
