@@ -173,50 +173,9 @@ docker run --rm \
     bash -c '
 set -euo pipefail
 
-# libopus (audiopus_sys) ships per-file SSE4.1 / SSSE3 C sources under
-# opus/silk/x86/ that assume the compiler sets `-msse4.1` / `-mssse3`
-# as per-file CMake COMPILE_FLAGS. With clang-cl those bare -m flags
-# are silently ignored (clang-cl expects /clang:-msse4.1), so the
-# intrinsics functions in those files fail to compile with:
-#   "error: always_inline function _mm_cvtepi16_epi32 requires target
-#    feature sse4.1, but would be inlined into a function that is
-#    compiled without support for sse4.1"
-#
-# env-var CFLAGS do NOT help here: cargo-xwin ships its own CMake
-# toolchain file (~/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake)
-# which hardcodes COMPILE_FLAGS and FORCE-overrides CMAKE_C_FLAGS,
-# so anything we export via CFLAGS_$TARGET gets dropped. The only
-# place that actually reaches every C compilation inside the opus
-# cmake build is the toolchain file itself. Patch it in place with
-# a one-shot sed: append four /clang:-m* flags immediately before
-# the closing paren of the COMPILE_FLAGS setter. Idempotent across
-# runs — if the file already contains the sentinel line we skip.
-TOOLCHAIN_FILE=/home/builder/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake
-echo ">>> Patching cargo-xwin toolchain for SSE4.1 / SSSE3 intrinsics"
-if grep -q WZP_SSE_PATCH "$TOOLCHAIN_FILE"; then
-    echo "    (already patched, skipping)"
-else
-    # The cleanest way to add flags is to append a pure-CMake block to
-    # the end of the toolchain file. Both CMAKE_C_FLAGS and
-    # CMAKE_CXX_FLAGS were already FORCE-set earlier in the toolchain;
-    # we override them again with the same content plus our SSE flags.
-    # This runs AFTER the original set(... FORCE) and the CMAKE_ARGS
-    # from the cmake-rs invocation, so it wins.
-    cat >> "$TOOLCHAIN_FILE" <<CMAKE_PATCH_EOF
-
-# ── WZP_SSE_PATCH ─────────────────────────────────────────────────────────
-# libopus (audiopus_sys) has per-file COMPILE_FLAGS "-msse4.1" on its
-# sse4_1.c sources, which clang-cl silently drops (expects /clang:-m…).
-# Force-add the flags globally so every C file in the opus cmake subbuild
-# compiles with the intrinsics target features enabled. All x86_64
-# Windows CPUs shipped since 2008 support these, so enabling them
-# globally on this target is safe.
-set(CMAKE_C_FLAGS   "\${CMAKE_C_FLAGS}   /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS "\${CMAKE_CXX_FLAGS} /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CACHE STRING "" FORCE)
-CMAKE_PATCH_EOF
-fi
-echo ">>> Toolchain tail after patch:"
-tail -15 "$TOOLCHAIN_FILE"
+# (SSE4.1 / SSSE3 toolchain patch for libopus is baked into the image
+# during the xwin pre-warm — see Dockerfile.windows-builder. No runtime
+# patching needed.)
 
 cd /build/source/desktop
 

@@ -89,4 +89,28 @@ RUN set -eux; \
     cd / && rm -rf /tmp/xwin-warmup && \
     du -sh $HOME/.cache/cargo-xwin
 
+# ── Patch the cargo-xwin clang-cl toolchain to add SSE4.1 / SSSE3 ─────────
+# libopus (via audiopus_sys) uses per-file COMPILE_FLAGS "-msse4.1" on
+# its opus/silk/x86/*_sse4_1.c sources, but clang-cl silently drops the
+# bare -m flags (it expects /clang:-m… instead). The per-file
+# intrinsics functions then fail to compile because the surrounding
+# function isn't marked with the target feature. We fix this by
+# inserting /clang:-msse4.1 / /clang:-mssse3 directly into the
+# COMPILE_FLAGS list in the cargo-xwin-generated cmake toolchain so
+# EVERY C file in every cmake-driven subbuild gets the feature flags.
+# All x86_64 Windows CPUs shipped since 2008 have these, safe on target.
+#
+# We do the patch inside the image (not at container run time) so
+# (a) it persists across container restarts without bash/awk/sed
+# escaping games inside docker-bash-c, and (b) it becomes part of
+# the shared image layer cache.
+RUN set -eux; \
+    TOOLCHAIN=$HOME/.cache/cargo-xwin/cmake/clang-cl/x86_64-pc-windows-msvc-toolchain.cmake; \
+    test -f "$TOOLCHAIN"; \
+    grep -q WZP_SSE_PATCH "$TOOLCHAIN" || \
+    awk '/\/imsvc .*\/winrt\)/ {sub(/\)/, "", $0); print $0; print "    /clang:-msse4.1"; print "    /clang:-mssse3"; print "    /clang:-msse3"; print "    /clang:-msse2"; print "    # WZP_SSE_PATCH"; print "    )"; next} {print}' "$TOOLCHAIN" > "$TOOLCHAIN.new" && \
+    mv "$TOOLCHAIN.new" "$TOOLCHAIN"; \
+    echo "=== Patched toolchain ==="; \
+    grep -A 15 "set(COMPILE_FLAGS" "$TOOLCHAIN" | head -20
+
 WORKDIR /build/source
