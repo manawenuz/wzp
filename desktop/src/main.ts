@@ -2,6 +2,41 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { generateIdenticon, createIdenticonEl } from "./identicon";
 
+// ── WebView hardening ──
+// Suppress the browser-style right-click context menu on desktop Tauri — it
+// exposes Inspect/Reload/Back/Forward entries that don't belong in a native-
+// feeling VoIP app. Dev tools remain accessible via the usual keyboard
+// shortcuts (F12 / Cmd-Opt-I). On Android there is no right-click so this is
+// a no-op there.
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// Also suppress browser-level zoom via keyboard (Ctrl/Cmd + / - / 0) so the
+// fixed-layout UI can't be accidentally scaled. Pinch-zoom is already handled
+// at the viewport meta level in index.html.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "-" || e.key === "=" || e.key === "0")) {
+      e.preventDefault();
+    }
+  },
+  { capture: true },
+);
+
+// Block gesture-based zoom on browsers that fire these legacy events (mainly
+// Safari / WebKit). Chromium sends `wheel` with ctrlKey for trackpad pinch —
+// catch that too.
+document.addEventListener("gesturestart", (e) => e.preventDefault());
+document.addEventListener("gesturechange", (e) => e.preventDefault());
+document.addEventListener("gestureend", (e) => e.preventDefault());
+document.addEventListener(
+  "wheel",
+  (e) => {
+    if (e.ctrlKey) e.preventDefault();
+  },
+  { passive: false },
+);
+
 // ── Elements ──
 const connectScreen = document.getElementById("connect-screen")!;
 const callScreen = document.getElementById("call-screen")!;
