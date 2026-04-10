@@ -25,6 +25,7 @@ use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 // Android (where wzp-client is pulled in with default-features=false).
 use wzp_client::call::{CallConfig, CallEncoder};
 
+use wzp_proto::traits::AudioDecoder;
 use wzp_proto::{CodecId, MediaTransport, QualityProfile};
 
 const FRAME_SAMPLES_40MS: usize = 1920;
@@ -91,6 +92,134 @@ pub struct CallEngine {
     /// Keep audio handles alive for the duration of the call.
     /// Wrapped in SyncWrapper because AudioUnit isn't Sync.
     _audio_handle: SyncWrapper,
+}
+
+/// Phase 3b/3c DRED reconstruction state for a recv task.
+///
+/// Wraps the libopus 1.5 DRED decoder + two `DredState` buffers (scratch +
+/// cached last-good) + sequence tracking needed to fill packet-loss gaps
+/// with neural redundancy reconstruction. Lives inside the recv task of
+/// `CallEngine::start` and is reset on codec/profile switches.
+///
+/// The original Phase 3c port landed on `crates/wzp-android/src/engine.rs`,
+/// which turned out to be dead code on the Tauri mobile pipeline — the
+/// live Android audio recv path is in *this* file. This helper rehomes
+/// the same logic to the correct engine.
+struct DredRecvState {
+    dred_decoder: wzp_codec::dred_ffi::DredDecoderHandle,
+    scratch: wzp_codec::dred_ffi::DredState,
+    last_good: wzp_codec::dred_ffi::DredState,
+    last_good_seq: Option<u16>,
+    expected_seq: Option<u16>,
+    pub dred_reconstructions: u64,
+    pub classical_plc_invocations: u64,
+}
+
+impl DredRecvState {
+    fn new() -> Self {
+        Self {
+            dred_decoder: wzp_codec::dred_ffi::DredDecoderHandle::new()
+                .expect("opus_dred_decoder_create failed at call setup"),
+            scratch: wzp_codec::dred_ffi::DredState::new()
+                .expect("opus_dred_alloc failed at call setup (scratch)"),
+            last_good: wzp_codec::dred_ffi::DredState::new()
+                .expect("opus_dred_alloc failed at call setup (good state)"),
+            last_good_seq: None,
+            expected_seq: None,
+            dred_reconstructions: 0,
+            classical_plc_invocations: 0,
+        }
+    }
+
+    /// Parse DRED side-channel data from an arriving Opus source packet
+    /// into the scratch state; on success, swap it into the cached good
+    /// state and record the sequence number as the new anchor.
+    ///
+    /// Call this BEFORE `fill_gap_to` so the anchor reflects the freshest
+    /// DRED source available for gap reconstruction.
+    fn ingest_opus(&mut self, seq: u16, payload: &[u8]) {
+        match self.dred_decoder.parse_into(&mut self.scratch, payload) {
+            Ok(available) if available > 0 => {
+                std::mem::swap(&mut self.scratch, &mut self.last_good);
+                self.last_good_seq = Some(seq);
+            }
+            _ => {
+                // Packet carried no DRED data, or parse failed — keep
+                // the cached good state (it may still cover upcoming
+                // gaps from a warm-up period).
+            }
+        }
+    }
+
+    /// On an arriving packet with sequence `current_seq`, detect any gap
+    /// from `expected_seq` to `current_seq - 1` and fill the missing
+    /// frames via DRED reconstruction (if state covers them) or classical
+    /// Opus PLC fallback. The `emit` callback is invoked once per
+    /// reconstructed/concealed frame with a `&mut [i16]` slice of length
+    /// `frame_samples`; the caller is responsible for AGC + playout.
+    ///
+    /// Updates `expected_seq` to `current_seq + 1` on return.
+    fn fill_gap_to<F>(
+        &mut self,
+        decoder: &mut wzp_codec::AdaptiveDecoder,
+        current_seq: u16,
+        frame_samples: usize,
+        pcm_scratch: &mut [i16],
+        mut emit: F,
+    ) where
+        F: FnMut(&mut [i16]),
+    {
+        const MAX_GAP_FRAMES: u16 = 16;
+        if let Some(expected) = self.expected_seq {
+            let gap = current_seq.wrapping_sub(expected);
+            if gap > 0 && gap <= MAX_GAP_FRAMES {
+                let available = self.last_good.samples_available();
+                for gap_idx in 0..gap {
+                    let missing_seq = expected.wrapping_add(gap_idx);
+                    let offset_samples = match self.last_good_seq {
+                        Some(anchor) => {
+                            let delta = anchor.wrapping_sub(missing_seq);
+                            if delta == 0 || delta > MAX_GAP_FRAMES {
+                                -1 // skip DRED, fall through to PLC
+                            } else {
+                                delta as i32 * frame_samples as i32
+                            }
+                        }
+                        None => -1,
+                    };
+                    let out = &mut pcm_scratch[..frame_samples];
+                    let reconstructed = if offset_samples > 0 && offset_samples <= available {
+                        decoder
+                            .reconstruct_from_dred(&self.last_good, offset_samples, out)
+                            .ok()
+                    } else {
+                        None
+                    };
+                    match reconstructed {
+                        Some(_n) => {
+                            self.dred_reconstructions += 1;
+                            emit(out);
+                        }
+                        None => {
+                            if decoder.decode_lost(out).is_ok() {
+                                self.classical_plc_invocations += 1;
+                                emit(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.expected_seq = Some(current_seq.wrapping_add(1));
+    }
+
+    /// Invalidate sequence tracking on profile switch. The cached DRED
+    /// state is tied to the old profile's frame rate so offsets would
+    /// produce wrong reconstructions until the next good-state parse.
+    fn reset_on_profile_switch(&mut self) {
+        self.last_good_seq = None;
+        self.expected_seq = None;
+    }
 }
 
 impl CallEngine {
@@ -294,10 +423,18 @@ impl CallEngine {
         let recv_rx_codec = rx_codec.clone();
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
-            let mut decoder = wzp_codec::create_decoder(initial_profile);
+            // Phase 3b/3c: use concrete AdaptiveDecoder (not Box<dyn
+            // AudioDecoder>) so we can call the inherent
+            // reconstruct_from_dred method on packet-loss gaps.
+            let mut decoder = wzp_codec::AdaptiveDecoder::new(initial_profile)
+                .expect("failed to create adaptive decoder");
+            let mut current_profile = initial_profile;
             let mut current_codec = initial_profile.codec;
             let mut agc = wzp_codec::AutoGainControl::new();
             let mut pcm = vec![0i16; FRAME_SAMPLES_40MS];
+            // Phase 3b/3c DRED reconstruction state — see DredRecvState
+            // above for the full flow.
+            let mut dred_recv = DredRecvState::new();
             info!(codec = ?current_codec, "recv task starting (android/oboe)");
 
             // ─── Decoded-PCM recorder (debug) ────────────────────────────
@@ -372,8 +509,44 @@ impl CallEngine {
                                 };
                                 info!(from = ?current_codec, to = ?pkt.header.codec_id, "recv: switching decoder");
                                 let _ = decoder.set_profile(new_profile);
+                                current_profile = new_profile;
                                 current_codec = pkt.header.codec_id;
+                                // Phase 3c: new profile → offsets in the
+                                // cached DRED state are invalid; reset.
+                                dred_recv.reset_on_profile_switch();
                             }
+
+                            // Phase 3b/3c DRED flow for Opus packets:
+                            //   1. parse DRED from this packet → last_good
+                            //   2. detect gap back to expected_seq and
+                            //      reconstruct missing frames via DRED
+                            //      (or classical PLC if no state covers)
+                            //   3. then decode the current packet normally
+                            //      (unchanged fall-through below)
+                            //
+                            // Codec2 packets skip DRED entirely — libopus
+                            // can't reconstruct them and the parse is a
+                            // no-op.
+                            if pkt.header.codec_id.is_opus() {
+                                dred_recv.ingest_opus(pkt.header.seq, &pkt.payload);
+                                let frame_samples_now = (48_000
+                                    * current_profile.frame_duration_ms as usize)
+                                    / 1000;
+                                let spk_muted_flag = recv_spk.load(Ordering::Relaxed);
+                                dred_recv.fill_gap_to(
+                                    &mut decoder,
+                                    pkt.header.seq,
+                                    frame_samples_now,
+                                    &mut pcm,
+                                    |samples| {
+                                        agc.process_frame(samples);
+                                        if !spk_muted_flag {
+                                            let _ = crate::wzp_native::audio_write_playout(samples);
+                                        }
+                                    },
+                                );
+                            }
+
                             match decoder.decode(&pkt.payload, &mut pcm) {
                                 Ok(n) => {
                                     last_decode_n = n;
@@ -732,10 +905,16 @@ impl CallEngine {
         let recv_rx_codec = rx_codec.clone();
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
-            let mut decoder = wzp_codec::create_decoder(initial_profile);
+            // Phase 3b/3c: concrete AdaptiveDecoder (not Box<dyn>) so we
+            // can call reconstruct_from_dred. Same reasoning as the
+            // Android recv path above.
+            let mut decoder = wzp_codec::AdaptiveDecoder::new(initial_profile)
+                .expect("failed to create adaptive decoder");
+            let mut current_profile = initial_profile;
             let mut current_codec = initial_profile.codec;
             let mut agc = wzp_codec::AutoGainControl::new();
             let mut pcm = vec![0i16; FRAME_SAMPLES_40MS]; // big enough for any codec
+            let mut dred_recv = DredRecvState::new();
 
             loop {
                 if !recv_r.load(Ordering::Relaxed) {
@@ -772,8 +951,34 @@ impl CallEngine {
                                 };
                                 info!(from = ?current_codec, to = ?pkt.header.codec_id, "recv: switching decoder");
                                 let _ = decoder.set_profile(new_profile);
+                                current_profile = new_profile;
                                 current_codec = pkt.header.codec_id;
+                                dred_recv.reset_on_profile_switch();
                             }
+
+                            // Phase 3b/3c: parse DRED + fill gaps before
+                            // decoding the current packet. See the Android
+                            // start() recv task for full commentary.
+                            if pkt.header.codec_id.is_opus() {
+                                dred_recv.ingest_opus(pkt.header.seq, &pkt.payload);
+                                let frame_samples_now = (48_000
+                                    * current_profile.frame_duration_ms as usize)
+                                    / 1000;
+                                let spk_muted_flag = recv_spk.load(Ordering::Relaxed);
+                                dred_recv.fill_gap_to(
+                                    &mut decoder,
+                                    pkt.header.seq,
+                                    frame_samples_now,
+                                    &mut pcm,
+                                    |samples| {
+                                        agc.process_frame(samples);
+                                        if !spk_muted_flag {
+                                            playout_ring.write(samples);
+                                        }
+                                    },
+                                );
+                            }
+
                             if let Ok(n) = decoder.decode(&pkt.payload, &mut pcm) {
                                 agc.process_frame(&mut pcm[..n]);
                                 if !recv_spk.load(Ordering::Relaxed) {
