@@ -31,12 +31,17 @@ SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=
 REBUILD_RUST=0
 DO_PULL=1
 IMAGE_BUILD=0
+# WITH_AEC=1 enables the wzp-client `linux-aec` feature (WebRTC AEC3 via
+# webrtc-audio-processing) and renames the output artifacts with an `-aec`
+# suffix so both variants can coexist on disk.
+WITH_AEC=0
 for arg in "$@"; do
     case "$arg" in
         --rust)         REBUILD_RUST=1 ;;
         --pull)         DO_PULL=1 ;;
         --no-pull)      DO_PULL=0 ;;
         --image-build)  IMAGE_BUILD=1 ;;
+        --aec)          WITH_AEC=1 ;;
         -h|--help)
             sed -n '3,25p' "$0"
             exit 0
@@ -80,10 +85,20 @@ NTFY_TOPIC="https://ntfy.sh/wzp"
 BRANCH="${1:-feat/desktop-audio-rewrite}"
 DO_PULL="${2:-1}"
 REBUILD_RUST="${3:-0}"
+WITH_AEC="${4:-0}"
 
 LOG_FILE=/tmp/wzp-linux-desktop-build.log
 GIT_HASH="unknown"
 ENV_FILE="$BASE_DIR/.env"
+
+# Variant suffix for artifact filenames so the noAEC baseline and the AEC
+# build can coexist on the host. Applied after the build to the downloaded
+# files (we can't easily rename during the cargo tauri build itself).
+if [ "$WITH_AEC" = "1" ]; then
+    VARIANT="aec"
+else
+    VARIANT="noAEC"
+fi
 
 notify() { curl -s -d "$1" "$NTFY_TOPIC" > /dev/null 2>&1 || true; }
 
@@ -155,8 +170,11 @@ mkdir -p "$BASE_DIR/data/cache/cargo-registry" \
          "$BASE_DIR/data/cache-linux-desktop/target"
 chown -R 1000:1000 "$BASE_DIR/data/cache-linux-desktop/target" 2>/dev/null || true
 
+# Pass WITH_AEC into the docker container so the inner build script can
+# decide whether to enable the wzp-client `linux-aec` feature.
 docker run --rm \
     --user 1000:1000 \
+    -e WITH_AEC="$WITH_AEC" \
     -v "$BASE_DIR/data/source:/build/source" \
     -v "$BASE_DIR/data/cache/cargo-registry:/home/builder/.cargo/registry" \
     -v "$BASE_DIR/data/cache/cargo-git:/home/builder/.cargo/git" \
@@ -173,12 +191,25 @@ npm install --silent 2>&1 | tail -5 || npm install 2>&1 | tail -20
 echo ">>> npm run build"
 npm run build 2>&1 | tail -5
 
-echo ">>> cargo tauri build (produces .deb + .AppImage + raw binary)"
-cd src-tauri
-# tauri-cli is already installed in the base image via the Android
-# builder RUN step. It produces target/release/wzp-desktop (raw ELF)
-# plus bundles under target/release/bundle/{deb,appimage}/.
-cargo tauri build 2>&1 | tail -40
+# The linux-aec feature enables a WebRTC AEC3 capture backend in
+# wzp-client. Opt in only when the caller asked for it; noAEC baseline
+# builds keep the plain CPAL path for comparison. Tauri does not
+# propagate --features through to the wzp-desktop crate directly
+# because `cargo tauri build` invokes cargo underneath — so we use
+# `cargo tauri build -- --features wzp-desktop/linux-aec` to pass it
+# through. Wait — wzp-desktop is the bin crate, and its `linux-aec`
+# feature needs to be defined there too. The simpler path is to set
+# the feature at the wzp-client level via a bin-crate feature that
+# forwards to wzp-client. Handled in Cargo.toml changes.
+if [ "${WITH_AEC:-0}" = "1" ]; then
+    echo ">>> cargo tauri build WITH linux-aec feature"
+    cd src-tauri
+    cargo tauri build -- --features wzp-desktop/linux-aec 2>&1 | tail -40
+else
+    echo ">>> cargo tauri build (noAEC baseline)"
+    cd src-tauri
+    cargo tauri build 2>&1 | tail -40
+fi
 
 echo ""
 echo ">>> Build artifacts:"
@@ -236,7 +267,7 @@ notify_local "WZP Linux desktop build dispatched (branch=$BRANCH)"
 log "Triggering remote build (branch=$BRANCH)..."
 
 # Run; last lines are *_REMOTE_PATH=...
-REMOTE_OUTPUT=$(ssh_cmd "/tmp/wzp-linux-desktop-build.sh '$BRANCH' '$DO_PULL' '$REBUILD_RUST'" || true)
+REMOTE_OUTPUT=$(ssh_cmd "/tmp/wzp-linux-desktop-build.sh '$BRANCH' '$DO_PULL' '$REBUILD_RUST' '$WITH_AEC'" || true)
 echo "$REMOTE_OUTPUT" | tail -80
 
 BIN_REMOTE=$(echo "$REMOTE_OUTPUT" | grep '^BIN_REMOTE_PATH=' | tail -1 | cut -d= -f2-)
@@ -244,21 +275,26 @@ DEB_REMOTE=$(echo "$REMOTE_OUTPUT" | grep '^DEB_REMOTE_PATH=' | tail -1 | cut -d
 APPIMAGE_REMOTE=$(echo "$REMOTE_OUTPUT" | grep '^APPIMAGE_REMOTE_PATH=' | tail -1 | cut -d= -f2-)
 
 if [ -n "$BIN_REMOTE" ]; then
-    log "Downloading wzp-desktop binary to $LOCAL_OUTPUT/..."
-    scp $SSH_OPTS "$REMOTE_HOST:$BIN_REMOTE" "$LOCAL_OUTPUT/wzp-desktop"
-    echo "  $LOCAL_OUTPUT/wzp-desktop ($(du -h "$LOCAL_OUTPUT/wzp-desktop" | cut -f1))"
+    log "Downloading wzp-desktop binary to $LOCAL_OUTPUT/wzp-desktop-$VARIANT ..."
+    scp $SSH_OPTS "$REMOTE_HOST:$BIN_REMOTE" "$LOCAL_OUTPUT/wzp-desktop-$VARIANT"
+    echo "  $LOCAL_OUTPUT/wzp-desktop-$VARIANT ($(du -h "$LOCAL_OUTPUT/wzp-desktop-$VARIANT" | cut -f1))"
 fi
 
 if [ -n "$DEB_REMOTE" ]; then
-    log "Downloading .deb to $LOCAL_OUTPUT/..."
-    scp $SSH_OPTS "$REMOTE_HOST:$DEB_REMOTE" "$LOCAL_OUTPUT/"
-    ls -lh "$LOCAL_OUTPUT"/*.deb
+    # Apply the variant suffix to the downloaded .deb: cargo-tauri names the
+    # file WarzonePhone_<version>_amd64.deb regardless of what we built, so
+    # the variant lives only in our chosen filename.
+    DEB_BASENAME=$(basename "$DEB_REMOTE" .deb)
+    log "Downloading .deb to $LOCAL_OUTPUT/${DEB_BASENAME}-$VARIANT.deb ..."
+    scp $SSH_OPTS "$REMOTE_HOST:$DEB_REMOTE" "$LOCAL_OUTPUT/${DEB_BASENAME}-$VARIANT.deb"
+    ls -lh "$LOCAL_OUTPUT/${DEB_BASENAME}-$VARIANT.deb"
 fi
 
 if [ -n "$APPIMAGE_REMOTE" ]; then
-    log "Downloading .AppImage to $LOCAL_OUTPUT/..."
-    scp $SSH_OPTS "$REMOTE_HOST:$APPIMAGE_REMOTE" "$LOCAL_OUTPUT/"
-    ls -lh "$LOCAL_OUTPUT"/*.AppImage
+    APPIMG_BASENAME=$(basename "$APPIMAGE_REMOTE" .AppImage)
+    log "Downloading .AppImage to $LOCAL_OUTPUT/${APPIMG_BASENAME}-$VARIANT.AppImage ..."
+    scp $SSH_OPTS "$REMOTE_HOST:$APPIMAGE_REMOTE" "$LOCAL_OUTPUT/${APPIMG_BASENAME}-$VARIANT.AppImage"
+    ls -lh "$LOCAL_OUTPUT/${APPIMG_BASENAME}-$VARIANT.AppImage"
 fi
 
 if [ -z "$BIN_REMOTE" ]; then

@@ -33,7 +33,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         librsvg2-dev \
         libglib2.0-dev \
         patchelf \
+        meson \
+        ninja-build \
+        python3 \
+        clang \
     && rm -rf /var/lib/apt/lists/*
+
+# ── webrtc-audio-processing build requirements ──────────────────────────────
+# The `webrtc-audio-processing` Rust crate with the `bundled` feature vendors
+# the PulseAudio webrtc-audio-processing C++ library and builds it via meson
+# + ninja at `cargo build` time. That avoids Debian Bookworm's stale
+# libwebrtc-audio-processing-dev 0.3-1 package (which predates AEC3) and gives
+# us a self-contained static link — no runtime .so dependency, same algorithm
+# on every Linux distro regardless of what apt ships.
+#
+# apt deps for the bundled build: meson, ninja-build, python3, clang,
+# build-essential (already present via android-builder base).
 
 USER builder
 WORKDIR /build/source

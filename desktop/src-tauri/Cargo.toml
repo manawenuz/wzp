@@ -72,7 +72,12 @@ wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio", "windows-aec"] }
 
-# Linux: same as Windows for now — plain CPAL.
+# Linux: CPAL playback+capture baseline. AEC is enabled via the top-level
+# `linux-aec` feature in wzp-desktop, which forwards to wzp-client/linux-aec.
+# Keeping it opt-in at the wzp-desktop level (rather than forcing it always
+# on here) lets `cargo tauri build` produce two variants from the same
+# source tree — a noAEC baseline and an AEC build — by toggling the feature
+# at build time: `cargo tauri build -- --features wzp-desktop/linux-aec`.
 [target.'cfg(target_os = "linux")'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
 
@@ -96,3 +101,7 @@ ndk-context = "0.1"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# linux-aec: forwards to wzp-client/linux-aec so `cargo tauri build -- --features
+# wzp-desktop/linux-aec` enables the WebRTC AEC3 backend on Linux. No-op on
+# other targets because wzp-client/linux-aec is itself cfg(target_os = "linux").
+linux-aec = ["wzp-client/linux-aec"]

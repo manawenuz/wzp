@@ -47,6 +47,16 @@ windows = { version = "0.58", optional = true, features = [
     "Win32_System_Variant",
 ] }
 
+# Linux-only: WebRTC AEC3 (Audio Processing Module) bindings for the
+# `linux-aec` feature. The `bundled` sub-feature of webrtc-audio-processing
+# statically compiles the vendored PulseAudio webrtc-audio-processing C++
+# sources via meson + ninja at cargo build time, avoiding Debian Bookworm's
+# stale system libwebrtc-audio-processing-dev 0.3 package (which predates
+# AEC3). Produces a self-contained static link — no runtime .so dep, same
+# algorithm on every Linux distro.
+[target.'cfg(target_os = "linux")'.dependencies]
+webrtc-audio-processing = { version = "2", optional = true, features = ["bundled"] }
+
 [features]
 default = []
 audio = ["cpal"]
@@ -61,6 +71,14 @@ vpio = ["dep:coreaudio-rs"]
 # enabling this feature on non-Windows targets is a no-op (the
 # audio_wasapi module is also #[cfg(target_os = "windows")] in lib.rs).
 windows-aec = ["dep:windows"]
+# linux-aec enables a CPAL + WebRTC AEC3 capture/playback backend that
+# runs the WebRTC Audio Processing Module (same algo as Chrome / Zoom /
+# Teams) in-process, using the playback PCM as the reference signal for
+# echo cancellation. The webrtc-audio-processing dep is target-gated to
+# Linux above, so enabling this feature on non-Linux targets is a no-op
+# (the audio_linux_aec module is also #[cfg(target_os = "linux")] in
+# lib.rs).
+linux-aec = ["dep:webrtc-audio-processing"]
 
 [[bin]]
 name = "wzp-client"
