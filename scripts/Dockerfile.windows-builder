@@ -1,0 +1,92 @@
+# =============================================================================
+# WZ Phone — Windows (x86_64-pc-windows-msvc) cross-compile image
+#
+# Cross-compiles the Tauri desktop binary for Windows from a Linux host via
+# `cargo xwin`, which auto-downloads the Microsoft CRT + Windows SDK at build
+# time. This image pre-warms that cache so the cross-compile is as close as
+# possible to a native Linux build on rebuild (~3 min warm vs ~20 min cold).
+#
+# Build:
+#   docker build -t wzp-windows-builder -f Dockerfile.windows-builder .
+#
+# Run: driven by scripts/build-windows-docker.sh (see that file).
+# =============================================================================
+FROM debian:bookworm
+
+ARG RUST_TARGET=x86_64-pc-windows-msvc
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System packages ──────────────────────────────────────────────────────────
+# - build-essential + pkg-config + libssl-dev: baseline cargo build toolchain
+# - cmake + ninja-build: audiopus_sys (libopus) uses cmake and expects Ninja
+#   as the generator for the windows target; without ninja-build the cmake
+#   build fails with "CMake was unable to find a build program corresponding
+#   to Ninja" partway through.
+# - llvm + clang + lld: cargo-xwin uses clang + lld-link for PE/COFF output.
+# - nasm: ring / rustls assembly for Windows needs NASM on non-Windows hosts.
+# - curl, git, ca-certificates, unzip: obvious plumbing.
+# - xz-utils: some Microsoft installer archives are xz-compressed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        curl \
+        git \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+        llvm \
+        clang \
+        lld \
+        nasm \
+        unzip \
+        xz-utils \
+        file \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 20 LTS (required by Tauri for frontend build) ────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version \
+    && npm --version
+
+# ── Builder user (1000:1000) — matches host bind-mount UID for the cache
+#    volumes so cargo-registry / target survive across runs without perms
+#    gymnastics.
+RUN groupadd -g 1000 builder \
+    && useradd -m -u 1000 -g 1000 -s /bin/bash builder
+
+USER builder
+WORKDIR /home/builder
+
+# ── Rust toolchain + Windows target + cargo-xwin ────────────────────────────
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable \
+    && . $HOME/.cargo/env \
+    && rustup target add ${RUST_TARGET} \
+    && cargo install cargo-xwin --locked
+
+ENV PATH="/home/builder/.cargo/bin:$PATH" \
+    XWIN_ACCEPT_LICENSE=1 \
+    RUST_TARGET_WIN=${RUST_TARGET}
+
+# ── Pre-warm the xwin cache ─────────────────────────────────────────────────
+# cargo-xwin downloads the Microsoft CRT + Windows SDK (~1.5-2 GB) into
+# ~/.cache/cargo-xwin the first time it runs. Baking that into an image
+# layer saves ~4 minutes off every subsequent cold run.
+#
+# We do this by creating a throwaway Rust project, building it with
+# cargo-xwin against the Windows target, then deleting the project but
+# keeping the xwin cache.
+RUN set -eux; \
+    mkdir -p /tmp/xwin-warmup && cd /tmp/xwin-warmup && \
+    . $HOME/.cargo/env && \
+    cargo new --bin xwin-warmup --quiet && \
+    cd xwin-warmup && \
+    cargo xwin build --release --target ${RUST_TARGET} 2>&1 | tail -5 && \
+    cd / && rm -rf /tmp/xwin-warmup && \
+    du -sh $HOME/.cache/cargo-xwin
+
+WORKDIR /build/source
