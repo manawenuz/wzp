@@ -58,8 +58,16 @@ pub struct CallStats {
     pub frames_decoded: u64,
     /// Number of playout underruns (buffer empty when audio needed).
     pub underruns: u64,
-    /// Frames recovered by FEC.
+    /// Frames recovered by RaptorQ FEC (Codec2 tiers only; Opus bypasses
+    /// RaptorQ per Phase 2).
     pub fec_recovered: u64,
+    /// Phase 3c: Opus frames reconstructed via DRED side-channel data.
+    /// Only increments on the Opus tiers; always zero for Codec2.
+    pub dred_reconstructions: u64,
+    /// Phase 3c: Opus frames filled via classical Opus PLC because no DRED
+    /// state covered the gap, plus any decode-error fallbacks. Codec2 loss
+    /// also increments this counter via the Codec2 PLC path.
+    pub classical_plc_invocations: u64,
     /// Playout ring overflow count (reader was lapped by writer).
     pub playout_overflows: u64,
     /// Playout ring underrun count (reader found empty buffer).
