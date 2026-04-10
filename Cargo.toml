@@ -35,7 +35,14 @@ quinn = "0.11"
 raptorq = "2"
 
 # Codec
-audiopus = "0.3.0-rc.0"
+# opusic-c: high-level safe bindings over libopus 1.5.2 (encoder side).
+# opusic-sys: raw FFI for the decoder side — we build our own DecoderHandle
+# because opusic-c::Decoder.inner is pub(crate) and cannot be reached for the
+# Phase 3 DRED reconstruction path. See docs/PRD-dred-integration.md.
+# Pinned exactly (no caret) for reproducible libopus 1.5.2 across the fleet.
+opusic-c = { version = "=1.5.5", default-features = false, features = ["bundled", "dred"] }
+opusic-sys = { version = "=0.6.0", default-features = false, features = ["bundled"] }
+bytemuck = "1"
 codec2 = "0.3"
 
 # Crypto

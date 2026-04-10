@@ -10,8 +10,17 @@ description = "WarzonePhone audio codec layer — Opus + Codec2 encoding/decodin
 wzp-proto = { workspace = true }
 tracing = { workspace = true }
 
-# Opus bindings
-audiopus = { workspace = true }
+# Opus bindings — libopus 1.5.2.
+# opusic-c for the encoder (set_dred_duration lives here in Phase 1).
+# opusic-sys for the decoder — we wrap the raw *mut OpusDecoder ourselves
+# because opusic-c::Decoder.inner is pub(crate), blocking the unified
+# decoder + DRED path we need in Phase 3.
+opusic-c = { workspace = true }
+opusic-sys = { workspace = true }
+
+# Zero-cost slice reinterpretation for the i16 ↔ u16 boundary between
+# our PCM buffers and opusic-c's encode API.
+bytemuck = { workspace = true }
 
 # Pure-Rust Codec2 implementation
 codec2 = { workspace = true }

@@ -1,30 +1,32 @@
-//! Opus decoder wrapping the `audiopus` crate.
+//! Opus decoder built on top of the raw opusic-sys `DecoderHandle`.
+//!
+//! Phase 0 of the DRED integration: we went straight to a custom
+//! `DecoderHandle` instead of `opusic_c::Decoder` because the latter's
+//! inner pointer is `pub(crate)` and we need to reach it in Phase 3 for
+//! `opus_decoder_dred_decode`. See `dred_ffi.rs` for the rationale and
+//! `docs/PRD-dred-integration.md` for the full plan.
 
-use audiopus::coder::Decoder;
-use audiopus::{Channels, MutSignals, SampleRate};
-use audiopus::packet::Packet;
+use crate::dred_ffi::DecoderHandle;
 use wzp_proto::{AudioDecoder, CodecError, CodecId, QualityProfile};
 
-/// Opus decoder implementing `AudioDecoder`.
+/// Opus decoder implementing [`AudioDecoder`].
 ///
-/// Operates at 48 kHz mono output.
+/// Operates at 48 kHz mono output. 20 ms and 40 ms frames supported via
+/// the active `QualityProfile`. Behavior is intentionally identical to
+/// the pre-swap audiopus-based decoder at this phase — DRED reconstruction
+/// lands in Phase 3.
 pub struct OpusDecoder {
-    inner: Decoder,
+    inner: DecoderHandle,
     codec_id: CodecId,
     frame_duration_ms: u8,
 }
 
-// SAFETY: Same reasoning as OpusEncoder — exclusive access via &mut self.
-unsafe impl Sync for OpusDecoder {}
-
 impl OpusDecoder {
     /// Create a new Opus decoder for the given quality profile.
     pub fn new(profile: QualityProfile) -> Result<Self, CodecError> {
-        let decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)
-            .map_err(|e| CodecError::DecodeFailed(format!("opus decoder init: {e}")))?;
-
+        let inner = DecoderHandle::new()?;
         Ok(Self {
-            inner: decoder,
+            inner,
             codec_id: profile.codec,
             frame_duration_ms: profile.frame_duration_ms,
         })
@@ -45,15 +47,7 @@ impl AudioDecoder for OpusDecoder {
                 pcm.len()
             )));
         }
-        let packet = Packet::try_from(encoded)
-            .map_err(|e| CodecError::DecodeFailed(format!("invalid packet: {e}")))?;
-        let signals = MutSignals::try_from(pcm)
-            .map_err(|e| CodecError::DecodeFailed(format!("output signals: {e}")))?;
-        let n = self
-            .inner
-            .decode(Some(packet), signals, false)
-            .map_err(|e| CodecError::DecodeFailed(format!("opus decode: {e}")))?;
-        Ok(n)
+        self.inner.decode(encoded, pcm)
     }
 
     fn decode_lost(&mut self, pcm: &mut [i16]) -> Result<usize, CodecError> {
@@ -64,13 +58,7 @@ impl AudioDecoder for OpusDecoder {
                 pcm.len()
             )));
         }
-        let signals = MutSignals::try_from(pcm)
-            .map_err(|e| CodecError::DecodeFailed(format!("output signals: {e}")))?;
-        let n = self
-            .inner
-            .decode(None, signals, false)
-            .map_err(|e| CodecError::DecodeFailed(format!("opus PLC: {e}")))?;
-        Ok(n)
+        self.inner.decode_lost(pcm)
     }
 
     fn codec_id(&self) -> CodecId {
