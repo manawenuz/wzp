@@ -584,6 +584,26 @@ pub enum SignalMessage {
         recommended_profile: crate::QualityProfile,
     },
 
+    /// Phase 4 telemetry: loss-recovery counts for the current session.
+    /// Sent periodically from receivers to the relay so Prometheus metrics
+    /// can distinguish DRED reconstructions from classical PLC invocations.
+    /// Fields default to 0 on old receivers (`#[serde(default)]`), so
+    /// introducing this variant is backward-compatible with pre-Phase-4
+    /// relays — they'll just log "unknown signal variant" on receipt.
+    LossRecoveryUpdate {
+        /// Total frames reconstructed via DRED since call start (monotonic).
+        #[serde(default)]
+        dred_reconstructions: u64,
+        /// Total frames filled via classical Opus/Codec2 PLC since call
+        /// start (monotonic).
+        #[serde(default)]
+        classical_plc_invocations: u64,
+        /// Total frames decoded since call start. Used by the relay to
+        /// compute recovery rates as a fraction of total frames.
+        #[serde(default)]
+        frames_decoded: u64,
+    },
+
     /// Connection keepalive / RTT measurement.
     Ping { timestamp_ms: u64 },
     Pong { timestamp_ms: u64 },
