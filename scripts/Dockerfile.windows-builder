@@ -118,18 +118,16 @@ RUN set -eux; \
 RUN set -eux; \
     OVERRIDE=$HOME/.cache/cargo-xwin/cmake/clang-cl/override.cmake; \
     test -f "$OVERRIDE"; \
-    grep -q WZP_SSE_PATCH "$OVERRIDE" || \
-    cat >> "$OVERRIDE" << 'SSE_PATCH_EOF' ; \
-# WZP_SSE_PATCH — force SSE4.1 / SSSE3 on every C / C++ compile so the
-# libopus (audiopus_sys) sse4_1.c / ssse3.c sources link their
-# _mm_cvtepi16_epi32 / _mm_mul_epi32 / _mm_blend_epi16 intrinsics.
-# Replaces the placeholder <FLAGS> in the CMAKE_C_COMPILE_OBJECT /
-# CMAKE_CXX_COMPILE_OBJECT command templates with the same placeholder
-# followed by four /clang:-m* flags, so the flags end up in every
-# compile command line without ever touching CMAKE_C_FLAGS.
-string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_C_COMPILE_OBJECT "${CMAKE_C_COMPILE_OBJECT}")
-string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_CXX_COMPILE_OBJECT "${CMAKE_CXX_COMPILE_OBJECT}")
-SSE_PATCH_EOF
+    if ! grep -q WZP_SSE_PATCH "$OVERRIDE"; then \
+        printf '%s\n' \
+            '' \
+            '# WZP_SSE_PATCH — force SSE4.1 / SSSE3 on every C / C++ compile so the' \
+            '# libopus (audiopus_sys) sse4_1.c / ssse3.c sources link their' \
+            '# _mm_cvtepi16_epi32 / _mm_mul_epi32 / _mm_blend_epi16 intrinsics.' \
+            'string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_C_COMPILE_OBJECT "${CMAKE_C_COMPILE_OBJECT}")' \
+            'string(REPLACE "<FLAGS>" "<FLAGS> /clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2" CMAKE_CXX_COMPILE_OBJECT "${CMAKE_CXX_COMPILE_OBJECT}")' \
+            >> "$OVERRIDE"; \
+    fi; \
     echo "=== Patched override.cmake tail ==="; \
     tail -12 "$OVERRIDE"
 
