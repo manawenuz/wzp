@@ -7202,8 +7202,9 @@ name = "wzp-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "coreaudio-rs",
+ "jni",
  "libloading 0.8.9",
+ "ndk-context",
  "rustls",
  "serde",
  "serde_json",

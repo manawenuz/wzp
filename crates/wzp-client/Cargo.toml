@@ -23,13 +23,21 @@ serde_json = "1"
 chrono = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 cpal = { version = "0.15", optional = true }
-coreaudio-rs = { version = "0.11", optional = true }
 libc = "0.2"
+
+# coreaudio-rs is Apple-framework-only; gate it to macOS so enabling
+# the `vpio` feature from a non-macOS target builds cleanly instead of
+# pulling in a crate that can only link against Apple frameworks.
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = { version = "0.11", optional = true }
 
 [features]
 default = []
 audio = ["cpal"]
-vpio = ["coreaudio-rs"]
+# vpio enables coreaudio-rs but that dep is itself gated to macOS above,
+# so enabling this feature on Windows/Linux is a no-op (the audio_vpio
+# module is also #[cfg(target_os = "macos")] in lib.rs).
+vpio = ["dep:coreaudio-rs"]
 
 [[bin]]
 name = "wzp-client"

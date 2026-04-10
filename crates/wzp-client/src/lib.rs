@@ -10,7 +10,10 @@
 pub mod audio_io;
 #[cfg(feature = "audio")]
 pub mod audio_ring;
-#[cfg(feature = "vpio")]
+// VoiceProcessingIO is an Apple Core Audio API — only compile the module
+// when the `vpio` feature is on AND we're targeting macOS. Enabling the
+// feature on Windows/Linux was previously silently broken.
+#[cfg(all(feature = "vpio", target_os = "macos"))]
 pub mod audio_vpio;
 pub mod bench;
 pub mod call;

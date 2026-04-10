@@ -51,16 +51,29 @@ wzp-fec = { path = "../../crates/wzp-fec" }
 wzp-crypto = { path = "../../crates/wzp-crypto" }
 wzp-transport = { path = "../../crates/wzp-transport" }
 
-# wzp-client pulls CPAL + (on macOS) VoiceProcessingIO — desktop only.
-# Android gets an oboe/AAudio backend in Step 3 of the Tauri mobile rewrite.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# wzp-client pulls in CPAL on every desktop target and, additionally on
+# macOS, VoiceProcessingIO (coreaudio-rs behind the "vpio" feature). The
+# vpio feature MUST NOT be enabled on Windows / Linux because coreaudio-rs
+# is Apple-framework-only and will fail to build. Task #24 will add a
+# matching Windows Voice Capture DSP path behind its own feature; until
+# then, Windows desktops use plain CPAL with AEC disabled.
+
+# macOS: CPAL + VoiceProcessingIO (hardware AEC via Core Audio).
+[target.'cfg(target_os = "macos")'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
 
-# Step B: depend on wzp-client on Android WITHOUT the audio/vpio features,
-# so we pull in only the platform-independent modules (call, handshake,
-# audio_ring, codec bindings). Deliberately no imports in lib.rs yet — we
-# only want to verify that compiling + linking these crates on android
-# doesn't regress the working build.
+# Windows: CPAL only. Windows AEC (WASAPI Communications / MF Voice
+# Capture DSP) lands in a follow-up task. See task #24.
+[target.'cfg(target_os = "windows")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
+
+# Linux: same as Windows for now — plain CPAL.
+[target.'cfg(target_os = "linux")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
+
+# Android: no CPAL, no vpio — audio goes through the standalone wzp-native
+# cdylib that we dlopen via libloading at runtime. See the wzp_native
+# module in src/.
 [target.'cfg(target_os = "android")'.dependencies]
 wzp-client = { path = "../../crates/wzp-client", default-features = false }
 # libloading: runtime dlopen of libwzp_native.so — the standalone cdylib
@@ -74,10 +87,6 @@ libloading = "0.8"
 # between earpiece and loud speaker without restarting.
 jni = "0.21"
 ndk-context = "0.1"
-
-# Platform-specific
-[target.'cfg(target_os = "macos")'.dependencies]
-coreaudio-rs = "0.11"
 
 [features]
 default = ["custom-protocol"]
