@@ -172,6 +172,23 @@ docker run --rm \
     wzp-windows-builder \
     bash -c '
 set -euo pipefail
+
+# libopus (audiopus_sys) ships per-file SSE4.1 / SSSE3 C sources under
+# opus/silk/x86/ that assume the compiler sets `-msse4.1` / `-mssse3`
+# as per-file CMake COMPILE_FLAGS. With clang-cl those bare -m flags
+# are silently ignored (clang-cl expects /clang:-msse4.1), so the
+# intrinsics functions in those files fail to compile with:
+#   "error: always_inline function _mm_cvtepi16_epi32 requires target
+#    feature sse4.1, but would be inlined into a function that is
+#    compiled without support for sse4.1"
+#
+# Workaround: set global CFLAGS for the Windows target so every C file
+# in libopus (and any other cc-rs crate) compiles with SSE4.1/SSSE3
+# enabled. All x86_64 Windows CPUs shipped since 2008 support these,
+# so the global enablement is safe for the target platform.
+export CFLAGS_x86_64_pc_windows_msvc="/clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2"
+export CXXFLAGS_x86_64_pc_windows_msvc="/clang:-msse4.1 /clang:-mssse3 /clang:-msse3 /clang:-msse2"
+
 cd /build/source/desktop
 
 echo ">>> npm install"
@@ -182,7 +199,7 @@ npm run build 2>&1 | tail -5
 
 echo ">>> cargo xwin build --release --target x86_64-pc-windows-msvc --bin wzp-desktop"
 cd src-tauri
-cargo xwin build --release --target x86_64-pc-windows-msvc --bin wzp-desktop 2>&1 | tail -30
+cargo xwin build --release --target x86_64-pc-windows-msvc --bin wzp-desktop 2>&1 | tail -50
 
 echo ""
 echo ">>> Build artifacts:"
