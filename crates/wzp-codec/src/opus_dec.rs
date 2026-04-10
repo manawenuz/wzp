@@ -6,7 +6,7 @@
 //! `opus_decoder_dred_decode`. See `dred_ffi.rs` for the rationale and
 //! `docs/PRD-dred-integration.md` for the full plan.
 
-use crate::dred_ffi::DecoderHandle;
+use crate::dred_ffi::{DecoderHandle, DredState};
 use wzp_proto::{AudioDecoder, CodecError, CodecId, QualityProfile};
 
 /// Opus decoder implementing [`AudioDecoder`].
@@ -35,6 +35,24 @@ impl OpusDecoder {
     /// Expected number of output PCM samples per frame.
     pub fn frame_samples(&self) -> usize {
         (48_000 * self.frame_duration_ms as usize) / 1000
+    }
+
+    /// Reconstruct a lost frame from a previously parsed `DredState`.
+    ///
+    /// Phase 3b entry point: callers (CallDecoder / engine.rs) use this to
+    /// synthesize audio for gaps detected by the jitter buffer when DRED
+    /// side-channel state from a later-arriving packet covers the gap's
+    /// sample offset. `offset_samples` is measured backward from the anchor
+    /// packet that produced `state`. See `DecoderHandle::reconstruct_from_dred`
+    /// for the full semantics.
+    pub fn reconstruct_from_dred(
+        &mut self,
+        state: &DredState,
+        offset_samples: i32,
+        output: &mut [i16],
+    ) -> Result<usize, CodecError> {
+        self.inner
+            .reconstruct_from_dred(state, offset_samples, output)
     }
 }
 

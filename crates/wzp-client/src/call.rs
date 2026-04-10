@@ -7,14 +7,15 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tracing::{debug, info, warn};
 
-use wzp_codec::{AutoGainControl, ComfortNoise, EchoCanceller, NoiseSupressor, SilenceDetector};
+use wzp_codec::dred_ffi::{DredDecoderHandle, DredState};
+use wzp_codec::{
+    AdaptiveDecoder, AutoGainControl, ComfortNoise, EchoCanceller, NoiseSupressor, SilenceDetector,
+};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
 use wzp_proto::packet::{MediaHeader, MediaPacket, MiniFrameContext};
 use wzp_proto::quality::AdaptiveQualityController;
-use wzp_proto::traits::{
-    AudioDecoder, AudioEncoder, FecDecoder, FecEncoder,
-};
+use wzp_proto::traits::{AudioDecoder, AudioEncoder, FecDecoder, FecEncoder};
 use wzp_proto::packet::QualityReport;
 use wzp_proto::{CodecId, QualityProfile};
 
@@ -457,9 +458,12 @@ impl CallEncoder {
 
 /// Manages the recv/decode side of a call.
 pub struct CallDecoder {
-    /// Audio decoder.
-    audio_dec: Box<dyn AudioDecoder>,
-    /// FEC decoder.
+    /// Audio decoder. Concrete `AdaptiveDecoder` (not `Box<dyn AudioDecoder>`)
+    /// because Phase 3b calls the inherent `reconstruct_from_dred` method,
+    /// which cannot live on the `AudioDecoder` trait without dragging libopus
+    /// types into `wzp-proto`.
+    audio_dec: AdaptiveDecoder,
+    /// FEC decoder (Codec2 tiers only; Opus bypasses RaptorQ per Phase 2).
     fec_dec: RaptorQFecDecoder,
     /// Jitter buffer.
     jitter: JitterBuffer,
@@ -473,6 +477,24 @@ pub struct CallDecoder {
     last_was_cn: bool,
     /// Mini-frame decompression context (tracks last full header baseline).
     mini_context: MiniFrameContext,
+    // ─── Phase 3b: DRED reconstruction state ──────────────────────────────
+    /// DRED side-channel parser (a separate libopus object from the decoder).
+    dred_decoder: DredDecoderHandle,
+    /// Scratch buffer used by `dred_decoder.parse_into` on every arriving
+    /// Opus packet. Reused across calls to avoid 10 KB alloc churn per packet.
+    dred_parse_scratch: DredState,
+    /// Cached "most recently parsed valid" DRED state, swapped with
+    /// `dred_parse_scratch` on successful parse. Used by `decode_next` when
+    /// the jitter buffer reports a gap.
+    last_good_dred: DredState,
+    /// Sequence number of the packet that produced `last_good_dred`. `None`
+    /// if no packet has yielded DRED state yet (cold start or legacy sender).
+    last_good_dred_seq: Option<u16>,
+    /// Phase 4 telemetry counter: gaps recovered via DRED reconstruction.
+    pub dred_reconstructions: u64,
+    /// Phase 4 telemetry counter: gaps filled via classical Opus PLC
+    /// (because no DRED state covered the gap, or the active codec is Codec2).
+    pub classical_plc_invocations: u64,
 }
 
 impl CallDecoder {
@@ -482,8 +504,19 @@ impl CallDecoder {
         } else {
             JitterBuffer::new(config.jitter_target, config.jitter_max, config.jitter_min)
         };
+        // Phase 3b: build the DRED parser + state buffers. These allocate
+        // libopus state (~10 KB each) once per call, not per packet — the
+        // scratch and last-good buffers are reused via std::mem::swap on
+        // every successful parse.
+        let dred_decoder =
+            DredDecoderHandle::new().expect("opus_dred_decoder_create failed at call setup");
+        let dred_parse_scratch =
+            DredState::new().expect("opus_dred_alloc failed at call setup (scratch)");
+        let last_good_dred =
+            DredState::new().expect("opus_dred_alloc failed at call setup (good state)");
         Self {
-            audio_dec: wzp_codec::create_decoder(config.profile),
+            audio_dec: AdaptiveDecoder::new(config.profile)
+                .expect("failed to create adaptive decoder"),
             fec_dec: wzp_fec::create_decoder(&config.profile),
             jitter,
             quality: AdaptiveQualityController::new(),
@@ -491,6 +524,12 @@ impl CallDecoder {
             comfort_noise: ComfortNoise::new(50),
             last_was_cn: false,
             mini_context: MiniFrameContext::default(),
+            dred_decoder,
+            dred_parse_scratch,
+            last_good_dred,
+            last_good_dred_seq: None,
+            dred_reconstructions: 0,
+            classical_plc_invocations: 0,
         }
     }
 
@@ -517,6 +556,37 @@ impl CallDecoder {
                 packet.header.is_repair,
                 &packet.payload,
             );
+        }
+
+        // Phase 3b: Opus source packets carry DRED side-channel data in
+        // libopus 1.5. Parse it into the scratch state and, on success,
+        // swap with the cached `last_good_dred` so later gap reconstruction
+        // has fresh neural redundancy to draw from. Parsing happens before
+        // the jitter push because the jitter buffer consumes the packet.
+        if packet.header.codec_id.is_opus() && !packet.header.is_repair {
+            match self
+                .dred_decoder
+                .parse_into(&mut self.dred_parse_scratch, &packet.payload)
+            {
+                Ok(available) if available > 0 => {
+                    // Swap the freshly parsed state into `last_good_dred`.
+                    // The old good state (now in scratch) is about to be
+                    // overwritten on the next parse — its contents are
+                    // not needed after this swap.
+                    std::mem::swap(&mut self.dred_parse_scratch, &mut self.last_good_dred);
+                    self.last_good_dred_seq = Some(packet.header.seq);
+                }
+                Ok(_) => {
+                    // Packet had no DRED data (return 0). Leave the cached
+                    // state untouched — it may still cover upcoming gaps
+                    // from a warm-up period where the encoder was producing
+                    // DRED bytes. The scratch buffer was potentially written
+                    // but its `samples_available` is 0 so it's harmless.
+                }
+                Err(e) => {
+                    debug!("DRED parse error (ignored): {e}");
+                }
+            }
         }
 
         // Source packets (Opus or Codec2) go to the jitter buffer for decode.
@@ -604,19 +674,72 @@ impl CallDecoder {
                 result
             }
             PlayoutResult::Missing { seq } => {
-                // Only generate PLC if there are still packets buffered ahead.
+                // Only attempt recovery if there are still packets buffered ahead.
                 // Otherwise we've drained everything — return None to stop.
-                if self.jitter.depth() > 0 {
-                    debug!(seq, "packet loss, generating PLC");
-                    let result = self.audio_dec.decode_lost(pcm).ok();
-                    if result.is_some() {
-                        self.jitter.record_decode();
-                    }
-                    result
-                } else {
+                if self.jitter.depth() == 0 {
                     self.jitter.record_underrun();
-                    None
+                    return None;
                 }
+
+                // Phase 3b: try DRED reconstruction first. If we have a
+                // recent DRED state from a packet whose seq > missing seq,
+                // and the seq delta (in samples) fits within the state's
+                // available window, libopus can synthesize a plausible
+                // replacement for the lost frame. Fall back to classical
+                // PLC when no state covers the gap, when the active codec
+                // is Codec2, or when the reconstruction itself errors.
+                if self.profile.codec.is_opus() {
+                    if let Some(last_seq) = self.last_good_dred_seq {
+                        // How many frames ahead of the missing seq is the
+                        // last-good packet? Use wrapping arithmetic for the
+                        // u16 seq space.
+                        let seq_delta = last_seq.wrapping_sub(seq);
+                        // Reject stale or backward state. u16 wraparound
+                        // would make a "seq went backward" delta very large;
+                        // cap at a sane forward-looking window.
+                        const MAX_SEQ_DELTA: u16 = 128;
+                        if seq_delta > 0 && seq_delta <= MAX_SEQ_DELTA {
+                            let frame_samples =
+                                (48_000 * self.profile.frame_duration_ms as i32) / 1000;
+                            let offset_samples = seq_delta as i32 * frame_samples;
+                            let available = self.last_good_dred.samples_available();
+                            if offset_samples > 0 && offset_samples <= available {
+                                match self.audio_dec.reconstruct_from_dred(
+                                    &self.last_good_dred,
+                                    offset_samples,
+                                    pcm,
+                                ) {
+                                    Ok(n) => {
+                                        self.dred_reconstructions += 1;
+                                        self.jitter.record_decode();
+                                        debug!(
+                                            seq,
+                                            last_seq,
+                                            offset_samples,
+                                            available,
+                                            "DRED reconstruction for gap"
+                                        );
+                                        return Some(n);
+                                    }
+                                    Err(e) => {
+                                        // Reconstruction failed — fall
+                                        // through to classical PLC below.
+                                        debug!(seq, "DRED reconstruct error: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Classical PLC fallback (also the Codec2 path).
+                debug!(seq, "packet loss, generating classical PLC");
+                self.classical_plc_invocations += 1;
+                let result = self.audio_dec.decode_lost(pcm).ok();
+                if result.is_some() {
+                    self.jitter.record_decode();
+                }
+                result
             }
             PlayoutResult::NotReady => {
                 self.jitter.record_underrun();
@@ -638,6 +761,19 @@ impl CallDecoder {
     /// Reset jitter buffer statistics counters.
     pub fn reset_stats(&mut self) {
         self.jitter.reset_stats();
+    }
+
+    /// Phase 3b introspection: sequence number of the most recently parsed
+    /// valid DRED state, or `None` if no Opus packet has yielded DRED data
+    /// yet. Used by tests to debug reconstruction eligibility.
+    pub fn last_good_dred_seq(&self) -> Option<u16> {
+        self.last_good_dred_seq
+    }
+
+    /// Phase 3b introspection: samples of audio history currently available
+    /// in the cached DRED state.
+    pub fn last_good_dred_samples_available(&self) -> i32 {
+        self.last_good_dred.samples_available()
     }
 }
 
@@ -817,6 +953,219 @@ mod tests {
         // Not enough buffered yet (min_depth = 25)
         let mut pcm = vec![0i16; 960];
         assert!(dec.decode_next(&mut pcm).is_none());
+    }
+
+    // ─── Phase 3b — DRED reconstruction on packet loss ────────────────────
+
+    /// Helper: create a CallEncoder/CallDecoder pair with the given profile
+    /// and silence suppression disabled so silence-detection doesn't drop
+    /// our synthetic test frames.
+    fn encoder_decoder_pair(profile: QualityProfile) -> (CallEncoder, CallDecoder) {
+        let config = CallConfig {
+            profile,
+            suppression_enabled: false,
+            // Small jitter buffer so decode_next drains quickly in tests.
+            jitter_min: 2,
+            jitter_target: 3,
+            jitter_max: 20,
+            adaptive_jitter: false,
+            ..Default::default()
+        };
+        (CallEncoder::new(&config), CallDecoder::new(&config))
+    }
+
+    /// Helper: generate a non-silent 20 ms frame of 300 Hz sine at the
+    /// given sample offset so consecutive frames form a continuous tone.
+    fn voice_frame_20ms(sample_offset: usize) -> Vec<i16> {
+        (0..960)
+            .map(|i| {
+                let t = (sample_offset + i) as f64 / 48_000.0;
+                (8000.0 * (2.0 * std::f64::consts::PI * 300.0 * t).sin()) as i16
+            })
+            .collect()
+    }
+
+    /// Phase 3b probe: sweep packet_loss_perc values to find the minimum
+    /// that produces a samples_available ≥ 960 (enough to reconstruct a
+    /// single 20 ms Opus frame). This guides the production loss floor.
+    #[test]
+    #[ignore] // diagnostic only — run with `cargo test ... -- --ignored --nocapture`
+    fn probe_dred_samples_available_by_loss_floor() {
+        use wzp_codec::opus_enc::OpusEncoder;
+        use wzp_proto::traits::AudioEncoder;
+
+        for loss_pct in [5u8, 10, 15, 20, 25, 40, 60, 80].iter().copied() {
+            let mut enc = OpusEncoder::new(QualityProfile::GOOD).unwrap();
+            enc.set_expected_loss(loss_pct);
+            let (_drop_enc, mut dec) = encoder_decoder_pair(QualityProfile::GOOD);
+
+            for i in 0..60u16 {
+                let pcm = voice_frame_20ms(i as usize * 960);
+                let mut encoded = vec![0u8; 512];
+                let n = enc.encode(&pcm, &mut encoded).unwrap();
+                encoded.truncate(n);
+                let pkt = MediaPacket {
+                    header: MediaHeader {
+                        version: 0,
+                        is_repair: false,
+                        codec_id: CodecId::Opus24k,
+                        has_quality_report: false,
+                        fec_ratio_encoded: 0,
+                        seq: i,
+                        timestamp: (i as u32) * 20,
+                        fec_block: 0,
+                        fec_symbol: 0,
+                        reserved: 0,
+                        csrc_count: 0,
+                    },
+                    payload: Bytes::from(encoded),
+                    quality_report: None,
+                };
+                dec.ingest(pkt);
+            }
+            eprintln!(
+                "[phase3b probe] loss_pct={loss_pct} samples_available={}",
+                dec.last_good_dred_samples_available()
+            );
+        }
+    }
+
+    /// Phase 3b: simulated single-packet loss on an Opus call triggers a
+    /// DRED reconstruction rather than a classical PLC fill. Runs the full
+    /// encode → ingest → decode_next pipeline.
+    #[test]
+    fn opus_single_packet_loss_is_recovered_via_dred() {
+        let (mut enc, mut dec) = encoder_decoder_pair(QualityProfile::GOOD);
+
+        // Warm-up: encode and ingest 60 frames (1.2 s) so the DRED emitter
+        // has had time to fill its 200 ms window and at least one
+        // successful DRED parse has happened on the decoder side.
+        let warmup_frames = 60;
+        for i in 0..warmup_frames {
+            let pcm = voice_frame_20ms(i * 960);
+            let packets = enc.encode_frame(&pcm).unwrap();
+            for pkt in packets {
+                dec.ingest(pkt);
+            }
+        }
+
+        // Drain the warm-up frames through the decoder to advance the
+        // jitter buffer cursor past them.
+        let mut out = vec![0i16; 960];
+        while dec.decode_next(&mut out).is_some() {}
+
+        // Encode the next three frames but skip ingesting the middle one.
+        let base_offset = warmup_frames * 960;
+        let pcm_a = voice_frame_20ms(base_offset);
+        let pcm_b = voice_frame_20ms(base_offset + 960);
+        let pcm_c = voice_frame_20ms(base_offset + 1920);
+
+        let pkts_a = enc.encode_frame(&pcm_a).unwrap();
+        let pkts_b = enc.encode_frame(&pcm_b).unwrap(); // DROP THIS ONE
+        let pkts_c = enc.encode_frame(&pcm_c).unwrap();
+
+        for pkt in pkts_a {
+            dec.ingest(pkt);
+        }
+        // Skip pkts_b entirely — this is the "packet loss".
+        drop(pkts_b);
+        for pkt in pkts_c {
+            dec.ingest(pkt);
+        }
+
+        // Drain again. Somewhere in here decode_next will hit Missing()
+        // for the dropped packet and attempt DRED reconstruction.
+        let baseline_dred = dec.dred_reconstructions;
+        let baseline_plc = dec.classical_plc_invocations;
+        eprintln!(
+            "[phase3b probe] pre-drain: last_good_seq={:?} samples_available={}",
+            dec.last_good_dred_seq(),
+            dec.last_good_dred_samples_available()
+        );
+        while dec.decode_next(&mut out).is_some() {}
+
+        let dred_delta = dec.dred_reconstructions - baseline_dred;
+        let plc_delta = dec.classical_plc_invocations - baseline_plc;
+        eprintln!(
+            "[phase3b probe] post-drain: dred_delta={dred_delta} plc_delta={plc_delta}"
+        );
+        assert!(
+            dred_delta >= 1,
+            "expected ≥1 DRED reconstruction on single-packet loss, \
+             got dred_delta={dred_delta} plc_delta={plc_delta}"
+        );
+    }
+
+    /// Phase 3b: lossless stream never triggers DRED reconstruction or PLC.
+    /// Baseline behavior — verifies the Missing() branch is not spuriously taken.
+    #[test]
+    fn opus_lossless_ingest_never_triggers_dred_or_plc() {
+        let (mut enc, mut dec) = encoder_decoder_pair(QualityProfile::GOOD);
+
+        // Encode + ingest 40 frames with no drops.
+        for i in 0..40 {
+            let pcm = voice_frame_20ms(i * 960);
+            let packets = enc.encode_frame(&pcm).unwrap();
+            for pkt in packets {
+                dec.ingest(pkt);
+            }
+        }
+
+        let mut out = vec![0i16; 960];
+        while dec.decode_next(&mut out).is_some() {}
+
+        assert_eq!(
+            dec.dred_reconstructions, 0,
+            "lossless stream should not reconstruct"
+        );
+        assert_eq!(
+            dec.classical_plc_invocations, 0,
+            "lossless stream should not PLC"
+        );
+    }
+
+    /// Phase 3b: Codec2 calls fall through to classical PLC on loss.
+    /// DRED is libopus-only, so even if the decoder's DRED state were
+    /// populated (it won't be — Codec2 packets don't carry DRED bytes),
+    /// `reconstruct_from_dred` rejects Codec2 at the AdaptiveDecoder
+    /// level. This test guards the Codec2 side of the protection split.
+    #[test]
+    fn codec2_loss_falls_through_to_classical_plc() {
+        let (mut enc, mut dec) = encoder_decoder_pair(QualityProfile::CATASTROPHIC);
+
+        // Codec2 1200 uses 40 ms frames → 1920 samples at 48 kHz (before
+        // the downsample inside the codec). Encode 20 frames (~0.8 s).
+        let make_frame = |offset: usize| -> Vec<i16> {
+            (0..1920)
+                .map(|i| {
+                    let t = (offset + i) as f64 / 48_000.0;
+                    (8000.0 * (2.0 * std::f64::consts::PI * 300.0 * t).sin()) as i16
+                })
+                .collect()
+        };
+
+        for i in 0..20 {
+            let pcm = make_frame(i * 1920);
+            let packets = enc.encode_frame(&pcm).unwrap();
+            for pkt in packets {
+                // Drop every 5th source packet to simulate loss.
+                if !pkt.header.is_repair && i % 5 == 3 {
+                    continue;
+                }
+                dec.ingest(pkt);
+            }
+        }
+
+        let mut out = vec![0i16; 1920];
+        while dec.decode_next(&mut out).is_some() {}
+
+        assert_eq!(
+            dec.dred_reconstructions, 0,
+            "Codec2 must never reconstruct via DRED"
+        );
+        // classical_plc_invocations may or may not trigger depending on
+        // whether the jitter buffer sees Missing before draining — the key
+        // assertion is that DRED is not used. PLC count is advisory.
     }
 
     // ---- QualityAdapter tests ----
