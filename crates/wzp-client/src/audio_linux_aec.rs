@@ -8,8 +8,9 @@
 //!
 //! ## Architecture
 //!
-//! A single module-level `Arc<Processor>` is shared between the capture and
-//! playback paths. On each 20 ms frame (960 samples @ 48 kHz mono):
+//! A single module-level `Arc<Mutex<Processor>>` is shared between the
+//! capture and playback paths. On each 20 ms frame (960 samples @ 48 kHz
+//! mono):
 //!
 //! - **Playback path**: `LinuxAecPlayback::start` spawns the usual CPAL
 //!   output thread, but wraps each chunk in a call to
@@ -44,25 +45,32 @@
 //!
 //! ## Thread safety
 //!
-//! `webrtc_audio_processing::Processor` is `Send + Sync` with `&self`
-//! methods. Capture and playback threads both hold an `Arc<Processor>` and
-//! call APM concurrently — the underlying C++ code serializes internally.
+//! The 0.3.x line of `webrtc-audio-processing` takes `&mut self` on both
+//! `process_capture_frame` and `process_render_frame`, so the `Processor`
+//! needs a `Mutex` around it for cross-thread sharing. The capture and
+//! playback threads each acquire the lock briefly (sub-millisecond per
+//! 10 ms frame) so contention is minimal at our frame rates.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use tracing::{info, warn};
-use webrtc_audio_processing::{Config, EchoCancellation, InitializationConfig, NoiseSuppression, Processor};
+use webrtc_audio_processing::{
+    Config, EchoCancellation, EchoCancellationSuppressionLevel, InitializationConfig,
+    NoiseSuppression, NoiseSuppressionLevel, Processor, NUM_SAMPLES_PER_FRAME,
+};
 
 use crate::audio_ring::AudioRing;
 
 /// 20 ms at 48 kHz, mono — matches the rest of the pipeline and the codec.
 pub const FRAME_SAMPLES: usize = 960;
 /// APM requires strict 10 ms frames at 48 kHz = 480 samples per call.
-const APM_FRAME_SAMPLES: usize = 480;
+/// Imported from the webrtc-audio-processing crate so we can't drift out
+/// of sync with whatever sample rate / frame length the C++ lib is using.
+const APM_FRAME_SAMPLES: usize = NUM_SAMPLES_PER_FRAME as usize;
 const APM_NUM_CHANNELS: usize = 1;
 /// Round-trip delay hint passed to APM; the estimator refines from here.
 /// 60 ms is a reasonable default for CPAL on ALSA / PulseAudio / PipeWire.
@@ -76,9 +84,11 @@ const STREAM_DELAY_MS: i32 = 60;
 /// Module-level lazily-initialized APM. Shared between capture and playback
 /// so they operate on the same echo-cancellation state — the render frames
 /// pushed by playback are what the capture path subtracts from the mic input.
-static PROCESSOR: OnceLock<Arc<Processor>> = OnceLock::new();
+/// Wrapped in a Mutex because the 0.3.x Processor takes `&mut self` on both
+/// process_capture_frame and process_render_frame.
+static PROCESSOR: OnceLock<Arc<Mutex<Processor>>> = OnceLock::new();
 
-fn get_or_init_processor() -> anyhow::Result<Arc<Processor>> {
+fn get_or_init_processor() -> anyhow::Result<Arc<Mutex<Processor>>> {
     if let Some(p) = PROCESSOR.get() {
         return Ok(p.clone());
     }
@@ -92,14 +102,13 @@ fn get_or_init_processor() -> anyhow::Result<Arc<Processor>> {
 
     let config = Config {
         echo_cancellation: Some(EchoCancellation {
-            suppression_level: webrtc_audio_processing::EchoCancellationSuppressionLevel::High,
+            suppression_level: EchoCancellationSuppressionLevel::High,
             stream_delay_ms: Some(STREAM_DELAY_MS),
             enable_delay_agnostic: true,
             enable_extended_filter: true,
         }),
         noise_suppression: Some(NoiseSuppression {
-            suppression_level:
-                webrtc_audio_processing::NoiseSuppressionLevel::High,
+            suppression_level: NoiseSuppressionLevel::High,
         }),
         enable_high_pass_filter: true,
         // AGC left off for now — it can fight the Opus encoder's own gain
@@ -109,11 +118,11 @@ fn get_or_init_processor() -> anyhow::Result<Arc<Processor>> {
     };
     processor.set_config(config);
 
-    let arc = Arc::new(processor);
+    let arc = Arc::new(Mutex::new(processor));
     let _ = PROCESSOR.set(arc.clone());
     info!(
         stream_delay_ms = STREAM_DELAY_MS,
-        "webrtc APM initialized (AEC3 High + NS High + HPF, AGC off)"
+        "webrtc APM initialized (AEC High + NS High + HPF, AGC off)"
     );
     Ok(arc)
 }
@@ -134,33 +143,49 @@ fn f32_to_i16(s: f32) -> i16 {
 
 /// Feed a 20 ms (960-sample) playback frame to APM as the render reference.
 /// Splits into two 10 ms halves because APM is strict about frame size.
-fn push_render_frame_20ms(apm: &Processor, pcm: &[i16]) {
+/// Takes the Mutex-wrapped Processor and locks briefly around each call.
+fn push_render_frame_20ms(apm: &Mutex<Processor>, pcm: &[i16]) {
     debug_assert_eq!(pcm.len(), FRAME_SAMPLES);
     let mut buf = [0f32; APM_FRAME_SAMPLES];
     for half in pcm.chunks_exact(APM_FRAME_SAMPLES) {
         for (i, &s) in half.iter().enumerate() {
             buf[i] = i16_to_f32(s);
         }
-        // process_render_frame mutates in place. For render we only care
-        // about feeding APM the reference — we discard the output.
-        if let Err(e) = apm.process_render_frame(&mut buf) {
-            warn!("webrtc APM process_render_frame failed: {e:?}");
+        match apm.lock() {
+            Ok(mut p) => {
+                if let Err(e) = p.process_render_frame(&mut buf) {
+                    warn!("webrtc APM process_render_frame failed: {e:?}");
+                }
+            }
+            Err(_) => {
+                warn!("webrtc APM mutex poisoned in render path");
+                return;
+            }
         }
     }
 }
 
 /// Run a 20 ms (960-sample) capture frame through APM's echo cancellation
 /// in place. Splits into two 10 ms halves, runs APM on each, stitches
-/// results back into the caller's buffer.
-fn process_capture_frame_20ms(apm: &Processor, pcm: &mut [i16]) {
+/// results back into the caller's buffer. Briefly holds the Mutex once
+/// per 10 ms half.
+fn process_capture_frame_20ms(apm: &Mutex<Processor>, pcm: &mut [i16]) {
     debug_assert_eq!(pcm.len(), FRAME_SAMPLES);
     let mut buf = [0f32; APM_FRAME_SAMPLES];
     for half in pcm.chunks_exact_mut(APM_FRAME_SAMPLES) {
         for (i, &s) in half.iter().enumerate() {
             buf[i] = i16_to_f32(s);
         }
-        if let Err(e) = apm.process_capture_frame(&mut buf) {
-            warn!("webrtc APM process_capture_frame failed: {e:?}");
+        match apm.lock() {
+            Ok(mut p) => {
+                if let Err(e) = p.process_capture_frame(&mut buf) {
+                    warn!("webrtc APM process_capture_frame failed: {e:?}");
+                }
+            }
+            Err(_) => {
+                warn!("webrtc APM mutex poisoned in capture path");
+                return;
+            }
         }
         for (i, d) in half.iter_mut().enumerate() {
             *d = f32_to_i16(buf[i]);
@@ -303,7 +328,7 @@ impl Drop for LinuxAecCapture {
 /// Pull whole 960-sample frames out of the leftover buffer, run them through
 /// APM's capture-side processing, and push to the ring. Leaves any partial
 /// sub-960 remainder in `leftover` for the next callback.
-fn drain_frames_through_apm(leftover: &mut Vec<i16>, apm: &Processor, ring: &AudioRing) {
+fn drain_frames_through_apm(leftover: &mut Vec<i16>, apm: &Mutex<Processor>, ring: &AudioRing) {
     let mut frame = [0i16; FRAME_SAMPLES];
     while leftover.len() >= FRAME_SAMPLES {
         frame.copy_from_slice(&leftover[..FRAME_SAMPLES]);
@@ -434,7 +459,7 @@ impl Drop for LinuxAecPlayback {
 fn fill_output_and_tee_i16(
     data: &mut [i16],
     ring: &AudioRing,
-    apm: &Processor,
+    apm: &Mutex<Processor>,
     carry: &std::sync::Mutex<Vec<i16>>,
 ) {
     let read = ring.read(data);
@@ -447,7 +472,7 @@ fn fill_output_and_tee_i16(
 fn fill_output_and_tee_f32(
     data: &mut [f32],
     ring: &AudioRing,
-    apm: &Processor,
+    apm: &Mutex<Processor>,
     carry: &std::sync::Mutex<Vec<i16>>,
 ) {
     let mut tmp = vec![0i16; data.len()];
@@ -463,7 +488,7 @@ fn fill_output_and_tee_f32(
 
 /// Push CPAL-bound samples into APM's render-side input for echo cancellation.
 /// Uses a carry buffer to batch into exact 960-sample (20 ms) frames.
-fn tee_render_samples(samples: &[i16], apm: &Processor, carry: &std::sync::Mutex<Vec<i16>>) {
+fn tee_render_samples(samples: &[i16], apm: &Mutex<Processor>, carry: &std::sync::Mutex<Vec<i16>>) {
     let mut lv = carry.lock().unwrap();
     lv.extend_from_slice(samples);
     while lv.len() >= FRAME_SAMPLES {

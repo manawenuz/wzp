@@ -33,22 +33,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         librsvg2-dev \
         libglib2.0-dev \
         patchelf \
-        meson \
-        ninja-build \
-        python3 \
+        libwebrtc-audio-processing-dev \
         clang \
     && rm -rf /var/lib/apt/lists/*
 
 # ── webrtc-audio-processing build requirements ──────────────────────────────
-# The `webrtc-audio-processing` Rust crate with the `bundled` feature vendors
-# the PulseAudio webrtc-audio-processing C++ library and builds it via meson
-# + ninja at `cargo build` time. That avoids Debian Bookworm's stale
-# libwebrtc-audio-processing-dev 0.3-1 package (which predates AEC3) and gives
-# us a self-contained static link — no runtime .so dependency, same algorithm
-# on every Linux distro regardless of what apt ships.
+# The `webrtc-audio-processing` Rust crate (0.3.x line) links against Debian
+# Bookworm's `libwebrtc-audio-processing-dev` apt package (0.3-1+b1), which
+# provides the PulseAudio fork of the WebRTC audio processing module. This is
+# the library that Pulse's module-echo-cancel and PipeWire's filter-chain
+# use for their AEC modes — same algorithm family, runtime-linked via
+# pkg-config at cargo build time.
 #
-# apt deps for the bundled build: meson, ninja-build, python3, clang,
-# build-essential (already present via android-builder base).
+# An attempt was made to use the 2.x line with the `bundled` sub-feature
+# (which would give AEC3 instead of AEC2) but both the crates.io tarball
+# and the upstream git `main` branch hit a `meson setup --reconfigure` bug
+# that panics on first-run empty build dirs. The 0.3 line avoids the
+# bundled build path entirely and is what we ship for now.
+#
+# `clang` is listed explicitly because the Rust crate's bindgen may need
+# it at compile time depending on the version of the underlying
+# webrtc-audio-processing-sys build script.
 
 USER builder
 WORKDIR /build/source

@@ -47,20 +47,24 @@ windows = { version = "0.58", optional = true, features = [
     "Win32_System_Variant",
 ] }
 
-# Linux-only: WebRTC AEC3 (Audio Processing Module) bindings for the
-# `linux-aec` feature. The `bundled` sub-feature statically compiles the
-# vendored PulseAudio webrtc-audio-processing C++ sources via meson+ninja
-# at cargo build time, avoiding Debian Bookworm's stale system
-# libwebrtc-audio-processing-dev 0.3 package (which predates AEC3).
+# Linux-only: WebRTC AEC (Audio Processing Module) bindings for the
+# `linux-aec` feature. This is the 0.3.x line of the `tonarino/
+# webrtc-audio-processing` crate, which links against Debian's
+# `libwebrtc-audio-processing-dev` apt package (0.3-1+b1 on Bookworm).
 #
-# We pull from git (not crates.io) because the crates.io tarball of
-# webrtc-audio-processing-sys 2.0.3 does NOT include the vendored C++
-# submodule contents ("Directory does not contain a valid build tree"),
-# and cargo clones git deps with submodules auto-initialized since ~1.27,
-# so the git path gives us a complete source tree that bundled-mode can
-# build. Pinned to tag v2.0.3 for reproducibility.
+# Note: we attempted the 2.x line with its `bundled` sub-feature first
+# (which would give us AEC3 instead of AEC2), but both the crates.io
+# tarball AND the upstream git `main` branch of webrtc-audio-processing-sys
+# 2.0.3 hit a `meson setup --reconfigure` bug where the build.rs passes
+# --reconfigure unconditionally even on first-run empty build dirs,
+# causing the bundled build to fail with "Directory does not contain a
+# valid build tree". The 0.x line doesn't use bundled mode and sidesteps
+# this entirely by linking the apt-provided library. AEC2 is older than
+# AEC3 but still the same algorithm family — this is what PulseAudio's
+# module-echo-cancel and PipeWire's filter-chain use by default on
+# current Debian-family distros.
 [target.'cfg(target_os = "linux")'.dependencies]
-webrtc-audio-processing = { git = "https://github.com/tonarino/webrtc-audio-processing", branch = "main", optional = true, features = ["bundled"] }
+webrtc-audio-processing = { version = "0.3", optional = true }
 
 [features]
 default = []
