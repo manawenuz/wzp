@@ -5,10 +5,15 @@ set -euo pipefail
 # notify via ntfy.sh/wzp. Fire and forget.
 #
 # Usage:
-#   ./scripts/build-and-notify.sh              Build + upload + notify
-#   ./scripts/build-and-notify.sh --rust       Force Rust rebuild
-#   ./scripts/build-and-notify.sh --pull       Git pull before building
-#   ./scripts/build-and-notify.sh --install    Also download + adb install locally
+#   ./scripts/build-and-notify.sh                      Build current local branch
+#   ./scripts/build-and-notify.sh --branch opus-DRED   Build a specific branch
+#   ./scripts/build-and-notify.sh --rust               Force Rust rebuild
+#   ./scripts/build-and-notify.sh --no-pull            Skip git pull (use cached source)
+#   ./scripts/build-and-notify.sh --install            Also download + adb install locally
+#
+# The remote builder pulls the requested branch from its `origin` (gitea:
+# git.manko.yoga). Make sure you've pushed the branch to `origin` before
+# running this script, otherwise the remote fetch will fail loudly.
 
 REMOTE_HOST="SepehrHomeserverdk"
 BASE_DIR="/mnt/storage/manBuilder"
@@ -19,14 +24,29 @@ SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=
 REBUILD_RUST=0
 DO_PULL=1
 DO_INSTALL=0
-for arg in "$@"; do
-    case "$arg" in
+# Default to whatever branch the local workspace is on — "build what I'm
+# working on" is the intuitive behavior for iterative development.
+BRANCH=$(git -C "$(dirname "$0")/.." branch --show-current 2>/dev/null || echo "")
+while [ $# -gt 0 ]; do
+    case "$1" in
         --rust) REBUILD_RUST=1 ;;
         --pull) DO_PULL=1 ;;
         --no-pull) DO_PULL=0 ;;
         --install) DO_INSTALL=1 ;;
+        --branch)
+            shift
+            BRANCH="$1"
+            ;;
+        --branch=*) BRANCH="${1#--branch=}" ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
     esac
+    shift
 done
+if [ -z "$BRANCH" ]; then
+    echo "ERROR: could not determine target branch (detached HEAD?). Pass --branch NAME."
+    exit 1
+fi
+echo "Target branch: $BRANCH"
 
 log() { echo -e "\033[1;36m>>> $*\033[0m"; }
 
@@ -42,20 +62,33 @@ BASE_DIR="/mnt/storage/manBuilder"
 NTFY_TOPIC="https://ntfy.sh/wzp"
 REBUILD_RUST="${1:-0}"
 DO_PULL="${2:-0}"
+BRANCH="${3:-}"
+
+if [ -z "$BRANCH" ]; then
+    echo "ERROR: remote script invoked without a BRANCH argument"
+    exit 1
+fi
 
 notify() { curl -s -d "$1" "$NTFY_TOPIC" > /dev/null 2>&1 || true; }
 
-trap 'notify "WZP Android build FAILED! Check /tmp/wzp-build.log"' ERR
+trap 'notify "WZP Android build FAILED [$BRANCH]! Check /tmp/wzp-build.log"' ERR
 
-# Pull if requested
+# Pull the requested branch. Previously this was hardcoded to
+# feat/android-voip-client with `|| true` on the reset, which silently
+# left the tree on whatever branch it was last on when the hardcoded
+# branch didn't exist on origin. Now the branch is a parameter and any
+# failure aborts the build so nobody ships an APK from the wrong source.
 if [ "$DO_PULL" = "1" ]; then
-    echo ">>> Pulling latest..."
+    echo ">>> Pulling branch '$BRANCH' from origin..."
     cd "$BASE_DIR/data/source"
     git reset --hard HEAD 2>/dev/null || true
     git clean -fd 2>/dev/null || true
     git gc --prune=now 2>/dev/null || true
-    git fetch origin feat/android-voip-client 2>&1 | tail -3
-    git reset --hard origin/feat/android-voip-client 2>/dev/null || true
+    git fetch origin "$BRANCH"
+    git reset --hard "origin/$BRANCH"
+    BUILT_HASH=$(git rev-parse --short HEAD)
+    BUILT_SUBJECT=$(git log -1 --format=%s)
+    echo ">>> HEAD after pull: $BUILT_HASH — $BUILT_SUBJECT"
 fi
 
 # Clean Rust if requested
@@ -73,7 +106,7 @@ find "$BASE_DIR/data/source" "$BASE_DIR/data/cache" \
 rm -rf "$BASE_DIR/data/source/android/app/src/main/jniLibs/arm64-v8a"
 
 GIT_HASH=$(cd $BASE_DIR/data/source && git rev-parse --short HEAD 2>/dev/null || echo unknown)
-notify "WZP Android build started [$GIT_HASH]..."
+notify "WZP Android build started [$BRANCH @ $GIT_HASH]..."
 
 echo ">>> Building in Docker..."
 docker run --rm --user 1000:1000 \
@@ -117,10 +150,10 @@ APK=$(find "$BASE_DIR/data/source/android" -name "app-debug*.apk" -path "*/outpu
 if [ -n "$APK" ]; then
     URL=$(curl -s -F "file=@$APK" -H "Authorization: $rusty_auth_token" "$rusty_address")
     echo "UPLOAD_URL=$URL"
-    notify "WZP Android [$GIT_HASH] done! APK: $URL"
+    notify "WZP Android [$BRANCH @ $GIT_HASH] done! APK: $URL"
     echo ">>> Done! APK at: $URL"
 else
-    notify "WZP build FAILED - no APK"
+    notify "WZP Android FAILED [$BRANCH @ $GIT_HASH] - no APK"
     echo "ERROR: No APK found"
     exit 1
 fi
@@ -129,9 +162,9 @@ REMOTE_SCRIPT
 ssh_cmd "chmod +x /tmp/wzp-docker-build.sh"
 
 # Run in tmux
-log "Starting build in tmux..."
+log "Starting build in tmux (branch: $BRANCH)..."
 ssh_cmd "tmux kill-session -t wzp-build 2>/dev/null; true"
-ssh_cmd "tmux new-session -d -s wzp-build '/tmp/wzp-docker-build.sh $REBUILD_RUST $DO_PULL 2>&1 | tee /tmp/wzp-build.log'"
+ssh_cmd "tmux new-session -d -s wzp-build '/tmp/wzp-docker-build.sh $REBUILD_RUST $DO_PULL $BRANCH 2>&1 | tee /tmp/wzp-build.log'"
 
 log "Build running! You'll get a notification on ntfy.sh/wzp with the download URL."
 echo ""
