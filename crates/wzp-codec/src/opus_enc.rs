@@ -1,7 +1,14 @@
-//! Opus encoder wrapping the `audiopus` crate.
+//! Opus encoder wrapping the `opusic-c` crate (libopus 1.5.2).
+//!
+//! Phase 0 of the DRED integration: swapped FFI backend from audiopus
+//! (dead, libopus 1.3) to opusic-c (live, libopus 1.5.2). Behavior is
+//! intentionally unchanged from the audiopus-based encoder — inband FEC
+//! stays ON, DRED stays at duration 0. Phase 1 enables DRED and disables
+//! inband FEC. See docs/PRD-dred-integration.md.
 
-use audiopus::coder::Encoder;
-use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
+use opusic_c::{
+    Application, Bitrate, Channels, Encoder, InbandFec, SampleRate, Signal,
+};
 use tracing::debug;
 use wzp_proto::{AudioEncoder, CodecError, CodecId, QualityProfile};
 
@@ -16,15 +23,17 @@ pub struct OpusEncoder {
 }
 
 // SAFETY: OpusEncoder is only used via `&mut self` methods. The inner
-// audiopus Encoder contains a raw pointer that is !Sync, but we never
-// share it across threads without exclusive access.
+// opusic-c Encoder wraps a non-null pointer that is !Sync by default,
+// but we never share it across threads without exclusive access.
 unsafe impl Sync for OpusEncoder {}
 
 impl OpusEncoder {
     /// Create a new Opus encoder for the given quality profile.
     pub fn new(profile: QualityProfile) -> Result<Self, CodecError> {
-        let encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)
-            .map_err(|e| CodecError::EncodeFailed(format!("opus encoder init: {e}")))?;
+        // opusic-c argument order: (Channels, SampleRate, Application)
+        // — different from audiopus's (SampleRate, Channels, Application).
+        let encoder = Encoder::new(Channels::Mono, SampleRate::Hz48000, Application::Voip)
+            .map_err(|e| CodecError::EncodeFailed(format!("opus encoder init: {e:?}")))?;
 
         let mut enc = Self {
             inner: encoder,
@@ -38,21 +47,21 @@ impl OpusEncoder {
         // Voice signal type hint for better compression
         enc.inner
             .set_signal(Signal::Voice)
-            .map_err(|e| CodecError::EncodeFailed(format!("set signal: {e}")))?;
+            .map_err(|e| CodecError::EncodeFailed(format!("set signal: {e:?}")))?;
 
         // Default complexity 7 — good quality/CPU trade-off for VoIP
         enc.inner
             .set_complexity(7)
-            .map_err(|e| CodecError::EncodeFailed(format!("set complexity: {e}")))?;
+            .map_err(|e| CodecError::EncodeFailed(format!("set complexity: {e:?}")))?;
 
         Ok(enc)
     }
 
     fn apply_bitrate(&mut self, codec: CodecId) -> Result<(), CodecError> {
-        let bps = codec.bitrate_bps() as i32;
+        let bps = codec.bitrate_bps();
         self.inner
-            .set_bitrate(Bitrate::BitsPerSecond(bps))
-            .map_err(|e| CodecError::EncodeFailed(format!("set bitrate: {e}")))?;
+            .set_bitrate(Bitrate::Value(bps))
+            .map_err(|e| CodecError::EncodeFailed(format!("set bitrate: {e:?}")))?;
         debug!(bitrate_bps = bps, "opus encoder bitrate set");
         Ok(())
     }
@@ -74,7 +83,7 @@ impl OpusEncoder {
     /// Higher values cause the encoder to use more redundancy to survive
     /// packet loss, at the expense of slightly higher bitrate.
     pub fn set_expected_loss(&mut self, loss_pct: u8) {
-        let _ = self.inner.set_packet_loss_perc(loss_pct.min(100));
+        let _ = self.inner.set_packet_loss(loss_pct.min(100));
     }
 }
 
@@ -87,10 +96,14 @@ impl AudioEncoder for OpusEncoder {
                 pcm.len()
             )));
         }
+        // opusic-c takes &[u16] for the sample input. Bit pattern is
+        // identical to i16 — the cast is zero-cost and the encoder
+        // interprets the bytes the same way as libopus internally.
+        let pcm_u16: &[u16] = bytemuck::cast_slice(pcm);
         let n = self
             .inner
-            .encode(pcm, out)
-            .map_err(|e| CodecError::EncodeFailed(format!("opus encode: {e}")))?;
+            .encode_to_slice(pcm_u16, out)
+            .map_err(|e| CodecError::EncodeFailed(format!("opus encode: {e:?}")))?;
         Ok(n)
     }
 
@@ -120,10 +133,56 @@ impl AudioEncoder for OpusEncoder {
     }
 
     fn set_inband_fec(&mut self, enabled: bool) {
-        let _ = self.inner.set_inband_fec(enabled);
+        // opusic-c replaces the audiopus bool with an enum that distinguishes
+        // Mode1 (classical LBRR, equivalent to libopus 1.3's inband FEC) and
+        // Mode2 (newer, higher-quality variant added in 1.5). Phase 0 preserves
+        // pre-swap behavior by using Mode1, which is the direct equivalent of
+        // audiopus's `set_inband_fec(true)`. Phase 1 flips this to Off when
+        // DRED is enabled.
+        let mode = if enabled { InbandFec::Mode1 } else { InbandFec::Off };
+        let _ = self.inner.set_inband_fec(mode);
     }
 
     fn set_dtx(&mut self, enabled: bool) {
         let _ = self.inner.set_dtx(enabled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wzp_proto::AudioDecoder;
+
+    /// Phase 0 acceptance gate: fail loudly if the linked libopus is not 1.5.x.
+    /// DRED (Phase 1+) only exists in libopus ≥ 1.5, so running against an
+    /// older version would silently regress the entire DRED integration.
+    #[test]
+    fn linked_libopus_is_1_5() {
+        let version = opusic_c::version();
+        assert!(
+            version.contains("1.5"),
+            "expected libopus 1.5.x, got: {version}"
+        );
+    }
+
+    #[test]
+    fn encoder_creates_at_good_profile() {
+        let enc = OpusEncoder::new(QualityProfile::GOOD).expect("opus encoder init");
+        assert_eq!(enc.codec_id, CodecId::Opus24k);
+        assert_eq!(enc.frame_samples(), 960); // 20 ms @ 48 kHz
+    }
+
+    #[test]
+    fn encoder_roundtrip_silence() {
+        use crate::opus_dec::OpusDecoder;
+        let mut enc = OpusEncoder::new(QualityProfile::GOOD).unwrap();
+        let mut dec = OpusDecoder::new(QualityProfile::GOOD).unwrap();
+        let pcm_in = vec![0i16; 960]; // 20 ms silence
+        let mut encoded = vec![0u8; 512];
+        let n = enc.encode(&pcm_in, &mut encoded).unwrap();
+        assert!(n > 0);
+        let mut pcm_out = vec![0i16; 960];
+        let samples = dec.decode(&encoded[..n], &mut pcm_out).unwrap();
+        assert_eq!(samples, 960);
     }
 }

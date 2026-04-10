@@ -15,6 +15,7 @@ pub mod agc;
 pub mod codec2_dec;
 pub mod codec2_enc;
 pub mod denoise;
+pub mod dred_ffi;
 pub mod opus_dec;
 pub mod opus_enc;
 pub mod resample;

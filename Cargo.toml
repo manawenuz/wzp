@@ -37,7 +37,14 @@ quinn = "0.11"
 raptorq = "2"
 
 # Codec
-audiopus = "0.3.0-rc.0"
+# opusic-c: high-level safe bindings over libopus 1.5.2 (encoder side).
+# opusic-sys: raw FFI for the decoder side — we build our own DecoderHandle
+# because opusic-c::Decoder.inner is pub(crate) and cannot be reached for the
+# Phase 3 DRED reconstruction path. See docs/PRD-dred-integration.md.
+# Pinned exactly (no caret) for reproducible libopus 1.5.2 across the fleet.
+opusic-c = { version = "=1.5.5", default-features = false, features = ["bundled", "dred"] }
+opusic-sys = { version = "=0.6.0", default-features = false, features = ["bundled"] }
+bytemuck = "1"
 codec2 = "0.3"
 
 # Crypto
@@ -66,9 +73,7 @@ opt-level = 2
 # real-time audio needs < 20ms per frame, impossible unoptimized.
 [profile.dev.package.nnnoiseless]
 opt-level = 3
-[profile.dev.package.audiopus_sys]
-opt-level = 3
-[profile.dev.package.audiopus]
+[profile.dev.package.opusic-sys]
 opt-level = 3
 [profile.dev.package.raptorq]
 opt-level = 3
@@ -77,15 +82,9 @@ opt-level = 3
 [profile.dev.package.wzp-fec]
 opt-level = 3
 
-# Vendored audiopus_sys with a patched opus/CMakeLists.txt that distinguishes
-# real cl.exe (MSVC) from clang-cl (used by cargo-xwin for Windows cross-
-# compiles). Upstream libopus 1.3.1 gates its `-msse4.1` per-file compile
-# flags on `if(NOT MSVC)`, which is false under clang-cl because CMake sets
-# MSVC=1 for both compilers — resulting in SSE4.1 source files compiled
-# without the required target feature and hard failures in silk/NSQ_sse4_1.c.
-# The vendored copy introduces an `MSVC_CL` var (true only for real cl.exe)
-# and flips the SIMD guards to use it, restoring per-file SIMD flags for
-# clang-cl. See vendor/audiopus_sys/opus/CMakeLists.txt for the full diff
-# and rationale, plus xiph/opus#256 / xiph/opus PR #257 upstream.
-[patch.crates-io]
-audiopus_sys = { path = "vendor/audiopus_sys" }
+# Phase 0 (opus-DRED): removed the [patch.crates-io] audiopus_sys = { path =
+# "vendor/audiopus_sys" } block. That patch existed to fix a Windows clang-cl
+# SIMD compile bug in libopus 1.3.1. With the swap to opusic-sys (libopus
+# 1.5.2), the upstream SIMD gating was fixed and the vendor patch is
+# obsolete. The vendor/audiopus_sys directory itself should be deleted as
+# part of the same cleanup — see the commit that follows this Phase 0.
