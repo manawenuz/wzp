@@ -38,9 +38,17 @@
 //! keeping the bitrate overhead modest compared to 25%. Real measurements
 //! from the quality adapter override upward when loss exceeds the floor.
 
+use std::sync::OnceLock;
+
 use opusic_c::{Application, Bitrate, Channels, Encoder, InbandFec, SampleRate, Signal};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use wzp_proto::{AudioEncoder, CodecError, CodecId, QualityProfile};
+
+/// Logged exactly once per process the first time an OpusEncoder is built.
+/// Confirms that libopus 1.5.2 (the version with DRED) is actually linked
+/// at runtime — invaluable when chasing "is the new codec loaded?"
+/// regressions on Android, where the only debug surface is logcat.
+static LIBOPUS_VERSION_LOGGED: OnceLock<()> = OnceLock::new();
 
 /// Minimum `OPUS_SET_PACKET_LOSS_PERC` value used in DRED mode. libopus
 /// scales the DRED emission window with the assumed loss percentage:
@@ -178,13 +186,25 @@ impl OpusEncoder {
             .set_packet_loss(DRED_LOSS_FLOOR_PCT)
             .map_err(|e| CodecError::EncodeFailed(format!("set packet loss floor: {e:?}")))?;
 
-        debug!(
+        // Bumped from debug! to info! so the DRED config is visible in
+        // logcat without enabling debug-level filtering. Each call's
+        // first OpusEncoder construction will log this; subsequent
+        // profile switches log it again with the new tier.
+        info!(
             codec = ?codec,
             dred_frames,
             dred_ms = dred_frames as u32 * 10,
             loss_floor_pct = DRED_LOSS_FLOOR_PCT,
             "opus encoder: DRED enabled"
         );
+
+        // One-shot logging of the linked libopus version so we can
+        // confirm at a glance that opusic-c (libopus 1.5.2) is loaded.
+        // Pre-Phase-0 audiopus shipped libopus 1.3 which has no DRED;
+        // if this log says "libopus 1.3" something is very wrong.
+        LIBOPUS_VERSION_LOGGED.get_or_init(|| {
+            info!(libopus_version = %opusic_c::version(), "linked libopus version");
+        });
 
         Ok(())
     }

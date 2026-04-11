@@ -113,6 +113,12 @@ struct DredRecvState {
     expected_seq: Option<u16>,
     pub dred_reconstructions: u64,
     pub classical_plc_invocations: u64,
+    /// Number of arriving Opus packets we have parsed for DRED so far —
+    /// used to throttle the periodic "DRED state observed" log to one
+    /// line every N packets so logcat doesn't drown.
+    parses_total: u64,
+    /// Counter of parses that yielded a non-zero `samples_available`.
+    parses_with_data: u64,
 }
 
 impl DredRecvState {
@@ -128,6 +134,8 @@ impl DredRecvState {
             expected_seq: None,
             dred_reconstructions: 0,
             classical_plc_invocations: 0,
+            parses_total: 0,
+            parses_with_data: 0,
         }
     }
 
@@ -138,10 +146,29 @@ impl DredRecvState {
     /// Call this BEFORE `fill_gap_to` so the anchor reflects the freshest
     /// DRED source available for gap reconstruction.
     fn ingest_opus(&mut self, seq: u16, payload: &[u8]) {
+        self.parses_total += 1;
         match self.dred_decoder.parse_into(&mut self.scratch, payload) {
             Ok(available) if available > 0 => {
+                self.parses_with_data += 1;
                 std::mem::swap(&mut self.scratch, &mut self.last_good);
                 self.last_good_seq = Some(seq);
+
+                // First successful parse on this call: log loudly so the
+                // user can see "DRED is on the wire" in logcat. After
+                // that, sample every 100th parse to confirm the window
+                // is steady-state without drowning the log.
+                let should_log = self.parses_with_data == 1
+                    || self.parses_with_data % 100 == 0;
+                if should_log {
+                    info!(
+                        seq,
+                        samples_available = available,
+                        ms = available / 48,
+                        parses_with_data = self.parses_with_data,
+                        parses_total = self.parses_total,
+                        "DRED state parsed from Opus packet"
+                    );
+                }
             }
             _ => {
                 // Packet carried no DRED data, or parse failed — keep
@@ -198,11 +225,44 @@ impl DredRecvState {
                     match reconstructed {
                         Some(_n) => {
                             self.dred_reconstructions += 1;
+                            // Log every DRED reconstruction. These are
+                            // rare events on a clean network — when
+                            // they fire, we want to know exactly which
+                            // gap was filled and how the offset math
+                            // played out. Acceptable to be chatty here.
+                            info!(
+                                missing_seq,
+                                anchor_seq = ?self.last_good_seq,
+                                offset_samples,
+                                offset_ms = offset_samples / 48,
+                                samples_available = available,
+                                gap_size = gap,
+                                total_dred_recoveries = self.dred_reconstructions,
+                                "DRED reconstruction fired for missing frame"
+                            );
                             emit(out);
                         }
                         None => {
                             if decoder.decode_lost(out).is_ok() {
                                 self.classical_plc_invocations += 1;
+                                // Log the first few classical PLC fills
+                                // and then sample, so we can see when
+                                // DRED couldn't cover a gap. The reason
+                                // is whichever check failed in the if
+                                // above (offset out of range, no good
+                                // state, or reconstruct error).
+                                if self.classical_plc_invocations <= 3
+                                    || self.classical_plc_invocations % 50 == 0
+                                {
+                                    info!(
+                                        missing_seq,
+                                        anchor_seq = ?self.last_good_seq,
+                                        offset_samples,
+                                        samples_available = available,
+                                        total_classical_plc = self.classical_plc_invocations,
+                                        "classical PLC fill (DRED could not cover gap)"
+                                    );
+                                }
                                 emit(out);
                             }
                         }
@@ -643,6 +703,10 @@ impl CallEngine {
                         written_samples,
                         decode_errs,
                         codec = ?current_codec,
+                        dred_recv = dred_recv.dred_reconstructions,
+                        classical_plc = dred_recv.classical_plc_invocations,
+                        dred_parses_with_data = dred_recv.parses_with_data,
+                        dred_parses_total = dred_recv.parses_total,
                         "recv heartbeat (android)"
                     );
                     heartbeat = std::time::Instant::now();
