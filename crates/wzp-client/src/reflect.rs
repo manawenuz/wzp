@@ -275,12 +275,61 @@ pub fn determine_role(
     }
 }
 
+/// Returns `true` if the address is in an RFC1918 / link-local /
+/// loopback range and therefore cannot possibly be a post-NAT
+/// reflex address from the public internet's point of view.
+///
+/// A probe against a relay ON THE SAME LAN as the client will
+/// naturally report the client's LAN IP back (because there's no
+/// NAT between them) — that observation is real but says nothing
+/// about the client's public-internet-facing NAT state. Mixing
+/// LAN reflex addrs with public-internet reflex addrs in
+/// `classify_nat` would always report `Multiple` (different IPs)
+/// and falsely warn about symmetric NAT. Filter them out before
+/// classifying.
+fn is_private_or_loopback(addr: &SocketAddr) -> bool {
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private() // 10/8, 172.16/12, 192.168/16
+                || v4.is_link_local() // 169.254/16
+                || (o[0] == 100 && (o[1] & 0xc0) == 0x40) // 100.64/10 CGNAT shared
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
 /// Pure-function NAT classifier — split out for unit testing
 /// without touching the network.
+///
+/// Only considers probes whose reflex addr is a **public-internet**
+/// address. LAN / private / loopback reflex addrs are dropped
+/// because they reflect the same-network path rather than the
+/// real NAT state. CGNAT (100.64/10) is also treated as private
+/// because the post-CGNAT address would be what we actually want
+/// to classify on — but CGNAT is unreachable from outside the
+/// carrier, so a relay seeing the CGNAT addr is on the same
+/// carrier network and again not useful for classification.
 pub fn classify_nat(probes: &[NatProbeResult]) -> (NatType, Option<String>) {
-    let successes: Vec<SocketAddr> = probes
+    // First: parse every successful probe's observed addr.
+    let parsed: Vec<SocketAddr> = probes
         .iter()
         .filter_map(|p| p.observed_addr.as_deref().and_then(|s| s.parse().ok()))
+        .collect();
+
+    // Then: drop LAN / private / loopback reflex addrs. Those are
+    // legitimate observations by same-network relays, but they
+    // don't contribute to NAT-type classification because the
+    // client's real public-facing NAT mapping is not involved on
+    // that path. A relay on the same LAN always sees the client's
+    // LAN IP, regardless of whether the NAT beyond it is cone or
+    // symmetric.
+    let successes: Vec<SocketAddr> = parsed
+        .into_iter()
+        .filter(|a| !is_private_or_loopback(a))
         .collect();
 
     if successes.len() < 2 {
@@ -362,6 +411,66 @@ mod tests {
         ];
         let (nt, addr) = classify_nat(&probes);
         assert_eq!(nt, NatType::Multiple);
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn classify_drops_private_ip_probes() {
+        // One LAN probe + one public probe should behave like a
+        // single public probe — i.e. Unknown (not enough data to
+        // classify). This is the common real-world case: the user
+        // has a LAN relay + an internet relay configured, the LAN
+        // relay sees the LAN IP, the internet relay sees the WAN
+        // IP, and the old classifier would flag "Multiple" and
+        // falsely warn about symmetric NAT.
+        let probes = vec![
+            mk(Some("192.168.1.100:4433")), // LAN — must be dropped
+            mk(Some("203.0.113.5:4433")),   // public (TEST-NET-3)
+        ];
+        let (nt, _) = classify_nat(&probes);
+        assert_eq!(nt, NatType::Unknown);
+    }
+
+    #[test]
+    fn classify_drops_loopback_probes() {
+        let probes = vec![
+            mk(Some("127.0.0.1:4433")),     // loopback — must be dropped
+            mk(Some("203.0.113.5:4433")),   // public
+            mk(Some("203.0.113.5:4433")),   // public, same addr
+        ];
+        let (nt, addr) = classify_nat(&probes);
+        // Two public probes with identical addrs → Cone.
+        assert_eq!(nt, NatType::Cone);
+        assert_eq!(addr.as_deref(), Some("203.0.113.5:4433"));
+    }
+
+    #[test]
+    fn classify_drops_cgnat_probes() {
+        // 100.64.0.0/10 is the CGNAT shared-transition range.
+        // Filter treats it like RFC1918 — a relay that sees the
+        // client with a 100.64/10 addr is on the same CGNAT
+        // network and can't contribute to public NAT classification.
+        let probes = vec![
+            mk(Some("100.64.0.42:4433")),   // CGNAT — dropped
+            mk(Some("203.0.113.5:4433")),   // public
+            mk(Some("203.0.113.5:12345")),  // public, different port
+        ];
+        let (nt, _) = classify_nat(&probes);
+        // Two public probes same IP different port → SymmetricPort.
+        assert_eq!(nt, NatType::SymmetricPort);
+    }
+
+    #[test]
+    fn classify_two_lan_probes_is_unknown_not_cone() {
+        // Even if both probes come back from LAN relays, we can't
+        // say anything useful about the public NAT state. Unknown,
+        // not Cone.
+        let probes = vec![
+            mk(Some("192.168.1.100:4433")),
+            mk(Some("192.168.1.100:4433")),
+        ];
+        let (nt, addr) = classify_nat(&probes);
+        assert_eq!(nt, NatType::Unknown);
         assert!(addr.is_none());
     }
 

@@ -826,9 +826,18 @@ settingsBtnCall.addEventListener("click", openSettings);
 // shows its working state inline so the user knows it's waiting on
 // the relay rather than the network.
 // Phase 2 multi-relay NAT type detection. Probes every configured
-// relay in parallel through transient QUIC connections and
-// classifies the result. Green = Cone (P2P viable),
-// amber = SymmetricPort (must relay), gray = Multiple / Unknown.
+// relay in parallel and classifies the result.
+//
+//   Cone          = P2P direct path viable, green cue
+//   SymmetricPort = per-destination port mapping, informational
+//                   (P2P will fall back to relay but calls still work)
+//   Multiple      = classifier saw different public IPs; informational
+//   Unknown       = not enough public probes, neutral
+//
+// The classifier drops LAN / private / CGNAT reflex addrs before
+// deciding, so a mixed "LAN relay + internet relay" setup does NOT
+// falsely flag as symmetric. Failed probes are shown in the list
+// for transparency but dimmed, not highlighted.
 sNatDetectBtn.addEventListener("click", async () => {
   const s = loadSettings();
   if (!s.relays || s.relays.length === 0) {
@@ -859,17 +868,18 @@ sNatDetectBtn.addEventListener("click", async () => {
       detection.nat_type === "Cone"
         ? `✓ Cone NAT — P2P viable (${detection.consensus_addr})`
         : detection.nat_type === "SymmetricPort"
-        ? "⚠ Symmetric NAT — must use relay"
+        ? "ℹ Symmetric NAT — P2P falls back to relay, calls still work"
         : detection.nat_type === "Multiple"
-        ? "⚠ Multiple IPs — treating as symmetric"
-        : "? Unknown (not enough successful probes)";
+        ? "ℹ Multiple public IPs observed"
+        : "? Unknown (not enough public probes)";
 
+    // Only Cone is "good news green". Everything else is neutral
+    // informational — the user has configured relays so any
+    // classification result just describes their network; none
+    // are "wrong" per se.
     const verdictColor =
       detection.nat_type === "Cone"
         ? "var(--green)"
-        : detection.nat_type === "SymmetricPort" ||
-          detection.nat_type === "Multiple"
-        ? "var(--yellow)"
         : "var(--text-dim)";
 
     sNatType.textContent = verdictLabel;
@@ -882,7 +892,10 @@ sNatDetectBtn.addEventListener("click", async () => {
             p.relay_addr
           )}) → ${escapeHtml(p.observed_addr)} [${p.latency_ms ?? "?"}ms]</div>`;
         } else {
-          return `<div style="color:var(--yellow)">• ${escapeHtml(
+          // Failed probes are dimmed, not highlighted — the classifier
+          // already ignores them, and the user doesn't need to be
+          // alarmed by a momentarily-offline relay.
+          return `<div style="color:var(--text-dim);opacity:0.7">• ${escapeHtml(
             p.relay_name
           )} (${escapeHtml(p.relay_addr)}) → ${escapeHtml(
             p.error ?? "probe failed"

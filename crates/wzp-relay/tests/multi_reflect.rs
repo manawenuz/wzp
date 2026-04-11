@@ -116,11 +116,19 @@ async fn probe_reflect_addr_happy_path() {
 }
 
 // -----------------------------------------------------------------------
-// Test 2: two loopback relays → Cone classification
+// Test 2: two loopback relays → probes succeed, classification is Unknown
 // -----------------------------------------------------------------------
+//
+// With the private-IP filter added in the NAT classifier, loopback
+// reflex addrs (127.0.0.1) are dropped before classification —
+// they can't possibly indicate public-internet NAT state. So the
+// test now asserts:
+//   - both probes succeed end-to-end (wire plumbing works)
+//   - both return 127.0.0.1 (same-host is visible)
+//   - the aggregated verdict is Unknown (no public probes)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn detect_nat_type_two_loopback_relays_is_cone() {
+async fn detect_nat_type_two_loopback_relays_probes_work_but_classify_unknown() {
     let (addr_a, _h_a) = spawn_mock_relay().await;
     let (addr_b, _h_b) = spawn_mock_relay().await;
 
@@ -135,24 +143,13 @@ async fn detect_nat_type_two_loopback_relays_is_cone() {
 
     assert_eq!(detection.probes.len(), 2);
     for p in &detection.probes {
-        assert!(p.observed_addr.is_some(), "probe {:?} failed: {:?}", p.relay_name, p.error);
+        assert!(
+            p.observed_addr.is_some(),
+            "probe {:?} failed: {:?}",
+            p.relay_name,
+            p.error
+        );
     }
-
-    // Loopback single-host: every probe sees 127.0.0.1 and, crucially,
-    // uses a different ephemeral source port (since probe_reflect_addr
-    // spins up a fresh quinn::Endpoint per probe). Wait — that makes
-    // this look like Symmetric to the classifier, not Cone!
-    //
-    // The classifier cares about the *observed* addr, which is what
-    // the relay sees as the client's source. Two different client
-    // endpoints on loopback → two different observed ports → the
-    // classifier correctly labels this as SymmetricPort in the test
-    // environment. That's still a valid verification of the
-    // plumbing, just not of the Cone classification.
-    //
-    // Accept either Cone OR SymmetricPort for this test, then
-    // assert the more specific invariant that matters: both probes
-    // returned the same observed IP.
     let observed_ips: Vec<String> = detection
         .probes
         .iter()
@@ -167,14 +164,15 @@ async fn detect_nat_type_two_loopback_relays_is_cone() {
     assert_eq!(observed_ips[0], "127.0.0.1");
     assert_eq!(observed_ips[1], "127.0.0.1");
 
-    // Either classification is valid on loopback (see long comment
-    // above). Explicitly assert the set so a future refactor that
-    // accidentally returns `Multiple` or `Unknown` fails the test.
-    assert!(
-        matches!(detection.nat_type, NatType::Cone | NatType::SymmetricPort),
-        "expected Cone or SymmetricPort on loopback, got {:?}",
-        detection.nat_type
+    // Classification: loopback probes are filtered out of the
+    // public-NAT classifier, so with 0 public probes the result
+    // is Unknown.
+    assert_eq!(
+        detection.nat_type,
+        NatType::Unknown,
+        "loopback-only probes must not contribute to public NAT classification"
     );
+    assert!(detection.consensus_addr.is_none());
 }
 
 // -----------------------------------------------------------------------
