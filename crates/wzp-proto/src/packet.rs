@@ -770,6 +770,29 @@ pub enum SignalMessage {
     CallRinging {
         call_id: String,
     },
+
+    // ── NAT reflection ("STUN for QUIC") ──────────────────────────────
+
+    /// Client → relay: "please tell me the source IP:port you see on
+    /// this connection". A QUIC-native replacement for classic STUN
+    /// that reuses the TLS-authenticated signal channel to the relay
+    /// instead of running a separate UDP reflection service on port
+    /// 3478. The relay answers with `ReflectResponse`.
+    ///
+    /// No payload — the relay already knows which connection the
+    /// request arrived on, and `connection.remote_address()` gives it
+    /// the exact source address (post-NAT) as observed from the
+    /// server side of the TLS session.
+    Reflect,
+
+    /// Relay → client: response to `Reflect`. Carries the socket
+    /// address the relay observes as the client's source for this
+    /// QUIC connection in `SocketAddr::to_string()` form — "a.b.c.d:p"
+    /// for IPv4, "[::1]:p" for IPv6. Clients parse it with
+    /// `SocketAddr::from_str`.
+    ReflectResponse {
+        observed_addr: String,
+    },
 }
 
 /// How the callee responds to a direct call.
@@ -906,6 +929,58 @@ mod tests {
         assert_eq!(packet.header, decoded.header);
         assert_eq!(packet.payload, decoded.payload);
         assert_eq!(packet.quality_report, decoded.quality_report);
+    }
+
+    #[test]
+    fn reflect_serialize_roundtrip() {
+        // Reflect is a unit variant — the client sends it with no
+        // payload and the relay answers with the observed source addr.
+        let req = SignalMessage::Reflect;
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::Reflect));
+
+        // ReflectResponse carries a string — exercise both IPv4 and
+        // IPv6 shapes because SocketAddr::to_string uses [::1]:port
+        // for v6 and the client side has to parse that back.
+        for addr in ["192.0.2.17:4433", "[2001:db8::1]:4433", "127.0.0.1:54321"] {
+            let resp = SignalMessage::ReflectResponse {
+                observed_addr: addr.to_string(),
+            };
+            let json = serde_json::to_string(&resp).unwrap();
+            let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+            match decoded {
+                SignalMessage::ReflectResponse { observed_addr } => {
+                    assert_eq!(observed_addr, addr);
+                    // Must parse back to a SocketAddr cleanly.
+                    let _parsed: std::net::SocketAddr = observed_addr.parse()
+                        .expect("observed_addr must parse as SocketAddr");
+                }
+                _ => panic!("wrong variant after roundtrip"),
+            }
+        }
+    }
+
+    #[test]
+    fn reflect_backward_compat_with_existing_variants() {
+        // Adding Reflect/ReflectResponse at the end of the enum must
+        // not break JSON round-tripping of existing variants. Smoke-
+        // test a sample of the pre-existing ones.
+        let cases = vec![
+            SignalMessage::Ping { timestamp_ms: 12345 },
+            SignalMessage::Hold,
+            SignalMessage::Hangup { reason: HangupReason::Normal },
+            SignalMessage::CallRinging { call_id: "abcd".into() },
+        ];
+        for m in cases {
+            let json = serde_json::to_string(&m).unwrap();
+            let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+            // Discriminant equality proves variant tag survived.
+            assert_eq!(
+                std::mem::discriminant(&m),
+                std::mem::discriminant(&decoded)
+            );
+        }
     }
 
     #[test]

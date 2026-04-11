@@ -83,6 +83,8 @@ const sRoom = document.getElementById("s-room") as HTMLInputElement;
 const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sDredDebug = document.getElementById("s-dred-debug") as HTMLInputElement;
+const sReflectedAddr = document.getElementById("s-reflected-addr") as HTMLSpanElement;
+const sReflectBtn = document.getElementById("s-reflect-btn") as HTMLButtonElement;
 const sAgc = document.getElementById("s-agc") as HTMLInputElement;
 const sQuality = document.getElementById("s-quality") as HTMLInputElement;
 const sQualityLabel = document.getElementById("s-quality-label")!;
@@ -757,6 +759,36 @@ function renderSettingsRecentRooms(rooms: RecentRoom[]) {
 
 settingsBtnHome.addEventListener("click", openSettings);
 settingsBtnCall.addEventListener("click", openSettings);
+// "STUN for QUIC" — ask the registered relay for our own public
+// address. Requires register_signal to have been run first
+// (otherwise the Rust side returns "not registered"). The button
+// shows its working state inline so the user knows it's waiting on
+// the relay rather than the network.
+sReflectBtn.addEventListener("click", async () => {
+  sReflectedAddr.textContent = "querying...";
+  sReflectBtn.disabled = true;
+  try {
+    const addr = await invoke<string>("get_reflected_address");
+    sReflectedAddr.textContent = addr;
+    sReflectedAddr.style.color = "var(--green)";
+  } catch (e: any) {
+    // Two main failure modes surfaced via the error string:
+    //  - "not registered"                 — user hasn't registered
+    //                                        against a relay yet
+    //  - "reflect timeout (relay may not support reflection)"
+    //                                       — old relay, pre-Phase-1
+    const msg = String(e);
+    sReflectedAddr.textContent = msg.includes("not registered")
+      ? "⚠ register first"
+      : msg.includes("timeout")
+      ? "⚠ relay does not support reflection"
+      : `⚠ ${msg}`;
+    sReflectedAddr.style.color = "var(--yellow)";
+  } finally {
+    sReflectBtn.disabled = false;
+  }
+});
+
 settingsClose.addEventListener("click", closeSettings);
 settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel) closeSettings(); });
 

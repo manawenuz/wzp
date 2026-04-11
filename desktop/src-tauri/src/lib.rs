@@ -465,6 +465,14 @@ struct SignalState {
     incoming_call_id: Option<String>,
     incoming_caller_fp: Option<String>,
     incoming_caller_alias: Option<String>,
+    /// Pending `ReflectResponse` channel. When the `get_reflected_address`
+    /// Tauri command fires, it drops a `oneshot::Sender<SocketAddr>` here
+    /// before sending a `SignalMessage::Reflect`. The spawned recv loop
+    /// picks the response off the next bi-stream and fires the sender.
+    /// If another Reflect request comes in while one is pending, we
+    /// replace the sender — the old receiver sees a `Cancelled` error
+    /// and the caller retries.
+    pending_reflect: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
 }
 
 #[tauri::command]
@@ -542,6 +550,39 @@ async fn register_signal(
                     let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None;
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
                 }
+                Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
+                    // "STUN for QUIC" response — the relay told us our
+                    // own server-reflexive address. If a Tauri command
+                    // is currently awaiting this, fire the oneshot;
+                    // otherwise log and drop (unsolicited responses
+                    // from a confused relay shouldn't crash the loop).
+                    tracing::info!(%observed_addr, "signal: ReflectResponse");
+                    match observed_addr.parse::<std::net::SocketAddr>() {
+                        Ok(parsed) => {
+                            let mut sig = signal_state.lock().await;
+                            if let Some(tx) = sig.pending_reflect.take() {
+                                // `send` returns Err(addr) only if the
+                                // receiver was dropped (caller timed out
+                                // or canceled). Either way, nothing to
+                                // do — the value is gone.
+                                let _ = tx.send(parsed);
+                            } else {
+                                tracing::debug!(%observed_addr, "reflect: unsolicited response (no pending sender)");
+                            }
+                            let _ = app_clone.emit(
+                                "signal-event",
+                                serde_json::json!({"type":"reflect","observed_addr":observed_addr}),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(%observed_addr, error = %e, "reflect: relay returned unparseable addr");
+                            // Treat unparseable response as a failed
+                            // request so the caller doesn't hang.
+                            let mut sig = signal_state.lock().await;
+                            let _ = sig.pending_reflect.take();
+                        }
+                    }
+                }
                 Ok(Some(other)) => {
                     tracing::debug!(?other, "signal: unhandled message");
                 }
@@ -615,6 +656,69 @@ async fn answer_call(
     Ok(())
 }
 
+/// "STUN for QUIC" — ask the relay what our own public address looks
+/// like from its side of the TLS-authenticated signal connection.
+///
+/// Wire flow:
+///   1. We install a `oneshot::Sender` in `SignalState.pending_reflect`
+///      (replacing any stale one — last request wins).
+///   2. We release the state lock and send `SignalMessage::Reflect`
+///      over the existing transport. The relay opens a fresh bi-stream
+///      on its side to respond, which the spawned recv loop picks up.
+///   3. The recv loop's `ReflectResponse` match arm takes the sender
+///      back out and fires it with the parsed `SocketAddr`.
+///   4. We await the receiver with a 1s timeout so a non-reflecting
+///      relay (pre-Phase-1 build) doesn't hang the UI forever.
+///
+/// Returns the addr as a string so it can cross the Tauri IPC
+/// boundary unchanged — JS-side can display it directly or parse it
+/// with `new URL(...)` / a regex if needed.
+#[tauri::command]
+async fn get_reflected_address(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    use wzp_proto::SignalMessage;
+    let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
+    let transport = {
+        let mut sig = state.signal.lock().await;
+        // Drop any older pending sender — we don't support more than
+        // one in-flight Reflect per connection. A prior request whose
+        // receiver has timed out will be cleaned up here automatically.
+        sig.pending_reflect = Some(tx);
+        sig.transport
+            .as_ref()
+            .ok_or_else(|| "not registered".to_string())?
+            .clone()
+    };
+    if let Err(e) = transport.send_signal(&SignalMessage::Reflect).await {
+        // Clean up the pending sender so the next attempt doesn't see
+        // a stale channel. Re-acquire the lock inline since we already
+        // released it above to release `transport` back to the caller.
+        let mut sig = state.signal.lock().await;
+        sig.pending_reflect = None;
+        return Err(format!("send Reflect: {e}"));
+    }
+
+    // 1s is plenty for a same-datacenter relay (< 50ms RTT) and also
+    // the ceiling for "something's wrong, tell the user" — any older
+    // relay will never reply at all. 1100ms in the integration test.
+    match tokio::time::timeout(std::time::Duration::from_millis(1000), rx).await {
+        Ok(Ok(addr)) => Ok(addr.to_string()),
+        Ok(Err(_canceled)) => {
+            // The recv loop dropped the sender (relay returned
+            // unparseable addr, or loop exited mid-request).
+            Err("reflect channel canceled (signal loop exited or parse error)".into())
+        }
+        Err(_elapsed) => {
+            // Timeout — strip the pending sender so the next attempt
+            // starts clean. Old (pre-Phase-1) relays will land here.
+            let mut sig = state.signal.lock().await;
+            sig.pending_reflect = None;
+            Err("reflect timeout (relay may not support reflection)".into())
+        }
+    }
+}
+
 #[tauri::command]
 async fn get_signal_status(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let sig = state.signal.lock().await;
@@ -651,6 +755,7 @@ pub fn run() {
         signal: Arc::new(Mutex::new(SignalState {
             transport: None, endpoint: None, fingerprint: String::new(), signal_status: "idle".into(),
             incoming_call_id: None, incoming_caller_fp: None, incoming_caller_alias: None,
+            pending_reflect: None,
         })),
     });
 
@@ -700,6 +805,7 @@ pub fn run() {
             ping_relay, get_identity, get_app_info,
             connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
+            get_reflected_address,
             deregister,
             set_speakerphone, is_speakerphone_on,
             get_call_history, get_recent_contacts, clear_call_history,

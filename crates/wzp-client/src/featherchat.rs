@@ -120,6 +120,12 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::CallRinging { .. } => CallSignalType::Ringing,
         SignalMessage::RegisterPresence { .. }
         | SignalMessage::RegisterPresenceAck { .. } => CallSignalType::Offer, // relay-only
+        // NAT reflection is a client↔relay control exchange that
+        // never crosses the featherChat bridge — if it ever reaches
+        // this mapper something is wrong, but we still have to give
+        // an answer. "Offer" is the generic catch-all.
+        SignalMessage::Reflect
+        | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
     }
 }
 

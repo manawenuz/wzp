@@ -83,12 +83,12 @@ async fn full_handshake_both_sides_derive_same_session() {
 
     // Run client and relay handshakes concurrently.
     let (client_result, relay_result) = tokio::join!(
-        wzp_client::handshake::perform_handshake(client_transport_clone.as_ref(), &client_seed),
+        wzp_client::handshake::perform_handshake(client_transport_clone.as_ref(), &client_seed, None),
         wzp_relay::handshake::accept_handshake(relay_transport_clone.as_ref(), &relay_seed),
     );
 
     let mut client_session = client_result.expect("client handshake should succeed");
-    let (mut relay_session, chosen_profile) =
+    let (mut relay_session, chosen_profile, _caller_fp, _caller_alias) =
         relay_result.expect("relay handshake should succeed");
 
     // Verify a profile was chosen.
@@ -151,6 +151,7 @@ async fn handshake_rejects_tampered_signature() {
             ephemeral_pub,
             signature: bad_signature,
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+            alias: None,
         };
         client_transport_clone
             .send_signal(&offer)

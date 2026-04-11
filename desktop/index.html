@@ -186,6 +186,18 @@
             </div>
           </div>
           <div class="settings-section">
+            <h3>Network</h3>
+            <div class="setting-row">
+              <span class="setting-label">Public address</span>
+              <span id="s-reflected-addr" class="fp-display">(not queried)</span>
+              <button id="s-reflect-btn" class="secondary-btn">Detect</button>
+            </div>
+            <small style="color:var(--text-dim);display:block;margin-top:4px">
+              Asks the registered relay to echo back the IP:port it sees for this
+              connection (QUIC-native NAT reflection, replaces STUN).
+            </small>
+          </div>
+          <div class="settings-section">
             <h3>Recent Rooms</h3>
             <div id="s-recent-rooms" class="recent-rooms-list"></div>
             <button id="s-clear-recent" class="secondary-btn">Clear History</button>

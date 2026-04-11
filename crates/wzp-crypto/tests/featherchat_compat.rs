@@ -115,6 +115,7 @@ fn wzp_signal_serializes_into_fc_callsignal_payload() {
         ephemeral_pub: [2u8; 32],
         signature: vec![3u8; 64],
         supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+        alias: None,
     };
 
     // Encode as featherChat CallSignal payload
@@ -280,6 +281,7 @@ fn all_signal_types_map_correctly() {
             wzp_proto::SignalMessage::CallOffer {
                 identity_pub: [0; 32], ephemeral_pub: [0; 32],
                 signature: vec![], supported_profiles: vec![],
+                alias: None,
             },
             "Offer",
         ),

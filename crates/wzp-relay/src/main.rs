@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use wzp_proto::{MediaTransport, SignalMessage};
 use wzp_relay::config::RelayConfig;
@@ -890,6 +890,31 @@ async fn main() -> anyhow::Result<()> {
 
                                 SignalMessage::Ping { timestamp_ms } => {
                                     let _ = transport.send_signal(&SignalMessage::Pong { timestamp_ms }).await;
+                                }
+
+                                // QUIC-native NAT reflection ("STUN for QUIC").
+                                // The client asks "what source address do you
+                                // see for me?" and we reply with whatever
+                                // quinn reports as this connection's remote
+                                // address — i.e. the post-NAT public address
+                                // as observed from the server side of the TLS
+                                // session. Used by the P2P path to learn the
+                                // client's server-reflexive address without
+                                // running a separate STUN server. No auth or
+                                // rate-limit in Phase 1 — the client is
+                                // already TLS-authenticated by the time it
+                                // reaches this match arm.
+                                SignalMessage::Reflect => {
+                                    let observed_addr = addr.to_string();
+                                    if let Err(e) = transport.send_signal(
+                                        &SignalMessage::ReflectResponse {
+                                            observed_addr: observed_addr.clone(),
+                                        },
+                                    ).await {
+                                        warn!(%addr, error = %e, "reflect: failed to send response");
+                                    } else {
+                                        debug!(%addr, %observed_addr, "reflect: responded");
+                                    }
                                 }
 
                                 other => {
