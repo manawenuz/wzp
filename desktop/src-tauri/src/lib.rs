@@ -719,6 +719,53 @@ async fn get_reflected_address(
     }
 }
 
+/// Phase 2 of the "STUN for QUIC" rollout — probe multiple relays
+/// in parallel to classify this client's NAT type. See
+/// `wzp_client::reflect` for the per-probe logic and the pure
+/// classifier.
+///
+/// This does NOT touch the registered `SignalState` — each probe
+/// opens a fresh throwaway QUIC endpoint so the OS gives it a
+/// fresh ephemeral source port. Sharing one endpoint across probes
+/// would make a symmetric NAT look like a cone NAT, which is
+/// exactly the failure mode we're trying to detect.
+///
+/// Takes the relay list from JS because the GUI owns the relay
+/// config (localStorage `wzp-settings.relays`). Frontend passes it
+/// in; Rust side just does the network work.
+#[tauri::command]
+async fn detect_nat_type(
+    relays: Vec<RelayArg>,
+) -> Result<serde_json::Value, String> {
+    // Parse relay args up front so a single malformed entry fails
+    // the whole call cleanly instead of surfacing as a probe error
+    // at the end.
+    let mut parsed = Vec::with_capacity(relays.len());
+    for r in relays {
+        let addr: std::net::SocketAddr = r
+            .address
+            .parse()
+            .map_err(|e| format!("bad relay address {:?}: {e}", r.address))?;
+        parsed.push((r.name, addr));
+    }
+
+    // 1500ms per probe is generous: a same-host probe is < 10ms,
+    // a cross-continent probe is typically < 300ms, and we want
+    // to tolerate a one-off packet loss during connect.
+    let detection = wzp_client::reflect::detect_nat_type(parsed, 1500).await;
+    serde_json::to_value(&detection).map_err(|e| format!("serialize: {e}"))
+}
+
+/// Deserialization shim for the relay list coming from JS. The
+/// `wzp-settings.relays` array in localStorage has more fields
+/// (rtt, serverFingerprint, knownFingerprint) but we only need
+/// name + address here.
+#[derive(serde::Deserialize)]
+struct RelayArg {
+    name: String,
+    address: String,
+}
+
 #[tauri::command]
 async fn get_signal_status(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let sig = state.signal.lock().await;
@@ -805,7 +852,7 @@ pub fn run() {
             ping_relay, get_identity, get_app_info,
             connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
-            get_reflected_address,
+            get_reflected_address, detect_nat_type,
             deregister,
             set_speakerphone, is_speakerphone_on,
             get_call_history, get_recent_contacts, clear_call_history,

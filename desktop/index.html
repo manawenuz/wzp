@@ -196,6 +196,17 @@
               Asks the registered relay to echo back the IP:port it sees for this
               connection (QUIC-native NAT reflection, replaces STUN).
             </small>
+            <div class="setting-row" style="margin-top:10px">
+              <span class="setting-label">NAT type</span>
+              <span id="s-nat-type" class="fp-display">(not detected)</span>
+              <button id="s-nat-detect-btn" class="secondary-btn">Detect NAT</button>
+            </div>
+            <div id="s-nat-probes" style="margin-top:6px;font-size:11px;color:var(--text-dim)"></div>
+            <small style="color:var(--text-dim);display:block;margin-top:4px">
+              Probes every configured relay in parallel and compares the results
+              to classify the NAT: cone (P2P viable), symmetric (must relay),
+              multiple, or unknown.
+            </small>
           </div>
           <div class="settings-section">
             <h3>Recent Rooms</h3>

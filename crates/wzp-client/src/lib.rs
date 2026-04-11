@@ -33,6 +33,7 @@ pub mod echo_test;
 pub mod featherchat;
 pub mod handshake;
 pub mod metrics;
+pub mod reflect;
 pub mod sweep;
 
 // AudioPlayback: three possible backends depending on feature flags.

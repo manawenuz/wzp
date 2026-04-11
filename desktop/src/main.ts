@@ -85,6 +85,9 @@ const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sDredDebug = document.getElementById("s-dred-debug") as HTMLInputElement;
 const sReflectedAddr = document.getElementById("s-reflected-addr") as HTMLSpanElement;
 const sReflectBtn = document.getElementById("s-reflect-btn") as HTMLButtonElement;
+const sNatType = document.getElementById("s-nat-type") as HTMLSpanElement;
+const sNatDetectBtn = document.getElementById("s-nat-detect-btn") as HTMLButtonElement;
+const sNatProbes = document.getElementById("s-nat-probes") as HTMLDivElement;
 const sAgc = document.getElementById("s-agc") as HTMLInputElement;
 const sQuality = document.getElementById("s-quality") as HTMLInputElement;
 const sQualityLabel = document.getElementById("s-quality-label")!;
@@ -764,6 +767,80 @@ settingsBtnCall.addEventListener("click", openSettings);
 // (otherwise the Rust side returns "not registered"). The button
 // shows its working state inline so the user knows it's waiting on
 // the relay rather than the network.
+// Phase 2 multi-relay NAT type detection. Probes every configured
+// relay in parallel through transient QUIC connections and
+// classifies the result. Green = Cone (P2P viable),
+// amber = SymmetricPort (must relay), gray = Multiple / Unknown.
+sNatDetectBtn.addEventListener("click", async () => {
+  const s = loadSettings();
+  if (!s.relays || s.relays.length === 0) {
+    sNatType.textContent = "⚠ no relays configured";
+    sNatType.style.color = "var(--yellow)";
+    return;
+  }
+  sNatType.textContent = "probing...";
+  sNatType.style.color = "var(--text)";
+  sNatProbes.innerHTML = "";
+  sNatDetectBtn.disabled = true;
+  try {
+    const detection = await invoke<{
+      probes: Array<{
+        relay_name: string;
+        relay_addr: string;
+        observed_addr: string | null;
+        latency_ms: number | null;
+        error: string | null;
+      }>;
+      nat_type: "Cone" | "SymmetricPort" | "Multiple" | "Unknown";
+      consensus_addr: string | null;
+    }>("detect_nat_type", {
+      relays: s.relays.map((r) => ({ name: r.name, address: r.address })),
+    });
+
+    const verdictLabel =
+      detection.nat_type === "Cone"
+        ? `✓ Cone NAT — P2P viable (${detection.consensus_addr})`
+        : detection.nat_type === "SymmetricPort"
+        ? "⚠ Symmetric NAT — must use relay"
+        : detection.nat_type === "Multiple"
+        ? "⚠ Multiple IPs — treating as symmetric"
+        : "? Unknown (not enough successful probes)";
+
+    const verdictColor =
+      detection.nat_type === "Cone"
+        ? "var(--green)"
+        : detection.nat_type === "SymmetricPort" ||
+          detection.nat_type === "Multiple"
+        ? "var(--yellow)"
+        : "var(--text-dim)";
+
+    sNatType.textContent = verdictLabel;
+    sNatType.style.color = verdictColor;
+
+    sNatProbes.innerHTML = detection.probes
+      .map((p) => {
+        if (p.observed_addr) {
+          return `<div>• ${escapeHtml(p.relay_name)} (${escapeHtml(
+            p.relay_addr
+          )}) → ${escapeHtml(p.observed_addr)} [${p.latency_ms ?? "?"}ms]</div>`;
+        } else {
+          return `<div style="color:var(--yellow)">• ${escapeHtml(
+            p.relay_name
+          )} (${escapeHtml(p.relay_addr)}) → ${escapeHtml(
+            p.error ?? "probe failed"
+          )}</div>`;
+        }
+      })
+      .join("");
+  } catch (e: any) {
+    sNatType.textContent = `⚠ ${String(e)}`;
+    sNatType.style.color = "var(--red)";
+    sNatProbes.innerHTML = "";
+  } finally {
+    sNatDetectBtn.disabled = false;
+  }
+});
+
 sReflectBtn.addEventListener("click", async () => {
   sReflectedAddr.textContent = "querying...";
   sReflectBtn.disabled = true;
