@@ -821,6 +821,15 @@ async fn register_signal(
                     tracing::warn!("signal recv returned None — peer closed");
                     break;
                 }
+                Err(wzp_proto::TransportError::Deserialize(e)) => {
+                    // Forward-compat: the relay sent us a
+                    // SignalMessage variant we don't know yet
+                    // (older client against a newer relay).
+                    // Log and keep the signal connection alive —
+                    // otherwise direct-call registration would
+                    // silently die on any protocol bump.
+                    tracing::warn!(error = %e, "signal recv: unknown variant, continuing");
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "signal recv error — breaking loop");
                     break;

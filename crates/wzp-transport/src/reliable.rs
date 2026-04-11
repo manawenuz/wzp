@@ -53,6 +53,13 @@ pub async fn recv_signal(recv: &mut quinn::RecvStream) -> Result<SignalMessage, 
         .await
         .map_err(|e| TransportError::Internal(format!("stream read payload error: {e}")))?;
 
-    serde_json::from_slice(&payload)
-        .map_err(|e| TransportError::Internal(format!("signal deserialize error: {e}")))
+    serde_json::from_slice(&payload).map_err(|e| {
+        // Distinguish serde failures from transport failures so the
+        // caller (relay main loop, client recv loop) can continue on
+        // unknown-variant / parse errors instead of tearing down the
+        // whole signal connection. Forward-compat: adding a new
+        // `SignalMessage` variant in one side must not break the
+        // other side's signal connection.
+        TransportError::Deserialize(format!("{e}"))
+    })
 }

@@ -1307,6 +1307,16 @@ async fn main() -> anyhow::Result<()> {
                             info!(%addr, "signal connection closed");
                             break;
                         }
+                        Err(wzp_proto::TransportError::Deserialize(e)) => {
+                            // Forward-compat: the peer sent a
+                            // SignalMessage variant we don't know
+                            // (newer client, newer federation peer).
+                            // Log and continue — tearing down the
+                            // connection on unknown variants would
+                            // silently kill interop across minor
+                            // protocol version bumps.
+                            warn!(%addr, "signal deserialize (unknown variant?), continuing: {e}");
+                        }
                         Err(e) => {
                             warn!(%addr, "signal recv error: {e}");
                             break;

@@ -53,6 +53,15 @@ pub enum TransportError {
     Timeout { ms: u64 },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Parsed wire bytes successfully but the payload didn't
+    /// deserialize into a known `SignalMessage` variant. Usually
+    /// means the peer is running a newer build with a variant we
+    /// don't know yet. Callers should **log and continue** rather
+    /// than tearing down the connection, so that forward-compat
+    /// additions to `SignalMessage` don't silently kill old
+    /// clients/relays.
+    #[error("signal deserialize: {0}")]
+    Deserialize(String),
     #[error("internal transport error: {0}")]
     Internal(String),
 }
