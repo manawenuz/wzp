@@ -1423,23 +1423,38 @@ listen("signal-event", (event: any) => {
       break;
     case "reconnecting":
       // Signal supervisor is retrying the relay connection. Show
-      // a non-blocking indicator; the user can keep using
-      // everything that doesn't need a live signal.
+      // a non-blocking indicator on the small status line INSIDE
+      // the registered panel — do NOT touch directRegistered
+      // itself, that's the parent that holds the entire
+      // registered UI (address bar, call button, history, ...)
+      // and overwriting its textContent wipes all children.
       {
         const relay = typeof data.relay === "string" ? data.relay : "relay";
-        directRegistered.textContent = `🔄 reconnecting to ${relay}…`;
-        directRegistered.style.color = "var(--yellow)";
-        directRegistered.classList.remove("hidden");
+        const status = document.getElementById("registered-status");
+        if (status) {
+          status.textContent = `🔄 reconnecting to ${relay}…`;
+          (status as HTMLElement).style.color = "var(--yellow)";
+        }
       }
       break;
     case "registered":
       // Supervisor (re-)succeeded, or the first register landed.
-      // Clear the banner and show the registered state.
+      // Clear the reconnecting badge and keep the registered UI.
       {
         const fp = typeof data.fingerprint === "string" ? data.fingerprint : "";
-        directRegistered.textContent = `✓ registered${fp ? ` (${fp.slice(0, 16)}…)` : ""}`;
-        directRegistered.style.color = "var(--green)";
+        const status = document.getElementById("registered-status");
+        if (status) {
+          status.textContent = fp
+            ? `✅ Registered (${fp.slice(0, 16)}…)`
+            : "✅ Registered — waiting for calls";
+          (status as HTMLElement).style.color = "var(--green)";
+        }
+        // Make sure the registered panel is visible and the
+        // Register button is hidden. This is the critical path
+        // both for the first register and for a transparent
+        // supervisor-driven reconnect.
         directRegistered.classList.remove("hidden");
+        registerBtn.classList.add("hidden");
       }
       break;
   }
