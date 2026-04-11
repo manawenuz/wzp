@@ -32,6 +32,7 @@ pub mod drift_test;
 pub mod echo_test;
 pub mod featherchat;
 pub mod handshake;
+pub mod dual_path;
 pub mod metrics;
 pub mod reflect;
 pub mod sweep;

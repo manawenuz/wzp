@@ -83,6 +83,10 @@ const sRoom = document.getElementById("s-room") as HTMLInputElement;
 const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sDredDebug = document.getElementById("s-dred-debug") as HTMLInputElement;
+const sCallDebug = document.getElementById("s-call-debug") as HTMLInputElement;
+const sCallDebugSection = document.getElementById("s-call-debug-section") as HTMLDivElement;
+const sCallDebugLogEl = document.getElementById("s-call-debug-log") as HTMLDivElement;
+const sCallDebugClearBtn = document.getElementById("s-call-debug-clear") as HTMLButtonElement;
 const sReflectedAddr = document.getElementById("s-reflected-addr") as HTMLSpanElement;
 const sReflectBtn = document.getElementById("s-reflect-btn") as HTMLButtonElement;
 const sNatType = document.getElementById("s-nat-type") as HTMLSpanElement;
@@ -150,6 +154,12 @@ interface Settings {
   /// reconstruction + classical-PLC logs and adds DRED counters to the
   /// recv heartbeat. Off in normal mode keeps logcat clean.
   dredDebugLogs: boolean;
+  /// Phase 3.5: when true, every step of a call's lifecycle (register,
+  /// reflect query, offer/answer, relay setup, dual-path race, engine
+  /// start, media) emits a `call-debug-log` Tauri event that this UI
+  /// renders into the rolling Debug Log panel in settings. Off in
+  /// normal mode keeps the GUI quiet but logcat always has a copy.
+  callDebugLogs: boolean;
 }
 
 function loadSettings(): Settings {
@@ -163,6 +173,7 @@ function loadSettings(): Settings {
     selectedRelay: 0, room: "general", alias: "",
     osAec: true, agc: true, quality: "auto", recentRooms: [],
     dredDebugLogs: false,
+    callDebugLogs: false,
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
@@ -413,10 +424,52 @@ function renderRecentRooms(rooms: RecentRoom[]) {
 // ── Init ──
 applySettings();
 setTimeout(pingAllRelays, 300);
-// Hydrate the Rust DRED verbose-logs flag from saved settings on boot so
-// the choice survives app restarts without needing the user to reopen
-// the settings panel.
+// Hydrate the Rust DRED + call-debug verbose-logs flags from saved
+// settings on boot so the choice survives app restarts without
+// needing the user to reopen the settings panel.
 invoke("set_dred_verbose_logs", { enabled: !!loadSettings().dredDebugLogs }).catch(() => {});
+invoke("set_call_debug_logs", { enabled: !!loadSettings().callDebugLogs }).catch(() => {});
+
+// ── Phase 3.5: call-flow debug log rolling buffer ─────────────────
+// Backend emits `call-debug-log` events at every step of the call
+// lifecycle when the flag is on. We keep a cap-200 ring here and
+// render into the Settings panel's Debug Log section.
+interface CallDebugEntry {
+  ts_ms: number;
+  step: string;
+  details: any;
+}
+const CALL_DEBUG_MAX = 200;
+const callDebugBuffer: CallDebugEntry[] = [];
+
+function renderCallDebugLog() {
+  // Skip the render if the section isn't visible — cheap guard on
+  // hot path, repainted each time the user opens settings.
+  if (sCallDebugSection.style.display === "none") return;
+  const lines = callDebugBuffer.map((e) => {
+    const iso = new Date(e.ts_ms).toISOString().slice(11, 23); // HH:MM:SS.mmm
+    const details = e.details && Object.keys(e.details).length > 0
+      ? " " + JSON.stringify(e.details)
+      : "";
+    return `${iso} ${e.step}${details}`;
+  });
+  sCallDebugLogEl.textContent = lines.join("\n");
+  sCallDebugLogEl.scrollTop = sCallDebugLogEl.scrollHeight;
+}
+
+listen("call-debug-log", (event: any) => {
+  const entry: CallDebugEntry = event.payload;
+  callDebugBuffer.push(entry);
+  if (callDebugBuffer.length > CALL_DEBUG_MAX) {
+    callDebugBuffer.shift();
+  }
+  renderCallDebugLog();
+});
+
+sCallDebugClearBtn.addEventListener("click", () => {
+  callDebugBuffer.length = 0;
+  sCallDebugLogEl.textContent = "";
+});
 
 // Load fingerprint + alias + git hash + render identicon
 interface AppInfo { git_hash: string; alias: string; fingerprint: string; data_dir: string }
@@ -730,6 +783,11 @@ function openSettings() {
   const s = loadSettings();
   sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
   sDredDebug.checked = !!s.dredDebugLogs;
+  sCallDebug.checked = !!s.callDebugLogs;
+  // Show the debug-log panel only when the user has the flag on —
+  // keeps the settings panel short in normal use.
+  sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
+  renderCallDebugLog();
   const qi = qualityToIndex(s.quality || "auto");
   sQuality.value = String(qi);
   updateQualityUI(qi);
@@ -874,10 +932,14 @@ settingsSave.addEventListener("click", () => {
   s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked;
   s.quality = QUALITY_STEPS[parseInt(sQuality.value)] || "auto";
   s.dredDebugLogs = sDredDebug.checked;
+  s.callDebugLogs = sCallDebug.checked;
   saveSettingsObj(s);
-  // Push the new flag to the Rust side immediately so the next encoded
-  // frame already honors it without waiting for an app restart.
+  // Push the new flags to the Rust side immediately so the next
+  // frame / call already honors them without waiting for a restart.
   invoke("set_dred_verbose_logs", { enabled: s.dredDebugLogs }).catch(() => {});
+  invoke("set_call_debug_logs", { enabled: s.callDebugLogs }).catch(() => {});
+  // Reveal or hide the debug-log panel based on the new setting.
+  sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
   roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec;
   renderRecentRooms(s.recentRooms);
   closeSettings();

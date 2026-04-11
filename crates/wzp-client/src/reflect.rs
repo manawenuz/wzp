@@ -223,6 +223,58 @@ pub async fn detect_nat_type(
     }
 }
 
+/// Role assignment for the Phase 3.5 dual-path QUIC race.
+///
+/// Both peers already know two strings at CallSetup time: their
+/// own server-reflexive address (queried via Phase 1 Reflect) and
+/// the peer's (carried in `CallSetup.peer_direct_addr`). To avoid
+/// a negotiation round-trip, both sides compare the two strings
+/// lexicographically and agree on a deterministic role:
+///
+/// - **Acceptor** — lexicographically smaller addr. Listens for
+///   an incoming direct connection from the peer. Does NOT dial.
+/// - **Dialer**   — lexicographically larger addr. Dials the
+///   peer's direct addr. Does NOT listen.
+///
+/// Both roles ALSO dial the relay in parallel as a fallback.
+/// Whichever future (direct or relay) completes first is used as
+/// the media transport. Because the role is deterministic and
+/// symmetric, both peers end up holding the same underlying QUIC
+/// session on the direct path — A's accepted conn and D's dialed
+/// conn are literally the same connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// This peer listens for the direct incoming connection.
+    Acceptor,
+    /// This peer dials the peer's direct address.
+    Dialer,
+}
+
+/// Compute the deterministic role for this peer in the dual-path
+/// race. Returns `None` when no direct attempt is possible —
+/// either peer didn't advertise a reflex addr, or the two addrs
+/// are identical (same host on loopback / mis-advertised).
+///
+/// The caller should treat `None` as "skip direct, relay-only".
+pub fn determine_role(
+    own_reflex_addr: Option<&str>,
+    peer_reflex_addr: Option<&str>,
+) -> Option<Role> {
+    let (own, peer) = match (own_reflex_addr, peer_reflex_addr) {
+        (Some(o), Some(p)) => (o, p),
+        _ => return None,
+    };
+    match own.cmp(peer) {
+        std::cmp::Ordering::Less => Some(Role::Acceptor),
+        std::cmp::Ordering::Greater => Some(Role::Dialer),
+        // Equal addrs should never happen in production (both
+        // peers behind the same NAT mapping + same port would be
+        // a degenerate case). Guard against it so we don't infinite-
+        // loop waiting for a connection to ourselves.
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
 /// Pure-function NAT classifier — split out for unit testing
 /// without touching the network.
 pub fn classify_nat(probes: &[NatProbeResult]) -> (NatType, Option<String>) {
@@ -324,6 +376,65 @@ mod tests {
         // Two successes both agree → Cone, ignore the failure row.
         assert_eq!(nt, NatType::Cone);
         assert_eq!(addr.as_deref(), Some("192.0.2.1:4433"));
+    }
+
+    #[test]
+    fn determine_role_smaller_is_acceptor() {
+        // Lexicographic: "192.0.2.1:4433" < "198.51.100.9:4433"
+        assert_eq!(
+            determine_role(Some("192.0.2.1:4433"), Some("198.51.100.9:4433")),
+            Some(Role::Acceptor)
+        );
+    }
+
+    #[test]
+    fn determine_role_larger_is_dialer() {
+        assert_eq!(
+            determine_role(Some("198.51.100.9:4433"), Some("192.0.2.1:4433")),
+            Some(Role::Dialer)
+        );
+    }
+
+    #[test]
+    fn determine_role_port_difference_matters() {
+        // Same ip, different ports — string compare still works
+        // because "4433" < "54321".
+        assert_eq!(
+            determine_role(Some("127.0.0.1:4433"), Some("127.0.0.1:54321")),
+            Some(Role::Acceptor)
+        );
+        assert_eq!(
+            determine_role(Some("127.0.0.1:54321"), Some("127.0.0.1:4433")),
+            Some(Role::Dialer)
+        );
+    }
+
+    #[test]
+    fn determine_role_equal_addrs_is_none() {
+        assert_eq!(
+            determine_role(Some("192.0.2.1:4433"), Some("192.0.2.1:4433")),
+            None
+        );
+    }
+
+    #[test]
+    fn determine_role_missing_side_is_none() {
+        assert_eq!(determine_role(None, Some("192.0.2.1:4433")), None);
+        assert_eq!(determine_role(Some("192.0.2.1:4433"), None), None);
+        assert_eq!(determine_role(None, None), None);
+    }
+
+    #[test]
+    fn determine_role_is_symmetric_across_peers() {
+        // Both peers compute roles independently; they must end
+        // up with opposite assignments (one Acceptor, one Dialer)
+        // so that each side ends up talking to the other.
+        let a = "192.0.2.1:4433";
+        let b = "198.51.100.9:4433";
+        let alice_role = determine_role(Some(a), Some(b));
+        let bob_role = determine_role(Some(b), Some(a));
+        assert_eq!(alice_role, Some(Role::Acceptor));
+        assert_eq!(bob_role, Some(Role::Dialer));
     }
 
     #[test]

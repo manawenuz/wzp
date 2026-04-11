@@ -31,10 +31,57 @@ use engine::CallEngine;
 
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use wzp_proto::MediaTransport;
+
+// ─── Call-flow debug logs (GUI-gated) ────────────────────────────────
+//
+// Runtime-toggleable verbose logging for every step in the
+// signaling + call setup path. When the user enables "Call flow
+// debug logs" in the settings panel, `emit_call_debug!` fires a
+// `call-debug-log` Tauri event that JS picks up and renders into a
+// rolling debug panel so the user can see exactly where a call
+// progressed or stalled — no logcat parsing needed.
+//
+// Mirrors the existing `wzp_codec::dred_verbose_logs` pattern.
+
+static CALL_DEBUG_LOGS: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn call_debug_logs_enabled() -> bool {
+    CALL_DEBUG_LOGS.load(Ordering::Relaxed)
+}
+
+fn set_call_debug_logs_internal(on: bool) {
+    CALL_DEBUG_LOGS.store(on, Ordering::Relaxed);
+}
+
+/// Emit a `call-debug-log` event to the JS side IF the flag is on.
+/// Also mirrors to `tracing::info!` so logcat keeps its copy
+/// regardless of the flag — the toggle only controls the GUI
+/// overlay, not the underlying Android log stream.
+fn emit_call_debug(
+    app: &tauri::AppHandle,
+    step: &str,
+    details: serde_json::Value,
+) {
+    tracing::info!(step, ?details, "call-debug");
+    if !call_debug_logs_enabled() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "ts_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        "step": step,
+        "details": details,
+    });
+    let _ = app.emit("call-debug-log", payload);
+}
 
 /// Short git hash captured at compile time by build.rs.
 const GIT_HASH: &str = env!("WZP_GIT_HASH");
@@ -124,6 +171,22 @@ fn set_dred_verbose_logs(enabled: bool) {
 #[tauri::command]
 fn get_dred_verbose_logs() -> bool {
     wzp_codec::dred_verbose_logs()
+}
+
+/// Phase 3.5 call-flow debug logs toggle. Gates the live
+/// `call-debug-log` Tauri events that the GUI renders into a
+/// rolling debug panel. Does NOT affect logcat — tracing::info
+/// always runs regardless so the Android log stream keeps its
+/// copy.
+#[tauri::command]
+fn set_call_debug_logs(enabled: bool) {
+    set_call_debug_logs_internal(enabled);
+    tracing::info!(enabled, "call-flow debug logs toggled");
+}
+
+#[tauri::command]
+fn get_call_debug_logs() -> bool {
+    call_debug_logs_enabled()
 }
 
 /// Ping a relay to check if it's online, measure RTT, and get server identity.
@@ -271,28 +334,114 @@ async fn connect(
     #[allow(non_snake_case)]
     peer_direct_addr: Option<String>,
 ) -> Result<String, String> {
+    emit_call_debug(&app, "connect:start", serde_json::json!({
+        "relay": relay,
+        "room": room,
+        "peer_direct_addr": peer_direct_addr,
+    }));
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
+        emit_call_debug(&app, "connect:already_connected", serde_json::json!({}));
         return Err("already connected".into());
     }
 
-    if let Some(ref addr) = peer_direct_addr {
-        tracing::info!(%addr, %relay, %room, "connect: peer_direct_addr supplied — hole-punching candidate logged (Phase 3.5 will race direct vs relay here)");
-    } else {
-        tracing::info!(%relay, %room, "connect: no peer_direct_addr — relay-only path");
-    }
+    // Phase 3.5: dual-path QUIC race.
+    //
+    // If the relay cross-wired a peer_direct_addr into the
+    // CallSetup, we read our own reflex addr from SignalState
+    // (populated earlier by place_call/answer_call's reflect query)
+    // and use determine_role() to decide whether we're the
+    // Acceptor (smaller addr, listens) or Dialer (larger addr,
+    // dials). Both roles also dial the relay in parallel as a
+    // fallback. Whichever transport completes first becomes the
+    // media transport we hand to CallEngine::start.
+    //
+    // If ANY of the inputs is missing (no peer_direct_addr, no
+    // own_reflex_addr, unparseable addrs, equal addrs), we skip
+    // the race entirely and fall back to the pure-relay path —
+    // identical to Phase 0 behavior.
+    let own_reflex_addr = state.signal.lock().await.own_reflex_addr.clone();
+    let peer_addr_parsed: Option<std::net::SocketAddr> = peer_direct_addr
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+    let relay_addr_parsed: Option<std::net::SocketAddr> = relay.parse().ok();
+    let role = wzp_client::reflect::determine_role(
+        own_reflex_addr.as_deref(),
+        peer_direct_addr.as_deref(),
+    );
+
+    let pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>> =
+        match (role, peer_addr_parsed, relay_addr_parsed) {
+            (Some(r), Some(peer_addr), Some(relay_sockaddr)) => {
+                tracing::info!(
+                    role = ?r,
+                    %peer_addr,
+                    %relay,
+                    %room,
+                    own = ?own_reflex_addr,
+                    "connect: starting dual-path race"
+                );
+                emit_call_debug(&app, "connect:dual_path_race_start", serde_json::json!({
+                    "role": format!("{:?}", r),
+                    "peer_addr": peer_addr.to_string(),
+                    "relay_addr": relay_sockaddr.to_string(),
+                    "own_reflex_addr": own_reflex_addr,
+                }));
+                let room_sni = room.clone();
+                let call_sni = format!("call-{room}");
+                match wzp_client::dual_path::race(r, peer_addr, relay_sockaddr, room_sni, call_sni).await {
+                    Ok((transport, path)) => {
+                        tracing::info!(?path, "connect: dual-path race resolved");
+                        emit_call_debug(&app, "connect:dual_path_race_won", serde_json::json!({
+                            "path": format!("{:?}", path),
+                        }));
+                        Some(transport)
+                    }
+                    Err(e) => {
+                        // Both paths failed — surface to the user.
+                        // CallEngine::start below with None will try
+                        // the relay once more using the old code path
+                        // (which reuses the signal endpoint and has a
+                        // longer timeout) so we don't unconditionally
+                        // fail the call on a transient race blip.
+                        tracing::warn!(error = %e, "connect: dual-path race failed, falling back to classic relay connect");
+                        emit_call_debug(&app, "connect:dual_path_race_failed", serde_json::json!({
+                            "error": e.to_string(),
+                        }));
+                        None
+                    }
+                }
+            }
+            _ => {
+                tracing::info!(
+                    has_peer = peer_direct_addr.is_some(),
+                    has_own = own_reflex_addr.is_some(),
+                    ?role,
+                    %relay,
+                    %room,
+                    "connect: skipping dual-path race (missing inputs), relay-only"
+                );
+                emit_call_debug(&app, "connect:dual_path_skipped", serde_json::json!({
+                    "has_peer": peer_direct_addr.is_some(),
+                    "has_own": own_reflex_addr.is_some(),
+                    "role": format!("{:?}", role),
+                }));
+                None
+            }
+        };
 
     // If we previously opened a quinn::Endpoint for the signaling connection
     // (direct-call path), reuse it so the media connection shares the same
     // UDP socket. This side-steps the Android issue where a second
     // quinn::Endpoint silently hangs in the QUIC handshake.
     let reuse_endpoint = state.signal.lock().await.endpoint.clone();
-    if reuse_endpoint.is_some() {
+    if reuse_endpoint.is_some() && pre_connected_transport.is_none() {
         tracing::info!("connect: reusing existing signal endpoint for media connection");
     }
 
     let app_clone = app.clone();
-    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, move |event_kind, message| {
+    emit_call_debug(&app, "connect:call_engine_starting", serde_json::json!({}));
+    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, move |event_kind, message| {
         let _ = app_clone.emit(
             "call-event",
             CallEvent {
@@ -305,9 +454,13 @@ async fn connect(
     {
         Ok(eng) => {
             *engine_lock = Some(eng);
+            emit_call_debug(&app, "connect:call_engine_started", serde_json::json!({}));
             Ok("connected".into())
         }
-        Err(e) => Err(format!("{e}")),
+        Err(e) => {
+            emit_call_debug(&app, "connect:call_engine_failed", serde_json::json!({ "error": e.to_string() }));
+            Err(format!("{e}"))
+        }
     }
 }
 
@@ -489,6 +642,12 @@ struct SignalState {
     /// replace the sender — the old receiver sees a `Cancelled` error
     /// and the caller retries.
     pending_reflect: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
+    /// Phase 3.5: this client's own server-reflexive address as last
+    /// observed by a Reflect query. Populated by
+    /// `try_reflect_own_addr` on success and read by the `connect`
+    /// Tauri command to compute the deterministic role for the
+    /// dual-path QUIC race against `peer_direct_addr`.
+    own_reflex_addr: Option<String>,
 }
 
 #[tauri::command]
@@ -499,6 +658,7 @@ async fn register_signal(
 ) -> Result<String, String> {
     use wzp_proto::SignalMessage;
 
+    emit_call_debug(&app, "register_signal:start", serde_json::json!({ "relay": relay }));
     let addr: std::net::SocketAddr = relay.parse().map_err(|e| format!("bad address: {e}"))?;
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -507,25 +667,39 @@ async fn register_signal(
     let pub_id = seed.derive_identity().public_identity();
     let fp = pub_id.fingerprint.to_string();
     let identity_pub = *pub_id.signing.as_bytes();
+    emit_call_debug(&app, "register_signal:identity_loaded", serde_json::json!({ "fingerprint": fp }));
 
     let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
     let endpoint = wzp_transport::create_endpoint(bind, None).map_err(|e| format!("{e}"))?;
+    emit_call_debug(&app, "register_signal:endpoint_created", serde_json::json!({ "bind": bind.to_string() }));
     let conn = wzp_transport::connect(&endpoint, addr, "_signal", wzp_transport::client_config())
-        .await.map_err(|e| format!("{e}"))?;
+        .await
+        .map_err(|e| {
+            emit_call_debug(&app, "register_signal:connect_failed", serde_json::json!({ "error": e.to_string() }));
+            format!("{e}")
+        })?;
     let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
+    emit_call_debug(&app, "register_signal:quic_connected", serde_json::json!({ "relay": relay }));
 
     transport.send_signal(&SignalMessage::RegisterPresence {
         identity_pub, signature: vec![], alias: None,
     }).await.map_err(|e| format!("{e}"))?;
+    emit_call_debug(&app, "register_signal:register_presence_sent", serde_json::json!({}));
 
     match transport.recv_signal().await.map_err(|e| format!("{e}"))? {
-        Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {}
-        _ => return Err("registration failed".into()),
+        Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {
+            emit_call_debug(&app, "register_signal:ack_received", serde_json::json!({}));
+        }
+        _ => {
+            emit_call_debug(&app, "register_signal:ack_failed", serde_json::json!({}));
+            return Err("registration failed".into());
+        }
     }
 
     { let mut sig = state.signal.lock().await; sig.transport = Some(transport.clone()); sig.endpoint = Some(endpoint.clone()); sig.fingerprint = fp.clone(); sig.signal_status = "registered".into(); }
 
     tracing::info!(%fp, "signal registered, spawning recv loop");
+    emit_call_debug(&app, "register_signal:recv_loop_spawning", serde_json::json!({ "fingerprint": fp }));
     let signal_state = Arc::clone(&state.signal);
     let app_clone = app.clone();
     tokio::spawn(async move {
@@ -533,11 +707,18 @@ async fn register_signal(
             match transport.recv_signal().await {
                 Ok(Some(SignalMessage::CallRinging { call_id })) => {
                     tracing::info!(%call_id, "signal: CallRinging");
+                    emit_call_debug(&app_clone, "recv:CallRinging", serde_json::json!({ "call_id": call_id }));
                     let mut sig = signal_state.lock().await; sig.signal_status = "ringing".into();
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"ringing","call_id":call_id}));
                 }
-                Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, .. })) => {
+                Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, caller_reflexive_addr, .. })) => {
                     tracing::info!(%call_id, caller = %caller_fingerprint, "signal: DirectCallOffer");
+                    emit_call_debug(&app_clone, "recv:DirectCallOffer", serde_json::json!({
+                        "call_id": call_id,
+                        "caller_fp": caller_fingerprint,
+                        "caller_alias": caller_alias,
+                        "caller_reflexive_addr": caller_reflexive_addr,
+                    }));
                     let mut sig = signal_state.lock().await; sig.signal_status = "incoming".into();
                     sig.incoming_call_id = Some(call_id.clone()); sig.incoming_caller_fp = Some(caller_fingerprint.clone()); sig.incoming_caller_alias = caller_alias.clone();
                     // Log as a Missed entry up-front. If the user accepts
@@ -553,8 +734,13 @@ async fn register_signal(
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"incoming","call_id":call_id,"caller_fp":caller_fingerprint,"caller_alias":caller_alias}));
                     let _ = app_clone.emit("history-changed", ());
                 }
-                Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, .. })) => {
+                Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, callee_reflexive_addr, .. })) => {
                     tracing::info!(%call_id, ?accept_mode, "signal: DirectCallAnswer (forwarded by relay)");
+                    emit_call_debug(&app_clone, "recv:DirectCallAnswer", serde_json::json!({
+                        "call_id": call_id,
+                        "accept_mode": format!("{:?}", accept_mode),
+                        "callee_reflexive_addr": callee_reflexive_addr,
+                    }));
                 }
                 Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr })) => {
                     // Phase 3: peer_direct_addr carries the OTHER party's
@@ -570,6 +756,12 @@ async fn register_signal(
                         peer_direct = ?peer_direct_addr,
                         "signal: CallSetup — emitting setup event to JS"
                     );
+                    emit_call_debug(&app_clone, "recv:CallSetup", serde_json::json!({
+                        "call_id": call_id,
+                        "room": room,
+                        "relay_addr": relay_addr,
+                        "peer_direct_addr": peer_direct_addr,
+                    }));
                     let mut sig = signal_state.lock().await;
                     sig.signal_status = "setup".into();
                     let _ = app_clone.emit(
@@ -585,6 +777,7 @@ async fn register_signal(
                 }
                 Ok(Some(SignalMessage::Hangup { reason })) => {
                     tracing::info!(?reason, "signal: Hangup");
+                    emit_call_debug(&app_clone, "recv:Hangup", serde_json::json!({ "reason": format!("{:?}", reason) }));
                     let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None;
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
                 }
@@ -648,6 +841,8 @@ async fn place_call(
 ) -> Result<(), String> {
     use wzp_proto::SignalMessage;
 
+    emit_call_debug(&app, "place_call:start", serde_json::json!({ "target_fp": target_fp }));
+
     // Phase 3 hole-punching: query our own reflex addr BEFORE the
     // offer so we can advertise it. Best-effort — a failed reflect
     // (old relay, transient error) falls back to `None` which
@@ -657,12 +852,15 @@ async fn place_call(
     // Critical: this call does its own state.signal.lock() usage and
     // MUST NOT be wrapped in an outer lock, or the recv loop's
     // ReflectResponse handler will deadlock on the same mutex.
+    emit_call_debug(&app, "place_call:reflect_query_start", serde_json::json!({}));
     let state_inner: Arc<AppState> = (*state).clone();
     let own_reflex = try_reflect_own_addr(&state_inner).await.ok().flatten();
     if let Some(ref a) = own_reflex {
         tracing::info!(%a, "place_call: learned own reflex addr for hole-punching advertisement");
+        emit_call_debug(&app, "place_call:reflect_query_ok", serde_json::json!({ "addr": a }));
     } else {
         tracing::info!("place_call: no reflex addr available, falling back to relay-only");
+        emit_call_debug(&app, "place_call:reflect_query_none", serde_json::json!({}));
     }
 
     let sig = state.signal.lock().await;
@@ -685,10 +883,18 @@ async fn place_call(
             ephemeral_pub: [0u8; 32],
             signature: vec![],
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
-            caller_reflexive_addr: own_reflex,
+            caller_reflexive_addr: own_reflex.clone(),
         })
         .await
-        .map_err(|e| format!("{e}"))?;
+        .map_err(|e| {
+            emit_call_debug(&app, "place_call:send_failed", serde_json::json!({ "error": e.to_string() }));
+            format!("{e}")
+        })?;
+    emit_call_debug(&app, "place_call:offer_sent", serde_json::json!({
+        "call_id": call_id,
+        "target_fp": target_fp,
+        "caller_reflexive_addr": own_reflex,
+    }));
     history::log(call_id, target_fp, None, history::CallDirection::Placed);
     let _ = app.emit("history-changed", ());
     Ok(())
@@ -707,6 +913,10 @@ async fn answer_call(
         1 => wzp_proto::CallAcceptMode::AcceptTrusted,
         _ => wzp_proto::CallAcceptMode::AcceptGeneric,
     };
+    emit_call_debug(&app, "answer_call:start", serde_json::json!({
+        "call_id": call_id,
+        "accept_mode": format!("{:?}", accept_mode),
+    }));
 
     // Phase 3 hole-punching: only AcceptTrusted reveals our reflex
     // addr. Privacy-mode (AcceptGeneric) and Reject explicitly do
@@ -717,16 +927,20 @@ async fn answer_call(
     // the reflect await or the recv loop's ReflectResponse handler
     // will deadlock on the same mutex.
     let own_reflex = if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
+        emit_call_debug(&app, "answer_call:reflect_query_start", serde_json::json!({}));
         let state_inner: Arc<AppState> = (*state).clone();
         let r = try_reflect_own_addr(&state_inner).await.ok().flatten();
         if let Some(ref a) = r {
             tracing::info!(%call_id, %a, "answer_call: learned own reflex addr for AcceptTrusted");
+            emit_call_debug(&app, "answer_call:reflect_query_ok", serde_json::json!({ "addr": a }));
         } else {
             tracing::info!(%call_id, "answer_call: no reflex addr for AcceptTrusted, falling back to relay-only");
+            emit_call_debug(&app, "answer_call:reflect_query_none", serde_json::json!({}));
         }
         r
     } else {
         // Reject / AcceptGeneric: keep the IP private.
+        emit_call_debug(&app, "answer_call:privacy_mode_skip_reflect", serde_json::json!({}));
         None
     };
 
@@ -744,14 +958,20 @@ async fn answer_call(
             ephemeral_pub: None,
             signature: None,
             chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
-            callee_reflexive_addr: own_reflex,
+            callee_reflexive_addr: own_reflex.clone(),
         })
         .await
         .map_err(|e| {
             tracing::error!(%call_id, error = %e, "answer_call: send_signal failed");
+            emit_call_debug(&app, "answer_call:send_failed", serde_json::json!({ "error": e.to_string() }));
             format!("{e}")
         })?;
     tracing::info!(%call_id, "answer_call: DirectCallAnswer sent successfully");
+    emit_call_debug(&app, "answer_call:answer_sent", serde_json::json!({
+        "call_id": call_id,
+        "accept_mode": format!("{:?}", accept_mode),
+        "callee_reflexive_addr": own_reflex,
+    }));
     // Upgrade the pending "Missed" entry to "Received" if the user
     // accepted (mode != Reject). Mode 0 = Reject → leave as Missed.
     if mode != 0 && history::mark_received_if_pending(&call_id) {
@@ -791,7 +1011,17 @@ async fn try_reflect_own_addr(
         return Ok(None);
     }
     match tokio::time::timeout(std::time::Duration::from_millis(1000), rx).await {
-        Ok(Ok(addr)) => Ok(Some(addr.to_string())),
+        Ok(Ok(addr)) => {
+            // Phase 3.5: cache the result on SignalState so the
+            // `connect` command can read it later for role
+            // determination without another reflect round-trip.
+            let s = addr.to_string();
+            {
+                let mut sig = state.signal.lock().await;
+                sig.own_reflex_addr = Some(s.clone());
+            }
+            Ok(Some(s))
+        }
         Ok(Err(_canceled)) => {
             tracing::warn!("try_reflect_own_addr: oneshot canceled");
             Ok(None)
@@ -952,6 +1182,7 @@ pub fn run() {
             transport: None, endpoint: None, fingerprint: String::new(), signal_status: "idle".into(),
             incoming_call_id: None, incoming_caller_fp: None, incoming_caller_alias: None,
             pending_reflect: None,
+            own_reflex_addr: None,
         })),
     });
 
@@ -1006,6 +1237,7 @@ pub fn run() {
             set_speakerphone, is_speakerphone_on,
             get_call_history, get_recent_contacts, clear_call_history,
             set_dred_verbose_logs, get_dred_verbose_logs,
+            set_call_debug_logs, get_call_debug_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarzonePhone");

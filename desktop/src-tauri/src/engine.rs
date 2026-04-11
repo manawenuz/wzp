@@ -297,6 +297,11 @@ impl CallEngine {
         _os_aec: bool,
         quality: String,
         reuse_endpoint: Option<wzp_transport::Endpoint>,
+        // Phase 3.5: caller did the dual-path race and picked a
+        // winning transport (direct or relay). If Some, we skip
+        // our own wzp_transport::connect step and use this
+        // directly. If None, existing Phase 0 behavior.
+        pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>>,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
@@ -309,7 +314,13 @@ impl CallEngine {
         // decode, first playout-ring write, and the C++ Oboe first-callback
         // logs (which already exist in cpp/oboe_bridge.cpp).
         let call_t0 = std::time::Instant::now();
-        info!(%relay, %room, %alias, %quality, has_reuse = reuse_endpoint.is_some(), t_ms = 0u128, "CallEngine::start (android) invoked");
+        info!(
+            %relay, %room, %alias, %quality,
+            has_reuse = reuse_endpoint.is_some(),
+            has_pre_connected = pre_connected_transport.is_some(),
+            t_ms = 0u128,
+            "CallEngine::start (android) invoked"
+        );
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
@@ -322,41 +333,48 @@ impl CallEngine {
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
 
-        // QUIC transport + handshake.
-        //
-        // If a `reuse_endpoint` was passed in (the direct-call path, where we
-        // already opened a quinn::Endpoint for the signal connection), reuse
-        // it: a second quinn::Endpoint on Android silently fails to complete
-        // the QUIC handshake against the same relay. Reusing the existing
-        // socket lets quinn multiplex the signal + media connections on one
-        // UDP port.
-        let endpoint = if let Some(ep) = reuse_endpoint {
-            info!(local_addr = ?ep.local_addr().ok(), "reusing signal endpoint for media connection");
-            ep
+        // Transport source: either the pre-connected one from the
+        // dual-path race (Phase 3.5) or build a fresh one here.
+        let transport = if let Some(t) = pre_connected_transport {
+            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: using pre-connected transport from dual-path race");
+            t
         } else {
-            let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-            let ep = wzp_transport::create_endpoint(bind_addr, None)
-                .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
-            info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
-            ep
+            // QUIC transport + handshake (Phase 0 relay-only path).
+            //
+            // If a `reuse_endpoint` was passed in (the direct-call path, where we
+            // already opened a quinn::Endpoint for the signal connection), reuse
+            // it: a second quinn::Endpoint on Android silently fails to complete
+            // the QUIC handshake against the same relay. Reusing the existing
+            // socket lets quinn multiplex the signal + media connections on one
+            // UDP port.
+            let endpoint = if let Some(ep) = reuse_endpoint {
+                info!(local_addr = ?ep.local_addr().ok(), "reusing signal endpoint for media connection");
+                ep
+            } else {
+                let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                let ep = wzp_transport::create_endpoint(bind_addr, None)
+                    .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+                info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
+                ep
+            };
+            let client_config = wzp_transport::client_config();
+            let conn = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                wzp_transport::connect(&endpoint, relay_addr, &room, client_config),
+            ).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    error!("connect failed: {e}");
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    error!("connect TIMED OUT after 10s — QUIC handshake never completed. Relay may be unreachable from this endpoint.");
+                    return Err(anyhow::anyhow!("QUIC connect timeout (10s)"));
+                }
+            };
+            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: QUIC connection established, performing handshake");
+            Arc::new(wzp_transport::QuinnTransport::new(conn))
         };
-        let client_config = wzp_transport::client_config();
-        let conn = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            wzp_transport::connect(&endpoint, relay_addr, &room, client_config),
-        ).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                error!("connect failed: {e}");
-                return Err(e.into());
-            }
-            Err(_) => {
-                error!("connect TIMED OUT after 10s — QUIC handshake never completed. Relay may be unreachable from this endpoint.");
-                return Err(anyhow::anyhow!("QUIC connect timeout (10s)"));
-            }
-        };
-        info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: QUIC connection established, performing handshake");
-        let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
 
         let _session = wzp_client::handshake::perform_handshake(
             &*transport,
@@ -872,12 +890,20 @@ impl CallEngine {
         _os_aec: bool,
         quality: String,
         reuse_endpoint: Option<wzp_transport::Endpoint>,
+        // Phase 3.5: caller did the dual-path race and picked a
+        // winning transport. If Some, skip our own connect step.
+        pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>>,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
-        info!(%relay, %room, %alias, %quality, has_reuse = reuse_endpoint.is_some(), "CallEngine::start (desktop) invoked");
+        info!(
+            %relay, %room, %alias, %quality,
+            has_reuse = reuse_endpoint.is_some(),
+            has_pre_connected = pre_connected_transport.is_some(),
+            "CallEngine::start (desktop) invoked"
+        );
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
@@ -899,24 +925,31 @@ impl CallEngine {
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
 
-        // Connect — reuse the signal endpoint if the direct-call path gave
-        // us one, otherwise create a fresh one (SFU room join path).
-        let endpoint = if let Some(ep) = reuse_endpoint {
-            info!(local_addr = ?ep.local_addr().ok(), "reusing signal endpoint for media connection");
-            ep
+        // Transport source: either the pre-connected dual-path
+        // winner (Phase 3.5) or build a fresh relay connection here.
+        let transport = if let Some(t) = pre_connected_transport {
+            info!("using pre-connected transport from dual-path race");
+            t
         } else {
-            let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-            let ep = wzp_transport::create_endpoint(bind_addr, None)
-                .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
-            info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
-            ep
+            // Connect — reuse the signal endpoint if the direct-call path gave
+            // us one, otherwise create a fresh one (SFU room join path).
+            let endpoint = if let Some(ep) = reuse_endpoint {
+                info!(local_addr = ?ep.local_addr().ok(), "reusing signal endpoint for media connection");
+                ep
+            } else {
+                let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                let ep = wzp_transport::create_endpoint(bind_addr, None)
+                    .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+                info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
+                ep
+            };
+            let client_config = wzp_transport::client_config();
+            let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config)
+                .await
+                .map_err(|e| { error!("connect failed: {e}"); e })?;
+            info!("QUIC connection established, performing handshake");
+            Arc::new(wzp_transport::QuinnTransport::new(conn))
         };
-        let client_config = wzp_transport::client_config();
-        let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config)
-            .await
-            .map_err(|e| { error!("connect failed: {e}"); e })?;
-        info!("QUIC connection established, performing handshake");
-        let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
 
         // Handshake
         let _session = wzp_client::handshake::perform_handshake(
