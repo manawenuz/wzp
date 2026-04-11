@@ -2,6 +2,125 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { generateIdenticon, createIdenticonEl } from "./identicon";
 
+// ── Incoming-call ringer ─────────────────────────────────────────────
+//
+// Web Audio synthesized two-tone ring that loops until stop() is
+// called. No external asset file — works immediately on every
+// platform Tauri has a WebView on (Android, macOS, Windows, Linux).
+//
+// The pattern is a classic North American ring cadence: 440Hz +
+// 480Hz tone for 2s, 4s silence, repeat. Volume ramps to ~30%
+// peak so it's audible without being obnoxious on laptop
+// speakers. Stops cleanly on stop() — cancels the timer AND
+// disconnects the active oscillators so there's no tail audio.
+class Ringer {
+  private ctx: AudioContext | null = null;
+  private timer: number | null = null;
+  private activeNodes: AudioNode[] = [];
+  private running = false;
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    // Construct the AudioContext lazily on the first ring — some
+    // platforms (iOS WebView, Android WebView) refuse to create
+    // one until after a user gesture, so we MUST be past that
+    // point by the time start() is called. Incoming call event is
+    // user-adjacent enough that the WebView normally allows it.
+    try {
+      if (!this.ctx) {
+        this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+    } catch (e) {
+      console.warn("Ringer: AudioContext unavailable", e);
+      this.running = false;
+      return;
+    }
+    this.playOnce();
+    // 2s tone + 4s silence = 6s cadence. Loop with setInterval.
+    this.timer = window.setInterval(() => this.playOnce(), 6000);
+  }
+
+  stop() {
+    this.running = false;
+    if (this.timer != null) {
+      window.clearInterval(this.timer);
+      this.timer = null;
+    }
+    for (const n of this.activeNodes) {
+      try {
+        (n as any).disconnect();
+      } catch {}
+    }
+    this.activeNodes = [];
+  }
+
+  private playOnce() {
+    if (!this.ctx || !this.running) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const toneDurSec = 2.0;
+    // Two-tone ring: 440Hz (A4) + 480Hz (close to B4). Mix both
+    // through one gain node for envelope control.
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
+    gain.gain.setValueAtTime(0.3, now + toneDurSec - 0.05);
+    gain.gain.linearRampToValueAtTime(0, now + toneDurSec);
+    gain.connect(ctx.destination);
+
+    for (const freq of [440, 480]) {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      osc.start(now);
+      osc.stop(now + toneDurSec);
+      this.activeNodes.push(osc);
+    }
+    this.activeNodes.push(gain);
+
+    // Schedule a cleanup of old nodes after this tone finishes so
+    // the activeNodes array doesn't grow unbounded across long
+    // rings.
+    window.setTimeout(() => {
+      this.activeNodes = this.activeNodes.filter((n) => n !== gain);
+    }, (toneDurSec + 0.1) * 1000);
+  }
+}
+const ringer = new Ringer();
+
+/// Best-effort system notification via the tauri-plugin-notification
+/// plugin. Uses raw `invoke` so we don't need to import
+/// `@tauri-apps/plugin-notification` — just invoke the plugin
+/// commands directly. Silently no-ops if the plugin isn't
+/// available or permission is denied.
+async function notifyIncomingCall(from: string) {
+  try {
+    // Make sure we have permission first. On Android this prompts
+    // the user once; after that it's cached.
+    const granted = await invoke<boolean>(
+      "plugin:notification|is_permission_granted",
+    ).catch(() => false);
+    if (!granted) {
+      const result = await invoke<string>(
+        "plugin:notification|request_permission",
+      ).catch(() => "denied");
+      if (result !== "granted") return;
+    }
+    await invoke("plugin:notification|notify", {
+      options: {
+        title: "Incoming call",
+        body: `From ${from}`,
+      },
+    });
+  } catch (e) {
+    // Notification plugin missing or refused — not fatal, the
+    // visible panel + ringer still alert the user.
+    console.debug("notify: plugin unavailable or refused", e);
+  }
+}
+
 // ── WebView hardening ──
 // Suppress the browser-style right-click context menu on desktop Tauri — it
 // exposes Inspect/Reload/Back/Forward entries that don't belong in a native-
@@ -1209,6 +1328,7 @@ callBtn.addEventListener("click", async () => {
 });
 
 acceptCallBtn.addEventListener("click", async () => {
+  ringer.stop();
   const status = await invoke<any>("get_signal_status");
   if (status.incoming_call_id) {
     await invoke("answer_call", { callId: status.incoming_call_id, mode: 2 });
@@ -1217,6 +1337,7 @@ acceptCallBtn.addEventListener("click", async () => {
 });
 
 rejectCallBtn.addEventListener("click", async () => {
+  ringer.stop();
   const status = await invoke<any>("get_signal_status");
   if (status.incoming_call_id) {
     await invoke("answer_call", { callId: status.incoming_call_id, mode: 0 });
@@ -1234,12 +1355,21 @@ listen("signal-event", (event: any) => {
     case "incoming":
       incomingCallPanel.classList.remove("hidden");
       incomingCaller.textContent = `From: ${data.caller_alias || data.caller_fp?.substring(0, 16) || "unknown"}`;
+      // Start ringing + fire a system notification. Both stop in
+      // the hangup/answered/accepted paths below (and via the
+      // accept/reject button handlers).
+      ringer.start();
+      notifyIncomingCall(
+        data.caller_alias || data.caller_fp?.substring(0, 16) || "unknown",
+      );
       break;
     case "answered":
       callStatusText.textContent = `Call answered (${data.mode})`;
+      ringer.stop();
       break;
     case "setup":
       callStatusText.textContent = "Connecting to media...";
+      ringer.stop();
       // Phase 3 hole-punching: peer_direct_addr carries the OTHER
       // party's reflex addr when both sides advertised one. Forward
       // to Rust connect() which currently logs it + takes the relay
@@ -1274,6 +1404,7 @@ listen("signal-event", (event: any) => {
       //   * setup failure mid-handshake → same as above
       callStatusText.textContent = "";
       incomingCallPanel.classList.add("hidden");
+      ringer.stop();
       (async () => {
         try {
           // disconnect errors out with "not connected" if there's

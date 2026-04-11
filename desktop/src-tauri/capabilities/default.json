@@ -21,6 +21,10 @@
     "core:window:default",
     "core:app:default",
     "core:webview:default",
-    "shell:default"
+    "shell:default",
+    "notification:default",
+    "notification:allow-notify",
+    "notification:allow-request-permission",
+    "notification:allow-is-permission-granted"
   ]
 }
