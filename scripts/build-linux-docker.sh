@@ -17,6 +17,12 @@ NTFY_TOPIC="https://ntfy.sh/wzp"
 LOCAL_OUTPUT="target/linux-x86_64"
 SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR"
 
+# Branch to build. Default matches the current active development branch
+# (opus-DRED-v2 as of 2026-04-11). Override with `WZP_BRANCH=<name> ./build-linux-docker.sh`
+# if you need a different one — e.g. to rebuild the relay from a feature
+# branch for A/B testing.
+WZP_BRANCH="${WZP_BRANCH:-opus-DRED-v2}"
+
 DO_PULL=1
 DO_CLEAN=0
 DO_INSTALL=0
@@ -44,19 +50,21 @@ BASE_DIR="/mnt/storage/manBuilder"
 NTFY_TOPIC="https://ntfy.sh/wzp"
 DO_PULL="${1:-0}"
 DO_CLEAN="${2:-0}"
+BRANCH="${3:-opus-DRED-v2}"
 
 notify() { curl -s -d "$1" "$NTFY_TOPIC" > /dev/null 2>&1 || true; }
 
 trap 'notify "WZP Linux build FAILED! Check /tmp/wzp-linux-build.log"' ERR
 
 if [ "$DO_PULL" = "1" ]; then
-    echo ">>> Pulling latest..."
+    echo ">>> Pulling latest ($BRANCH)..."
     cd "$BASE_DIR/data/source"
     git reset --hard HEAD 2>/dev/null || true
     git clean -fd 2>/dev/null || true
     git gc --prune=now 2>/dev/null || true
-    git fetch origin feat/android-voip-client 2>&1 | tail -3
-    git reset --hard origin/feat/android-voip-client 2>/dev/null || true
+    git fetch origin "$BRANCH" 2>&1 | tail -3
+    git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
+    git reset --hard "origin/$BRANCH" 2>/dev/null || true
 fi
 
 if [ "$DO_CLEAN" = "1" ]; then
@@ -133,7 +141,7 @@ ssh_cmd "chmod +x /tmp/wzp-linux-build.sh"
 # Run in tmux
 log "Starting Linux build in tmux..."
 ssh_cmd "tmux kill-session -t wzp-linux 2>/dev/null; true"
-ssh_cmd "tmux new-session -d -s wzp-linux '/tmp/wzp-linux-build.sh $DO_PULL $DO_CLEAN 2>&1 | tee /tmp/wzp-linux-build.log'"
+ssh_cmd "tmux new-session -d -s wzp-linux '/tmp/wzp-linux-build.sh $DO_PULL $DO_CLEAN $WZP_BRANCH 2>&1 | tee /tmp/wzp-linux-build.log'"
 
 log "Build running! Notification on ntfy.sh/wzp when done."
 echo ""
