@@ -67,22 +67,45 @@ pub enum NatType {
     Unknown,
 }
 
-/// Probe a single relay with a throwaway QUIC connection.
+/// Probe a single relay with a QUIC connection.
 ///
-/// Each call creates a fresh `quinn::Endpoint` so the OS hands out a
-/// fresh ephemeral source port — essential for NAT-type detection
-/// because a shared socket would produce the same mapping against
-/// every relay and mask symmetric NAT.
+/// # Endpoint reuse (Phase 5 — Nebula-style architecture)
+///
+/// If `existing_endpoint` is `Some`, the probe uses that socket
+/// instead of creating a fresh one. This is the desired mode in
+/// production: a port-preserving NAT (MikroTik masquerade, most
+/// consumer routers) gives a **stable** external port for the
+/// one socket, so the reflex addr observed by ANY relay is the
+/// SAME addr and matches what a peer would see on a direct dial.
+/// Pass the signal endpoint here.
+///
+/// If `None`, creates a fresh one-shot endpoint. Kept for:
+/// - tests that spin up isolated probes
+/// - the "I'm not registered yet" case where there's no signal
+///   endpoint to reuse
+///
+/// NOTE on NAT-type detection: the pre-Phase-5 behavior of
+/// forcing a fresh endpoint per probe was wrong — it made every
+/// port-preserving NAT look symmetric because the classifier saw
+/// a different external port for each fresh source port. With
+/// one shared socket, the classifier reflects the REAL NAT
+/// behavior.
 pub async fn probe_reflect_addr(
     relay: SocketAddr,
     timeout_ms: u64,
+    existing_endpoint: Option<wzp_transport::Endpoint>,
 ) -> Result<(SocketAddr, u32), String> {
     // Install rustls provider idempotently — a second install on the
     // same thread is a no-op.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let endpoint = create_endpoint(bind, None).map_err(|e| format!("endpoint: {e}"))?;
+    let endpoint = match existing_endpoint {
+        Some(ep) => ep,
+        None => {
+            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            create_endpoint(bind, None).map_err(|e| format!("endpoint: {e}"))?
+        }
+    };
 
     let start = Instant::now();
     let probe = async {
@@ -153,9 +176,10 @@ pub async fn probe_reflect_addr(
         .await
         .map_err(|_| format!("probe timeout ({timeout_ms}ms)"))??;
 
-    // Drop the endpoint explicitly AFTER the probe finishes so the
-    // UDP socket is released before we return.
-    drop(endpoint);
+    // `endpoint` is a quinn::Endpoint clone — an Arc under the
+    // hood. Letting it drop at end-of-scope is correct whether it
+    // was fresh (last ref → socket closes) or shared (ref count
+    // decrements, socket stays alive for the signal loop).
     Ok(out)
 }
 
@@ -163,17 +187,32 @@ pub async fn probe_reflect_addr(
 /// classifying the returned addresses. Never errors — failing
 /// probes surface via `NatProbeResult.error`; aggregate is always
 /// returned.
+///
+/// # Endpoint reuse (Phase 5)
+///
+/// If `shared_endpoint` is `Some`, every probe reuses it. This is
+/// the PRODUCTION behavior: all probes source from the same UDP
+/// port, so port-preserving NATs map them to the same external
+/// port, and the classifier reflects the real NAT type. Pass the
+/// signal endpoint.
+///
+/// If `None`, each probe creates its own fresh endpoint — useful
+/// in tests that don't have a signal endpoint, but produces
+/// spurious `SymmetricPort` classifications against NATs that
+/// would otherwise look cone-like.
 pub async fn detect_nat_type(
     relays: Vec<(String, SocketAddr)>,
     timeout_ms: u64,
+    shared_endpoint: Option<wzp_transport::Endpoint>,
 ) -> NatDetection {
     // Parallel probes via tokio::task::JoinSet so the wall-clock is
     // bounded by the slowest probe, not the sum. JoinSet keeps the
     // dep surface at just tokio — we already depend on it.
     let mut set = tokio::task::JoinSet::new();
     for (name, addr) in relays {
+        let ep = shared_endpoint.clone();
         set.spawn(async move {
-            let result = probe_reflect_addr(addr, timeout_ms).await;
+            let result = probe_reflect_addr(addr, timeout_ms, ep).await;
             (name, addr, result)
         });
     }

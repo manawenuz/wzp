@@ -97,7 +97,7 @@ async fn probe_reflect_addr_happy_path() {
 
     let (observed, latency_ms) = tokio::time::timeout(
         Duration::from_secs(3),
-        probe_reflect_addr(relay_addr, 2000),
+        probe_reflect_addr(relay_addr, 2000, None),
     )
     .await
     .expect("probe must complete within 3s")
@@ -138,6 +138,7 @@ async fn detect_nat_type_two_loopback_relays_probes_work_but_classify_unknown() 
             ("RelayB".into(), addr_b),
         ],
         2000,
+        None,
     )
     .await;
 
@@ -195,6 +196,7 @@ async fn detect_nat_type_dead_relay_is_unknown() {
             ("Dead".into(), dead_addr),
         ],
         600, // tight timeout so the dead probe fails fast
+        None,
     )
     .await;
 

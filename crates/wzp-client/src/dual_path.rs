@@ -59,6 +59,22 @@ pub async fn race(
     relay_addr: SocketAddr,
     room_sni: String,
     call_sni: String,
+    // Phase 5: when `Some`, reuse this endpoint for BOTH the
+    // direct-path branch AND the relay dial. This is critical
+    // for hole-punching through port-preserving NATs — the
+    // advertised reflex addr only matches what peers can dial if
+    // the listening socket is the SAME one that registered with
+    // the relay. Pass the signal endpoint here.
+    //
+    // The endpoint MUST have been created with a server config
+    // (`create_endpoint(bind, Some(server_config()))`) if the
+    // A-role branch is going to run, otherwise `accept()` will
+    // return None immediately.
+    //
+    // When `None`, falls back to the pre-Phase-5 behavior of
+    // creating fresh endpoints per role. Used by tests and by
+    // paths where we're not registered to a relay.
+    shared_endpoint: Option<wzp_transport::Endpoint>,
 ) -> anyhow::Result<(Arc<QuinnTransport>, WinningPath)> {
     // Rustls provider must be installed before any quinn endpoint
     // is created. Install attempt is idempotent.
@@ -75,18 +91,37 @@ pub async fn race(
 
     match role {
         Role::Acceptor => {
-            let (sc, _cert_der) = wzp_transport::server_config();
-            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
-            let ep = wzp_transport::create_endpoint(bind, Some(sc))?;
-            tracing::info!(
-                local_addr = ?ep.local_addr().ok(),
-                "dual_path: A-role endpoint up, awaiting peer dial"
-            );
+            let ep = match shared_endpoint.clone() {
+                Some(ep) => {
+                    tracing::info!(
+                        local_addr = ?ep.local_addr().ok(),
+                        "dual_path: A-role reusing shared endpoint for accept"
+                    );
+                    ep
+                }
+                None => {
+                    let (sc, _cert_der) = wzp_transport::server_config();
+                    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                    let fresh = wzp_transport::create_endpoint(bind, Some(sc))?;
+                    tracing::info!(
+                        local_addr = ?fresh.local_addr().ok(),
+                        "dual_path: A-role fresh endpoint up, awaiting peer dial"
+                    );
+                    fresh
+                }
+            };
             let ep_for_fut = ep.clone();
             direct_fut = Box::pin(async move {
                 // `wzp_transport::accept` wraps the same
                 // `endpoint.accept().await?.await?` dance we want
                 // and maps errors into TransportError for us.
+                //
+                // If `ep_for_fut` is the shared signal endpoint,
+                // this accept pulls the NEXT incoming connection
+                // — normally that's the peer's direct-P2P dial.
+                // Signal recv is done via the existing signal
+                // CONNECTION (accept_bi), not the endpoint, so
+                // there's no conflict.
                 let conn = wzp_transport::accept(&ep_for_fut)
                     .await
                     .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
@@ -95,13 +130,26 @@ pub async fn race(
             direct_ep = ep;
         }
         Role::Dialer => {
-            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
-            let ep = wzp_transport::create_endpoint(bind, None)?;
-            tracing::info!(
-                local_addr = ?ep.local_addr().ok(),
-                %peer_direct_addr,
-                "dual_path: D-role endpoint up, dialing peer"
-            );
+            let ep = match shared_endpoint.clone() {
+                Some(ep) => {
+                    tracing::info!(
+                        local_addr = ?ep.local_addr().ok(),
+                        %peer_direct_addr,
+                        "dual_path: D-role reusing shared endpoint to dial peer"
+                    );
+                    ep
+                }
+                None => {
+                    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                    let fresh = wzp_transport::create_endpoint(bind, None)?;
+                    tracing::info!(
+                        local_addr = ?fresh.local_addr().ok(),
+                        %peer_direct_addr,
+                        "dual_path: D-role fresh endpoint up, dialing peer"
+                    );
+                    fresh
+                }
+            };
             let ep_for_fut = ep.clone();
             let client_cfg = wzp_transport::client_config();
             let sni = call_sni.clone();
@@ -116,9 +164,17 @@ pub async fn race(
         }
     }
 
-    // Relay path: classic dial to the relay's media room.
-    let relay_bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let relay_ep = wzp_transport::create_endpoint(relay_bind, None)?;
+    // Relay path: classic dial to the relay's media room. Phase 5:
+    // reuse the shared endpoint here too so MikroTik-style NATs
+    // keep a stable external port across all flows from this
+    // client. Falls back to a fresh endpoint when not shared.
+    let relay_ep = match shared_endpoint.clone() {
+        Some(ep) => ep,
+        None => {
+            let relay_bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            wzp_transport::create_endpoint(relay_bind, None)?
+        }
+    };
     let relay_ep_for_fut = relay_ep.clone();
     let relay_client_cfg = wzp_transport::client_config();
     let relay_sni = room_sni.clone();
@@ -185,11 +241,16 @@ pub async fn race(
         }
     };
 
-    // Drop both endpoints once the winner is stored in result. The
-    // winning transport owns its own connection so dropping the
-    // endpoint won't kill it.
-    drop(direct_ep);
-    drop(relay_ep);
+    // Let both endpoint clones drop at end-of-scope. With the
+    // Phase 5 shared-endpoint path, these clones are Arc<Endpoint>
+    // clones of the signal endpoint — dropping them just decrements
+    // the ref count, the socket stays alive for the signal loop +
+    // any further direct-P2P attempts. With the fresh-endpoint
+    // fallback, the drops are the last refs so the sockets close
+    // promptly. Either way the winning transport already owns its
+    // own quinn::Connection reference which is independent of the
+    // Endpoint lifetime.
+    let _ = (direct_ep, relay_ep);
 
     result
 }

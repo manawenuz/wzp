@@ -114,6 +114,7 @@ async fn dual_path_direct_wins_on_loopback() {
         relay_addr,
         "test-room".into(),
         "call-test".into(),
+        None, // Phase 5: tests use fresh endpoints (no shared signal)
     )
     .await
     .expect("race must succeed");
@@ -151,6 +152,7 @@ async fn dual_path_relay_wins_when_direct_is_dead() {
         relay_addr,
         "test-room".into(),
         "call-test".into(),
+        None, // Phase 5: tests use fresh endpoints (no shared signal)
     )
     .await
     .expect("race must succeed via relay fallback");
@@ -184,6 +186,7 @@ async fn dual_path_errors_cleanly_when_both_paths_dead() {
         dead_relay,
         "test-room".into(),
         "call-test".into(),
+        None, // Phase 5: tests use fresh endpoints (no shared signal)
     )
     .await;
     let elapsed = start.elapsed();

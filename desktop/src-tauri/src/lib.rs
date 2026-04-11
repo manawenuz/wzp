@@ -360,7 +360,10 @@ async fn connect(
     // own_reflex_addr, unparseable addrs, equal addrs), we skip
     // the race entirely and fall back to the pure-relay path —
     // identical to Phase 0 behavior.
-    let own_reflex_addr = state.signal.lock().await.own_reflex_addr.clone();
+    let (own_reflex_addr, signal_endpoint_for_race) = {
+        let sig = state.signal.lock().await;
+        (sig.own_reflex_addr.clone(), sig.endpoint.clone())
+    };
     let peer_addr_parsed: Option<std::net::SocketAddr> = peer_direct_addr
         .as_deref()
         .and_then(|s| s.parse().ok());
@@ -389,7 +392,20 @@ async fn connect(
                 }));
                 let room_sni = room.clone();
                 let call_sni = format!("call-{room}");
-                match wzp_client::dual_path::race(r, peer_addr, relay_sockaddr, room_sni, call_sni).await {
+                // Phase 5: pass the signal endpoint so the race
+                // reuses ONE socket for listen + dial + relay.
+                // The advertised reflex addr then matches the
+                // actual listening port and peers can reach us.
+                match wzp_client::dual_path::race(
+                    r,
+                    peer_addr,
+                    relay_sockaddr,
+                    room_sni,
+                    call_sni,
+                    signal_endpoint_for_race.clone(),
+                )
+                .await
+                {
                     Ok((transport, path)) => {
                         tracing::info!(?path, "connect: dual-path race resolved");
                         emit_call_debug(&app, "connect:dual_path_race_won", serde_json::json!({
@@ -760,8 +776,23 @@ fn do_register_signal(
     let identity_pub = *pub_id.signing.as_bytes();
     emit_call_debug(&app, "register_signal:identity_loaded", serde_json::json!({ "fingerprint": fp }));
 
+    // Phase 5: single-socket Nebula-style architecture. The signal
+    // endpoint is dual-purpose (client + server config). Every outbound
+    // flow — signal, reflect probes, relay media dials, direct-P2P
+    // dials — uses this same socket, so port-preserving NATs (MikroTik
+    // masquerade is the big one) give us a stable external port that
+    // peers can actually dial. The same socket also accepts incoming
+    // direct-P2P connections during the dual-path race.
+    //
+    // Was `None` before Phase 5 — that produced a client-only endpoint
+    // with a different internal port than later reflect / dual-path
+    // endpoints, which made MikroTik look symmetric and broke direct
+    // P2P because the advertised reflex port was not the listening
+    // port.
     let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let endpoint = wzp_transport::create_endpoint(bind, None).map_err(|e| format!("{e}"))?;
+    let (server_cfg, _cert_der) = wzp_transport::server_config();
+    let endpoint = wzp_transport::create_endpoint(bind, Some(server_cfg))
+        .map_err(|e| format!("{e}"))?;
     emit_call_debug(&app, "register_signal:endpoint_created", serde_json::json!({ "bind": bind.to_string() }));
     let conn = wzp_transport::connect(&endpoint, addr, "_signal", wzp_transport::client_config())
         .await
@@ -1384,6 +1415,7 @@ async fn get_reflected_address(
 /// in; Rust side just does the network work.
 #[tauri::command]
 async fn detect_nat_type(
+    state: tauri::State<'_, Arc<AppState>>,
     relays: Vec<RelayArg>,
 ) -> Result<serde_json::Value, String> {
     // Parse relay args up front so a single malformed entry fails
@@ -1398,10 +1430,18 @@ async fn detect_nat_type(
         parsed.push((r.name, addr));
     }
 
+    // Phase 5: share the signal endpoint across all probes so
+    // they emit from the same source port. Port-preserving NATs
+    // (MikroTik, most consumer routers) give a stable external
+    // port → classifier correctly sees cone instead of falsely
+    // labeling SymmetricPort. Falls back to None (per-probe fresh
+    // endpoint) when not registered.
+    let shared_endpoint = state.signal.lock().await.endpoint.clone();
+
     // 1500ms per probe is generous: a same-host probe is < 10ms,
     // a cross-continent probe is typically < 300ms, and we want
     // to tolerate a one-off packet loss during connect.
-    let detection = wzp_client::reflect::detect_nat_type(parsed, 1500).await;
+    let detection = wzp_client::reflect::detect_nat_type(parsed, 1500, shared_endpoint).await;
     serde_json::to_value(&detection).map_err(|e| format!("serialize: {e}"))
 }
 
