@@ -347,6 +347,9 @@ function renderRelayDialogList() {
 
     // Click to select
     item.addEventListener("click", () => {
+      const prev = loadSettings();
+      const prevRelayAddr = prev.relays[prev.selectedRelay]?.address;
+
       const s = loadSettings();
       s.selectedRelay = i;
 
@@ -358,6 +361,30 @@ function renderRelayDialogList() {
       saveSettingsObj(s);
       renderRelayDialogList();
       renderRelayButton();
+
+      // If the user switched relays and we're currently registered,
+      // transparently re-register against the new one. The Rust
+      // `register_signal` command is idempotent and handles the
+      // swap internally (close old transport → connect new). This
+      // makes "change server" a single-click operation instead of
+      // manual deregister + re-register.
+      const newRelayAddr = r.address;
+      if (newRelayAddr && newRelayAddr !== prevRelayAddr) {
+        (async () => {
+          // Is a signal currently registered? get_signal_status is
+          // cheap and lets us decide whether to kick the swap.
+          try {
+            const st: any = await invoke("get_signal_status");
+            if (st && st.status === "registered") {
+              await invoke<string>("register_signal", { relay: newRelayAddr });
+              // `signal-event { type: "registered" }` from Rust will
+              // update directRegistered for us — no manual render here.
+            }
+          } catch (e) {
+            console.warn("relay swap: failed to re-register", e);
+          }
+        })();
+      }
     });
 
     relayDialogList.appendChild(item);
@@ -1236,6 +1263,27 @@ listen("signal-event", (event: any) => {
     case "hangup":
       callStatusText.textContent = "";
       incomingCallPanel.classList.add("hidden");
+      break;
+    case "reconnecting":
+      // Signal supervisor is retrying the relay connection. Show
+      // a non-blocking indicator; the user can keep using
+      // everything that doesn't need a live signal.
+      {
+        const relay = typeof data.relay === "string" ? data.relay : "relay";
+        directRegistered.textContent = `🔄 reconnecting to ${relay}…`;
+        directRegistered.style.color = "var(--yellow)";
+        directRegistered.classList.remove("hidden");
+      }
+      break;
+    case "registered":
+      // Supervisor (re-)succeeded, or the first register landed.
+      // Clear the banner and show the registered state.
+      {
+        const fp = typeof data.fingerprint === "string" ? data.fingerprint : "";
+        directRegistered.textContent = `✓ registered${fp ? ` (${fp.slice(0, 16)}…)` : ""}`;
+        directRegistered.style.color = "var(--green)";
+        directRegistered.classList.remove("hidden");
+      }
       break;
   }
 });
