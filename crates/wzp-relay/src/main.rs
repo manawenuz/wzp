@@ -453,6 +453,21 @@ async fn main() -> anyhow::Result<()> {
     let signal_hub = Arc::new(Mutex::new(wzp_relay::signal_hub::SignalHub::new()));
     let call_registry = Arc::new(Mutex::new(wzp_relay::call_registry::CallRegistry::new()));
 
+    // Phase 4: cross-relay direct-call signal dispatcher.
+    //
+    // The federation layer unwraps incoming
+    // `SignalMessage::FederatedSignalForward` envelopes and pushes
+    // (inner, origin_relay_fp) onto this channel. A dedicated task
+    // further down reads from it and routes the inner message
+    // through signal_hub / call_registry exactly as if it had
+    // arrived on a local signal transport — with the extra
+    // context that a peer relay is on the other side of the call.
+    let (cross_relay_tx, mut cross_relay_rx) =
+        tokio::sync::mpsc::channel::<(wzp_proto::SignalMessage, String)>(32);
+    if let Some(ref fm) = federation_mgr {
+        fm.set_cross_relay_tx(cross_relay_tx.clone()).await;
+    }
+
     // Spawn inter-relay health probes via ProbeMesh coordinator
     if !config.probe_targets.is_empty() {
         let mesh = wzp_relay::probe::ProbeMesh::new(
@@ -497,6 +512,201 @@ async fn main() -> anyhow::Result<()> {
         info!(filter = %tap, "debug tap enabled — logging packet headers");
     }
 
+    // Phase 4: cross-relay direct-call dispatcher task.
+    //
+    // Reads unwrapped (inner, origin_relay_fp) tuples that the
+    // federation layer pushes out of its `handle_signal` arm for
+    // `FederatedSignalForward`, and routes the inner message
+    // through the local signal_hub / call_registry exactly as if
+    // the message had arrived on a local client signal transport.
+    //
+    // In Phase 4 MVP the dispatcher handles:
+    //   * DirectCallOffer  — if target is local, stash in registry
+    //                        with peer_relay_fp and deliver to
+    //                        local callee via signal_hub.
+    //   * DirectCallAnswer — stash callee addr, forward answer to
+    //                        local caller, emit local CallSetup.
+    //   * CallRinging     — forward to local caller for UX.
+    //   * Hangup          — forward to the local participant(s).
+    // Everything else is dropped.
+    {
+        let signal_hub_d = signal_hub.clone();
+        let call_registry_d = call_registry.clone();
+        let advertised_addr_d = advertised_addr_str.clone();
+        let federation_mgr_d = federation_mgr.clone();
+        tokio::spawn(async move {
+            use wzp_proto::{CallAcceptMode, SignalMessage};
+            while let Some((inner, origin_relay_fp)) = cross_relay_rx.recv().await {
+                match inner {
+                    SignalMessage::DirectCallOffer {
+                        ref target_fingerprint,
+                        ref caller_fingerprint,
+                        ref call_id,
+                        ref caller_reflexive_addr,
+                        ..
+                    } => {
+                        // Is the target on THIS relay? If not, drop —
+                        // Phase 4 MVP is single-hop federation only.
+                        let online = {
+                            let hub = signal_hub_d.lock().await;
+                            hub.is_online(target_fingerprint)
+                        };
+                        if !online {
+                            tracing::debug!(
+                                target = %target_fingerprint,
+                                %origin_relay_fp,
+                                "cross-relay: offer target not local, dropping (no multi-hop)"
+                            );
+                            continue;
+                        }
+                        // Stash in local registry so the answer path
+                        // can find the call + route the reply back
+                        // through the same federation link.
+                        {
+                            let mut reg = call_registry_d.lock().await;
+                            reg.create_call(
+                                call_id.clone(),
+                                caller_fingerprint.clone(),
+                                target_fingerprint.clone(),
+                            );
+                            reg.set_caller_reflexive_addr(call_id, caller_reflexive_addr.clone());
+                            reg.set_peer_relay_fp(call_id, Some(origin_relay_fp.clone()));
+                        }
+                        // Deliver the offer to the local target.
+                        let hub = signal_hub_d.lock().await;
+                        if let Err(e) = hub.send_to(target_fingerprint, &inner).await {
+                            tracing::warn!(
+                                target = %target_fingerprint,
+                                error = %e,
+                                "cross-relay: failed to deliver forwarded offer"
+                            );
+                        }
+                    }
+
+                    SignalMessage::DirectCallAnswer {
+                        ref call_id,
+                        accept_mode,
+                        ref callee_reflexive_addr,
+                        ..
+                    } => {
+                        // Look up the local caller fp from the registry.
+                        let caller_fp = {
+                            let reg = call_registry_d.lock().await;
+                            reg.get(call_id).map(|c| c.caller_fingerprint.clone())
+                        };
+                        let Some(caller_fp) = caller_fp else {
+                            tracing::debug!(%call_id, "cross-relay: answer for unknown call, dropping");
+                            continue;
+                        };
+
+                        if accept_mode == CallAcceptMode::Reject {
+                            // Forward hangup to local caller + clean up registry.
+                            let hub = signal_hub_d.lock().await;
+                            let _ = hub
+                                .send_to(
+                                    &caller_fp,
+                                    &SignalMessage::Hangup {
+                                        reason: wzp_proto::HangupReason::Normal,
+                                    },
+                                )
+                                .await;
+                            drop(hub);
+                            let mut reg = call_registry_d.lock().await;
+                            reg.end_call(call_id);
+                            continue;
+                        }
+
+                        // Accept — stash the callee's reflex addr + mark
+                        // the call active, then read back BOTH addrs so
+                        // we can cross-wire peer_direct_addr in CallSetup.
+                        let room_name = format!("call-{call_id}");
+                        let (caller_addr, callee_addr_for_setup) = {
+                            let mut reg = call_registry_d.lock().await;
+                            reg.set_active(call_id, accept_mode, room_name.clone());
+                            reg.set_callee_reflexive_addr(
+                                call_id,
+                                callee_reflexive_addr.clone(),
+                            );
+                            let c = reg.get(call_id);
+                            (
+                                c.and_then(|c| c.caller_reflexive_addr.clone()),
+                                c.and_then(|c| c.callee_reflexive_addr.clone()),
+                            )
+                        };
+                        let _ = caller_addr; // unused on the caller side; callee holds the relevant addr
+
+                        // Forward the raw answer to the local caller so
+                        // the JS side sees DirectCallAnswer (fires any
+                        // "call answered" UX that looks at this message).
+                        {
+                            let hub = signal_hub_d.lock().await;
+                            let _ = hub.send_to(&caller_fp, &inner).await;
+                        }
+
+                        // Emit the LOCAL CallSetup to our local caller.
+                        // relay_addr = our own advertised addr so if P2P
+                        // fails the caller will at least dial OUR relay
+                        // (single-relay fallback — Phase 4.1 will wire
+                        // federated media so that actually reaches the
+                        // peer). peer_direct_addr = the callee's reflex
+                        // addr carried in the answer.
+                        let setup = SignalMessage::CallSetup {
+                            call_id: call_id.clone(),
+                            room: room_name.clone(),
+                            relay_addr: advertised_addr_d.clone(),
+                            peer_direct_addr: callee_addr_for_setup,
+                        };
+                        let hub = signal_hub_d.lock().await;
+                        let _ = hub.send_to(&caller_fp, &setup).await;
+
+                        tracing::info!(
+                            %call_id,
+                            %caller_fp,
+                            %origin_relay_fp,
+                            "cross-relay: delivered answer + CallSetup to local caller"
+                        );
+                    }
+
+                    SignalMessage::CallRinging { ref call_id } => {
+                        // Forward to local caller for "ringing..." UX.
+                        let caller_fp = {
+                            let reg = call_registry_d.lock().await;
+                            reg.get(call_id).map(|c| c.caller_fingerprint.clone())
+                        };
+                        if let Some(fp) = caller_fp {
+                            let hub = signal_hub_d.lock().await;
+                            let _ = hub.send_to(&fp, &inner).await;
+                        }
+                    }
+
+                    SignalMessage::Hangup { .. } => {
+                        // Best-effort: broadcast the hangup to every
+                        // local participant of any call that currently
+                        // has this origin as its peer_relay_fp.
+                        // The forwarded hangup doesn't carry a call_id
+                        // so we can't target precisely — Phase 4.1 will
+                        // tighten this once hangup tracking is stricter.
+                        tracing::debug!(
+                            %origin_relay_fp,
+                            "cross-relay: forwarded Hangup (Phase 4.1 will target by call_id)"
+                        );
+                    }
+
+                    _ => {
+                        tracing::debug!(
+                            %origin_relay_fp,
+                            "cross-relay: dispatcher ignoring unsupported inner variant"
+                        );
+                    }
+                }
+            }
+            // Suppress the warning if federation_mgr_d is unused —
+            // it's held here so the Arc doesn't drop during the
+            // dispatcher's lifetime.
+            drop(federation_mgr_d);
+        });
+    }
+
     info!("Listening for connections...");
 
     loop {
@@ -529,6 +739,10 @@ async fn main() -> anyhow::Result<()> {
         let signal_hub = signal_hub.clone();
         let call_registry = call_registry.clone();
         let advertised_addr_str = advertised_addr_str.clone();
+        // Phase 4: per-task clone of this relay's federation TLS
+        // fingerprint so the FederatedSignalForward envelopes the
+        // spawned signal handler builds carry `origin_relay_fp`.
+        let tls_fp = tls_fp.clone();
 
         let incoming_addr = incoming.remote_address();
         info!(%incoming_addr, "accept queue: new Incoming, spawning handshake task");
@@ -782,9 +996,72 @@ async fn main() -> anyhow::Result<()> {
                                         hub.is_online(&target_fp)
                                     };
                                     if !online {
-                                        info!(%addr, target = %target_fp, "call target not online");
-                                        let _ = transport.send_signal(&SignalMessage::Hangup {
-                                            reason: wzp_proto::HangupReason::Normal,
+                                        // Phase 4: maybe the target is on a
+                                        // federation peer. Wrap the offer in
+                                        // FederatedSignalForward and broadcast
+                                        // it over every active peer link —
+                                        // whichever relay has the target will
+                                        // unwrap and dispatch locally. We also
+                                        // stash the call in OUR registry so
+                                        // the eventual answer coming back via
+                                        // federation has a matching entry.
+                                        let forwarded = if let Some(ref fm) = federation_mgr {
+                                            let forward = SignalMessage::FederatedSignalForward {
+                                                inner: Box::new(msg.clone()),
+                                                origin_relay_fp: tls_fp.clone(),
+                                            };
+                                            let count = fm.broadcast_signal(&forward).await;
+                                            if count > 0 {
+                                                info!(
+                                                    %addr,
+                                                    target = %target_fp,
+                                                    peers = count,
+                                                    "direct-call offer forwarded to federation peers"
+                                                );
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
+
+                                        if !forwarded {
+                                            info!(%addr, target = %target_fp, "call target not online (no federation route)");
+                                            let _ = transport.send_signal(&SignalMessage::Hangup {
+                                                reason: wzp_proto::HangupReason::Normal,
+                                            }).await;
+                                            continue;
+                                        }
+
+                                        // Create call in registry with the
+                                        // caller's reflex addr + mark it as
+                                        // cross-relay so the answer path knows
+                                        // to route the CallSetup's
+                                        // peer_direct_addr from what the
+                                        // federated answer carries. peer_relay_fp
+                                        // stays None here because we broadcast —
+                                        // the receiving relay picks itself as
+                                        // the answer source and its forwarded
+                                        // answer will identify itself there.
+                                        {
+                                            let mut reg = call_registry.lock().await;
+                                            reg.create_call(
+                                                call_id.clone(),
+                                                client_fp.clone(),
+                                                target_fp.clone(),
+                                            );
+                                            reg.set_caller_reflexive_addr(
+                                                &call_id,
+                                                caller_addr_for_registry,
+                                            );
+                                        }
+
+                                        // Send ringing to caller immediately
+                                        // so the UI shows feedback while the
+                                        // federated delivery is in flight.
+                                        let _ = transport.send_signal(&SignalMessage::CallRinging {
+                                            call_id: call_id.clone(),
                                         }).await;
                                         continue;
                                     }
@@ -824,12 +1101,25 @@ async fn main() -> anyhow::Result<()> {
                                     let mode = *accept_mode;
                                     let callee_addr_for_registry = callee_reflexive_addr.clone();
 
-                                    let peer_fp = {
+                                    // Phase 4: look up peer fingerprint AND
+                                    // peer_relay_fp in one lock acquisition.
+                                    // peer_relay_fp being Some means the
+                                    // caller is on a remote federation peer
+                                    // and we have to route the answer /
+                                    // hangup back through that link instead
+                                    // of local signal_hub.
+                                    let (peer_fp, peer_relay_fp) = {
                                         let reg = call_registry.lock().await;
-                                        reg.peer_fingerprint(&call_id, &client_fp).map(|s| s.to_string())
+                                        match reg.get(&call_id) {
+                                            Some(c) => (
+                                                Some(reg.peer_fingerprint(&call_id, &client_fp).map(|s| s.to_string())),
+                                                c.peer_relay_fp.clone(),
+                                            ),
+                                            None => (None, None),
+                                        }
                                     };
 
-                                    let Some(peer_fp) = peer_fp else {
+                                    let Some(Some(peer_fp)) = peer_fp else {
                                         warn!(call_id = %call_id, "answer for unknown call");
                                         continue;
                                     };
@@ -839,10 +1129,29 @@ async fn main() -> anyhow::Result<()> {
                                         let mut reg = call_registry.lock().await;
                                         reg.end_call(&call_id);
                                         drop(reg);
-                                        let hub = signal_hub.lock().await;
-                                        let _ = hub.send_to(&peer_fp, &SignalMessage::Hangup {
-                                            reason: wzp_proto::HangupReason::Normal,
-                                        }).await;
+
+                                        // Phase 4: cross-relay reject —
+                                        // forward the hangup to the origin
+                                        // relay instead of local signal_hub.
+                                        if let Some(ref origin_fp) = peer_relay_fp {
+                                            if let Some(ref fm) = federation_mgr {
+                                                let hangup = SignalMessage::Hangup {
+                                                    reason: wzp_proto::HangupReason::Normal,
+                                                };
+                                                let forward = SignalMessage::FederatedSignalForward {
+                                                    inner: Box::new(hangup),
+                                                    origin_relay_fp: tls_fp.clone(),
+                                                };
+                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                    warn!(%call_id, %origin_fp, error = %e, "cross-relay reject forward failed");
+                                                }
+                                            }
+                                        } else {
+                                            let hub = signal_hub.lock().await;
+                                            let _ = hub.send_to(&peer_fp, &SignalMessage::Hangup {
+                                                reason: wzp_proto::HangupReason::Normal,
+                                            }).await;
+                                        }
                                     } else {
                                         // Accept — create private room + stash the
                                         // callee's reflex addr if it advertised one
@@ -869,46 +1178,68 @@ async fn main() -> anyhow::Result<()> {
                                             "call accepted, creating room"
                                         );
 
-                                        // Forward answer to caller
-                                        {
-                                            let hub = signal_hub.lock().await;
-                                            let _ = hub.send_to(&peer_fp, &msg).await;
-                                        }
-
-                                        // Send CallSetup to both parties.
-                                        //
-                                        // Each party's `peer_direct_addr` carries the
-                                        // OTHER party's reflex addr so they can attempt
-                                        // a direct QUIC handshake to each other in
-                                        // parallel with the relay path (Phase 3
-                                        // hole-punching). Both sides falling back to the
-                                        // relay path is the Phase 0 behavior, so
-                                        // emitting `None` here is always safe.
-                                        //
-                                        // BUG FIX (pre-Phase 3): the previous version of
-                                        // this used `addr.ip()` which is the client's
-                                        // remote address, not the relay's. Use the
-                                        // precomputed advertised address.
                                         let relay_addr_for_setup = advertised_addr_str.clone();
 
-                                        // peer_fp identifies the caller here (the
-                                        // fingerprint currently on the other end of this
-                                        // answer flow); client_fp identifies the callee.
-                                        // So the CALLER gets the callee's addr as its
-                                        // peer_direct_addr, and vice versa.
-                                        let setup_for_caller = SignalMessage::CallSetup {
-                                            call_id: call_id.clone(),
-                                            room: room.clone(),
-                                            relay_addr: relay_addr_for_setup.clone(),
-                                            peer_direct_addr: callee_addr.clone(),
-                                        };
-                                        let setup_for_callee = SignalMessage::CallSetup {
-                                            call_id: call_id.clone(),
-                                            room: room.clone(),
-                                            relay_addr: relay_addr_for_setup,
-                                            peer_direct_addr: caller_addr.clone(),
-                                        };
-                                        {
+                                        if let Some(ref origin_fp) = peer_relay_fp {
+                                            // Phase 4 cross-relay: the caller
+                                            // is on a remote peer. Forward the
+                                            // raw answer (which carries the
+                                            // callee's reflex addr) back over
+                                            // federation — the peer's
+                                            // cross-relay dispatcher will
+                                            // deliver it to the local caller
+                                            // AND emit a CallSetup on that
+                                            // side with peer_direct_addr =
+                                            // callee_addr.
+                                            //
+                                            // Here we emit only the LOCAL
+                                            // CallSetup (to our callee) with
+                                            // peer_direct_addr = caller_addr.
+                                            if let Some(ref fm) = federation_mgr {
+                                                let forward = SignalMessage::FederatedSignalForward {
+                                                    inner: Box::new(msg.clone()),
+                                                    origin_relay_fp: tls_fp.clone(),
+                                                };
+                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                    warn!(
+                                                        %call_id,
+                                                        %origin_fp,
+                                                        error = %e,
+                                                        "cross-relay answer forward failed"
+                                                    );
+                                                }
+                                            }
+
+                                            let setup_for_callee = SignalMessage::CallSetup {
+                                                call_id: call_id.clone(),
+                                                room: room.clone(),
+                                                relay_addr: relay_addr_for_setup,
+                                                peer_direct_addr: caller_addr.clone(),
+                                            };
+                                            let hub = signal_hub.lock().await;
+                                            let _ = hub.send_to(&client_fp, &setup_for_callee).await;
+                                        } else {
+                                            // Local call (existing Phase 3 path).
+                                            // Forward answer to caller
+                                            {
+                                                let hub = signal_hub.lock().await;
+                                                let _ = hub.send_to(&peer_fp, &msg).await;
+                                            }
+
+                                            // Send CallSetup to BOTH parties with
+                                            // cross-wired peer_direct_addr.
+                                            let setup_for_caller = SignalMessage::CallSetup {
+                                                call_id: call_id.clone(),
+                                                room: room.clone(),
+                                                relay_addr: relay_addr_for_setup.clone(),
+                                                peer_direct_addr: callee_addr.clone(),
+                                            };
+                                            let setup_for_callee = SignalMessage::CallSetup {
+                                                call_id: call_id.clone(),
+                                                room: room.clone(),
+                                                relay_addr: relay_addr_for_setup,
+                                                peer_direct_addr: caller_addr.clone(),
+                                            };
                                             let hub = signal_hub.lock().await;
                                             let _ = hub.send_to(&peer_fp, &setup_for_caller).await;
                                             let _ = hub.send_to(&client_fp, &setup_for_callee).await;

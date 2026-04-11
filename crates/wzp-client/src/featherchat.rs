@@ -126,6 +126,10 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         // an answer. "Offer" is the generic catch-all.
         SignalMessage::Reflect
         | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
+        // Phase 4 cross-relay forwarding envelope — strictly a
+        // relay-to-relay message, never rides the featherChat
+        // bridge. Catch-all mapping for completeness.
+        SignalMessage::FederatedSignalForward { .. } => CallSignalType::Offer,
     }
 }
 

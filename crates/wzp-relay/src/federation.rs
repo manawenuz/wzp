@@ -146,6 +146,14 @@ pub struct FederationManager {
     event_log: EventLogger,
     /// Per-room rate limiters for inbound federation media.
     rate_limiters: Mutex<HashMap<String, RateLimiter>>,
+    /// Phase 4: channel for handing cross-relay direct-call
+    /// signaling (inner message + origin relay fp) back to the
+    /// main signal loop in `main.rs`. Set once at startup via
+    /// `set_cross_relay_tx`. `None` when the main loop hasn't
+    /// wired it up yet (e.g. during startup warmup) — forwards
+    /// that arrive before wiring are dropped with a warning.
+    cross_relay_signal_tx:
+        Mutex<Option<tokio::sync::mpsc::Sender<(wzp_proto::SignalMessage, String)>>>,
 }
 
 impl FederationManager {
@@ -171,6 +179,78 @@ impl FederationManager {
             dedup: Mutex::new(Deduplicator::new(DEDUP_WINDOW_SIZE)),
             event_log,
             rate_limiters: Mutex::new(HashMap::new()),
+            cross_relay_signal_tx: Mutex::new(None),
+        }
+    }
+
+    /// Phase 4: expose this relay's federation TLS fingerprint so
+    /// the main signal loop can populate
+    /// `SignalMessage::FederatedSignalForward.origin_relay_fp`.
+    pub fn local_tls_fp(&self) -> &str {
+        &self.local_tls_fp
+    }
+
+    /// Phase 4: wire the channel that the main signal loop uses
+    /// to receive unwrapped cross-relay direct-call signals. Called
+    /// once at startup from `main.rs`.
+    pub async fn set_cross_relay_tx(
+        &self,
+        tx: tokio::sync::mpsc::Sender<(wzp_proto::SignalMessage, String)>,
+    ) {
+        *self.cross_relay_signal_tx.lock().await = Some(tx);
+    }
+
+    /// Phase 4: broadcast a `SignalMessage::FederatedSignalForward`
+    /// to every active federation peer link. Returns the number of
+    /// peers the broadcast reached (not the number that successfully
+    /// delivered the message further). Used when the local relay
+    /// doesn't know which peer holds the target fingerprint for a
+    /// `DirectCallOffer` — whichever peer has it will unwrap and
+    /// handle locally; the rest drop silently after "target not
+    /// local" check.
+    ///
+    /// Loop prevention: the receiving relay checks
+    /// `origin_relay_fp` against its own fp and drops self-sourced
+    /// forwards.
+    pub async fn broadcast_signal(&self, msg: &wzp_proto::SignalMessage) -> usize {
+        let links = self.peer_links.lock().await;
+        let mut count = 0;
+        for (fp, link) in links.iter() {
+            match link.transport.send_signal(msg).await {
+                Ok(()) => {
+                    count += 1;
+                    tracing::debug!(peer = %link.label, %fp, "federation: broadcast signal ok");
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %link.label, %fp, error = %e, "federation: broadcast signal failed");
+                }
+            }
+        }
+        count
+    }
+
+    /// Phase 4: targeted send — used by the
+    /// `DirectCallAnswer` path when the registry knows exactly
+    /// which peer relay to route the reply back to. More efficient
+    /// than re-broadcasting and avoids leaking the call to
+    /// uninvolved peers.
+    ///
+    /// Returns `Ok(())` on success, `Err(String)` when the peer
+    /// isn't currently linked or the send fails.
+    pub async fn send_signal_to_peer(
+        &self,
+        peer_relay_fp: &str,
+        msg: &wzp_proto::SignalMessage,
+    ) -> Result<(), String> {
+        let normalized = normalize_fp(peer_relay_fp);
+        let links = self.peer_links.lock().await;
+        match links.get(&normalized) {
+            Some(link) => link
+                .transport
+                .send_signal(msg)
+                .await
+                .map_err(|e| format!("send to peer {normalized}: {e}")),
+            None => Err(format!("no active federation link for {normalized}")),
         }
     }
 
@@ -849,6 +929,57 @@ async fn handle_signal(
                     room::broadcast_signal(&senders, &update).await;
                     info!(room = %room, "broadcast updated presence (remote participant removed)");
                     break;
+                }
+            }
+        }
+        // Phase 4: cross-relay direct-call signal envelope.
+        //
+        // Unwrap the inner message and hand it off to the main
+        // signal loop via the cross_relay_signal_tx channel. The
+        // main loop will then dispatch the inner DirectCallOffer/
+        // Answer/Ringing/Hangup exactly as if it had arrived on a
+        // local signal transport — with the extra context that
+        // the call is "federated" (origin_relay_fp).
+        //
+        // Loop prevention: drop any forward whose origin matches
+        // our own federation TLS fingerprint. With
+        // broadcast-to-all-peers this prevents A→B→A echo loops.
+        SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
+            if origin_relay_fp == fm.local_tls_fp {
+                tracing::debug!(
+                    peer = %peer_label,
+                    "federation: dropping self-sourced FederatedSignalForward (loop prevention)"
+                );
+                return;
+            }
+            let tx_opt = {
+                let guard = fm.cross_relay_signal_tx.lock().await;
+                guard.clone()
+            };
+            match tx_opt {
+                Some(tx) => {
+                    let inner_discriminant = std::mem::discriminant(&*inner);
+                    if let Err(e) = tx.send((*inner, origin_relay_fp.clone())).await {
+                        warn!(
+                            peer = %peer_label,
+                            ?inner_discriminant,
+                            error = %e,
+                            "federation: cross-relay signal dispatcher full / closed"
+                        );
+                    } else {
+                        tracing::debug!(
+                            peer = %peer_label,
+                            ?inner_discriminant,
+                            %origin_relay_fp,
+                            "federation: forwarded cross-relay signal to main dispatcher"
+                        );
+                    }
+                }
+                None => {
+                    warn!(
+                        peer = %peer_label,
+                        "federation: cross_relay_signal_tx not wired yet — dropping forward"
+                    );
                 }
             }
         }

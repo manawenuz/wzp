@@ -41,6 +41,15 @@ pub struct DirectCall {
     /// `AcceptTrusted` answers — privacy-mode answers leave this
     /// `None`. Fed into the caller's `CallSetup.peer_direct_addr`.
     pub callee_reflexive_addr: Option<String>,
+    /// Phase 4 (cross-relay): federation TLS fingerprint of the
+    /// PEER RELAY that forwarded the offer/answer for this call.
+    /// `None` for local calls — caller and callee both
+    /// registered on this relay. `Some(fp)` when one side of
+    /// the call is on a remote relay reached through the
+    /// federation link identified by `fp`. The
+    /// `DirectCallAnswer` handling uses this to route the reply
+    /// back through the SAME link instead of broadcasting again.
+    pub peer_relay_fp: Option<String>,
 }
 
 /// Registry of active direct calls.
@@ -69,9 +78,20 @@ impl CallRegistry {
             ended_at: None,
             caller_reflexive_addr: None,
             callee_reflexive_addr: None,
+            peer_relay_fp: None,
         };
         self.calls.insert(call_id.clone(), call);
         self.calls.get(&call_id).unwrap()
+    }
+
+    /// Phase 4: stash the federation TLS fingerprint of the peer
+    /// relay that originated (or will receive) the cross-relay
+    /// forward for this call. Safe to call with `None` to clear
+    /// a previously-set value.
+    pub fn set_peer_relay_fp(&mut self, call_id: &str, fp: Option<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.peer_relay_fp = fp;
+        }
     }
 
     /// Phase 3: stash the caller's server-reflexive address read
@@ -265,6 +285,29 @@ mod tests {
 
         // Setter on an unknown call is a no-op, not a panic.
         reg.set_caller_reflexive_addr("does-not-exist", Some("x".into()));
+    }
+
+    #[test]
+    fn call_registry_stores_peer_relay_fp() {
+        let mut reg = CallRegistry::new();
+        reg.create_call("c1".into(), "alice".into(), "bob".into());
+
+        // Default: no peer relay.
+        assert!(reg.get("c1").unwrap().peer_relay_fp.is_none());
+
+        // Cross-relay call: origin relay's fp is stashed.
+        reg.set_peer_relay_fp("c1", Some("relay-a-tls-fp".into()));
+        assert_eq!(
+            reg.get("c1").unwrap().peer_relay_fp.as_deref(),
+            Some("relay-a-tls-fp")
+        );
+
+        // Clearing with None is a valid no-op and empties the field.
+        reg.set_peer_relay_fp("c1", None);
+        assert!(reg.get("c1").unwrap().peer_relay_fp.is_none());
+
+        // Unknown call is a no-op, not a panic.
+        reg.set_peer_relay_fp("does-not-exist", Some("x".into()));
     }
 
     #[test]

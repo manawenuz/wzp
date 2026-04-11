@@ -820,6 +820,38 @@ pub enum SignalMessage {
     ReflectResponse {
         observed_addr: String,
     },
+
+    // ── Phase 4: cross-relay direct-call signaling ────────────────────
+
+    /// Phase 4: relay-to-relay envelope for forwarding direct-call
+    /// signaling across a federation link. When Alice on Relay A
+    /// sends a `DirectCallOffer` for Bob whose fingerprint isn't
+    /// in A's local SignalHub, Relay A wraps the offer in this
+    /// envelope and broadcasts it over every active federation
+    /// peer link. Whichever peer has Bob registered unwraps the
+    /// inner message and delivers it locally.
+    ///
+    /// Never originated by clients — only relays create and
+    /// consume this variant.
+    ///
+    /// Loop prevention: the receiving relay drops any forward
+    /// where `origin_relay_fp` matches its own federation TLS
+    /// fingerprint. With broadcast-to-all-peers this prevents
+    /// A→B→A echo loops; proper TTL + dedup will land when
+    /// multi-hop federation is added (Phase 4.2).
+    FederatedSignalForward {
+        /// The signal message being forwarded
+        /// (`DirectCallOffer`, `DirectCallAnswer`, `CallRinging`,
+        /// `Hangup`, ...). Boxed because `SignalMessage` is
+        /// relatively large and JSON serde handles recursion
+        /// cleanly.
+        inner: Box<SignalMessage>,
+        /// Federation TLS fingerprint of the sending relay.
+        /// Used (a) for loop prevention by the receiver and (b)
+        /// to route the peer's reply back through the same
+        /// federation link via `send_signal_to_peer`.
+        origin_relay_fp: String,
+    },
 }
 
 /// How the callee responds to a direct call.
@@ -984,6 +1016,82 @@ mod tests {
                         .expect("observed_addr must parse as SocketAddr");
                 }
                 _ => panic!("wrong variant after roundtrip"),
+            }
+        }
+    }
+
+    #[test]
+    fn federated_signal_forward_roundtrip() {
+        // Wrap a DirectCallOffer inside FederatedSignalForward and
+        // prove both directions of serde preserve every field.
+        let inner = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: Some("Alice".into()),
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [1u8; 32],
+            ephemeral_pub: [2u8; 32],
+            signature: vec![3u8; 64],
+            supported_profiles: vec![],
+            caller_reflexive_addr: Some("192.0.2.1:4433".into()),
+        };
+        let forward = SignalMessage::FederatedSignalForward {
+            inner: Box::new(inner),
+            origin_relay_fp: "relay-a-tls-fp".into(),
+        };
+        let json = serde_json::to_string(&forward).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
+                assert_eq!(origin_relay_fp, "relay-a-tls-fp");
+                match *inner {
+                    SignalMessage::DirectCallOffer {
+                        caller_fingerprint,
+                        target_fingerprint,
+                        caller_reflexive_addr,
+                        ..
+                    } => {
+                        assert_eq!(caller_fingerprint, "alice");
+                        assert_eq!(target_fingerprint, "bob");
+                        assert_eq!(caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
+                    }
+                    _ => panic!("inner was not DirectCallOffer after roundtrip"),
+                }
+            }
+            _ => panic!("outer was not FederatedSignalForward"),
+        }
+    }
+
+    #[test]
+    fn federated_signal_forward_can_nest_any_inner() {
+        // Sanity check that every direct-call signaling variant
+        // we intend to forward survives being boxed + re-serialized.
+        let cases: Vec<SignalMessage> = vec![
+            SignalMessage::DirectCallAnswer {
+                call_id: "c1".into(),
+                accept_mode: CallAcceptMode::AcceptTrusted,
+                identity_pub: None,
+                ephemeral_pub: None,
+                signature: None,
+                chosen_profile: None,
+                callee_reflexive_addr: Some("198.51.100.9:4433".into()),
+            },
+            SignalMessage::CallRinging { call_id: "c1".into() },
+            SignalMessage::Hangup { reason: HangupReason::Normal },
+        ];
+        for inner in cases {
+            let inner_disc = std::mem::discriminant(&inner);
+            let forward = SignalMessage::FederatedSignalForward {
+                inner: Box::new(inner),
+                origin_relay_fp: "r".into(),
+            };
+            let json = serde_json::to_string(&forward).unwrap();
+            let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+            match decoded {
+                SignalMessage::FederatedSignalForward { inner, .. } => {
+                    assert_eq!(std::mem::discriminant(&*inner), inner_disc);
+                }
+                _ => panic!("outer variant lost"),
             }
         }
     }
