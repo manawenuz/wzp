@@ -770,6 +770,9 @@ async fn run_signal_mode(
             ephemeral_pub: [0u8; 32], // Phase 1: not used for key exchange
             signature: vec![],
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+            // CLI client doesn't attempt hole-punching; always
+            // relay-path.
+            caller_reflexive_addr: None,
         }).await?;
     }
 
@@ -799,12 +802,15 @@ async fn run_signal_mode(
                         ephemeral_pub: None,
                         signature: None,
                         chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
+                        // CLI auto-accept uses generic (privacy) mode,
+                        // so callee addr stays hidden from the caller.
+                        callee_reflexive_addr: None,
                     }).await;
                 }
                 SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
                     info!(call_id = %call_id, mode = ?accept_mode, "call answered");
                 }
-                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay } => {
+                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _ } => {
                     info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
 
                     // Connect to the media room

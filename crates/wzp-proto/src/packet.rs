@@ -736,6 +736,15 @@ pub enum SignalMessage {
         signature: Vec<u8>,
         /// Supported quality profiles.
         supported_profiles: Vec<crate::QualityProfile>,
+        /// Phase 3 (hole-punching): caller's own server-reflexive
+        /// address as learned via `SignalMessage::Reflect`. The
+        /// relay stashes this in its call registry and later
+        /// injects it into the callee's `CallSetup.peer_direct_addr`
+        /// so the callee can try a direct QUIC handshake to the
+        /// caller instead of routing media through the relay.
+        /// `None` means "caller doesn't want P2P, use relay only".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_reflexive_addr: Option<String>,
     },
 
     /// Callee's response to a direct call.
@@ -755,6 +764,13 @@ pub enum SignalMessage {
         /// Chosen quality profile (present when accepting).
         #[serde(skip_serializing_if = "Option::is_none")]
         chosen_profile: Option<crate::QualityProfile>,
+        /// Phase 3 (hole-punching): callee's own server-reflexive
+        /// address, only populated on `AcceptTrusted` — privacy-mode
+        /// answers leave this `None` so the callee's real IP stays
+        /// hidden (the whole point of `AcceptGeneric`). The relay
+        /// carries it opaquely into the caller's `CallSetup`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callee_reflexive_addr: Option<String>,
     },
 
     /// Relay tells both parties: media room is ready.
@@ -764,6 +780,17 @@ pub enum SignalMessage {
         room: String,
         /// Relay address for the QUIC media connection.
         relay_addr: String,
+        /// Phase 3 (hole-punching): the OTHER party's server-reflexive
+        /// address as the relay learned it from the offer/answer
+        /// exchange. When populated, clients attempt a direct QUIC
+        /// handshake to this address in parallel with the existing
+        /// relay path and use whichever connects first. `None`
+        /// means the relay path is the only option — either because
+        /// a peer didn't advertise its addr (Phase 1/2 relay or
+        /// privacy-mode answer) or because the relay decided P2P
+        /// wasn't viable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_direct_addr: Option<String>,
     },
 
     /// Ringing notification (relay → caller, callee received the offer).
@@ -958,6 +985,133 @@ mod tests {
                 }
                 _ => panic!("wrong variant after roundtrip"),
             }
+        }
+    }
+
+    #[test]
+    fn hole_punching_optional_fields_roundtrip() {
+        // DirectCallOffer with Some(caller_reflexive_addr)
+        let offer = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: None,
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [0; 32],
+            ephemeral_pub: [0; 32],
+            signature: vec![],
+            supported_profiles: vec![],
+            caller_reflexive_addr: Some("192.0.2.1:4433".into()),
+        };
+        let json = serde_json::to_string(&offer).unwrap();
+        assert!(
+            json.contains("caller_reflexive_addr"),
+            "Some field must serialize: {json}"
+        );
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+                assert_eq!(caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // DirectCallOffer with None — skip_serializing_if must
+        // OMIT the field from the JSON so older relays that don't
+        // know about caller_reflexive_addr don't see it.
+        let offer_none = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: None,
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [0; 32],
+            ephemeral_pub: [0; 32],
+            signature: vec![],
+            supported_profiles: vec![],
+            caller_reflexive_addr: None,
+        };
+        let json_none = serde_json::to_string(&offer_none).unwrap();
+        assert!(
+            !json_none.contains("caller_reflexive_addr"),
+            "None field must NOT serialize: {json_none}"
+        );
+
+        // DirectCallAnswer with callee_reflexive_addr.
+        let answer = SignalMessage::DirectCallAnswer {
+            call_id: "c1".into(),
+            accept_mode: CallAcceptMode::AcceptTrusted,
+            identity_pub: None,
+            ephemeral_pub: None,
+            signature: None,
+            chosen_profile: None,
+            callee_reflexive_addr: Some("198.51.100.9:4433".into()),
+        };
+        let decoded: SignalMessage =
+            serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
+        match decoded {
+            SignalMessage::DirectCallAnswer { callee_reflexive_addr, .. } => {
+                assert_eq!(
+                    callee_reflexive_addr.as_deref(),
+                    Some("198.51.100.9:4433")
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // CallSetup with peer_direct_addr.
+        let setup = SignalMessage::CallSetup {
+            call_id: "c1".into(),
+            room: "call-c1".into(),
+            relay_addr: "203.0.113.5:4433".into(),
+            peer_direct_addr: Some("192.0.2.1:4433".into()),
+        };
+        let decoded: SignalMessage =
+            serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
+        match decoded {
+            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+                assert_eq!(peer_direct_addr.as_deref(), Some("192.0.2.1:4433"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn hole_punching_backward_compat_old_json_parses() {
+        // An older client/relay wouldn't include the new fields at
+        // all — the new code must still accept that JSON because
+        // of #[serde(default)] on the Option<String>.
+        let old_offer_json = r#"{
+            "DirectCallOffer": {
+                "caller_fingerprint": "alice",
+                "caller_alias": null,
+                "target_fingerprint": "bob",
+                "call_id": "c1",
+                "identity_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "ephemeral_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "signature": [],
+                "supported_profiles": []
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(old_offer_json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+                assert!(caller_reflexive_addr.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let old_setup_json = r#"{
+            "CallSetup": {
+                "call_id": "c1",
+                "room": "call-c1",
+                "relay_addr": "203.0.113.5:4433"
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(old_setup_json).unwrap();
+        match decoded {
+            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+                assert!(peer_direct_addr.is_none());
+            }
+            _ => panic!("wrong variant"),
         }
     }
 

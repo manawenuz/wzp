@@ -1138,7 +1138,10 @@ listen("signal-event", (event: any) => {
       break;
     case "setup":
       callStatusText.textContent = "Connecting to media...";
-      // Auto-connect to the call room
+      // Phase 3 hole-punching: peer_direct_addr carries the OTHER
+      // party's reflex addr when both sides advertised one. Forward
+      // to Rust connect() which currently logs it + takes the relay
+      // path; Phase 3.5 will race direct vs relay here.
       (async () => {
         try {
           await invoke("connect", {
@@ -1147,6 +1150,7 @@ listen("signal-event", (event: any) => {
             alias: aliasInput.value,
             osAec: osAecCheckbox.checked,
             quality: loadSettings().quality || "auto",
+            peerDirectAddr: data.peer_direct_addr ?? null,
           });
           showCallScreen();
         } catch (e: any) {

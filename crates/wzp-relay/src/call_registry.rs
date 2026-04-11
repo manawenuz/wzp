@@ -31,6 +31,16 @@ pub struct DirectCall {
     pub created_at: Instant,
     pub answered_at: Option<Instant>,
     pub ended_at: Option<Instant>,
+    /// Phase 3 (hole-punching): caller's server-reflexive address
+    /// as carried in the `DirectCallOffer`. The relay stashes it
+    /// here when the offer arrives so it can later inject it as
+    /// `peer_direct_addr` into the callee's `CallSetup`.
+    pub caller_reflexive_addr: Option<String>,
+    /// Phase 3 (hole-punching): callee's server-reflexive address
+    /// as carried in the `DirectCallAnswer`. Only populated for
+    /// `AcceptTrusted` answers — privacy-mode answers leave this
+    /// `None`. Fed into the caller's `CallSetup.peer_direct_addr`.
+    pub callee_reflexive_addr: Option<String>,
 }
 
 /// Registry of active direct calls.
@@ -57,9 +67,29 @@ impl CallRegistry {
             created_at: Instant::now(),
             answered_at: None,
             ended_at: None,
+            caller_reflexive_addr: None,
+            callee_reflexive_addr: None,
         };
         self.calls.insert(call_id.clone(), call);
         self.calls.get(&call_id).unwrap()
+    }
+
+    /// Phase 3: stash the caller's server-reflexive address read
+    /// off a `DirectCallOffer`. Safe to call on any call state;
+    /// a no-op if the call doesn't exist.
+    pub fn set_caller_reflexive_addr(&mut self, call_id: &str, addr: Option<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.caller_reflexive_addr = addr;
+        }
+    }
+
+    /// Phase 3: stash the callee's server-reflexive address read
+    /// off a `DirectCallAnswer`. Safe to call on any call state;
+    /// a no-op if the call doesn't exist.
+    pub fn set_callee_reflexive_addr(&mut self, call_id: &str, addr: Option<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.callee_reflexive_addr = addr;
+        }
     }
 
     /// Get a call by ID.
@@ -195,5 +225,57 @@ mod tests {
         reg.create_call("c1".into(), "alice".into(), "bob".into());
         assert_eq!(reg.peer_fingerprint("c1", "alice"), Some("bob"));
         assert_eq!(reg.peer_fingerprint("c1", "bob"), Some("alice"));
+    }
+
+    #[test]
+    fn call_registry_stores_reflexive_addrs() {
+        let mut reg = CallRegistry::new();
+        reg.create_call("c1".into(), "alice".into(), "bob".into());
+
+        // Default: both addrs are None.
+        let c = reg.get("c1").unwrap();
+        assert!(c.caller_reflexive_addr.is_none());
+        assert!(c.callee_reflexive_addr.is_none());
+
+        // Caller advertises its reflex addr via DirectCallOffer.
+        reg.set_caller_reflexive_addr("c1", Some("192.0.2.1:4433".into()));
+        assert_eq!(
+            reg.get("c1").unwrap().caller_reflexive_addr.as_deref(),
+            Some("192.0.2.1:4433")
+        );
+
+        // Callee responds with AcceptTrusted + its own reflex addr.
+        reg.set_callee_reflexive_addr("c1", Some("198.51.100.9:4433".into()));
+        assert_eq!(
+            reg.get("c1").unwrap().callee_reflexive_addr.as_deref(),
+            Some("198.51.100.9:4433")
+        );
+
+        // Both addrs are independently readable — the relay uses
+        // them to cross-wire peer_direct_addr in CallSetup.
+        let c = reg.get("c1").unwrap();
+        assert_eq!(
+            c.caller_reflexive_addr.as_deref(),
+            Some("192.0.2.1:4433")
+        );
+        assert_eq!(
+            c.callee_reflexive_addr.as_deref(),
+            Some("198.51.100.9:4433")
+        );
+
+        // Setter on an unknown call is a no-op, not a panic.
+        reg.set_caller_reflexive_addr("does-not-exist", Some("x".into()));
+    }
+
+    #[test]
+    fn call_registry_clearing_reflex_addr_works() {
+        // Passing None to the setter must clear a previously-set value
+        // so callers that downgrade to privacy mode mid-flow don't
+        // leak a stale addr into CallSetup.
+        let mut reg = CallRegistry::new();
+        reg.create_call("c1".into(), "alice".into(), "bob".into());
+        reg.set_caller_reflexive_addr("c1", Some("192.0.2.1:4433".into()));
+        reg.set_caller_reflexive_addr("c1", None);
+        assert!(reg.get("c1").unwrap().caller_reflexive_addr.is_none());
     }
 }

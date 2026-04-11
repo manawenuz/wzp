@@ -766,9 +766,15 @@ async fn main() -> anyhow::Result<()> {
                     match transport.recv_signal().await {
                         Ok(Some(msg)) => {
                             match msg {
-                                SignalMessage::DirectCallOffer { ref target_fingerprint, ref call_id, .. } => {
+                                SignalMessage::DirectCallOffer {
+                                    ref target_fingerprint,
+                                    ref call_id,
+                                    ref caller_reflexive_addr,
+                                    ..
+                                } => {
                                     let target_fp = target_fingerprint.clone();
                                     let call_id = call_id.clone();
+                                    let caller_addr_for_registry = caller_reflexive_addr.clone();
 
                                     // Check if target is online
                                     let online = {
@@ -783,10 +789,15 @@ async fn main() -> anyhow::Result<()> {
                                         continue;
                                     }
 
-                                    // Create call in registry
+                                    // Create call in registry + stash the caller's
+                                    // reflex addr (Phase 3 hole-punching). The relay
+                                    // treats the addr as opaque — no validation.
+                                    // Injected later into the callee's CallSetup as
+                                    // peer_direct_addr.
                                     {
                                         let mut reg = call_registry.lock().await;
                                         reg.create_call(call_id.clone(), client_fp.clone(), target_fp.clone());
+                                        reg.set_caller_reflexive_addr(&call_id, caller_addr_for_registry);
                                     }
 
                                     // Forward offer to callee
@@ -803,9 +814,15 @@ async fn main() -> anyhow::Result<()> {
                                     }).await;
                                 }
 
-                                SignalMessage::DirectCallAnswer { ref call_id, ref accept_mode, .. } => {
+                                SignalMessage::DirectCallAnswer {
+                                    ref call_id,
+                                    ref accept_mode,
+                                    ref callee_reflexive_addr,
+                                    ..
+                                } => {
                                     let call_id = call_id.clone();
                                     let mode = *accept_mode;
+                                    let callee_addr_for_registry = callee_reflexive_addr.clone();
 
                                     let peer_fp = {
                                         let reg = call_registry.lock().await;
@@ -827,13 +844,30 @@ async fn main() -> anyhow::Result<()> {
                                             reason: wzp_proto::HangupReason::Normal,
                                         }).await;
                                     } else {
-                                        // Accept — create private room
+                                        // Accept — create private room + stash the
+                                        // callee's reflex addr if it advertised one
+                                        // (AcceptTrusted only — privacy-mode answers
+                                        // leave it None by design). Then read back
+                                        // BOTH parties' addrs so we can cross-wire
+                                        // peer_direct_addr on the CallSetups below.
                                         let room = format!("call-{call_id}");
-                                        {
+                                        let (caller_addr, callee_addr) = {
                                             let mut reg = call_registry.lock().await;
                                             reg.set_active(&call_id, mode, room.clone());
-                                        }
-                                        info!(call_id = %call_id, room = %room, mode = ?mode, "call accepted, creating room");
+                                            reg.set_callee_reflexive_addr(&call_id, callee_addr_for_registry);
+                                            let call = reg.get(&call_id);
+                                            (
+                                                call.and_then(|c| c.caller_reflexive_addr.clone()),
+                                                call.and_then(|c| c.callee_reflexive_addr.clone()),
+                                            )
+                                        };
+                                        info!(
+                                            call_id = %call_id,
+                                            room = %room,
+                                            ?mode,
+                                            p2p_viable = caller_addr.is_some() && callee_addr.is_some(),
+                                            "call accepted, creating room"
+                                        );
 
                                         // Forward answer to caller
                                         {
@@ -843,25 +877,41 @@ async fn main() -> anyhow::Result<()> {
 
                                         // Send CallSetup to both parties.
                                         //
-                                        // BUG FIX: the previous version of this used `addr.ip()`
-                                        // which is `connection.remote_address()` — the CLIENT'S
-                                        // IP, not the relay's. So CallSetup told both parties to
-                                        // dial the answerer's own IP, which meant the caller was
-                                        // sending QUIC Initials into the callee's client (no
-                                        // server listening there) and the callee was sending to
-                                        // itself. In both cases endpoint.connect() hung forever.
+                                        // Each party's `peer_direct_addr` carries the
+                                        // OTHER party's reflex addr so they can attempt
+                                        // a direct QUIC handshake to each other in
+                                        // parallel with the relay path (Phase 3
+                                        // hole-punching). Both sides falling back to the
+                                        // relay path is the Phase 0 behavior, so
+                                        // emitting `None` here is always safe.
                                         //
-                                        // Use the relay's precomputed advertised address instead.
+                                        // BUG FIX (pre-Phase 3): the previous version of
+                                        // this used `addr.ip()` which is the client's
+                                        // remote address, not the relay's. Use the
+                                        // precomputed advertised address.
                                         let relay_addr_for_setup = advertised_addr_str.clone();
-                                        let setup = SignalMessage::CallSetup {
+
+                                        // peer_fp identifies the caller here (the
+                                        // fingerprint currently on the other end of this
+                                        // answer flow); client_fp identifies the callee.
+                                        // So the CALLER gets the callee's addr as its
+                                        // peer_direct_addr, and vice versa.
+                                        let setup_for_caller = SignalMessage::CallSetup {
+                                            call_id: call_id.clone(),
+                                            room: room.clone(),
+                                            relay_addr: relay_addr_for_setup.clone(),
+                                            peer_direct_addr: callee_addr.clone(),
+                                        };
+                                        let setup_for_callee = SignalMessage::CallSetup {
                                             call_id: call_id.clone(),
                                             room: room.clone(),
                                             relay_addr: relay_addr_for_setup,
+                                            peer_direct_addr: caller_addr.clone(),
                                         };
                                         {
                                             let hub = signal_hub.lock().await;
-                                            let _ = hub.send_to(&peer_fp, &setup).await;
-                                            let _ = hub.send_to(&client_fp, &setup).await;
+                                            let _ = hub.send_to(&peer_fp, &setup_for_caller).await;
+                                            let _ = hub.send_to(&client_fp, &setup_for_callee).await;
                                         }
                                     }
                                 }
