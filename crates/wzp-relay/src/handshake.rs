@@ -94,9 +94,13 @@ pub async fn accept_handshake(
 }
 
 /// Select the best quality profile from those the caller supports.
-fn choose_profile(supported: &[QualityProfile]) -> QualityProfile {
-    // Cap at GOOD (24k) for now — studio tiers (32k/48k/64k) not yet tested
-    // for federation reliability (large packets may exceed path MTU).
+///
+/// The `_supported` list is currently ignored — we hardcode GOOD (24k) until
+/// studio tiers (32k/48k/64k) have been validated across federation (large
+/// packets may exceed path MTU and fragment in unpleasant ways). Once that's
+/// tested, the body should pick the highest supported profile ≤ the relay's
+/// configured ceiling.
+fn choose_profile(_supported: &[QualityProfile]) -> QualityProfile {
     QualityProfile::GOOD
 }
 

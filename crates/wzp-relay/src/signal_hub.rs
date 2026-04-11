@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{info, warn};
+use tracing::info;
 use wzp_proto::{MediaTransport, SignalMessage};
 use wzp_transport::QuinnTransport;
 
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn register_unregister() {
-        let mut hub = SignalHub::new();
+        let hub = SignalHub::new();
         assert_eq!(hub.online_count(), 0);
         assert!(!hub.is_online("alice"));
 

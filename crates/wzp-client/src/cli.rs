@@ -776,7 +776,6 @@ async fn run_signal_mode(
     // Signal recv loop — handle incoming signals
     let signal_transport = transport.clone();
     let relay = relay_addr;
-    let my_fp = fp.clone();
     let my_seed = seed.0;
 
     loop {

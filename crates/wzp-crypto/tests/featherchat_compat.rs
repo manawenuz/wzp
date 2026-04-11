@@ -273,7 +273,7 @@ fn auth_invalid_response_matches() {
 
 #[test]
 fn all_signal_types_map_correctly() {
-    use wzp_client::featherchat::{signal_to_call_type, CallSignalType};
+    use wzp_client::featherchat::signal_to_call_type;
 
     let cases: Vec<(wzp_proto::SignalMessage, &str)> = vec![
         (

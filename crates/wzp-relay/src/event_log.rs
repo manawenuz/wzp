@@ -5,7 +5,6 @@
 //! Use `wzp-analyzer` to correlate events across multiple relays.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde::Serialize;
 use tokio::sync::mpsc;

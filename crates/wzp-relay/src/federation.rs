@@ -142,9 +142,6 @@ pub struct FederationManager {
     peer_links: Arc<Mutex<HashMap<String, PeerLink>>>,
     /// Dedup filter for incoming federation datagrams.
     dedup: Mutex<Deduplicator>,
-    /// Per-room seq counter for federation media delivered to local clients.
-    /// Ensures clients see monotonically increasing seq regardless of federation sender.
-    local_delivery_seq: std::sync::atomic::AtomicU16,
     /// JSONL event log for protocol analysis.
     event_log: EventLogger,
     /// Per-room rate limiters for inbound federation media.
@@ -172,7 +169,6 @@ impl FederationManager {
             metrics,
             peer_links: Arc::new(Mutex::new(HashMap::new())),
             dedup: Mutex::new(Deduplicator::new(DEDUP_WINDOW_SIZE)),
-            local_delivery_seq: std::sync::atomic::AtomicU16::new(0),
             event_log,
             rate_limiters: Mutex::new(HashMap::new()),
         }
@@ -296,7 +292,12 @@ impl FederationManager {
     /// Forward locally-generated media to all connected peers.
     /// For locally-originated media, we send to ALL peers (they decide whether to deliver).
     /// For forwarded media (multi-hop), handle_datagram filters by active_rooms.
-    pub async fn forward_to_peers(&self, room_name: &str, room_hash: &[u8; 8], media_data: &Bytes) {
+    ///
+    /// `_room_name` is kept in the signature for caller-site symmetry with
+    /// the other room-tagged helpers and for future per-room-name logging
+    /// or rate limiting; the body currently forwards on `room_hash` alone
+    /// because that's what the wire format carries.
+    pub async fn forward_to_peers(&self, _room_name: &str, room_hash: &[u8; 8], media_data: &Bytes) {
         let links = self.peer_links.lock().await;
         if links.is_empty() {
             return;
@@ -623,11 +624,20 @@ async fn run_federation_link(
         }
     };
 
-    // RTT monitor: periodically sample QUIC RTT for this peer
+    // RTT monitor: periodically sample QUIC RTT for this peer and push it
+    // into the `wzp_federation_peer_rtt_ms` gauge. The gauge is registered
+    // in metrics.rs but previously never received any samples — the task
+    // computed rtt_ms and dropped it on the floor, leaving the Grafana
+    // panel blank. Fixed as part of the workspace warning sweep.
     let rtt_task = async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let rtt_ms = rtt_transport.connection().stats().path.rtt.as_millis() as f64;
+            fm_rtt
+                .metrics
+                .federation_peer_rtt_ms
+                .with_label_values(&[&label_rtt])
+                .set(rtt_ms);
         }
     };
 

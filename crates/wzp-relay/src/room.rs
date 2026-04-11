@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, warn};
 
 use wzp_proto::packet::TrunkFrame;
 use wzp_proto::MediaTransport;
@@ -483,7 +483,6 @@ async fn run_participant_plain(
     );
 
     loop {
-        let recv_start = std::time::Instant::now();
         let pkt = match transport.recv_media().await {
             Ok(Some(pkt)) => pkt,
             Ok(None) => {
@@ -838,7 +837,7 @@ mod tests {
 
     #[test]
     fn room_join_leave() {
-        let mut mgr = RoomManager::new();
+        let mgr = RoomManager::new();
         assert_eq!(mgr.room_size("test"), 0);
         assert!(mgr.list().is_empty());
     }

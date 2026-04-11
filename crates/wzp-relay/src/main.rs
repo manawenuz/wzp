@@ -272,7 +272,7 @@ const BUILD_GIT_HASH: &str = env!("WZP_BUILD_HASH");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let CliResult { mut config, identity_path, config_file, config_needs_create } = parse_args();
+    let CliResult { config, identity_path, config_file, config_needs_create } = parse_args();
     tracing_subscriber::fmt().init();
     info!(version = BUILD_GIT_HASH, "wzp-relay build");
     rustls::crypto::ring::default_provider()
@@ -766,7 +766,7 @@ async fn main() -> anyhow::Result<()> {
                     match transport.recv_signal().await {
                         Ok(Some(msg)) => {
                             match msg {
-                                SignalMessage::DirectCallOffer { ref target_fingerprint, ref call_id, ref caller_alias, .. } => {
+                                SignalMessage::DirectCallOffer { ref target_fingerprint, ref call_id, .. } => {
                                     let target_fp = target_fingerprint.clone();
                                     let call_id = call_id.clone();
 
