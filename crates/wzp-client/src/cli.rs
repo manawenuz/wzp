@@ -626,11 +626,21 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
         .spawn(move || {
             let config = CallConfig::default();
             let mut encoder = CallEncoder::new(&config);
+            let mut frame = vec![0i16; FRAME_SAMPLES];
             loop {
-                let frame = match capture.read_frame() {
-                    Some(f) => f,
-                    None => break,
-                };
+                // Pull a full 20 ms frame from the capture ring. The ring
+                // may return a partial read when the CPAL callback hasn't
+                // produced enough samples yet — keep reading until we
+                // accumulate a whole frame, sleeping briefly on empty
+                // returns so we don't hot-spin the CPU.
+                let mut filled = 0usize;
+                while filled < FRAME_SAMPLES {
+                    let n = capture.ring().read(&mut frame[filled..]);
+                    filled += n;
+                    if n == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
                 let packets = match encoder.encode_frame(&frame) {
                     Ok(p) => p,
                     Err(e) => {
@@ -661,7 +671,13 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
                     // Repair packets feed the FEC decoder but don't produce audio.
                     if !is_repair {
                         if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
-                            playback.write_frame(&pcm_buf);
+                            // Push the decoded frame into the playback
+                            // ring. The CPAL output callback drains from
+                            // here on its own clock; if the ring is full
+                            // (rare in CLI live mode) the write returns
+                            // a short count and the tail is dropped,
+                            // which is the correct real-time behavior.
+                            playback.ring().write(&pcm_buf);
                         }
                     }
                 }
