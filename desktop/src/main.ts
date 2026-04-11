@@ -1261,8 +1261,34 @@ listen("signal-event", (event: any) => {
       })();
       break;
     case "hangup":
+      // Peer (or the relay) ended the call. Tear down OUR side
+      // of the media engine and return to the connect screen
+      // automatically — the user shouldn't have to hit End Call
+      // on a call that's already over.
+      //
+      // Scenarios this handles:
+      //   * active direct call, peer hung up → disconnect + back
+      //     to connect screen
+      //   * incoming call was ringing but caller bailed → hide
+      //     incoming panel (no engine to disconnect)
+      //   * setup failure mid-handshake → same as above
       callStatusText.textContent = "";
       incomingCallPanel.classList.add("hidden");
+      (async () => {
+        try {
+          // disconnect errors out with "not connected" if there's
+          // no active engine — safe to ignore, we just want to
+          // make sure any engine IS torn down.
+          await invoke("disconnect");
+        } catch {}
+        // Suppress the call-event "disconnected" auto-reconnect
+        // path since this was a peer-initiated hangup, not a
+        // transport drop.
+        userDisconnected = true;
+        if (!callScreen.classList.contains("hidden")) {
+          showConnectScreen();
+        }
+      })();
       break;
     case "reconnecting":
       // Signal supervisor is retrying the relay connection. Show
