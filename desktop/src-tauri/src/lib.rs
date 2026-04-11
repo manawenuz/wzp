@@ -110,6 +110,22 @@ struct PingResult {
     server_fingerprint: String,
 }
 
+/// Toggle DRED verbose logging at runtime (gates the chatty per-frame
+/// reconstruction + parse logs in opus_enc and engine.rs). Wired to the
+/// "DRED debug logs" checkbox in the GUI settings panel.
+#[tauri::command]
+fn set_dred_verbose_logs(enabled: bool) {
+    wzp_codec::set_dred_verbose_logs(enabled);
+    tracing::info!(enabled, "DRED verbose logs toggled");
+}
+
+/// Read the current DRED verbose logging flag (so the GUI can hydrate
+/// its checkbox on startup without trusting localStorage alone).
+#[tauri::command]
+fn get_dred_verbose_logs() -> bool {
+    wzp_codec::dred_verbose_logs()
+}
+
 /// Ping a relay to check if it's online, measure RTT, and get server identity.
 #[tauri::command]
 async fn ping_relay(relay: String) -> Result<PingResult, String> {
@@ -687,6 +703,7 @@ pub fn run() {
             deregister,
             set_speakerphone, is_speakerphone_on,
             get_call_history, get_recent_contacts, clear_call_history,
+            set_dred_verbose_logs, get_dred_verbose_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarzonePhone");

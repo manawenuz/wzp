@@ -82,6 +82,7 @@ const settingsBtnCall = document.getElementById("settings-btn-call")!;
 const sRoom = document.getElementById("s-room") as HTMLInputElement;
 const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
+const sDredDebug = document.getElementById("s-dred-debug") as HTMLInputElement;
 const sAgc = document.getElementById("s-agc") as HTMLInputElement;
 const sQuality = document.getElementById("s-quality") as HTMLInputElement;
 const sQualityLabel = document.getElementById("s-quality-label")!;
@@ -140,6 +141,10 @@ interface Settings {
   agc: boolean;
   quality: string;
   recentRooms: RecentRoom[];
+  /// When true, the Rust side emits the chatty per-frame DRED parse +
+  /// reconstruction + classical-PLC logs and adds DRED counters to the
+  /// recv heartbeat. Off in normal mode keeps logcat clean.
+  dredDebugLogs: boolean;
 }
 
 function loadSettings(): Settings {
@@ -152,6 +157,7 @@ function loadSettings(): Settings {
     ],
     selectedRelay: 0, room: "general", alias: "",
     osAec: true, agc: true, quality: "auto", recentRooms: [],
+    dredDebugLogs: false,
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
@@ -402,6 +408,10 @@ function renderRecentRooms(rooms: RecentRoom[]) {
 // ── Init ──
 applySettings();
 setTimeout(pingAllRelays, 300);
+// Hydrate the Rust DRED verbose-logs flag from saved settings on boot so
+// the choice survives app restarts without needing the user to reopen
+// the settings panel.
+invoke("set_dred_verbose_logs", { enabled: !!loadSettings().dredDebugLogs }).catch(() => {});
 
 // Load fingerprint + alias + git hash + render identicon
 interface AppInfo { git_hash: string; alias: string; fingerprint: string; data_dir: string }
@@ -714,6 +724,7 @@ listen("call-event", (event: any) => {
 function openSettings() {
   const s = loadSettings();
   sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
+  sDredDebug.checked = !!s.dredDebugLogs;
   const qi = qualityToIndex(s.quality || "auto");
   sQuality.value = String(qi);
   updateQualityUI(qi);
@@ -753,7 +764,11 @@ settingsSave.addEventListener("click", () => {
   const s = loadSettings();
   s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked;
   s.quality = QUALITY_STEPS[parseInt(sQuality.value)] || "auto";
+  s.dredDebugLogs = sDredDebug.checked;
   saveSettingsObj(s);
+  // Push the new flag to the Rust side immediately so the next encoded
+  // frame already honors it without waiting for an app restart.
+  invoke("set_dred_verbose_logs", { enabled: s.dredDebugLogs }).catch(() => {});
   roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec;
   renderRecentRooms(s.recentRooms);
   closeSettings();

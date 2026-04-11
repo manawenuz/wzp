@@ -159,7 +159,7 @@ impl DredRecvState {
                 // is steady-state without drowning the log.
                 let should_log = self.parses_with_data == 1
                     || self.parses_with_data % 100 == 0;
-                if should_log {
+                if should_log && wzp_codec::dred_verbose_logs() {
                     info!(
                         seq,
                         samples_available = available,
@@ -225,21 +225,22 @@ impl DredRecvState {
                     match reconstructed {
                         Some(_n) => {
                             self.dred_reconstructions += 1;
-                            // Log every DRED reconstruction. These are
-                            // rare events on a clean network — when
-                            // they fire, we want to know exactly which
-                            // gap was filled and how the offset math
-                            // played out. Acceptable to be chatty here.
-                            info!(
-                                missing_seq,
-                                anchor_seq = ?self.last_good_seq,
-                                offset_samples,
-                                offset_ms = offset_samples / 48,
-                                samples_available = available,
-                                gap_size = gap,
-                                total_dred_recoveries = self.dred_reconstructions,
-                                "DRED reconstruction fired for missing frame"
-                            );
+                            // Log every DRED reconstruction (gated behind
+                            // the GUI verbose-logs toggle). When enabled,
+                            // we want to know exactly which gap was
+                            // filled and how the offset math played out.
+                            if wzp_codec::dred_verbose_logs() {
+                                info!(
+                                    missing_seq,
+                                    anchor_seq = ?self.last_good_seq,
+                                    offset_samples,
+                                    offset_ms = offset_samples / 48,
+                                    samples_available = available,
+                                    gap_size = gap,
+                                    total_dred_recoveries = self.dred_reconstructions,
+                                    "DRED reconstruction fired for missing frame"
+                                );
+                            }
                             emit(out);
                         }
                         None => {
@@ -251,8 +252,9 @@ impl DredRecvState {
                                 // is whichever check failed in the if
                                 // above (offset out of range, no good
                                 // state, or reconstruct error).
-                                if self.classical_plc_invocations <= 3
-                                    || self.classical_plc_invocations % 50 == 0
+                                if (self.classical_plc_invocations <= 3
+                                    || self.classical_plc_invocations % 50 == 0)
+                                    && wzp_codec::dred_verbose_logs()
                                 {
                                     info!(
                                         missing_seq,
@@ -695,20 +697,33 @@ impl CallEngine {
                 // Heartbeat every 2s with decode+playout state
                 if heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
                     let fr = recv_fr.load(Ordering::Relaxed);
-                    info!(
-                        recv_fr = fr,
-                        decoded_frames,
-                        last_decode_n,
-                        last_written,
-                        written_samples,
-                        decode_errs,
-                        codec = ?current_codec,
-                        dred_recv = dred_recv.dred_reconstructions,
-                        classical_plc = dred_recv.classical_plc_invocations,
-                        dred_parses_with_data = dred_recv.parses_with_data,
-                        dred_parses_total = dred_recv.parses_total,
-                        "recv heartbeat (android)"
-                    );
+                    if wzp_codec::dred_verbose_logs() {
+                        info!(
+                            recv_fr = fr,
+                            decoded_frames,
+                            last_decode_n,
+                            last_written,
+                            written_samples,
+                            decode_errs,
+                            codec = ?current_codec,
+                            dred_recv = dred_recv.dred_reconstructions,
+                            classical_plc = dred_recv.classical_plc_invocations,
+                            dred_parses_with_data = dred_recv.parses_with_data,
+                            dred_parses_total = dred_recv.parses_total,
+                            "recv heartbeat (android)"
+                        );
+                    } else {
+                        info!(
+                            recv_fr = fr,
+                            decoded_frames,
+                            last_decode_n,
+                            last_written,
+                            written_samples,
+                            decode_errs,
+                            codec = ?current_codec,
+                            "recv heartbeat (android)"
+                        );
+                    }
                     heartbeat = std::time::Instant::now();
                 }
             }
