@@ -302,7 +302,14 @@ impl CallEngine {
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
-        info!(%relay, %room, %alias, %quality, has_reuse = reuse_endpoint.is_some(), "CallEngine::start (android) invoked");
+        // Single "call epoch" timestamp threaded through send + recv tasks
+        // so every milestone log can carry t_ms_since_call_start. Used to
+        // diagnose the first-join no-audio regression by giving us a clean
+        // ordering between audio_start, first capture, first recv, first
+        // decode, first playout-ring write, and the C++ Oboe first-callback
+        // logs (which already exist in cpp/oboe_bridge.cpp).
+        let call_t0 = std::time::Instant::now();
+        info!(%relay, %room, %alias, %quality, has_reuse = reuse_endpoint.is_some(), t_ms = 0u128, "CallEngine::start (android) invoked");
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
@@ -348,7 +355,7 @@ impl CallEngine {
                 return Err(anyhow::anyhow!("QUIC connect timeout (10s)"));
             }
         };
-        info!("QUIC connection established, performing handshake");
+        info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: QUIC connection established, performing handshake");
         let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
 
         let _session = wzp_client::handshake::perform_handshake(
@@ -358,7 +365,7 @@ impl CallEngine {
         )
         .await
         .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
-        info!("connected to relay, handshake complete");
+        info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));
 
         // Oboe audio via the wzp-native cdylib that was dlopen'd at
@@ -370,10 +377,21 @@ impl CallEngine {
                 "wzp-native not loaded — dlopen failed at startup"
             ));
         }
+        let t_pre_audio = call_t0.elapsed().as_millis();
         if let Err(code) = crate::wzp_native::audio_start() {
             return Err(anyhow::anyhow!("wzp_native_audio_start failed: code {code}"));
         }
-        info!("wzp-native audio started");
+        // Diagnostic: how long did audio_start() take, and at what
+        // wall-clock offset from CallEngine::start did it complete?
+        // Compare to the C++ "playout cb#0" log timestamp in logcat to
+        // see whether the Oboe playout callback fires before or after
+        // the recv task starts pushing decoded frames.
+        let t_audio_start_done = call_t0.elapsed().as_millis();
+        info!(
+            t_ms = t_audio_start_done,
+            audio_start_ms = t_audio_start_done.saturating_sub(t_pre_audio),
+            "first-join diag: wzp-native audio started"
+        );
 
         let running = Arc::new(AtomicBool::new(true));
         let mic_muted = Arc::new(AtomicBool::new(false));
@@ -394,6 +412,7 @@ impl CallEngine {
         let send_drops = Arc::new(AtomicU64::new(0));
         let send_quality = quality.clone();
         let send_tx_codec = tx_codec.clone();
+        let send_t0 = call_t0;
         tokio::spawn(async move {
             let profile = resolve_quality(&send_quality);
             let config = match profile {
@@ -409,7 +428,7 @@ impl CallEngine {
                 },
             };
             let frame_samples = (config.profile.frame_duration_ms as usize) * 48;
-            info!(codec = ?config.profile.codec, frame_samples, "send task starting (android/oboe)");
+            info!(codec = ?config.profile.codec, frame_samples, t_ms = send_t0.elapsed().as_millis(), "first-join diag: send task spawned (android/oboe)");
             *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false);
@@ -419,6 +438,13 @@ impl CallEngine {
             let mut last_rms: u32 = 0;
             let mut last_pkt_bytes: usize = 0;
             let mut short_reads: u64 = 0;
+            // First-join diagnostic: latch the wall-clock offset of the
+            // first full-frame capture read and the first non-zero RMS
+            // reading separately. The gap between them tells us how long
+            // Oboe input took to actually start delivering real samples
+            // after returning a "started" status from audio_start.
+            let mut first_full_read_logged = false;
+            let mut first_nonzero_rms_logged = false;
 
             loop {
                 if !send_r.load(Ordering::Relaxed) {
@@ -434,12 +460,29 @@ impl CallEngine {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     continue;
                 }
+                if !first_full_read_logged {
+                    info!(
+                        t_ms = send_t0.elapsed().as_millis(),
+                        short_reads_before = short_reads,
+                        frame_samples,
+                        "first-join diag: send first full capture frame read"
+                    );
+                    first_full_read_logged = true;
+                }
 
                 // RMS for UI meter
                 let sum_sq: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
                 let rms = (sum_sq / buf.len() as f64).sqrt() as u32;
                 send_level.store(rms, Ordering::Relaxed);
                 last_rms = rms;
+                if !first_nonzero_rms_logged && rms > 0 {
+                    info!(
+                        t_ms = send_t0.elapsed().as_millis(),
+                        rms,
+                        "first-join diag: send first non-zero capture RMS"
+                    );
+                    first_nonzero_rms_logged = true;
+                }
 
                 if send_mic.load(Ordering::Relaxed) {
                     buf.fill(0);
@@ -483,6 +526,7 @@ impl CallEngine {
         let recv_spk = spk_muted.clone();
         let recv_fr = frames_received.clone();
         let recv_rx_codec = rx_codec.clone();
+        let recv_t0 = call_t0;
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
             // Phase 3b/3c: use concrete AdaptiveDecoder (not Box<dyn
@@ -497,7 +541,11 @@ impl CallEngine {
             // Phase 3b/3c DRED reconstruction state — see DredRecvState
             // above for the full flow.
             let mut dred_recv = DredRecvState::new();
-            info!(codec = ?current_codec, "recv task starting (android/oboe)");
+            info!(codec = ?current_codec, t_ms = recv_t0.elapsed().as_millis(), "first-join diag: recv task spawned (android/oboe)");
+            // First-join diagnostic latches — see send task above for the
+            // sibling capture milestones.
+            let mut first_decode_logged = false;
+            let mut first_playout_write_logged = false;
 
             // ─── Decoded-PCM recorder (debug) ────────────────────────────
             // Dumps the first ~10 seconds of post-AGC PCM to a raw i16 LE
@@ -546,7 +594,13 @@ impl CallEngine {
                 {
                     Ok(Ok(Some(pkt))) => {
                         if !first_packet_logged {
-                            info!(codec_id = ?pkt.header.codec_id, payload_bytes = pkt.payload.len(), is_repair = pkt.header.is_repair, "recv: first media packet received");
+                            info!(
+                                t_ms = recv_t0.elapsed().as_millis(),
+                                codec_id = ?pkt.header.codec_id,
+                                payload_bytes = pkt.payload.len(),
+                                is_repair = pkt.header.is_repair,
+                                "first-join diag: recv first media packet"
+                            );
                             first_packet_logged = true;
                         }
                         if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
@@ -613,6 +667,15 @@ impl CallEngine {
                                 Ok(n) => {
                                     last_decode_n = n;
                                     decoded_frames += 1;
+                                    if !first_decode_logged {
+                                        info!(
+                                            t_ms = recv_t0.elapsed().as_millis(),
+                                            n,
+                                            codec = ?current_codec,
+                                            "first-join diag: recv first successful decode"
+                                        );
+                                        first_decode_logged = true;
+                                    }
                                     // Log sample range for the first few decoded frames and periodically
                                     if decoded_frames <= 3 || decoded_frames % 100 == 0 {
                                         let slice = &pcm[..n];
@@ -663,6 +726,15 @@ impl CallEngine {
 
                                     if !recv_spk.load(Ordering::Relaxed) {
                                         let w = crate::wzp_native::audio_write_playout(&pcm[..n]);
+                                        if !first_playout_write_logged {
+                                            info!(
+                                                t_ms = recv_t0.elapsed().as_millis(),
+                                                n,
+                                                w,
+                                                "first-join diag: recv first playout-ring write"
+                                            );
+                                            first_playout_write_logged = true;
+                                        }
                                         last_written = w;
                                         written_samples = written_samples.saturating_add(w as u64);
                                         if w < n && decoded_frames <= 10 {
