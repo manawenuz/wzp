@@ -917,6 +917,14 @@ pub enum SignalMessage {
         /// federation link via `send_signal_to_peer`.
         origin_relay_fp: String,
     },
+
+    /// Relay-initiated quality directive: all participants should switch
+    /// to the recommended profile to match the weakest link.
+    QualityDirective {
+        recommended_profile: crate::QualityProfile,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// How the callee responds to a direct call.
