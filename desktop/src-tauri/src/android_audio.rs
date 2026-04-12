@@ -96,3 +96,134 @@ pub fn is_speakerphone_on() -> Result<bool, String> {
         .map_err(|e| format!("isSpeakerphoneOn: {e}"))?;
     Ok(on)
 }
+
+// ─── Bluetooth SCO routing ──────────────────────────────────────────────────
+
+/// Start Bluetooth SCO (Synchronous Connection Oriented) audio routing.
+///
+/// Turns off the loudspeaker, then opens the SCO link so both capture and
+/// playout move to the connected Bluetooth headset. Requires that a SCO-
+/// capable device is paired and connected (check [`is_bluetooth_available`]
+/// first). The caller must restart Oboe streams after this call.
+#[allow(deprecated)]
+pub fn start_bluetooth_sco() -> Result<(), String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let am = audio_manager(&mut env, &activity)?;
+
+    // Ensure speaker is off — mutually exclusive with SCO.
+    env.call_method(
+        &am,
+        "setSpeakerphoneOn",
+        "(Z)V",
+        &[JValue::Bool(0)],
+    )
+    .map_err(|e| format!("setSpeakerphoneOn(false): {e}"))?;
+
+    env.call_method(&am, "startBluetoothSco", "()V", &[])
+        .map_err(|e| format!("startBluetoothSco: {e}"))?;
+
+    env.call_method(
+        &am,
+        "setBluetoothScoOn",
+        "(Z)V",
+        &[JValue::Bool(1)],
+    )
+    .map_err(|e| format!("setBluetoothScoOn(true): {e}"))?;
+
+    tracing::info!("AudioManager: Bluetooth SCO started");
+    Ok(())
+}
+
+/// Stop Bluetooth SCO audio routing, returning audio to the earpiece.
+///
+/// Safe to call even if SCO is not currently active (no-ops in that case).
+/// The caller must restart Oboe streams after this call.
+#[allow(deprecated)]
+pub fn stop_bluetooth_sco() -> Result<(), String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let am = audio_manager(&mut env, &activity)?;
+
+    let is_on = env
+        .call_method(&am, "isBluetoothScoOn", "()Z", &[])
+        .and_then(|v| v.z())
+        .unwrap_or(false);
+
+    if is_on {
+        env.call_method(
+            &am,
+            "setBluetoothScoOn",
+            "(Z)V",
+            &[JValue::Bool(0)],
+        )
+        .map_err(|e| format!("setBluetoothScoOn(false): {e}"))?;
+
+        env.call_method(&am, "stopBluetoothSco", "()V", &[])
+            .map_err(|e| format!("stopBluetoothSco: {e}"))?;
+    }
+
+    tracing::info!(was_on = is_on, "AudioManager: Bluetooth SCO stopped");
+    Ok(())
+}
+
+/// Query whether Bluetooth SCO audio is currently active.
+#[allow(deprecated)]
+pub fn is_bluetooth_sco_on() -> Result<bool, String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let am = audio_manager(&mut env, &activity)?;
+
+    env.call_method(&am, "isBluetoothScoOn", "()Z", &[])
+        .and_then(|v| v.z())
+        .map_err(|e| format!("isBluetoothScoOn: {e}"))
+}
+
+/// Check whether a Bluetooth SCO-capable device is currently connected.
+///
+/// Iterates `AudioManager.getDevices(GET_DEVICES_OUTPUTS)` and looks for
+/// `TYPE_BLUETOOTH_SCO` (7).
+pub fn is_bluetooth_available() -> Result<bool, String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let am = audio_manager(&mut env, &activity)?;
+
+    // AudioManager.GET_DEVICES_OUTPUTS = 2
+    let devices = env
+        .call_method(
+            &am,
+            "getDevices",
+            "(I)[Landroid/media/AudioDeviceInfo;",
+            &[JValue::Int(2)],
+        )
+        .and_then(|v| v.l())
+        .map_err(|e| format!("getDevices(OUTPUTS): {e}"))?;
+
+    let arr = jni::objects::JObjectArray::from(devices);
+    let len = env
+        .get_array_length(&arr)
+        .map_err(|e| format!("get_array_length: {e}"))?;
+
+    for i in 0..len {
+        let device = env
+            .get_object_array_element(&arr, i)
+            .map_err(|e| format!("get_object_array_element({i}): {e}"))?;
+        let device_type = env
+            .call_method(&device, "getType", "()I", &[])
+            .and_then(|v| v.i())
+            .unwrap_or(0);
+        // TYPE_BLUETOOTH_SCO = 7
+        if device_type == 7 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

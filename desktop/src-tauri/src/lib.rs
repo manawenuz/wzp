@@ -775,6 +775,71 @@ async fn is_speakerphone_on() -> Result<bool, String> {
     }
 }
 
+// ─── Bluetooth SCO routing (Android-specific, no-op on desktop) ─────────────
+
+/// Enable or disable Bluetooth SCO audio routing. Like speakerphone toggling,
+/// this requires an Oboe stream restart so AAudio picks up the new route.
+#[tauri::command]
+#[allow(unused_variables)]
+async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        if on {
+            android_audio::start_bluetooth_sco()?;
+        } else {
+            android_audio::stop_bluetooth_sco()?;
+        }
+        if wzp_native::is_loaded() && wzp_native::audio_is_running() {
+            tracing::info!(on, "set_bluetooth_sco: restarting Oboe for route change");
+            tokio::task::spawn_blocking(|| {
+                wzp_native::audio_stop();
+                wzp_native::audio_start()
+                    .map_err(|code| format!("audio_start after BT toggle: code {code}"))
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking join: {e}"))??;
+            tracing::info!("set_bluetooth_sco: Oboe restarted");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
+    }
+}
+
+/// Check whether a Bluetooth SCO device is currently connected and available.
+#[tauri::command]
+async fn is_bluetooth_available() -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        android_audio::is_bluetooth_available()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Return the current audio route as a string: "bluetooth", "speaker", or "earpiece".
+#[tauri::command]
+async fn get_audio_route() -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        if android_audio::is_bluetooth_sco_on()? {
+            return Ok("bluetooth".into());
+        }
+        if android_audio::is_speakerphone_on()? {
+            return Ok("speaker".into());
+        }
+        Ok("earpiece".into())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok("earpiece".into())
+    }
+}
+
 // ─── Call history commands ───────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1892,6 +1957,7 @@ pub fn run() {
             hangup_call,
             deregister,
             set_speakerphone, is_speakerphone_on,
+            set_bluetooth_sco, is_bluetooth_available, get_audio_route,
             get_call_history, get_recent_contacts, clear_call_history,
             set_dred_verbose_logs, get_dred_verbose_logs,
             set_call_debug_logs, get_call_debug_logs,

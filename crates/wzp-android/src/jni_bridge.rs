@@ -222,6 +222,29 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeForceProfile(
     }));
 }
 
+/// Signal a network transport change from the Android ConnectivityManager.
+///
+/// `network_type` matches the Rust `NetworkContext` enum:
+///   0=WiFi, 1=CellularLte, 2=Cellular5g, 3=Cellular3g, 4=Unknown, 5=None
+///
+/// The engine forwards this to the `AdaptiveQualityController` which:
+/// - Preemptively downgrades one tier on WiFi→cellular
+/// - Activates a 10-second FEC boost
+/// - Uses faster downgrade thresholds on cellular
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeOnNetworkChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    network_type: jint,
+    bandwidth_kbps: jint,
+) {
+    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let h = unsafe { handle_ref(handle) };
+        h.engine.on_network_changed(network_type as u8, bandwidth_kbps as u32);
+    }));
+}
+
 /// Write captured PCM samples from Kotlin AudioRecord into the engine's capture ring.
 /// pcm is a Java short[] array.
 #[unsafe(no_mangle)]

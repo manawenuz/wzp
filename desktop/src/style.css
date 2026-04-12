@@ -1083,7 +1083,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   color: white;
 }
 
-/* Speaker routing button (non-muted earpiece state should not look red) */
+/* Audio routing button — highlight color depends on active route */
 #spk-btn.speaker-on .icon {
   color: var(--accent);
+}
+#spk-btn.bt-on .icon {
+  color: #60a5fa; /* blue-400 for Bluetooth */
 }

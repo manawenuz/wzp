@@ -49,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.wzp.audio.AudioRoute
 import com.wzp.engine.CallStats
 import com.wzp.ui.components.CopyableFingerprint
 import com.wzp.ui.components.Identicon
@@ -74,6 +75,7 @@ fun InCallScreen(
     val callState by viewModel.callState.collectAsState()
     val isMuted by viewModel.isMuted.collectAsState()
     val isSpeaker by viewModel.isSpeaker.collectAsState()
+    val audioRoute by viewModel.audioRoute.collectAsState()
     val stats by viewModel.stats.collectAsState()
     val qualityTier by viewModel.qualityTier.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
@@ -621,12 +623,12 @@ fun InCallScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Controls: Mic / End / Spk
+                // Controls: Mic / End / Route (Ear/Spk/BT)
                 ControlRow(
                     isMuted = isMuted,
-                    isSpeaker = isSpeaker,
+                    audioRoute = audioRoute,
                     onToggleMute = viewModel::toggleMute,
-                    onToggleSpeaker = viewModel::toggleSpeaker,
+                    onCycleRoute = viewModel::cycleAudioRoute,
                     onHangUp = { viewModel.stopCall() }
                 )
 
@@ -915,9 +917,9 @@ private fun AudioLevelBar(audioLevel: Int) {
 @Composable
 private fun ControlRow(
     isMuted: Boolean,
-    isSpeaker: Boolean,
+    audioRoute: AudioRoute,
     onToggleMute: () -> Unit,
-    onToggleSpeaker: () -> Unit,
+    onCycleRoute: () -> Unit,
     onHangUp: () -> Unit
 ) {
     Row(
@@ -959,22 +961,28 @@ private fun ControlRow(
             Text("End", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
         }
 
-        // Speaker
+        // Audio route: cycles Earpiece → Speaker → Bluetooth (when available)
         FilledTonalIconButton(
-            onClick = onToggleSpeaker,
+            onClick = onCycleRoute,
             modifier = Modifier.size(56.dp),
-            colors = if (isSpeaker) {
-                IconButtonDefaults.filledTonalIconButtonColors(
+            colors = when (audioRoute) {
+                AudioRoute.SPEAKER -> IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = Color(0xFF0F3460), contentColor = Color.White
                 )
-            } else {
-                IconButtonDefaults.filledTonalIconButtonColors(
+                AudioRoute.BLUETOOTH -> IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = Color(0xFF2563EB), contentColor = Color.White
+                )
+                else -> IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = DarkSurface2, contentColor = Color.White
                 )
             }
         ) {
             Text(
-                text = if (isSpeaker) "Spk\nOn" else "Spk",
+                text = when (audioRoute) {
+                    AudioRoute.EARPIECE -> "Ear"
+                    AudioRoute.SPEAKER -> "Spk"
+                    AudioRoute.BLUETOOTH -> "BT"
+                },
                 textAlign = TextAlign.Center,
                 style = MaterialTheme.typography.labelSmall,
                 lineHeight = 12.sp

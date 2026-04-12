@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.wzp.audio.AudioPipeline
+import com.wzp.audio.AudioRoute
 import com.wzp.audio.AudioRouteManager
 import com.wzp.data.SettingsRepository
 import com.wzp.debug.DebugReporter
@@ -12,6 +13,7 @@ import com.wzp.engine.CallStats
 import com.wzp.service.CallService
 import com.wzp.engine.WzpCallback
 import com.wzp.engine.WzpEngine
+import com.wzp.net.NetworkMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -43,6 +45,7 @@ class CallViewModel : ViewModel(), WzpCallback {
     private var engineInitialized = false
     private var audioPipeline: AudioPipeline? = null
     private var audioRouteManager: AudioRouteManager? = null
+    private var networkMonitor: NetworkMonitor? = null
     private var audioStarted = false
     private var appContext: Context? = null
     private var settings: SettingsRepository? = null
@@ -59,6 +62,9 @@ class CallViewModel : ViewModel(), WzpCallback {
 
     private val _isSpeaker = MutableStateFlow(false)
     val isSpeaker: StateFlow<Boolean> = _isSpeaker.asStateFlow()
+
+    private val _audioRoute = MutableStateFlow(AudioRoute.EARPIECE)
+    val audioRoute: StateFlow<AudioRoute> = _audioRoute.asStateFlow()
 
     private val _stats = MutableStateFlow(CallStats())
     val stats: StateFlow<CallStats> = _stats.asStateFlow()
@@ -226,7 +232,19 @@ class CallViewModel : ViewModel(), WzpCallback {
             audioPipeline = AudioPipeline(appCtx)
         }
         if (audioRouteManager == null) {
-            audioRouteManager = AudioRouteManager(appCtx)
+            audioRouteManager = AudioRouteManager(appCtx).also { arm ->
+                arm.onRouteChanged = { route ->
+                    _audioRoute.value = route
+                    _isSpeaker.value = (route == AudioRoute.SPEAKER)
+                }
+            }
+        }
+        if (networkMonitor == null) {
+            networkMonitor = NetworkMonitor(appCtx).also { nm ->
+                nm.onNetworkChanged = { type, bw ->
+                    engine?.onNetworkChanged(type, bw)
+                }
+            }
         }
         if (debugReporter == null) {
             debugReporter = DebugReporter(appCtx)
@@ -607,6 +625,27 @@ class CallViewModel : ViewModel(), WzpCallback {
         audioRouteManager?.setSpeaker(newSpeaker)
     }
 
+    /** Cycle audio output: Earpiece → Speaker → Bluetooth (if available) → Earpiece. */
+    fun cycleAudioRoute() {
+        val routes = audioRouteManager?.availableRoutes() ?: return
+        val currentIdx = routes.indexOf(_audioRoute.value)
+        val next = routes[(currentIdx + 1) % routes.size]
+        when (next) {
+            AudioRoute.EARPIECE -> {
+                audioRouteManager?.setBluetoothSco(false)
+                audioRouteManager?.setSpeaker(false)
+            }
+            AudioRoute.SPEAKER -> {
+                audioRouteManager?.setSpeaker(true)
+            }
+            AudioRoute.BLUETOOTH -> {
+                audioRouteManager?.setBluetoothSco(true)
+            }
+        }
+        _audioRoute.value = next
+        _isSpeaker.value = (next == AudioRoute.SPEAKER)
+    }
+
     fun clearError() { _errorMessage.value = null }
 
     fun sendDebugReport() {
@@ -661,6 +700,7 @@ class CallViewModel : ViewModel(), WzpCallback {
             it.start(e)
         }
         audioRouteManager?.register()
+        networkMonitor?.register()
         audioStarted = true
     }
 
@@ -668,8 +708,10 @@ class CallViewModel : ViewModel(), WzpCallback {
         if (!audioStarted) return
         audioPipeline?.stop()    // sets running=false; DON'T null — teardown needs awaitDrain()
         audioRouteManager?.unregister()
+        networkMonitor?.unregister()
         audioRouteManager?.setSpeaker(false)
         _isSpeaker.value = false
+        _audioRoute.value = AudioRoute.EARPIECE
         audioStarted = false
     }
 

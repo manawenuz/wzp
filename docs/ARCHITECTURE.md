@@ -940,3 +940,55 @@ The patch introduces an `MSVC_CL` variable that is true only for real `cl.exe` (
 This does not affect macOS or Linux builds — on those platforms `MSVC=0` everywhere so the patched logic behaves identically to upstream.
 
 Upstream tracking: xiph/opus#256, xiph/opus PR #257 (both stale).
+
+## Network Awareness (Android)
+
+The adaptive quality controller (`AdaptiveQualityController` in `wzp-proto`) supports proactive network-aware adaptation via `signal_network_change(NetworkContext)`. On Android, this is fed by `NetworkMonitor.kt` which wraps `ConnectivityManager.NetworkCallback`.
+
+```
+ConnectivityManager
+       │ onCapabilitiesChanged / onLost
+       ▼
+NetworkMonitor.kt  ──classify──►  type: Int (WiFi=0, LTE=1, 5G=2, 3G=3)
+       │ onNetworkChanged(type, bw)
+       ▼
+CallViewModel  ──►  WzpEngine.onNetworkChanged()
+                        │ JNI
+                        ▼
+                    jni_bridge.rs
+                        │
+                        ▼
+                    EngineState.pending_network_type  (AtomicU8, lock-free)
+                        │ polled every ~20ms
+                        ▼
+                    recv task: quality_ctrl.signal_network_change(ctx)
+                        │
+                        ├─ WiFi → Cellular: preemptive 1-tier downgrade
+                        ├─ Any change: 10s FEC boost (+0.2 ratio)
+                        └─ Cellular: faster downgrade thresholds (2 vs 3)
+```
+
+Cellular generation is approximated from `getLinkDownstreamBandwidthKbps()` to avoid requiring `READ_PHONE_STATE` permission.
+
+## Audio Routing (Android)
+
+Both Android app variants support 3-way audio routing: **Earpiece → Speaker → Bluetooth SCO**.
+
+### Native Kotlin App
+
+`AudioRouteManager.kt` handles device detection (via `AudioDeviceCallback`), SCO lifecycle (`startBluetoothSco` / `stopBluetoothSco`), and auto-fallback on BT disconnect. `CallViewModel.cycleAudioRoute()` cycles through available routes.
+
+### Tauri Desktop App
+
+`android_audio.rs` provides JNI bridges to `AudioManager` for speakerphone and Bluetooth SCO control. After each route change, Oboe streams are stopped and restarted via `spawn_blocking` to force AAudio to reconfigure with the new routing.
+
+```
+User tap ──► cycleAudioRoute()
+                │
+                ├─ Earpiece: setSpeakerphoneOn(false)
+                ├─ Speaker:  setSpeakerphoneOn(true)
+                └─ BT SCO:   startBluetoothSco() + setBluetoothScoOn(true)
+                │
+                ▼
+            Oboe stop + start (~60-400ms)
+```

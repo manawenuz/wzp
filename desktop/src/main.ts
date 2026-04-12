@@ -872,12 +872,11 @@ function showCallScreen() {
   }
   callStatus.className = "status-dot";
   statusInterval = window.setInterval(pollStatus, 250);
-  // Sync the Speaker/Earpiece label with the OS state (Android only; on
-  // desktop the command is a no-op returning false so we land on "Earpiece"
-  // which is fine because desktop has no routing concept).
-  invoke<boolean>("is_speakerphone_on")
-    .then((on) => { speakerphoneOn = !!on; updateSpkLabel(); })
-    .catch(() => { speakerphoneOn = false; updateSpkLabel(); });
+  // Sync the audio route label with the OS state (Android only; on desktop
+  // get_audio_route returns "earpiece" so we land on the default).
+  invoke<string>("get_audio_route")
+    .then((route) => { currentAudioRoute = (route as AudioRoute) || "earpiece"; updateRouteLabel(); })
+    .catch(() => { currentAudioRoute = "earpiece"; updateRouteLabel(); });
 }
 
 function showConnectScreen() {
@@ -898,38 +897,74 @@ micBtn.addEventListener("click", async () => {
   try { const m: boolean = await invoke("toggle_mic"); micBtn.classList.toggle("muted", m); micIcon.textContent = m ? "Mic Off" : "Mic"; } catch {}
 });
 
-// Speaker routing (Android) — toggles AudioManager.setSpeakerphoneOn + then
-// stops and restarts the Oboe streams so AAudio reconfigures with the new
-// routing. The Rust-side Tauri command handles the restart, we just swap
-// the button label.
+// Audio routing (Android) — cycles between earpiece, speaker, and Bluetooth
+// SCO. Each transition calls the corresponding Tauri command which sets the
+// AudioManager state and restarts Oboe streams so AAudio picks up the new
+// route. On desktop all commands are no-ops.
 //
 // Earpiece is NOT a "muted" state, so DO NOT add the `.muted` CSS class
 // (which would tint the button red); that was a bug in 0178cbd that made
-// earpiece mode look like playback was off. A separate `.speaker-on` class
-// is available for css styling if we want to visually indicate loud mode.
-let speakerphoneOn = false;
-let speakerphoneBusy = false;
-function updateSpkLabel() {
-  spkBtn.classList.toggle("speaker-on", speakerphoneOn);
+// earpiece mode look like playback was off.
+type AudioRoute = "earpiece" | "speaker" | "bluetooth";
+let currentAudioRoute: AudioRoute = "earpiece";
+let routeBusy = false;
+
+function updateRouteLabel() {
+  spkBtn.classList.remove("speaker-on", "bt-on");
   spkBtn.classList.remove("muted");
-  spkIcon.textContent = speakerphoneOn ? "🔊 Speaker" : "🔈 Earpiece";
+  switch (currentAudioRoute) {
+    case "speaker":
+      spkIcon.textContent = "🔊 Speaker";
+      spkBtn.classList.add("speaker-on");
+      break;
+    case "bluetooth":
+      spkIcon.textContent = "🎧 BT";
+      spkBtn.classList.add("bt-on");
+      break;
+    default:
+      spkIcon.textContent = "🔈 Earpiece";
+      break;
+  }
 }
-spkBtn.addEventListener("click", async () => {
-  if (speakerphoneBusy) return;  // debounce — the restart takes ~60ms
-  speakerphoneBusy = true;
-  const next = !speakerphoneOn;
+
+async function cycleAudioRoute() {
+  if (routeBusy) return; // debounce — Oboe restart takes ~60-400ms
+  routeBusy = true;
   spkBtn.disabled = true;
   try {
-    await invoke("set_speakerphone", { on: next });
-    speakerphoneOn = next;
-    updateSpkLabel();
+    const btAvailable = await invoke<boolean>("is_bluetooth_available");
+    const routes: AudioRoute[] = btAvailable
+      ? ["earpiece", "speaker", "bluetooth"]
+      : ["earpiece", "speaker"];
+    const idx = routes.indexOf(currentAudioRoute);
+    const next = routes[(idx + 1) % routes.length];
+
+    // Tear down current route
+    if (currentAudioRoute === "bluetooth") {
+      await invoke("set_bluetooth_sco", { on: false });
+    }
+    // Activate next route
+    if (next === "speaker") {
+      await invoke("set_speakerphone", { on: true });
+    } else if (next === "bluetooth") {
+      await invoke("set_speakerphone", { on: false });
+      await invoke("set_bluetooth_sco", { on: true });
+    } else {
+      // earpiece — turn everything off
+      await invoke("set_speakerphone", { on: false });
+    }
+
+    currentAudioRoute = next;
+    updateRouteLabel();
   } catch (e) {
-    console.error("set_speakerphone failed:", e);
+    console.error("cycleAudioRoute failed:", e);
   } finally {
     spkBtn.disabled = false;
-    speakerphoneBusy = false;
+    routeBusy = false;
   }
-});
+}
+
+spkBtn.addEventListener("click", cycleAudioRoute);
 hangupBtn.addEventListener("click", async () => {
   userDisconnected = true;
   // Use the new hangup_call command instead of raw disconnect —
@@ -1002,7 +1037,7 @@ async function pollStatus() {
     micBtn.classList.toggle("muted", st.mic_muted);
     micIcon.textContent = st.mic_muted ? "Mic Off" : "Mic";
     // NB: spkBtn label is driven by the Android audio routing state
-    // (speakerphoneOn / updateSpkLabel), not by the engine's spk_muted.
+    // (currentAudioRoute / updateRouteLabel), not by the engine's spk_muted.
     // Skip that here so pollStatus doesn't clobber the routing UI.
     callTimer.textContent = formatDuration(st.call_duration_secs);
 

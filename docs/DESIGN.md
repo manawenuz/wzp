@@ -583,6 +583,49 @@ Signal messages are sent over reliable QUIC streams as length-prefixed JSON:
 | wzp-client | 30 + 2 integration | Encoder/decoder, quality adapter, silence, drift, sweep |
 | wzp-web | 2 | Metrics |
 
+## Audio Routing (Android)
+
+WarzonePhone supports three audio output routes on Android: **Earpiece**, **Speaker**, and **Bluetooth SCO**. The user cycles through available routes with a single button.
+
+### Route lifecycle
+
+1. Call starts → Earpiece (default). `AudioManager.MODE_IN_COMMUNICATION` set by `CallService`.
+2. User taps route button → cycles to next available route.
+3. Route change requires Oboe stream restart (~60-400ms) because AAudio silently tears down streams on some OEMs when the routing target changes mid-stream.
+4. Bluetooth disconnect mid-call → `AudioDeviceCallback.onAudioDevicesRemoved` fires → auto-fallback to Earpiece or Speaker.
+
+### Bluetooth SCO
+
+SCO (Synchronous Connection Oriented) is the correct Bluetooth profile for VoIP — it provides bidirectional mono audio at 8/16 kHz with ~30ms latency. A2DP (stereo, high-quality) is unidirectional and adds 100-200ms of buffering, making it unsuitable for real-time voice.
+
+The deprecated `AudioManager.startBluetoothSco()` API is used because the modern `setCommunicationDevice()` requires API 31+ and our minSdk is 26. The deprecated APIs are functional on all tested devices through API 35.
+
+### Two app variants
+
+Both the native Kotlin app (`AudioRouteManager.kt`) and the Tauri app (`android_audio.rs` JNI bridge) call the same `AudioManager` APIs. The native app uses `AudioDeviceCallback` for automatic device detection; the Tauri app queries `getDevices()` on demand.
+
+## Network Change Response
+
+The `AdaptiveQualityController` in `wzp-proto` reacts to network transport changes signaled via `signal_network_change(NetworkContext)`:
+
+| Transition | Response |
+|-----------|----------|
+| WiFi → Cellular | Preemptive 1-tier quality downgrade + 10s FEC boost |
+| Cellular → WiFi | FEC boost only (quality recovers via normal adaptive logic) |
+| Any change | Reset hysteresis counters to avoid stale state |
+
+On Android, `NetworkMonitor.kt` wraps `ConnectivityManager.NetworkCallback` and classifies the transport type using bandwidth heuristics (no `READ_PHONE_STATE` needed). The classification is delivered to the Rust engine via JNI → `AtomicU8` → recv task polling — the same lock-free cross-task signaling pattern used for adaptive profile switches.
+
+### Cellular generation heuristics
+
+| Downstream bandwidth | Classification |
+|---------------------|---------------|
+| >= 100 Mbps | 5G NR |
+| >= 10 Mbps | LTE |
+| < 10 Mbps | 3G or worse |
+
+These thresholds are conservative. Carriers over-report bandwidth, but for VoIP quality decisions the exact generation matters less than the rough category.
+
 ## Build Requirements
 
 - **Rust** 1.85+ (2024 edition)

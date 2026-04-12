@@ -99,6 +99,9 @@ pub(crate) struct EngineState {
     /// QUIC transport handle — stored so stop_call() can close it immediately,
     /// triggering relay-side leave + RoomUpdate broadcast.
     pub quic_transport: Mutex<Option<Arc<wzp_transport::QuinnTransport>>>,
+    /// Network type from Android ConnectivityManager, polled by recv task.
+    /// 0xFF = no change pending; 0-5 = NetworkContext ordinal.
+    pub pending_network_type: AtomicU8,
 }
 
 pub struct WzpEngine {
@@ -120,6 +123,7 @@ impl WzpEngine {
             playout_ring: AudioRing::new(),
             audio_level_rms: AtomicU32::new(0),
             quic_transport: Mutex::new(None),
+            pending_network_type: AtomicU8::new(PROFILE_NO_CHANGE),
         });
         Self {
             state,
@@ -403,6 +407,13 @@ impl WzpEngine {
     pub fn set_speaker(&self, _enabled: bool) {}
 
     pub fn force_profile(&self, _profile: QualityProfile) {}
+
+    /// Signal a network transport change from Android ConnectivityManager.
+    /// Stores the type atomically; the recv task polls it on each packet.
+    pub fn on_network_changed(&self, network_type: u8, bandwidth_kbps: u32) {
+        info!(network_type, bandwidth_kbps, "on_network_changed");
+        self.state.pending_network_type.store(network_type, Ordering::Release);
+    }
 
     pub fn get_stats(&self) -> CallStats {
         let mut stats = self.state.stats.lock().unwrap().clone();
@@ -869,6 +880,23 @@ async fn run_call(
                             is_repair = pkt.header.is_repair,
                             "large recv gap — possible network stall"
                         );
+                    }
+
+                    // Check for network transport change from ConnectivityManager
+                    {
+                        let net = state.pending_network_type.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
+                        if net != PROFILE_NO_CHANGE {
+                            use wzp_proto::NetworkContext;
+                            let ctx = match net {
+                                0 => NetworkContext::WiFi,
+                                1 => NetworkContext::CellularLte,
+                                2 => NetworkContext::Cellular5g,
+                                3 => NetworkContext::Cellular3g,
+                                _ => NetworkContext::Unknown,
+                            };
+                            quality_ctrl.signal_network_change(ctx);
+                            info!(?ctx, "quality controller: network context updated");
+                        }
                     }
 
                     // Adaptive quality: ingest quality reports from relay

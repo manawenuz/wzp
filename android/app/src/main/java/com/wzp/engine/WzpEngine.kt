@@ -96,6 +96,17 @@ class WzpEngine(private val callback: WzpCallback) {
         if (nativeHandle != 0L) nativeForceProfile(nativeHandle, profile)
     }
 
+    /**
+     * Signal a network transport change (e.g. WiFi → LTE handoff).
+     *
+     * @param networkType matches Rust `NetworkContext` ordinals:
+     *   0=WiFi, 1=LTE, 2=5G, 3=3G, 4=Unknown, 5=None
+     * @param bandwidthKbps reported downstream bandwidth in kbps
+     */
+    fun onNetworkChanged(networkType: Int, bandwidthKbps: Int) {
+        if (nativeHandle != 0L) nativeOnNetworkChanged(nativeHandle, networkType, bandwidthKbps)
+    }
+
     /** Destroy the native engine and free all resources. The instance must not be reused. */
     @Synchronized
     fun destroy() {
@@ -163,6 +174,7 @@ class WzpEngine(private val callback: WzpCallback) {
     private external fun nativeStartSignaling(handle: Long, relay: String, seed: String, token: String, alias: String): Int
     private external fun nativePlaceCall(handle: Long, targetFp: String): Int
     private external fun nativeAnswerCall(handle: Long, callId: String, mode: Int): Int
+    private external fun nativeOnNetworkChanged(handle: Long, networkType: Int, bandwidthKbps: Int)
 
     /**
      * Ping a relay server. Requires engine to be initialized.
