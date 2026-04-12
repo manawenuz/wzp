@@ -417,20 +417,47 @@ impl CallEngine {
                 "wzp-native not loaded — dlopen failed at startup"
             ));
         }
+
+        // Fix D (task #37): explicit stop+start cycle on EVERY call
+        // start — not just rejoin. Empirically, the first call after
+        // app launch on Nothing Phone has the Oboe playout callback
+        // fire once (cb#0) and then stop draining the ring, causing
+        // written_samples to freeze at 7679 (ring capacity minus
+        // one burst). Rejoin (second call) always works because
+        // audio_stop tears down the streams and audio_start rebuilds
+        // them in a state that the audio driver accepts. By always
+        // running stop first (no-op on cold start when not yet
+        // started), we get the same "fresh rebuild" behavior on
+        // every call.
+        crate::wzp_native::audio_stop();
+        // Brief pause to let Android's audio routing + AudioManager
+        // settle after the stop. 50ms is enough for the driver to
+        // release the audio session; shorter risks the new start
+        // hitting a "device busy" on some HALs.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
         let t_pre_audio = call_t0.elapsed().as_millis();
         if let Err(code) = crate::wzp_native::audio_start() {
             return Err(anyhow::anyhow!("wzp_native_audio_start failed: code {code}"));
         }
-        // Diagnostic: how long did audio_start() take, and at what
-        // wall-clock offset from CallEngine::start did it complete?
-        // Compare to the C++ "playout cb#0" log timestamp in logcat to
-        // see whether the Oboe playout callback fires before or after
-        // the recv task starts pushing decoded frames.
+
+        // Fix C (task #36): prime the playout ring with 20ms of
+        // silence immediately after audio_start so the Oboe playout
+        // callback has data to drain on its FIRST invocation. On
+        // devices where the callback only fires when the ring is
+        // non-empty (or where an empty-ring callback causes the
+        // stream to self-pause), this ensures the callback keeps
+        // running until real decoded audio arrives.
+        {
+            let silence = vec![0i16; 960]; // 20ms @ 48kHz mono
+            let _ = crate::wzp_native::audio_write_playout(&silence);
+        }
+
         let t_audio_start_done = call_t0.elapsed().as_millis();
         info!(
             t_ms = t_audio_start_done,
             audio_start_ms = t_audio_start_done.saturating_sub(t_pre_audio),
-            "first-join diag: wzp-native audio started"
+            "first-join diag: wzp-native audio started (with stop+prime cycle)"
         );
 
         let running = Arc::new(AtomicBool::new(true));
