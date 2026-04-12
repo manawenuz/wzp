@@ -513,6 +513,13 @@ impl CallEngine {
             encoder.set_aec_enabled(false);
             let mut buf = vec![0i16; frame_samples];
 
+            // Continuous DRED tuning: poll quinn path stats every 25
+            // frames (~500 ms at 20 ms/frame) and adjust DRED duration +
+            // expected-loss hint based on real-time network conditions.
+            let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
+            let mut frames_since_dred_poll: u32 = 0;
+            const DRED_POLL_INTERVAL: u32 = 25;
+
             let mut heartbeat = std::time::Instant::now();
             let mut last_rms: u32 = 0;
             let mut last_pkt_bytes: usize = 0;
@@ -600,6 +607,34 @@ impl CallEngine {
                         }
                     }
                     Err(e) => error!("encode: {e}"),
+                }
+
+                // DRED tuner: poll quinn path stats periodically and
+                // adjust encoder DRED duration + expected-loss hint.
+                frames_since_dred_poll += 1;
+                if frames_since_dred_poll >= DRED_POLL_INTERVAL {
+                    frames_since_dred_poll = 0;
+                    let snap = send_t.quinn_path_stats();
+                    let pq = send_t.path_quality();
+                    if let Some(tuning) = dred_tuner.update(
+                        snap.loss_pct,
+                        snap.rtt_ms,
+                        pq.jitter_ms,
+                    ) {
+                        encoder.apply_dred_tuning(tuning);
+                        if wzp_codec::dred_verbose_logs() {
+                            info!(
+                                dred_frames = tuning.dred_frames,
+                                dred_ms = tuning.dred_frames as u32 * 10,
+                                expected_loss = tuning.expected_loss_pct,
+                                quinn_loss = format!("{:.1}", snap.loss_pct),
+                                quinn_rtt = snap.rtt_ms,
+                                jitter = pq.jitter_ms,
+                                spike = dred_tuner.spike_boost_active(),
+                                "DRED tuner adjusted encoder"
+                            );
+                        }
+                    }
                 }
 
                 // Heartbeat every 2s with capture+encode+send state
@@ -1250,6 +1285,11 @@ impl CallEngine {
             encoder.set_aec_enabled(false); // OS AEC or none
             let mut buf = vec![0i16; frame_samples];
 
+            // Continuous DRED tuning (same as Android send task).
+            let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
+            let mut frames_since_dred_poll: u32 = 0;
+            const DRED_POLL_INTERVAL: u32 = 25;
+
             loop {
                 if !send_r.load(Ordering::Relaxed) {
                     break;
@@ -1284,6 +1324,21 @@ impl CallEngine {
                         send_fs.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(e) => error!("encode: {e}"),
+                }
+
+                // DRED tuner: poll quinn path stats periodically.
+                frames_since_dred_poll += 1;
+                if frames_since_dred_poll >= DRED_POLL_INTERVAL {
+                    frames_since_dred_poll = 0;
+                    let snap = send_t.quinn_path_stats();
+                    let pq = send_t.path_quality();
+                    if let Some(tuning) = dred_tuner.update(
+                        snap.loss_pct,
+                        snap.rtt_ms,
+                        pq.jitter_ms,
+                    ) {
+                        encoder.apply_dred_tuning(tuning);
+                    }
                 }
             }
         });

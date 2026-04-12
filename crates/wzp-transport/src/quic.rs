@@ -13,6 +13,29 @@ use crate::datagram;
 use crate::path_monitor::PathMonitor;
 use crate::reliable;
 
+/// Snapshot of quinn's QUIC-level path statistics.
+///
+/// Provides more accurate loss/RTT data than `PathMonitor`'s sequence-gap
+/// heuristic because quinn sees ACK frames and congestion signals directly.
+#[derive(Clone, Copy, Debug)]
+pub struct QuinnPathSnapshot {
+    /// Smoothed RTT in milliseconds (from quinn's congestion controller).
+    pub rtt_ms: u32,
+    /// Cumulative loss percentage (lost_packets / sent_packets × 100).
+    pub loss_pct: f32,
+    /// Total congestion events observed by the QUIC stack.
+    pub congestion_events: u64,
+    /// Current congestion window in bytes.
+    pub cwnd: u64,
+    /// Total packets sent on this path.
+    pub sent_packets: u64,
+    /// Total packets lost on this path.
+    pub lost_packets: u64,
+    /// Current PMTUD-discovered maximum datagram payload size (bytes).
+    /// Starts at `initial_mtu` (1200) and grows as PMTUD probes succeed.
+    pub current_mtu: usize,
+}
+
 /// QUIC-based transport implementing the `MediaTransport` trait.
 pub struct QuinnTransport {
     connection: quinn::Connection,
@@ -64,6 +87,31 @@ impl QuinnTransport {
     /// Get the maximum datagram payload size, if datagrams are supported.
     pub fn max_datagram_size(&self) -> Option<usize> {
         datagram::max_datagram_payload(&self.connection)
+    }
+
+    /// Snapshot of QUIC-level path stats from quinn, useful for DRED tuning.
+    ///
+    /// Returns `(rtt_ms, loss_pct, congestion_events)` derived from quinn's
+    /// internal congestion controller — more accurate than our own sequence-gap
+    /// heuristic in `PathMonitor` because quinn sees ACK frames directly.
+    pub fn quinn_path_stats(&self) -> QuinnPathSnapshot {
+        let stats = self.connection.stats();
+        let rtt_ms = stats.path.rtt.as_millis() as u32;
+        let loss_pct = if stats.path.sent_packets > 0 {
+            (stats.path.lost_packets as f32 / stats.path.sent_packets as f32) * 100.0
+        } else {
+            0.0
+        };
+        let current_mtu = self.connection.max_datagram_size().unwrap_or(1200);
+        QuinnPathSnapshot {
+            rtt_ms,
+            loss_pct,
+            congestion_events: stats.path.congestion_events,
+            cwnd: stats.path.cwnd,
+            sent_packets: stats.path.sent_packets,
+            lost_packets: stats.path.lost_packets,
+            current_mtu,
+        }
     }
 
     /// Send an encoded [`TrunkFrame`] as a single QUIC datagram.

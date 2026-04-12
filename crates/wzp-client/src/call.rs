@@ -445,6 +445,15 @@ impl CallEncoder {
         self.aec.feed_farend(farend);
     }
 
+    /// Apply DRED tuning output to the encoder.
+    ///
+    /// Called by the send loop after `DredTuner::update()` returns `Some`.
+    /// No-op when the active codec is Codec2 (DRED is Opus-only).
+    pub fn apply_dred_tuning(&mut self, tuning: wzp_proto::DredTuning) {
+        self.audio_enc.set_dred_duration(tuning.dred_frames);
+        self.audio_enc.set_expected_loss(tuning.expected_loss_pct);
+    }
+
     /// Enable or disable acoustic echo cancellation.
     pub fn set_aec_enabled(&mut self, enabled: bool) {
         self.aec.set_enabled(enabled);
@@ -1441,5 +1450,132 @@ mod tests {
             enc.frames_suppressed > 0,
             "frames_suppressed should be > 0"
         );
+    }
+
+    // ---- DredTuner integration tests ----
+
+    /// End-to-end test: DredTuner reacts to simulated network degradation
+    /// and adjusts the encoder's DRED parameters via `apply_dred_tuning`.
+    #[test]
+    fn dred_tuner_adjusts_encoder_on_loss() {
+        use wzp_proto::DredTuner;
+
+        let mut enc = CallEncoder::new(&CallConfig {
+            profile: QualityProfile::GOOD,
+            suppression_enabled: false,
+            ..Default::default()
+        });
+        let mut tuner = DredTuner::new(QualityProfile::GOOD.codec);
+
+        // Baseline: good network → baseline DRED (20 frames = 200 ms).
+        let baseline = tuner.current();
+        assert_eq!(baseline.dred_frames, 20);
+
+        // Warm up the tuner — first few updates may return Some as the
+        // EWMA initializes and expected_loss settles from the initial 15%.
+        for _ in 0..10 {
+            tuner.update(0.0, 50, 5);
+        }
+        // After settling, the tuning should be at baseline.
+        assert_eq!(tuner.current().dred_frames, 20);
+
+        // Simulate network degradation: 30% loss, 300ms RTT.
+        // The tuner should increase DRED frames above baseline.
+        let tuning = tuner.update(30.0, 300, 15);
+        assert!(tuning.is_some(), "loss spike should trigger tuning change");
+        let t = tuning.unwrap();
+        assert!(
+            t.dred_frames > 20,
+            "30% loss should increase DRED above baseline 20, got {}",
+            t.dred_frames
+        );
+
+        // Apply to encoder — should not panic.
+        enc.apply_dred_tuning(t);
+
+        // Verify the encoder still works after tuning.
+        let pcm = voice_frame_20ms(0);
+        let packets = enc.encode_frame(&pcm).unwrap();
+        assert!(!packets.is_empty(), "encoder must still produce packets after DRED tuning");
+    }
+
+    /// DredTuner jitter spike triggers pre-emptive DRED boost to ceiling.
+    #[test]
+    fn dred_tuner_spike_boosts_to_ceiling() {
+        use wzp_proto::DredTuner;
+
+        let mut tuner = DredTuner::new(CodecId::Opus24k);
+
+        // Establish low-jitter baseline.
+        for _ in 0..20 {
+            tuner.update(0.0, 50, 5);
+        }
+        assert!(!tuner.spike_boost_active());
+
+        // Jitter spikes to 40ms (8x baseline of ~5ms).
+        let tuning = tuner.update(0.0, 50, 40);
+        assert!(tuner.spike_boost_active(), "jitter spike should activate boost");
+        assert!(tuning.is_some());
+        // Ceiling for Opus24k is 50 frames = 500 ms.
+        assert_eq!(
+            tuning.unwrap().dred_frames, 50,
+            "spike should push to ceiling"
+        );
+    }
+
+    /// DredTuner is a no-op for Codec2 profiles.
+    #[test]
+    fn dred_tuner_noop_for_codec2() {
+        use wzp_proto::DredTuner;
+
+        let mut tuner = DredTuner::new(CodecId::Codec2_1200);
+
+        // Even extreme conditions produce no tuning output.
+        assert!(tuner.update(50.0, 800, 100).is_none());
+        assert_eq!(tuner.current().dred_frames, 0);
+    }
+
+    /// DredTuner + CallEncoder: full cycle through profile switch.
+    #[test]
+    fn dred_tuner_handles_profile_switch() {
+        use wzp_proto::DredTuner;
+
+        let mut enc = CallEncoder::new(&CallConfig {
+            profile: QualityProfile::GOOD,
+            suppression_enabled: false,
+            ..Default::default()
+        });
+        let mut tuner = DredTuner::new(QualityProfile::GOOD.codec);
+
+        // Apply initial tuning on good network.
+        if let Some(t) = tuner.update(0.0, 50, 5) {
+            enc.apply_dred_tuning(t);
+        }
+
+        // Switch to degraded profile.
+        enc.set_profile(QualityProfile::DEGRADED).unwrap();
+        tuner.set_codec(QualityProfile::DEGRADED.codec);
+
+        // Opus6k baseline is 50 frames (500 ms), ceiling is 104 (1040 ms).
+        let baseline = tuner.current();
+        // After set_codec, the cached tuning should reflect old state;
+        // a fresh update gives the new codec's mapping.
+        let tuning = tuner.update(20.0, 200, 10);
+        assert!(tuning.is_some());
+        let t = tuning.unwrap();
+        assert!(
+            t.dred_frames >= 50,
+            "Opus6k with 20% loss should be at least baseline 50, got {}",
+            t.dred_frames
+        );
+
+        enc.apply_dred_tuning(t);
+
+        // Encode a 40ms frame (Opus6k uses 40ms frames = 1920 samples).
+        let pcm: Vec<i16> = (0..1920)
+            .map(|i| ((i as f32 * 0.1).sin() * 10_000.0) as i16)
+            .collect();
+        let packets = enc.encode_frame(&pcm).unwrap();
+        assert!(!packets.is_empty());
     }
 }

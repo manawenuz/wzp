@@ -1100,6 +1100,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         };
         let forward = SignalMessage::FederatedSignalForward {
             inner: Box::new(inner),
@@ -1142,6 +1143,7 @@ mod tests {
                 chosen_profile: None,
                 callee_reflexive_addr: Some("198.51.100.9:4433".into()),
                 callee_local_addrs: Vec::new(),
+                callee_build_version: None,
             },
             SignalMessage::CallRinging { call_id: "c1".into() },
             SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
@@ -1177,6 +1179,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         };
         let json = serde_json::to_string(&offer).unwrap();
         assert!(
@@ -1205,6 +1208,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: None,
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         };
         let json_none = serde_json::to_string(&offer_none).unwrap();
         assert!(
@@ -1222,6 +1226,7 @@ mod tests {
             chosen_profile: None,
             callee_reflexive_addr: Some("198.51.100.9:4433".into()),
             callee_local_addrs: Vec::new(),
+            callee_build_version: None,
         };
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();

@@ -57,3 +57,28 @@ When the path MTU is small, the relay or client should:
 - MTU-based codec selection (future, needs adaptive quality)
 
 ## Effort: 1 day
+
+## Implementation Status (2026-04-12)
+
+Phase 1 is now implemented:
+
+### What was built
+
+- **Transport config** (`crates/wzp-transport/src/config.rs`):
+  - `MtuDiscoveryConfig` with `upper_bound=1452`, `interval=300s`, `black_hole_cooldown=30s`
+  - `initial_mtu=1200` (safe QUIC minimum)
+  - Quinn's PLPMTUD binary-searches from 1200 up to 1452 automatically
+
+- **`QuinnPathSnapshot::current_mtu`** (`crates/wzp-transport/src/quic.rs`):
+  - Reads `connection.max_datagram_size()` which reflects the PMTUD-discovered value
+  - Available to all callers via `transport.quinn_path_stats()`
+
+- **Trunk batcher MTU-aware** (`crates/wzp-relay/src/room.rs`):
+  - `TrunkedForwarder::new()` initializes `max_bytes` from discovered MTU
+  - `send()` refreshes `max_bytes` on every call (cheap atomic read in quinn)
+  - Federation trunk frames grow automatically as PMTUD discovers larger paths
+
+### Phases 2-3 status
+
+- Phase 2 (handle MTU failures): Already handled — `send_media()`/`send_trunk()` check `max_datagram_size()` and return `DatagramTooLarge` errors. These are logged and the packet is dropped gracefully.
+- Phase 3 (codec-aware MTU): Not yet implemented. Future video frames will need application-layer fragmentation when they exceed the discovered MTU.

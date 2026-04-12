@@ -105,6 +105,7 @@ fn mk_offer(call_id: &str, caller_reflexive_addr: Option<&str>) -> SignalMessage
         supported_profiles: vec![],
         caller_reflexive_addr: caller_reflexive_addr.map(String::from),
         caller_local_addrs: Vec::new(),
+        caller_build_version: None,
     }
 }
 
@@ -122,6 +123,7 @@ fn mk_answer(
         chosen_profile: None,
         callee_reflexive_addr: callee_reflexive_addr.map(String::from),
         callee_local_addrs: Vec::new(),
+        callee_build_version: None,
     }
 }
 

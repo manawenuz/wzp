@@ -382,18 +382,32 @@ impl TrunkedForwarder {
     /// Create a new trunked forwarder.
     ///
     /// `session_id` tags every entry pushed into the batcher so the receiver
-    /// can demultiplex packets by session.
+    /// can demultiplex packets by session. The batcher's `max_bytes` is
+    /// initialized from the transport's current PMTUD-discovered MTU so that
+    /// trunk frames fill the largest datagram the path supports (instead of
+    /// the conservative 1200-byte default).
     pub fn new(transport: Arc<wzp_transport::QuinnTransport>, session_id: [u8; 2]) -> Self {
+        let mut batcher = TrunkBatcher::new();
+        if let Some(mtu) = transport.max_datagram_size() {
+            batcher.max_bytes = mtu;
+        }
         Self {
             transport,
-            batcher: TrunkBatcher::new(),
+            batcher,
             session_id,
         }
     }
 
     /// Push a media packet into the batcher.  If the batcher is full it will
     /// flush automatically and the resulting trunk frame is sent immediately.
+    ///
+    /// Also refreshes `max_bytes` from the transport's PMTUD-discovered MTU
+    /// so the batcher fills larger datagrams as the path MTU grows.
     pub async fn send(&mut self, pkt: &wzp_proto::MediaPacket) -> anyhow::Result<()> {
+        // Refresh batcher limit from PMTUD (cheap: reads an atomic in quinn).
+        if let Some(mtu) = self.transport.max_datagram_size() {
+            self.batcher.max_bytes = mtu;
+        }
         let payload: Bytes = pkt.to_bytes();
         if let Some(frame) = self.batcher.push(self.session_id, payload) {
             self.send_frame(&frame)?;

@@ -28,6 +28,13 @@ pub trait AudioEncoder: Send + Sync {
 
     /// Enable/disable DTX (discontinuous transmission). No-op for Codec2.
     fn set_dtx(&mut self, _enabled: bool) {}
+
+    /// Hint the encoder about expected packet loss (0–100). In DRED mode the
+    /// encoder floors this at 15% internally. No-op for Codec2.
+    fn set_expected_loss(&mut self, _loss_pct: u8) {}
+
+    /// Set DRED duration in 10 ms frame units (0–104). No-op for Codec2.
+    fn set_dred_duration(&mut self, _frames: u8) {}
 }
 
 /// Decodes compressed frames back to PCM audio.

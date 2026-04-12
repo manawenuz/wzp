@@ -123,7 +123,6 @@ fn transport_config() -> quinn::TransportConfig {
     config.keep_alive_interval(Some(Duration::from_secs(5)));
 
     // Enable DATAGRAM extension for unreliable media packets.
-    // Allow datagrams up to 1200 bytes (conservative for lossy links).
     config.datagram_receive_buffer_size(Some(65536));
 
     // Conservative flow control for bandwidth-constrained links
@@ -133,6 +132,26 @@ fn transport_config() -> quinn::TransportConfig {
 
     // Aggressive initial RTT estimate for high-latency links
     config.initial_rtt(Duration::from_millis(300));
+
+    // PMTUD (Path MTU Discovery) — quinn 0.11 enables this by default but
+    // with conservative bounds (initial 1200, upper 1452). We keep the safe
+    // initial_mtu of 1200 so the first packets always get through, but raise
+    // upper_bound so the binary search can discover larger MTUs on paths that
+    // support them. Typical results:
+    //   - Ethernet/fiber: discovers ~1452 (Ethernet MTU minus IP/UDP/QUIC)
+    //   - WireGuard/VPN: discovers ~1380-1420
+    //   - Starlink: discovers ~1400-1452
+    //   - Cellular: stays at 1200-1300
+    // Black hole detection automatically falls back to 1200 if probes fail.
+    // This matters for future video frames which can be 1-50 KB and benefit
+    // from fewer application-layer fragments per frame.
+    let mut mtu_config = quinn::MtuDiscoveryConfig::default();
+    mtu_config
+        .upper_bound(1452)
+        .interval(Duration::from_secs(300))       // re-probe every 5 min
+        .black_hole_cooldown(Duration::from_secs(30)); // retry faster on lossy links
+    config.mtu_discovery_config(Some(mtu_config));
+    config.initial_mtu(1200); // safe starting point
 
     config
 }

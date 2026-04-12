@@ -358,3 +358,31 @@ End-to-end testing, in order:
 - **OSCE enable**: opusic-c has an `osce` feature flag for Opus Speech Coding Enhancement, a separate libopus 1.5 neural post-processor. Out of scope for this PRD but should be the next audio-quality follow-up. Probably one-line enable once opusic-c is in.
 - **Upstream PR to opusic-c**: our own `dred_ffi.rs` wrapper should be proven in production first, then the fixes upstreamed to `opusic-c/src/dred.rs` (preserve `dred_end`, fix `dred_offset` double-pass, expose `DredPacket` externally). Follow-up task, not blocking this PRD.
 - **`feat/desktop-audio-rewrite` merge**: the vendored `audiopus_sys` patch on that branch becomes obsolete under this PRD. Coordinate removal with whoever owns that branch.
+
+## Phase A: Continuous DRED Tuning (Implemented 2026-04-12)
+
+Phase A extends the discrete tier-locked DRED durations from Phases 1-3 with continuous, network-driven tuning.
+
+### What was built
+
+- **`DredTuner`** (`crates/wzp-proto/src/dred_tuner.rs`): Maps `(loss_pct, rtt_ms, jitter_ms)` → `(dred_frames, expected_loss_pct)` continuously
+- **Quinn stats exposure** (`crates/wzp-transport/src/quic.rs`): `QuinnPathSnapshot` provides quinn's internal RTT, loss, congestion events — more accurate than sequence-gap heuristics
+- **Jitter variance window** (`crates/wzp-transport/src/path_monitor.rs`): 10-sample sliding window for RTT standard deviation, used for spike detection
+- **`AudioEncoder` trait extensions** (`crates/wzp-proto/src/traits.rs`): `set_expected_loss()` and `set_dred_duration()` with default no-op, overridden by `OpusEncoder` and `AdaptiveEncoder`
+- **Engine integration** (`desktop/src-tauri/src/engine.rs`): Both Android and desktop send tasks poll every 25 frames and apply tuning
+
+### Opus6k DRED extended
+
+`dred_duration_for(Opus6k)` changed from 50 (500ms) to 104 (1040ms) — the maximum libopus 1.5 supports. The RDO-VAE's quality-vs-offset curve makes this nearly free in bitrate terms while doubling burst resilience on the worst links.
+
+### Jitter spike detection ("Sawtooth" prediction)
+
+When instantaneous jitter exceeds the EWMA × 1.3 (asymmetric: fast-up α=0.3, slow-down α=0.05), the tuner enters spike-boost mode:
+- DRED immediately jumps to the codec tier's ceiling
+- Cooldown: 10 cycles (~5 seconds at 25 packets/cycle)
+- Designed for Starlink satellite handover sawtooth jitter pattern
+
+### Test coverage
+
+- 10 unit tests for tuner math (baseline, scaling, spike, cooldown, codec switch, Codec2 no-op)
+- 4 integration tests (encoder adjustment, spike boost, Codec2 no-op, profile switch with encode verification)

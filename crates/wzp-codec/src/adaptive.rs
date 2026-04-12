@@ -116,6 +116,14 @@ impl AudioEncoder for AdaptiveEncoder {
     fn set_dtx(&mut self, enabled: bool) {
         self.opus.set_dtx(enabled);
     }
+
+    fn set_expected_loss(&mut self, loss_pct: u8) {
+        self.opus.set_expected_loss(loss_pct);
+    }
+
+    fn set_dred_duration(&mut self, frames: u8) {
+        self.opus.set_dred_duration(frames);
+    }
 }
 
 // ─── AdaptiveDecoder ─────────────────────────────────────────────────────────
