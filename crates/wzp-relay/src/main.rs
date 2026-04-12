@@ -611,6 +611,7 @@ async fn main() -> anyhow::Result<()> {
                                     &caller_fp,
                                     &SignalMessage::Hangup {
                                         reason: wzp_proto::HangupReason::Normal,
+                                        call_id: None,
                                     },
                                 )
                                 .await;
@@ -1071,6 +1072,7 @@ async fn main() -> anyhow::Result<()> {
                                             info!(%addr, target = %target_fp, "call target not online (no federation route)");
                                             let _ = transport.send_signal(&SignalMessage::Hangup {
                                                 reason: wzp_proto::HangupReason::Normal,
+                                                call_id: None,
                                             }).await;
                                             continue;
                                         }
@@ -1186,6 +1188,7 @@ async fn main() -> anyhow::Result<()> {
                                             if let Some(ref fm) = federation_mgr {
                                                 let hangup = SignalMessage::Hangup {
                                                     reason: wzp_proto::HangupReason::Normal,
+                                                    call_id: Some(call_id.clone()),
                                                 };
                                                 let forward = SignalMessage::FederatedSignalForward {
                                                     inner: Box::new(hangup),
@@ -1199,6 +1202,7 @@ async fn main() -> anyhow::Result<()> {
                                             let hub = signal_hub.lock().await;
                                             let _ = hub.send_to(&peer_fp, &SignalMessage::Hangup {
                                                 reason: wzp_proto::HangupReason::Normal,
+                                                call_id: Some(call_id.clone()),
                                             }).await;
                                         }
                                     } else {
@@ -1303,25 +1307,40 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
 
-                                SignalMessage::Hangup { .. } => {
-                                    // Forward hangup to all active calls for this user
+                                SignalMessage::Hangup { ref call_id, .. } => {
+                                    // If the client sent a call_id, only end
+                                    // that specific call. Otherwise (old clients)
+                                    // fall back to ending ALL active calls for
+                                    // this user — which can race with new calls.
                                     let calls = {
                                         let reg = call_registry.lock().await;
-                                        reg.calls_for_fingerprint(&client_fp)
-                                            .iter()
-                                            .map(|c| (c.call_id.clone(), if c.caller_fingerprint == client_fp {
-                                                c.callee_fingerprint.clone()
-                                            } else {
-                                                c.caller_fingerprint.clone()
-                                            }))
-                                            .collect::<Vec<_>>()
+                                        if let Some(cid) = call_id {
+                                            // Targeted hangup: only the named call
+                                            reg.get(cid)
+                                                .map(|c| vec![(c.call_id.clone(), if c.caller_fingerprint == client_fp {
+                                                    c.callee_fingerprint.clone()
+                                                } else {
+                                                    c.caller_fingerprint.clone()
+                                                })])
+                                                .unwrap_or_default()
+                                        } else {
+                                            // Legacy: end all calls for this user
+                                            reg.calls_for_fingerprint(&client_fp)
+                                                .iter()
+                                                .map(|c| (c.call_id.clone(), if c.caller_fingerprint == client_fp {
+                                                    c.callee_fingerprint.clone()
+                                                } else {
+                                                    c.caller_fingerprint.clone()
+                                                }))
+                                                .collect::<Vec<_>>()
+                                        }
                                     };
-                                    for (call_id, peer_fp) in &calls {
+                                    for (cid, peer_fp) in &calls {
                                         let hub = signal_hub.lock().await;
                                         let _ = hub.send_to(peer_fp, &msg).await;
                                         drop(hub);
                                         let mut reg = call_registry.lock().await;
-                                        reg.end_call(call_id);
+                                        reg.end_call(cid);
                                     }
                                 }
 
@@ -1440,6 +1459,7 @@ async fn main() -> anyhow::Result<()> {
                     let hub = signal_hub.lock().await;
                     let _ = hub.send_to(peer_fp, &SignalMessage::Hangup {
                         reason: wzp_proto::HangupReason::Normal,
+                        call_id: Some(call_id.clone()),
                     }).await;
                     drop(hub);
                     let mut reg = call_registry.lock().await;

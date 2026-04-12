@@ -608,8 +608,14 @@ pub enum SignalMessage {
     Ping { timestamp_ms: u64 },
     Pong { timestamp_ms: u64 },
 
-    /// End the call.
-    Hangup { reason: HangupReason },
+    /// End the call. `call_id` is optional for backwards compatibility
+    /// with older clients that send Hangup without it — the relay falls
+    /// back to ending ALL active calls for the sender in that case.
+    Hangup {
+        reason: HangupReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
 
     /// featherChat bearer token for relay authentication.
     /// Sent as the first signal message when --auth-url is configured.
@@ -1138,7 +1144,7 @@ mod tests {
                 callee_local_addrs: Vec::new(),
             },
             SignalMessage::CallRinging { call_id: "c1".into() },
-            SignalMessage::Hangup { reason: HangupReason::Normal },
+            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
         ];
         for inner in cases {
             let inner_disc = std::mem::discriminant(&inner);
@@ -1296,7 +1302,7 @@ mod tests {
         let cases = vec![
             SignalMessage::Ping { timestamp_ms: 12345 },
             SignalMessage::Hold,
-            SignalMessage::Hangup { reason: HangupReason::Normal },
+            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
             SignalMessage::CallRinging { call_id: "abcd".into() },
         ];
         for m in cases {

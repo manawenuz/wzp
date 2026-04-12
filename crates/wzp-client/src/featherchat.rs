@@ -170,6 +170,7 @@ mod tests {
 
         let hangup = SignalMessage::Hangup {
             reason: wzp_proto::HangupReason::Normal,
+            call_id: None,
         };
         assert!(matches!(signal_to_call_type(&hangup), CallSignalType::Hangup));
 

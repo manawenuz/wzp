@@ -971,6 +971,7 @@ async fn internal_deregister(
     sig.incoming_caller_fp = None;
     sig.incoming_caller_alias = None;
     sig.pending_reflect = None;
+    sig.pending_path_report = None;
     sig.own_reflex_addr = None;
     if !keep_desired {
         sig.desired_relay_addr = None;
@@ -1151,10 +1152,14 @@ fn do_register_signal(
                         }),
                     );
                 }
-                Ok(Some(SignalMessage::Hangup { reason })) => {
+                Ok(Some(SignalMessage::Hangup { reason, .. })) => {
                     tracing::info!(?reason, "signal: Hangup");
                     emit_call_debug(&app_clone, "recv:Hangup", serde_json::json!({ "reason": format!("{:?}", reason) }));
-                    let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None; sig.ipv6_endpoint = None;
+                    let mut sig = signal_state.lock().await;
+                    sig.signal_status = "registered".into();
+                    sig.incoming_call_id = None;
+                    sig.ipv6_endpoint = None;
+                    sig.pending_path_report = None;
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
                 }
                 Ok(Some(SignalMessage::MediaPathReport { call_id, direct_ok, race_winner })) => {
@@ -1853,6 +1858,7 @@ async fn hangup_call(
             match transport
                 .send_signal(&SignalMessage::Hangup {
                     reason: wzp_proto::HangupReason::Normal,
+                    call_id: None,
                 })
                 .await
             {

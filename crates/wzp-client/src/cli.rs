@@ -424,6 +424,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
     info!(total_source, total_repair, total_bytes, "done — closing");
     let hangup = wzp_proto::SignalMessage::Hangup {
         reason: wzp_proto::HangupReason::Normal,
+        call_id: None,
     };
     transport.send_signal(&hangup).await.ok();
     transport.close().await?;
@@ -575,6 +576,7 @@ async fn run_file_mode(
     // Send Hangup signal so the relay knows we're done
     let hangup = wzp_proto::SignalMessage::Hangup {
         reason: wzp_proto::HangupReason::Normal,
+        call_id: None,
     };
     transport.send_signal(&hangup).await.ok();
 
@@ -865,6 +867,7 @@ async fn run_signal_mode(
                                                 info!("hanging up...");
                                                 let _ = signal_transport.send_signal(&SignalMessage::Hangup {
                                                     reason: wzp_proto::HangupReason::Normal,
+                                                    call_id: None,
                                                 }).await;
                                                 break;
                                             }
@@ -881,7 +884,7 @@ async fn run_signal_mode(
                         Err(e) => error!("media connect failed: {e}"),
                     }
                 }
-                SignalMessage::Hangup { reason } => {
+                SignalMessage::Hangup { reason, .. } => {
                     info!(reason = ?reason, "call ended by remote");
                 }
                 SignalMessage::Pong { .. } => {}

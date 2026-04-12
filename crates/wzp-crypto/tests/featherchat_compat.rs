@@ -199,6 +199,7 @@ fn wzp_answer_round_trips_through_fc_callsignal() {
 fn wzp_hangup_round_trips_through_fc_callsignal() {
     let hangup = wzp_proto::SignalMessage::Hangup {
         reason: wzp_proto::HangupReason::Normal,
+        call_id: None,
     };
 
     let payload = wzp_client::featherchat::encode_call_payload(&hangup, None, None);
@@ -302,6 +303,7 @@ fn all_signal_types_map_correctly() {
         (
             wzp_proto::SignalMessage::Hangup {
                 reason: wzp_proto::HangupReason::Normal,
+                call_id: None,
             },
             "Hangup",
         ),

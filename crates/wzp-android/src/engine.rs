@@ -355,7 +355,7 @@ impl WzpEngine {
                         // Store call setup info for Kotlin to pick up
                         stats.incoming_call_id = Some(format!("{relay_addr}|{room}"));
                     }
-                    Ok(Some(SignalMessage::Hangup { reason })) => {
+                    Ok(Some(SignalMessage::Hangup { reason, .. })) => {
                         info!(reason = ?reason, "signal: call ended by remote");
                         let mut stats = signal_state.stats.lock().unwrap();
                         stats.state = crate::stats::CallState::Closed;
