@@ -102,7 +102,8 @@ pub async fn probe_reflect_addr(
     let endpoint = match existing_endpoint {
         Some(ep) => ep,
         None => {
-            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            // [::]:0 = dual-stack socket for both IPv4 + IPv6
+            let bind: SocketAddr = "[::]:0".parse().unwrap();
             create_endpoint(bind, None).map_err(|e| format!("endpoint: {e}"))?
         }
     };

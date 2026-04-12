@@ -170,7 +170,14 @@ pub async fn race(
                 }
                 None => {
                     let (sc, _cert_der) = wzp_transport::server_config();
-                    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                    // [::]:0 = dual-stack socket — handles both IPv4 (via
+                    // v4-mapped addrs) and IPv6 natively. Pre-Phase-5.5
+                    // used 0.0.0.0:0 (IPv4-only) which silently made
+                    // all IPv6 host candidates non-functional: dials
+                    // to [2a0d:...] failed or hung, accepts from IPv6
+                    // peers never arrived, and the JoinSet wasted time
+                    // on dead candidates before the IPv4 one won.
+                    let bind: SocketAddr = "[::]:0".parse().unwrap();
                     let fresh = wzp_transport::create_endpoint(bind, Some(sc))?;
                     tracing::info!(
                         local_addr = ?fresh.local_addr().ok(),
@@ -206,7 +213,14 @@ pub async fn race(
                     ep
                 }
                 None => {
-                    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                    // [::]:0 = dual-stack socket — handles both IPv4 (via
+                    // v4-mapped addrs) and IPv6 natively. Pre-Phase-5.5
+                    // used 0.0.0.0:0 (IPv4-only) which silently made
+                    // all IPv6 host candidates non-functional: dials
+                    // to [2a0d:...] failed or hung, accepts from IPv6
+                    // peers never arrived, and the JoinSet wasted time
+                    // on dead candidates before the IPv4 one won.
+                    let bind: SocketAddr = "[::]:0".parse().unwrap();
                     let fresh = wzp_transport::create_endpoint(bind, None)?;
                     tracing::info!(
                         local_addr = ?fresh.local_addr().ok(),
@@ -302,7 +316,7 @@ pub async fn race(
     let relay_ep = match shared_endpoint.clone() {
         Some(ep) => ep,
         None => {
-            let relay_bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+            let relay_bind: SocketAddr = "[::]:0".parse().unwrap();
             wzp_transport::create_endpoint(relay_bind, None)?
         }
     };

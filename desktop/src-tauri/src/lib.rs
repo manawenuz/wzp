@@ -194,7 +194,7 @@ fn get_call_debug_logs() -> bool {
 async fn ping_relay(relay: String) -> Result<PingResult, String> {
     let addr: std::net::SocketAddr = relay.parse().map_err(|e| format!("bad address: {e}"))?;
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let bind: std::net::SocketAddr = "[::]:0".parse().unwrap();
     let endpoint = wzp_transport::create_endpoint(bind, None).map_err(|e| format!("{e}"))?;
     let client_cfg = wzp_transport::client_config();
 
@@ -914,7 +914,13 @@ fn do_register_signal(
     // endpoints, which made MikroTik look symmetric and broke direct
     // P2P because the advertised reflex port was not the listening
     // port.
-    let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    // [::]:0 = dual-stack socket — handles IPv4 (via ::ffff:x.x.x.x
+    // mapped addresses) AND native IPv6 on one socket. Critical for
+    // Phase 5.5 ICE host candidates: without dual-stack, the IPv6
+    // candidates advertised in DirectCallOffer/Answer are dead on
+    // arrival — the Dialer can't send to them and the Acceptor can't
+    // receive from them.
+    let bind: std::net::SocketAddr = "[::]:0".parse().unwrap();
     let (server_cfg, _cert_der) = wzp_transport::server_config();
     let endpoint = wzp_transport::create_endpoint(bind, Some(server_cfg))
         .map_err(|e| format!("{e}"))?;
