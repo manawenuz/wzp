@@ -366,10 +366,58 @@ async fn connect(
         .as_deref()
         .and_then(|s| s.parse().ok());
     let relay_addr_parsed: Option<std::net::SocketAddr> = relay.parse().ok();
-    let role = wzp_client::reflect::determine_role(
+    let mut role = wzp_client::reflect::determine_role(
         own_reflex_addr.as_deref(),
         peer_direct_addr.as_deref(),
     );
+
+    // Phase 5.6 safety heuristic: only attempt P2P direct when
+    // both peers are behind the SAME public IP (= same LAN / same
+    // NAT). When they have DIFFERENT public IPs they're on
+    // different networks, and the current dual-path race has a
+    // race condition: one side may pick Direct while the other
+    // picks Relay, sending media to different places (TX > 0,
+    // RX: 0 on both — the screenshots that triggered this fix).
+    //
+    // Same public IP means:
+    //   - Same LAN behind the same router → LAN candidates work
+    //   - Same WAN NAT → reflex addr from the relay is the same
+    //     endpoint for both peers, direct dial should work
+    //
+    // Different public IPs means:
+    //   - Cross-network (WiFi ↔ LTE, home ↔ office, etc.)
+    //   - Direct P2P requires symmetric hole-punching which the
+    //     current architecture can't guarantee both sides agree on
+    //   - Relay-only is the safe choice until ICE negotiation is
+    //     implemented (Phase 6)
+    //
+    // This heuristic preserves same-LAN P2P (proven working) and
+    // eliminates the broken cross-network case. The full fix is
+    // ICE-style path negotiation where both sides agree on the
+    // winner before committing media.
+    if let Some(ref r) = role {
+        let same_public_ip = match (
+            own_reflex_addr.as_deref().and_then(|s| s.parse::<std::net::SocketAddr>().ok()),
+            peer_addr_parsed,
+        ) {
+            (Some(own), Some(peer)) => own.ip() == peer.ip(),
+            _ => false,
+        };
+        if !same_public_ip {
+            tracing::info!(
+                ?r,
+                own = ?own_reflex_addr,
+                peer = ?peer_direct_addr,
+                "connect: different public IPs → skipping P2P direct (relay-only until ICE negotiation is implemented)"
+            );
+            emit_call_debug(&app, "connect:cross_network_relay_only", serde_json::json!({
+                "own_reflex": own_reflex_addr,
+                "peer_reflex": peer_direct_addr,
+                "reason": "different public IPs — both sides must use relay to avoid path mismatch",
+            }));
+            role = None; // forces relay-only path
+        }
+    }
 
     // Phase 5.5: build the full peer candidate bundle (reflex +
     // LAN hosts). The dial_order helper will fan them out in
