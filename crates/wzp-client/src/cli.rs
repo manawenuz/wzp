@@ -773,6 +773,7 @@ async fn run_signal_mode(
             // CLI client doesn't attempt hole-punching; always
             // relay-path.
             caller_reflexive_addr: None,
+            caller_local_addrs: Vec::new(),
         }).await?;
     }
 
@@ -805,12 +806,13 @@ async fn run_signal_mode(
                         // CLI auto-accept uses generic (privacy) mode,
                         // so callee addr stays hidden from the caller.
                         callee_reflexive_addr: None,
+                        callee_local_addrs: Vec::new(),
                     }).await;
                 }
                 SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
                     info!(call_id = %call_id, mode = ?accept_mode, "call answered");
                 }
-                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _ } => {
+                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _, peer_local_addrs: _ } => {
                     info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
 
                     // Connect to the media room

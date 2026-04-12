@@ -745,6 +745,16 @@ pub enum SignalMessage {
         /// `None` means "caller doesn't want P2P, use relay only".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_reflexive_addr: Option<String>,
+        /// Phase 5.5 (ICE host candidates): caller's LAN-local
+        /// interface addresses paired with its signal endpoint's
+        /// port. Peers on the same physical LAN can direct-dial
+        /// these without going through the WAN reflex addr,
+        /// which is important because most consumer NATs
+        /// (including MikroTik masquerade) don't support NAT
+        /// hairpinning — the reflex addr is unreachable from
+        /// the same LAN.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caller_local_addrs: Vec<String>,
     },
 
     /// Callee's response to a direct call.
@@ -771,6 +781,13 @@ pub enum SignalMessage {
         /// carries it opaquely into the caller's `CallSetup`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         callee_reflexive_addr: Option<String>,
+        /// Phase 5.5 (ICE host candidates): callee's LAN-local
+        /// interface addresses. Same purpose as
+        /// `caller_local_addrs` in `DirectCallOffer`. Only
+        /// populated on `AcceptTrusted` alongside
+        /// `callee_reflexive_addr`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        callee_local_addrs: Vec<String>,
     },
 
     /// Relay tells both parties: media room is ready.
@@ -791,6 +808,14 @@ pub enum SignalMessage {
         /// wasn't viable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_direct_addr: Option<String>,
+        /// Phase 5.5 (ICE host candidates): the OTHER party's LAN
+        /// host addresses (RFC1918 IPv4 + CGNAT + non-link-local
+        /// IPv6). On same-LAN calls these are directly dialable
+        /// and bypass the NAT-hairpinning problem that blocks
+        /// same-LAN peers from using `peer_direct_addr`.
+        /// Client-side race tries all of these in parallel.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peer_local_addrs: Vec<String>,
     },
 
     /// Ringing notification (relay → caller, callee received the offer).
@@ -1034,6 +1059,7 @@ mod tests {
             signature: vec![3u8; 64],
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
+            caller_local_addrs: Vec::new(),
         };
         let forward = SignalMessage::FederatedSignalForward {
             inner: Box::new(inner),
@@ -1075,6 +1101,7 @@ mod tests {
                 signature: None,
                 chosen_profile: None,
                 callee_reflexive_addr: Some("198.51.100.9:4433".into()),
+                callee_local_addrs: Vec::new(),
             },
             SignalMessage::CallRinging { call_id: "c1".into() },
             SignalMessage::Hangup { reason: HangupReason::Normal },
@@ -1109,6 +1136,7 @@ mod tests {
             signature: vec![],
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
+            caller_local_addrs: Vec::new(),
         };
         let json = serde_json::to_string(&offer).unwrap();
         assert!(
@@ -1136,6 +1164,7 @@ mod tests {
             signature: vec![],
             supported_profiles: vec![],
             caller_reflexive_addr: None,
+            caller_local_addrs: Vec::new(),
         };
         let json_none = serde_json::to_string(&offer_none).unwrap();
         assert!(
@@ -1152,6 +1181,7 @@ mod tests {
             signature: None,
             chosen_profile: None,
             callee_reflexive_addr: Some("198.51.100.9:4433".into()),
+            callee_local_addrs: Vec::new(),
         };
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
@@ -1171,6 +1201,7 @@ mod tests {
             room: "call-c1".into(),
             relay_addr: "203.0.113.5:4433".into(),
             peer_direct_addr: Some("192.0.2.1:4433".into()),
+            peer_local_addrs: Vec::new(),
         };
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();

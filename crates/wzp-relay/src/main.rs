@@ -543,6 +543,7 @@ async fn main() -> anyhow::Result<()> {
                         ref caller_fingerprint,
                         ref call_id,
                         ref caller_reflexive_addr,
+                        ref caller_local_addrs,
                         ..
                     } => {
                         // Is the target on THIS relay? If not, drop —
@@ -561,7 +562,8 @@ async fn main() -> anyhow::Result<()> {
                         }
                         // Stash in local registry so the answer path
                         // can find the call + route the reply back
-                        // through the same federation link.
+                        // through the same federation link. Include
+                        // Phase 5.5 LAN host candidates too.
                         {
                             let mut reg = call_registry_d.lock().await;
                             reg.create_call(
@@ -570,6 +572,7 @@ async fn main() -> anyhow::Result<()> {
                                 target_fingerprint.clone(),
                             );
                             reg.set_caller_reflexive_addr(call_id, caller_reflexive_addr.clone());
+                            reg.set_caller_local_addrs(call_id, caller_local_addrs.clone());
                             reg.set_peer_relay_fp(call_id, Some(origin_relay_fp.clone()));
                         }
                         // Deliver the offer to the local target.
@@ -587,6 +590,7 @@ async fn main() -> anyhow::Result<()> {
                         ref call_id,
                         accept_mode,
                         ref callee_reflexive_addr,
+                        ref callee_local_addrs,
                         ..
                     } => {
                         // Look up the local caller fp from the registry.
@@ -616,24 +620,26 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
 
-                        // Accept — stash the callee's reflex addr + mark
-                        // the call active, then read back BOTH addrs so
-                        // we can cross-wire peer_direct_addr in CallSetup.
+                        // Accept — stash the callee's reflex addr + LAN
+                        // host candidates + mark the call active,
+                        // then read back everything needed to cross-
+                        // wire peer_direct_addr + peer_local_addrs in
+                        // the local CallSetup.
                         let room_name = format!("call-{call_id}");
-                        let (caller_addr, callee_addr_for_setup) = {
+                        let (callee_addr_for_setup, callee_local_for_setup) = {
                             let mut reg = call_registry_d.lock().await;
                             reg.set_active(call_id, accept_mode, room_name.clone());
                             reg.set_callee_reflexive_addr(
                                 call_id,
                                 callee_reflexive_addr.clone(),
                             );
+                            reg.set_callee_local_addrs(call_id, callee_local_addrs.clone());
                             let c = reg.get(call_id);
                             (
-                                c.and_then(|c| c.caller_reflexive_addr.clone()),
                                 c.and_then(|c| c.callee_reflexive_addr.clone()),
+                                c.map(|c| c.callee_local_addrs.clone()).unwrap_or_default(),
                             )
                         };
-                        let _ = caller_addr; // unused on the caller side; callee holds the relevant addr
 
                         // Forward the raw answer to the local caller so
                         // the JS side sees DirectCallAnswer (fires any
@@ -649,12 +655,14 @@ async fn main() -> anyhow::Result<()> {
                         // (single-relay fallback — Phase 4.1 will wire
                         // federated media so that actually reaches the
                         // peer). peer_direct_addr = the callee's reflex
-                        // addr carried in the answer.
+                        // addr carried in the answer. peer_local_addrs
+                        // = callee's LAN host candidates (Phase 5.5 ICE).
                         let setup = SignalMessage::CallSetup {
                             call_id: call_id.clone(),
                             room: room_name.clone(),
                             relay_addr: advertised_addr_d.clone(),
                             peer_direct_addr: callee_addr_for_setup,
+                            peer_local_addrs: callee_local_for_setup,
                         };
                         let hub = signal_hub_d.lock().await;
                         let _ = hub.send_to(&caller_fp, &setup).await;
@@ -984,11 +992,13 @@ async fn main() -> anyhow::Result<()> {
                                     ref target_fingerprint,
                                     ref call_id,
                                     ref caller_reflexive_addr,
+                                    ref caller_local_addrs,
                                     ..
                                 } => {
                                     let target_fp = target_fingerprint.clone();
                                     let call_id = call_id.clone();
                                     let caller_addr_for_registry = caller_reflexive_addr.clone();
+                                    let caller_local_for_registry = caller_local_addrs.clone();
 
                                     // Check if target is online
                                     let online = {
@@ -1035,7 +1045,8 @@ async fn main() -> anyhow::Result<()> {
                                         }
 
                                         // Create call in registry with the
-                                        // caller's reflex addr + mark it as
+                                        // caller's reflex addr + LAN host
+                                        // candidates, and mark it as
                                         // cross-relay so the answer path knows
                                         // to route the CallSetup's
                                         // peer_direct_addr from what the
@@ -1053,7 +1064,11 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                             reg.set_caller_reflexive_addr(
                                                 &call_id,
-                                                caller_addr_for_registry,
+                                                caller_addr_for_registry.clone(),
+                                            );
+                                            reg.set_caller_local_addrs(
+                                                &call_id,
+                                                caller_local_for_registry.clone(),
                                             );
                                         }
 
@@ -1067,14 +1082,15 @@ async fn main() -> anyhow::Result<()> {
                                     }
 
                                     // Create call in registry + stash the caller's
-                                    // reflex addr (Phase 3 hole-punching). The relay
-                                    // treats the addr as opaque — no validation.
-                                    // Injected later into the callee's CallSetup as
-                                    // peer_direct_addr.
+                                    // reflex addr (Phase 3 hole-punching) AND its
+                                    // LAN host candidates (Phase 5.5 ICE). The
+                                    // relay treats both as opaque. Both are
+                                    // injected later into the callee's CallSetup.
                                     {
                                         let mut reg = call_registry.lock().await;
                                         reg.create_call(call_id.clone(), client_fp.clone(), target_fp.clone());
                                         reg.set_caller_reflexive_addr(&call_id, caller_addr_for_registry);
+                                        reg.set_caller_local_addrs(&call_id, caller_local_for_registry);
                                     }
 
                                     // Forward offer to callee
@@ -1095,11 +1111,13 @@ async fn main() -> anyhow::Result<()> {
                                     ref call_id,
                                     ref accept_mode,
                                     ref callee_reflexive_addr,
+                                    ref callee_local_addrs,
                                     ..
                                 } => {
                                     let call_id = call_id.clone();
                                     let mode = *accept_mode;
                                     let callee_addr_for_registry = callee_reflexive_addr.clone();
+                                    let callee_local_for_registry = callee_local_addrs.clone();
 
                                     // Phase 4: look up peer fingerprint AND
                                     // peer_relay_fp in one lock acquisition.
@@ -1160,14 +1178,17 @@ async fn main() -> anyhow::Result<()> {
                                         // BOTH parties' addrs so we can cross-wire
                                         // peer_direct_addr on the CallSetups below.
                                         let room = format!("call-{call_id}");
-                                        let (caller_addr, callee_addr) = {
+                                        let (caller_addr, callee_addr, caller_local, callee_local) = {
                                             let mut reg = call_registry.lock().await;
                                             reg.set_active(&call_id, mode, room.clone());
                                             reg.set_callee_reflexive_addr(&call_id, callee_addr_for_registry);
+                                            reg.set_callee_local_addrs(&call_id, callee_local_for_registry.clone());
                                             let call = reg.get(&call_id);
                                             (
                                                 call.and_then(|c| c.caller_reflexive_addr.clone()),
                                                 call.and_then(|c| c.callee_reflexive_addr.clone()),
+                                                call.map(|c| c.caller_local_addrs.clone()).unwrap_or_default(),
+                                                call.map(|c| c.callee_local_addrs.clone()).unwrap_or_default(),
                                             )
                                         };
                                         info!(
@@ -1215,6 +1236,7 @@ async fn main() -> anyhow::Result<()> {
                                                 room: room.clone(),
                                                 relay_addr: relay_addr_for_setup,
                                                 peer_direct_addr: caller_addr.clone(),
+                                                peer_local_addrs: caller_local.clone(),
                                             };
                                             let hub = signal_hub.lock().await;
                                             let _ = hub.send_to(&client_fp, &setup_for_callee).await;
@@ -1227,18 +1249,21 @@ async fn main() -> anyhow::Result<()> {
                                             }
 
                                             // Send CallSetup to BOTH parties with
-                                            // cross-wired peer_direct_addr.
+                                            // cross-wired peer_direct_addr +
+                                            // peer_local_addrs (Phase 5.5 ICE).
                                             let setup_for_caller = SignalMessage::CallSetup {
                                                 call_id: call_id.clone(),
                                                 room: room.clone(),
                                                 relay_addr: relay_addr_for_setup.clone(),
                                                 peer_direct_addr: callee_addr.clone(),
+                                                peer_local_addrs: callee_local.clone(),
                                             };
                                             let setup_for_callee = SignalMessage::CallSetup {
                                                 call_id: call_id.clone(),
                                                 room: room.clone(),
                                                 relay_addr: relay_addr_for_setup,
                                                 peer_direct_addr: caller_addr.clone(),
+                                                peer_local_addrs: caller_local.clone(),
                                             };
                                             let hub = signal_hub.lock().await;
                                             let _ = hub.send_to(&peer_fp, &setup_for_caller).await;

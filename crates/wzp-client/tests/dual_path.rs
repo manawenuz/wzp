@@ -19,7 +19,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use wzp_client::dual_path::{race, WinningPath};
+use wzp_client::dual_path::{race, PeerCandidates, WinningPath};
 use wzp_client::reflect::Role;
 use wzp_transport::{create_endpoint, server_config};
 
@@ -110,7 +110,10 @@ async fn dual_path_direct_wins_on_loopback() {
     // should win.
     let result = race(
         Role::Dialer,
-        acceptor_listen_addr,
+        PeerCandidates {
+            reflexive: Some(acceptor_listen_addr),
+            local: Vec::new(),
+        },
         relay_addr,
         "test-room".into(),
         "call-test".into(),
@@ -148,7 +151,10 @@ async fn dual_path_relay_wins_when_direct_is_dead() {
 
     let result = race(
         Role::Dialer,
-        dead_peer,
+        PeerCandidates {
+            reflexive: Some(dead_peer),
+            local: Vec::new(),
+        },
         relay_addr,
         "test-room".into(),
         "call-test".into(),
@@ -182,7 +188,10 @@ async fn dual_path_errors_cleanly_when_both_paths_dead() {
     let start = std::time::Instant::now();
     let result = race(
         Role::Dialer,
-        dead_peer,
+        PeerCandidates {
+            reflexive: Some(dead_peer),
+            local: Vec::new(),
+        },
         dead_relay,
         "test-room".into(),
         "call-test".into(),

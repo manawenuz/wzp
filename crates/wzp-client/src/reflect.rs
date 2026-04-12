@@ -262,6 +262,88 @@ pub async fn detect_nat_type(
     }
 }
 
+/// Enumerate LAN-local host candidates this client is reachable
+/// on, paired with the given port (typically the signal
+/// endpoint's bound port so that incoming dials land on the same
+/// socket the advertised reflex addr points to).
+///
+/// Gathers BOTH IPv4 and IPv6 candidates:
+///
+/// - **IPv4**: RFC1918 private ranges (10/8, 172.16/12, 192.168/16)
+///   and CGNAT shared-transition (100.64/10). Public IPv4 is
+///   skipped because the reflex-addr path already covers it.
+///   Loopback and link-local (169.254/16) are skipped.
+///
+/// - **IPv6**: ALL global-unicast addresses (2000::/3 — the real
+///   routable IPv6 space) AND unique-local (fc00::/7). These
+///   are directly dialable from a peer on the same LAN, and on
+///   true dual-stack LANs (which most consumer ISPs now provide,
+///   including Starlink) IPv6 often gives a direct path even
+///   when IPv4 can't hairpin. Loopback (::1), unspecified (::),
+///   and link-local (fe80::/10) are skipped — link-local would
+///   require a scope ID to be useful and is basically never
+///   reachable across interface boundaries.
+///
+/// The port must come from the caller — typically
+/// `signal_endpoint.local_addr()?.port()`, so that the peer's
+/// dials to these addresses land on the same socket that's
+/// already listening (Phase 5 shared-endpoint architecture).
+///
+/// Safe to call from any thread; no I/O, no async. The `if-addrs`
+/// crate reads the kernel's interface table via a single
+/// getifaddrs(3) syscall.
+pub fn local_host_candidates(port: u16) -> Vec<SocketAddr> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
+        }
+        match iface.ip() {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_link_local() {
+                    continue;
+                }
+                // Keep RFC1918 private ranges and CGNAT — those
+                // are the LAN-dialable addrs we actually want.
+                // Skip public v4 because the reflex addr already
+                // covers that path.
+                if v4.is_private() {
+                    out.push(SocketAddr::new(std::net::IpAddr::V4(v4), port));
+                } else if v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40 {
+                    // 100.64/10 CGNAT — rare but valid if two
+                    // phones are on the same CGNAT-hairpinned
+                    // carrier LAN (some hotspot setups).
+                    out.push(SocketAddr::new(std::net::IpAddr::V4(v4), port));
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    continue;
+                }
+                // Link-local (fe80::/10) — skip because it needs
+                // a zone/scope ID to be usable and that scope is
+                // meaningless to the peer.
+                let first = v6.segments()[0];
+                if (first & 0xffc0) == 0xfe80 {
+                    continue;
+                }
+                // Include everything else: ULA (fc00::/7, high
+                // bits 0xfc00/0xfd00) and global unicast
+                // (2000::/3, first segment 0x2000-0x3fff). Both
+                // are directly dialable from a peer on the same
+                // dual-stack LAN, and on Starlink / most modern
+                // ISPs the IPv6 path usually has no CGNAT and
+                // works even when the v4 path doesn't hairpin.
+                out.push(SocketAddr::new(std::net::IpAddr::V6(v6), port));
+            }
+        }
+    }
+    out
+}
+
 /// Role assignment for the Phase 3.5 dual-path QUIC race.
 ///
 /// Both peers already know two strings at CallSetup time: their

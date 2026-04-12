@@ -323,21 +323,18 @@ async fn connect(
     alias: String,
     os_aec: bool,
     quality: String,
-    // Phase 3 hole-punching: peer's server-reflexive address as
-    // cross-wired by the relay in CallSetup.peer_direct_addr. JS
-    // passes it through when present. Currently LOGGED for
-    // observability but not yet used to race a direct QUIC
-    // handshake — that's the Phase 3.5 follow-up. Passing it
-    // through now so real-hardware testing can confirm the
-    // advertising layer is delivering the addrs end to end, and so
-    // the JS → Rust wire is stable before we add the race logic.
-    #[allow(non_snake_case)]
+    // Phase 3 hole-punching: peer's server-reflexive address
+    // cross-wired by the relay in CallSetup.peer_direct_addr.
     peer_direct_addr: Option<String>,
+    // Phase 5.5: peer's LAN host candidates from CallSetup.
+    // JS side passes [] when empty.
+    peer_local_addrs: Vec<String>,
 ) -> Result<String, String> {
     emit_call_debug(&app, "connect:start", serde_json::json!({
         "relay": relay,
         "room": room,
         "peer_direct_addr": peer_direct_addr,
+        "peer_local_addrs": peer_local_addrs,
     }));
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
@@ -373,12 +370,26 @@ async fn connect(
         peer_direct_addr.as_deref(),
     );
 
+    // Phase 5.5: build the full peer candidate bundle (reflex +
+    // LAN hosts). The dial_order helper will fan them out in
+    // priority order for the D-role race.
+    let peer_local_parsed: Vec<std::net::SocketAddr> = peer_local_addrs
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
     let pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>> =
-        match (role, peer_addr_parsed, relay_addr_parsed) {
-            (Some(r), Some(peer_addr), Some(relay_sockaddr)) => {
+        match (role, relay_addr_parsed) {
+            (Some(r), Some(relay_sockaddr))
+                if peer_addr_parsed.is_some() || !peer_local_parsed.is_empty() =>
+            {
+                let candidates = wzp_client::dual_path::PeerCandidates {
+                    reflexive: peer_addr_parsed,
+                    local: peer_local_parsed.clone(),
+                };
                 tracing::info!(
                     role = ?r,
-                    %peer_addr,
+                    candidates = ?candidates.dial_order(),
                     %relay,
                     %room,
                     own = ?own_reflex_addr,
@@ -386,7 +397,8 @@ async fn connect(
                 );
                 emit_call_debug(&app, "connect:dual_path_race_start", serde_json::json!({
                     "role": format!("{:?}", r),
-                    "peer_addr": peer_addr.to_string(),
+                    "peer_reflex": peer_addr_parsed.map(|a| a.to_string()),
+                    "peer_local": peer_local_parsed.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
                     "relay_addr": relay_sockaddr.to_string(),
                     "own_reflex_addr": own_reflex_addr,
                 }));
@@ -394,11 +406,9 @@ async fn connect(
                 let call_sni = format!("call-{room}");
                 // Phase 5: pass the signal endpoint so the race
                 // reuses ONE socket for listen + dial + relay.
-                // The advertised reflex addr then matches the
-                // actual listening port and peers can reach us.
                 match wzp_client::dual_path::race(
                     r,
-                    peer_addr,
+                    candidates,
                     relay_sockaddr,
                     room_sni,
                     call_sni,
@@ -430,7 +440,8 @@ async fn connect(
             }
             _ => {
                 tracing::info!(
-                    has_peer = peer_direct_addr.is_some(),
+                    has_peer_reflex = peer_direct_addr.is_some(),
+                    has_peer_local = !peer_local_addrs.is_empty(),
                     has_own = own_reflex_addr.is_some(),
                     ?role,
                     %relay,
@@ -438,7 +449,8 @@ async fn connect(
                     "connect: skipping dual-path race (missing inputs), relay-only"
                 );
                 emit_call_debug(&app, "connect:dual_path_skipped", serde_json::json!({
-                    "has_peer": peer_direct_addr.is_some(),
+                    "has_peer_reflex": peer_direct_addr.is_some(),
+                    "has_peer_local": !peer_local_addrs.is_empty(),
                     "has_own": own_reflex_addr.is_some(),
                     "role": format!("{:?}", role),
                 }));
@@ -878,18 +890,17 @@ fn do_register_signal(
                         "callee_reflexive_addr": callee_reflexive_addr,
                     }));
                 }
-                Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr })) => {
+                Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr, peer_local_addrs })) => {
                     // Phase 3: peer_direct_addr carries the OTHER party's
-                    // reflex addr when hole-punching is viable. Forwarded
-                    // to JS alongside the relay addr so the connect flow
-                    // can attempt a dual-path race. `null` when either
-                    // side didn't advertise (pre-Phase-3 peer, privacy
-                    // mode callee, or relay policy).
+                    // reflex addr. Phase 5.5: peer_local_addrs carries
+                    // their LAN host candidates (usable for same-LAN
+                    // direct dials that can't hairpin through the NAT).
                     tracing::info!(
                         %call_id,
                         %room,
                         %relay_addr,
                         peer_direct = ?peer_direct_addr,
+                        peer_local = ?peer_local_addrs,
                         "signal: CallSetup — emitting setup event to JS"
                     );
                     emit_call_debug(&app_clone, "recv:CallSetup", serde_json::json!({
@@ -897,6 +908,7 @@ fn do_register_signal(
                         "room": room,
                         "relay_addr": relay_addr,
                         "peer_direct_addr": peer_direct_addr,
+                        "peer_local_addrs": peer_local_addrs,
                     }));
                     let mut sig = signal_state.lock().await;
                     sig.signal_status = "setup".into();
@@ -908,6 +920,7 @@ fn do_register_signal(
                             "room": room,
                             "relay_addr": relay_addr,
                             "peer_direct_addr": peer_direct_addr,
+                            "peer_local_addrs": peer_local_addrs,
                         }),
                     );
                 }
@@ -1164,6 +1177,26 @@ async fn place_call(
         emit_call_debug(&app, "place_call:reflect_query_none", serde_json::json!({}));
     }
 
+    // Phase 5.5: gather LAN host candidates using the signal
+    // endpoint's bound port so incoming dials land on the same
+    // socket that's already listening.
+    let caller_local_addrs: Vec<String> = {
+        let sig = state.signal.lock().await;
+        sig.endpoint
+            .as_ref()
+            .and_then(|ep| ep.local_addr().ok())
+            .map(|la| {
+                wzp_client::reflect::local_host_candidates(la.port())
+                    .into_iter()
+                    .map(|a| a.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    emit_call_debug(&app, "place_call:host_candidates", serde_json::json!({
+        "local_addrs": caller_local_addrs,
+    }));
+
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or("not registered")?;
     let call_id = format!(
@@ -1185,6 +1218,7 @@ async fn place_call(
             signature: vec![],
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
             caller_reflexive_addr: own_reflex.clone(),
+            caller_local_addrs: caller_local_addrs.clone(),
         })
         .await
         .map_err(|e| {
@@ -1245,6 +1279,29 @@ async fn answer_call(
         None
     };
 
+    // Phase 5.5: gather LAN host candidates (AcceptTrusted only
+    // for symmetry with the reflex addr — privacy mode keeps
+    // LAN addrs hidden too).
+    let callee_local_addrs: Vec<String> =
+        if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
+            let sig = state.signal.lock().await;
+            sig.endpoint
+                .as_ref()
+                .and_then(|ep| ep.local_addr().ok())
+                .map(|la| {
+                    wzp_client::reflect::local_host_candidates(la.port())
+                        .into_iter()
+                        .map(|a| a.to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    emit_call_debug(&app, "answer_call:host_candidates", serde_json::json!({
+        "local_addrs": callee_local_addrs,
+    }));
+
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or_else(|| {
         tracing::warn!("answer_call: not registered (no transport)");
@@ -1260,6 +1317,7 @@ async fn answer_call(
             signature: None,
             chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
             callee_reflexive_addr: own_reflex.clone(),
+            callee_local_addrs: callee_local_addrs.clone(),
         })
         .await
         .map_err(|e| {

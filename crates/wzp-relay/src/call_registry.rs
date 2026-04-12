@@ -50,6 +50,17 @@ pub struct DirectCall {
     /// `DirectCallAnswer` handling uses this to route the reply
     /// back through the SAME link instead of broadcasting again.
     pub peer_relay_fp: Option<String>,
+    /// Phase 5.5 (ICE host candidates): caller's LAN-local
+    /// interface addresses from the `DirectCallOffer`. Cross-
+    /// wired into the callee's `CallSetup.peer_local_addrs` so
+    /// the callee can direct-dial the caller over the same LAN
+    /// without going through the WAN reflex addr (NAT
+    /// hairpinning often doesn't work for same-LAN peers).
+    pub caller_local_addrs: Vec<String>,
+    /// Phase 5.5 (ICE host candidates): callee's LAN-local
+    /// interface addresses from the `DirectCallAnswer`. Cross-
+    /// wired into the caller's `CallSetup.peer_local_addrs`.
+    pub callee_local_addrs: Vec<String>,
 }
 
 /// Registry of active direct calls.
@@ -79,9 +90,28 @@ impl CallRegistry {
             caller_reflexive_addr: None,
             callee_reflexive_addr: None,
             peer_relay_fp: None,
+            caller_local_addrs: Vec::new(),
+            callee_local_addrs: Vec::new(),
         };
         self.calls.insert(call_id.clone(), call);
         self.calls.get(&call_id).unwrap()
+    }
+
+    /// Phase 5.5: stash the caller's LAN host candidates from
+    /// the `DirectCallOffer`. Empty Vec is a valid value meaning
+    /// "caller has no LAN candidates" (e.g. old client).
+    pub fn set_caller_local_addrs(&mut self, call_id: &str, addrs: Vec<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.caller_local_addrs = addrs;
+        }
+    }
+
+    /// Phase 5.5: stash the callee's LAN host candidates from
+    /// the `DirectCallAnswer`.
+    pub fn set_callee_local_addrs(&mut self, call_id: &str, addrs: Vec<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.callee_local_addrs = addrs;
+        }
     }
 
     /// Phase 4: stash the federation TLS fingerprint of the peer

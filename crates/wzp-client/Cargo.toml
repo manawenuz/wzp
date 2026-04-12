@@ -24,6 +24,12 @@ chrono = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 cpal = { version = "0.15", optional = true }
 libc = "0.2"
+# Phase 5.5 — LAN host-candidate ICE: enumerate local network
+# interface addresses for inclusion in DirectCallOffer/Answer so
+# peers on the same LAN can direct-connect without NAT hairpinning
+# through the WAN reflex addr (which many consumer NATs, including
+# MikroTik's default masquerade, don't support).
+if-addrs = "0.13"
 
 # coreaudio-rs is Apple-framework-only; gate it to macOS so enabling
 # the `vpio` feature from a non-macOS target builds cleanly instead of

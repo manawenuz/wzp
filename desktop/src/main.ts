@@ -1488,6 +1488,7 @@ listen("signal-event", (event: any) => {
             osAec: osAecCheckbox.checked,
             quality: loadSettings().quality || "auto",
             peerDirectAddr: data.peer_direct_addr ?? null,
+            peerLocalAddrs: data.peer_local_addrs ?? [],
           });
           showCallScreen();
         } catch (e: any) {

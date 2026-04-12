@@ -52,28 +52,66 @@ pub enum WinningPath {
 /// genuinely fail (network partition). Returns
 /// `Err(anyhow::anyhow!(...))` if both paths fail within the
 /// timeout.
+/// Phase 5.5 candidate bundle — full ICE-ish candidate list for
+/// the peer. The race tries them all in parallel alongside the
+/// relay path. At minimum this should contain the peer's
+/// server-reflexive address; `local_addrs` carries LAN host
+/// candidates gathered from their physical interfaces.
+///
+/// Empty is valid: the D-role has nothing to dial and the race
+/// reduces to "relay only" + (if A-role) accepting on the
+/// shared endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct PeerCandidates {
+    /// Peer's server-reflexive address (Phase 3). `None` if the
+    /// peer didn't advertise one.
+    pub reflexive: Option<SocketAddr>,
+    /// Peer's LAN host addresses (Phase 5.5). Tried first on
+    /// same-LAN pairs — direct dials to these bypass the NAT
+    /// entirely.
+    pub local: Vec<SocketAddr>,
+}
+
+impl PeerCandidates {
+    /// Flatten into the list of addrs the D-role should dial.
+    /// Order: LAN host candidates first (fastest when they
+    /// work), then reflexive (covers the non-LAN case).
+    pub fn dial_order(&self) -> Vec<SocketAddr> {
+        let mut out = Vec::with_capacity(self.local.len() + 1);
+        out.extend(self.local.iter().copied());
+        if let Some(a) = self.reflexive {
+            // Only add if it's not already in the list (some
+            // edge cases on same-LAN could have the same addr
+            // in both).
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        out
+    }
+
+    /// Is there anything for the D-role to dial? If not, the
+    /// race reduces to relay-only.
+    pub fn is_empty(&self) -> bool {
+        self.reflexive.is_none() && self.local.is_empty()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn race(
     role: Role,
-    peer_direct_addr: SocketAddr,
+    peer_candidates: PeerCandidates,
     relay_addr: SocketAddr,
     room_sni: String,
     call_sni: String,
     // Phase 5: when `Some`, reuse this endpoint for BOTH the
-    // direct-path branch AND the relay dial. This is critical
-    // for hole-punching through port-preserving NATs — the
-    // advertised reflex addr only matches what peers can dial if
-    // the listening socket is the SAME one that registered with
-    // the relay. Pass the signal endpoint here.
+    // direct-path branch AND the relay dial. Pass the signal
+    // endpoint. The endpoint MUST be server-capable (created
+    // with a server config) for the A-role accept branch to
+    // work.
     //
-    // The endpoint MUST have been created with a server config
-    // (`create_endpoint(bind, Some(server_config()))`) if the
-    // A-role branch is going to run, otherwise `accept()` will
-    // return None immediately.
-    //
-    // When `None`, falls back to the pre-Phase-5 behavior of
-    // creating fresh endpoints per role. Used by tests and by
-    // paths where we're not registered to a relay.
+    // When `None`, falls back to fresh endpoints per role.
+    // Used by tests.
     shared_endpoint: Option<wzp_transport::Endpoint>,
 ) -> anyhow::Result<(Arc<QuinnTransport>, WinningPath)> {
     // Rustls provider must be installed before any quinn endpoint
@@ -81,9 +119,22 @@ pub async fn race(
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Build the direct-path endpoint + future based on role.
-    // Each future returns an already-wrapped `QuinnTransport` so we
-    // don't need a direct `quinn::Connection` type in scope here
-    // (this crate doesn't depend on quinn directly).
+    //
+    // A-role: one accept future on the shared endpoint. The
+    //   first incoming QUIC connection wins — we don't care
+    //   which peer candidate the dialer used to reach us.
+    //
+    // D-role: N parallel dial futures, one per peer candidate
+    //   (all LAN host addrs + the reflex addr), consolidated
+    //   into a single direct_fut via FuturesUnordered-style
+    //   "first OK wins" semantics. The first successful dial
+    //   becomes the direct path; the losers are dropped (quinn
+    //   will abort the in-flight handshakes via the dropped
+    //   Connecting futures).
+    //
+    // Either way, direct_fut resolves to a single QuinnTransport
+    // (or an error) and is raced against the relay_fut by the
+    // outer tokio::select!.
     let direct_ep: wzp_transport::Endpoint;
     let direct_fut: std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<QuinnTransport>> + Send>,
@@ -113,15 +164,12 @@ pub async fn race(
             let ep_for_fut = ep.clone();
             direct_fut = Box::pin(async move {
                 // `wzp_transport::accept` wraps the same
-                // `endpoint.accept().await?.await?` dance we want
-                // and maps errors into TransportError for us.
-                //
+                // `endpoint.accept().await?.await?` dance we want.
                 // If `ep_for_fut` is the shared signal endpoint,
-                // this accept pulls the NEXT incoming connection
-                // — normally that's the peer's direct-P2P dial.
-                // Signal recv is done via the existing signal
-                // CONNECTION (accept_bi), not the endpoint, so
-                // there's no conflict.
+                // this pulls the NEXT incoming connection —
+                // normally that's the peer's direct-P2P dial.
+                // Signal recv is done via the signal CONNECTION
+                // (accept_bi), not the endpoint, so no conflict.
                 let conn = wzp_transport::accept(&ep_for_fut)
                     .await
                     .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
@@ -134,8 +182,8 @@ pub async fn race(
                 Some(ep) => {
                     tracing::info!(
                         local_addr = ?ep.local_addr().ok(),
-                        %peer_direct_addr,
-                        "dual_path: D-role reusing shared endpoint to dial peer"
+                        candidates = ?peer_candidates.dial_order(),
+                        "dual_path: D-role reusing shared endpoint to dial peer candidates"
                     );
                     ep
                 }
@@ -144,21 +192,86 @@ pub async fn race(
                     let fresh = wzp_transport::create_endpoint(bind, None)?;
                     tracing::info!(
                         local_addr = ?fresh.local_addr().ok(),
-                        %peer_direct_addr,
-                        "dual_path: D-role fresh endpoint up, dialing peer"
+                        candidates = ?peer_candidates.dial_order(),
+                        "dual_path: D-role fresh endpoint up, dialing peer candidates"
                     );
                     fresh
                 }
             };
             let ep_for_fut = ep.clone();
-            let client_cfg = wzp_transport::client_config();
+            let dial_order = peer_candidates.dial_order();
             let sni = call_sni.clone();
             direct_fut = Box::pin(async move {
-                let conn =
-                    wzp_transport::connect(&ep_for_fut, peer_direct_addr, &sni, client_cfg)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("direct dial: {e}"))?;
-                Ok(QuinnTransport::new(conn))
+                if dial_order.is_empty() {
+                    // No candidates — the race reduces to
+                    // relay-only. Surface a stable error so the
+                    // outer select falls through to relay_fut
+                    // without a spurious "direct failed" warning.
+                    // Use a pending future that never resolves so
+                    // the select's "other side wins" branch is
+                    // the natural outcome.
+                    std::future::pending::<anyhow::Result<QuinnTransport>>().await
+                } else {
+                    // Fan out N parallel dials via JoinSet. First
+                    // `Ok` wins; `Err` from a single candidate is
+                    // not fatal — we wait for the others. Only
+                    // when ALL have failed do we return Err.
+                    let mut set = tokio::task::JoinSet::new();
+                    for (idx, candidate) in dial_order.iter().enumerate() {
+                        let ep = ep_for_fut.clone();
+                        let client_cfg = wzp_transport::client_config();
+                        let sni = sni.clone();
+                        let candidate = *candidate;
+                        set.spawn(async move {
+                            let result = wzp_transport::connect(
+                                &ep,
+                                candidate,
+                                &sni,
+                                client_cfg,
+                            )
+                            .await;
+                            (idx, candidate, result)
+                        });
+                    }
+                    let mut last_err: Option<String> = None;
+                    while let Some(join_res) = set.join_next().await {
+                        let (idx, candidate, dial_res) = match join_res {
+                            Ok(t) => t,
+                            Err(e) => {
+                                last_err = Some(format!("join {e}"));
+                                continue;
+                            }
+                        };
+                        match dial_res {
+                            Ok(conn) => {
+                                tracing::info!(
+                                    %candidate,
+                                    candidate_idx = idx,
+                                    "dual_path: direct dial succeeded on candidate"
+                                );
+                                // Abort the remaining in-flight
+                                // dials so they don't complete
+                                // and leak QUIC sessions.
+                                set.abort_all();
+                                return Ok(QuinnTransport::new(conn));
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    %candidate,
+                                    candidate_idx = idx,
+                                    error = %e,
+                                    "dual_path: direct dial failed, trying others"
+                                );
+                                last_err = Some(format!("candidate {candidate}: {e}"));
+                            }
+                        }
+                    }
+                    Err(anyhow::anyhow!(
+                        "all {} direct candidates failed; last: {}",
+                        dial_order.len(),
+                        last_err.unwrap_or_else(|| "n/a".into())
+                    ))
+                }
             });
             direct_ep = ep;
         }
@@ -193,7 +306,12 @@ pub async fn race(
     // below need to await the OPPOSITE future after the winning
     // branch fires. Without pinning, tokio::select! moves the
     // future out and we can't touch it again.
-    tracing::info!(?role, %peer_direct_addr, %relay_addr, "dual_path: racing direct vs relay");
+    tracing::info!(
+        ?role,
+        candidates = ?peer_candidates.dial_order(),
+        %relay_addr,
+        "dual_path: racing direct vs relay"
+    );
     let direct_timed = tokio::time::timeout(Duration::from_secs(2), direct_fut);
     tokio::pin!(direct_timed, relay_fut);
 
@@ -202,7 +320,7 @@ pub async fn race(
         direct_result = &mut direct_timed => {
             match direct_result {
                 Ok(Ok(transport)) => {
-                    tracing::info!(%peer_direct_addr, "dual_path: direct WON");
+                    tracing::info!("dual_path: direct WON");
                     Ok((Arc::new(transport), WinningPath::Direct))
                 }
                 Ok(Err(e)) => {
