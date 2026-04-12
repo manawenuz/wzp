@@ -33,6 +33,11 @@ impl QuinnTransport {
         &self.connection
     }
 
+    /// Remote address of the peer on this connection.
+    pub fn remote_address(&self) -> std::net::SocketAddr {
+        self.connection.remote_address()
+    }
+
     /// Send raw bytes as a QUIC datagram (no MediaPacket framing).
     pub fn send_raw_datagram(&self, data: &[u8]) -> Result<(), TransportError> {
         self.connection

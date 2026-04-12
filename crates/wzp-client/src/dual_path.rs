@@ -202,12 +202,20 @@ pub async fn race(
                         tokio::select! {
                             v4 = wzp_transport::accept(&ep_for_fut) => {
                                 let conn = v4.map_err(|e| anyhow::anyhow!("v4 accept: {e}"))?;
-                                tracing::info!("dual_path: A-role accepted on IPv4 endpoint");
+                                tracing::info!(
+                                    remote = %conn.remote_address(),
+                                    stable_id = conn.stable_id(),
+                                    "dual_path: A-role accepted on IPv4 endpoint"
+                                );
                                 Ok(QuinnTransport::new(conn))
                             }
                             v6 = wzp_transport::accept(&v6_ep) => {
                                 let conn = v6.map_err(|e| anyhow::anyhow!("v6 accept: {e}"))?;
-                                tracing::info!("dual_path: A-role accepted on IPv6 endpoint");
+                                tracing::info!(
+                                    remote = %conn.remote_address(),
+                                    stable_id = conn.stable_id(),
+                                    "dual_path: A-role accepted on IPv6 endpoint"
+                                );
                                 Ok(QuinnTransport::new(conn))
                             }
                         }
@@ -216,6 +224,11 @@ pub async fn race(
                         let conn = wzp_transport::accept(&ep_for_fut)
                             .await
                             .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
+                        tracing::info!(
+                            remote = %conn.remote_address(),
+                            stable_id = conn.stable_id(),
+                            "dual_path: A-role accepted (v4-only)"
+                        );
                         Ok(QuinnTransport::new(conn))
                     }
                 }
@@ -316,6 +329,8 @@ pub async fn race(
                                 tracing::info!(
                                     %candidate,
                                     candidate_idx = idx,
+                                    remote = %conn.remote_address(),
+                                    stable_id = conn.stable_id(),
                                     "dual_path: direct dial succeeded on candidate"
                                 );
                                 // Abort the remaining in-flight

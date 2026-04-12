@@ -477,6 +477,7 @@ impl CallEngine {
         let send_fs = frames_sent.clone();
         let send_level = audio_level.clone();
         let send_drops = Arc::new(AtomicU64::new(0));
+        let send_last_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let send_quality = quality.clone();
         let send_tx_codec = tx_codec.clone();
         let send_t0 = call_t0;
@@ -561,8 +562,13 @@ impl CallEngine {
                             last_pkt_bytes = pkt.payload.len();
                             if let Err(e) = send_t.send_media(pkt).await {
                                 send_drops.fetch_add(1, Ordering::Relaxed);
-                                if send_drops.load(Ordering::Relaxed) <= 3 {
+                                let count = send_drops.load(Ordering::Relaxed);
+                                if count <= 3 {
                                     tracing::warn!("send_media error (dropping packet): {e}");
+                                }
+                                // Latch last error for heartbeat
+                                if count == 1 {
+                                    *send_last_err.lock().await = Some(format!("{e}"));
                                 }
                             }
                         }
@@ -605,6 +611,7 @@ impl CallEngine {
                     // you capture/mic is broken; a live one with
                     // no peer recv tells you outbound is being
                     // dropped somewhere in the media path.
+                    let err_str = send_last_err.lock().await.clone();
                     crate::emit_call_debug(
                         &send_app,
                         "media:send_heartbeat",
@@ -614,6 +621,7 @@ impl CallEngine {
                             "last_pkt_bytes": last_pkt_bytes,
                             "short_reads": short_reads,
                             "drops": drops,
+                            "last_send_err": err_str,
                         }),
                     );
                     heartbeat = std::time::Instant::now();
@@ -1105,7 +1113,12 @@ impl CallEngine {
 
         // Transport source: either pre-connected or fresh.
         let transport = if let Some(t) = pre_connected_transport {
-            info!(is_direct_p2p, "using pre-connected transport");
+            info!(
+                is_direct_p2p,
+                remote = %t.remote_address(),
+                max_datagram = ?t.max_datagram_size(),
+                "using pre-connected transport"
+            );
             t
         } else {
             // Connect — reuse the signal endpoint if the direct-call path gave
