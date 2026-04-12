@@ -774,6 +774,7 @@ async fn run_signal_mode(
             // relay-path.
             caller_reflexive_addr: None,
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         }).await?;
     }
 
@@ -807,6 +808,7 @@ async fn run_signal_mode(
                         // so callee addr stays hidden from the caller.
                         callee_reflexive_addr: None,
                         callee_local_addrs: Vec::new(),
+                        callee_build_version: None,
                     }).await;
                 }
                 SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
