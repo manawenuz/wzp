@@ -747,7 +747,7 @@ async fn run_signal_mode(
         Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {
             info!(fingerprint = %fp, "registered on relay — waiting for calls");
         }
-        Some(SignalMessage::RegisterPresenceAck { success: false, error }) => {
+        Some(SignalMessage::RegisterPresenceAck { success: false, error, .. }) => {
             anyhow::bail!("registration failed: {}", error.unwrap_or_default());
         }
         other => {
