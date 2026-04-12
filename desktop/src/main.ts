@@ -835,6 +835,14 @@ async function doConnect() {
   }
 }
 
+// Phase 5.6: when we're in a direct P2P call (not relay-
+// mediated), the relay's room infrastructure never sends a
+// RoomUpdate because neither peer actually joined the room.
+// pollStatus sees an empty participant list and shows "Waiting
+// for participants...". Track the peer's identity from the
+// signal plane and render a synthetic participant entry instead.
+let directCallPeer: { fingerprint: string; alias: string | null } | null = null;
+
 function showCallScreen() {
   connectScreen.classList.add("hidden");
   callScreen.classList.remove("hidden");
@@ -855,6 +863,7 @@ function showConnectScreen() {
   connectBtn.disabled = false;
   connectBtn.textContent = "Connect";
   levelBar.style.width = "0%";
+  directCallPeer = null;
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
 }
 
@@ -975,14 +984,23 @@ async function pollStatus() {
     const pct = rms > 0 ? Math.min(100, (Math.log(rms) / Math.log(32767)) * 100) : 0;
     levelBar.style.width = `${pct}%`;
 
-    // Participants grouped by relay
-    if (st.participants.length === 0) {
+    // Participants grouped by relay. For direct P2P calls the
+    // relay never sends a RoomUpdate (neither peer joins the
+    // relay's media room) so st.participants is empty. If we
+    // have a directCallPeer from the signal plane, inject a
+    // synthetic entry so the UI shows who we're talking to.
+    const displayParticipants =
+      st.participants.length === 0 && directCallPeer
+        ? [{ ...directCallPeer, relay_label: "P2P Direct" }]
+        : st.participants;
+
+    if (displayParticipants.length === 0) {
       participantsDiv.innerHTML = '<div class="participants-empty">Waiting for participants...</div>';
     } else {
       participantsDiv.innerHTML = "";
       // Group by relay_label (null = this relay)
       const groups: Record<string, typeof st.participants> = {};
-      st.participants.forEach((p: any) => {
+      displayParticipants.forEach((p: any) => {
         const relay = p.relay_label || "This Relay";
         if (!groups[relay]) groups[relay] = [];
         groups[relay].push(p);
@@ -1430,6 +1448,10 @@ callBtn.addEventListener("click", async () => {
   const target = targetFpInput.value.trim();
   if (!target) return;
   callStatusText.textContent = "Calling...";
+  // Remember the target for P2P participant display — on a
+  // direct call the relay never sends RoomUpdate so pollStatus
+  // would otherwise show "Waiting for participants...".
+  directCallPeer = { fingerprint: target, alias: null };
   try {
     await invoke("place_call", { targetFp: target });
   } catch (e: any) {
@@ -1473,6 +1495,11 @@ listen("signal-event", (event: any) => {
     case "incoming":
       incomingCallPanel.classList.remove("hidden");
       incomingCaller.textContent = `From: ${data.caller_alias || data.caller_fp?.substring(0, 16) || "unknown"}`;
+      // Remember the peer for the P2P participant display.
+      directCallPeer = {
+        fingerprint: data.caller_fp || "",
+        alias: data.caller_alias || null,
+      };
       // Start ringing + fire a system notification. Both stop in
       // the hangup/answered/accepted paths below (and via the
       // accept/reject button handlers).
