@@ -38,6 +38,24 @@ pub enum WinningPath {
     Relay,
 }
 
+/// Phase 6: the race now returns BOTH transports (when available)
+/// so the connect command can negotiate with the peer before
+/// committing. The negotiation decides which transport to use
+/// based on whether BOTH sides report `direct_ok = true`.
+pub struct RaceResult {
+    /// The direct P2P transport, if the direct path completed.
+    /// `None` if the direct dial/accept failed or timed out.
+    pub direct_transport: Option<Arc<QuinnTransport>>,
+    /// The relay transport, if the relay dial completed.
+    /// `None` if the relay dial failed (shouldn't happen in
+    /// practice since relay is always reachable).
+    pub relay_transport: Option<Arc<QuinnTransport>>,
+    /// Which future completed first in the local race.
+    /// Informational — the actual path used is decided by the
+    /// Phase 6 negotiation after both sides exchange reports.
+    pub local_winner: WinningPath,
+}
+
 /// Attempt a direct QUIC connection to the peer in parallel with
 /// the relay dial and return the winning `QuinnTransport`.
 ///
@@ -113,7 +131,7 @@ pub async fn race(
     // When `None`, falls back to fresh endpoints per role.
     // Used by tests.
     shared_endpoint: Option<wzp_transport::Endpoint>,
-) -> anyhow::Result<(Arc<QuinnTransport>, WinningPath)> {
+) -> anyhow::Result<RaceResult> {
     // Rustls provider must be installed before any quinn endpoint
     // is created. Install attempt is idempotent.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -322,76 +340,135 @@ pub async fn race(
         Ok::<_, anyhow::Error>(QuinnTransport::new(conn))
     };
 
-    // Race the two with a shared 2s ceiling on the direct attempt.
-    // Pin both so we can poll them from multiple branches of the
-    // select without moving the futures — the "direct failed, wait
-    // for relay" and "relay failed, wait for direct" fallback paths
-    // below need to await the OPPOSITE future after the winning
-    // branch fires. Without pinning, tokio::select! moves the
-    // future out and we can't touch it again.
+    // Phase 6: run both paths concurrently via tokio::spawn and
+    // collect BOTH results. The old tokio::select! approach dropped
+    // the loser, which meant the connect command couldn't negotiate
+    // with the peer — it had to commit to whichever path won locally.
+    //
+    // Now we spawn both as tasks, wait for the first to complete
+    // (that determines `local_winner`), then give the loser a short
+    // grace period to also complete. The connect command gets a
+    // RaceResult with both transports (when available) and uses the
+    // Phase 6 MediaPathReport exchange to decide which one to
+    // actually use for media.
     tracing::info!(
         ?role,
         candidates = ?peer_candidates.dial_order(),
         %relay_addr,
         "dual_path: racing direct vs relay"
     );
-    let direct_timed = tokio::time::timeout(Duration::from_secs(2), direct_fut);
-    tokio::pin!(direct_timed, relay_fut);
 
-    let result = tokio::select! {
-        biased; // prefer direct win if both arrive in the same tick
-        direct_result = &mut direct_timed => {
-            match direct_result {
-                Ok(Ok(transport)) => {
-                    tracing::info!("dual_path: direct WON");
-                    Ok((Arc::new(transport), WinningPath::Direct))
+    let mut direct_task = tokio::spawn(
+        tokio::time::timeout(Duration::from_secs(2), direct_fut),
+    );
+    let mut relay_task = tokio::spawn(async move {
+        // Keep the 500ms head start so direct has a chance
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::timeout(Duration::from_secs(5), relay_fut).await
+    });
+
+    // Wait for the first one to complete. This tells us the
+    // local_winner — but we DON'T commit to it yet. Phase 6
+    // negotiation decides the actual path.
+    let (mut direct_result, mut relay_result): (
+        Option<anyhow::Result<QuinnTransport>>,
+        Option<anyhow::Result<QuinnTransport>>,
+    ) = (None, None);
+
+    let local_winner;
+
+    tokio::select! {
+        biased;
+        d = &mut direct_task => {
+            match d {
+                Ok(Ok(Ok(t))) => {
+                    tracing::info!("dual_path: direct completed first");
+                    direct_result = Some(Ok(t));
+                    local_winner = WinningPath::Direct;
                 }
-                Ok(Err(e)) => {
-                    // Direct failed — fall back to waiting for relay.
-                    tracing::warn!(error = %e, "dual_path: direct failed, awaiting relay");
-                    match tokio::time::timeout(Duration::from_secs(5), &mut relay_fut).await {
-                        Ok(Ok(transport)) => Ok((Arc::new(transport), WinningPath::Relay)),
-                        Ok(Err(e2)) => Err(anyhow::anyhow!("both paths failed: direct={e}, relay={e2}")),
-                        Err(_) => Err(anyhow::anyhow!("both paths failed: direct={e}, relay=timeout(5s)")),
-                    }
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!(error = %e, "dual_path: direct failed");
+                    direct_result = Some(Err(anyhow::anyhow!("{e}")));
+                    local_winner = WinningPath::Relay; // direct failed → relay is our only hope
                 }
-                Err(_elapsed) => {
-                    tracing::warn!("dual_path: direct timed out (2s), awaiting relay");
-                    match tokio::time::timeout(Duration::from_secs(5), &mut relay_fut).await {
-                        Ok(Ok(transport)) => Ok((Arc::new(transport), WinningPath::Relay)),
-                        Ok(Err(e2)) => Err(anyhow::anyhow!("direct timeout + relay failed: {e2}")),
-                        Err(_) => Err(anyhow::anyhow!("direct timeout + relay timeout")),
-                    }
-                }
-            }
-        }
-        relay_result = &mut relay_fut => {
-            match relay_result {
-                Ok(transport) => {
-                    tracing::info!("dual_path: relay WON (direct still pending)");
-                    Ok((Arc::new(transport), WinningPath::Relay))
+                Ok(Err(_)) => {
+                    tracing::warn!("dual_path: direct timed out (2s)");
+                    direct_result = Some(Err(anyhow::anyhow!("direct timeout")));
+                    local_winner = WinningPath::Relay;
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "dual_path: relay failed, awaiting direct remainder");
-                    match tokio::time::timeout(Duration::from_millis(1500), &mut direct_timed).await {
-                        Ok(Ok(Ok(transport))) => Ok((Arc::new(transport), WinningPath::Direct)),
-                        _ => Err(anyhow::anyhow!("relay failed + direct unavailable: {e}")),
-                    }
+                    tracing::warn!(error = %e, "dual_path: direct task panicked");
+                    direct_result = Some(Err(anyhow::anyhow!("direct task panic")));
+                    local_winner = WinningPath::Relay;
                 }
             }
         }
-    };
+        r = &mut relay_task => {
+            match r {
+                Ok(Ok(Ok(t))) => {
+                    tracing::info!("dual_path: relay completed first");
+                    relay_result = Some(Ok(t));
+                    local_winner = WinningPath::Relay;
+                }
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!(error = %e, "dual_path: relay failed");
+                    relay_result = Some(Err(anyhow::anyhow!("{e}")));
+                    local_winner = WinningPath::Direct;
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!("dual_path: relay timed out");
+                    relay_result = Some(Err(anyhow::anyhow!("relay timeout")));
+                    local_winner = WinningPath::Direct;
+                }
+                Err(e) => {
+                    relay_result = Some(Err(anyhow::anyhow!("relay task panic: {e}")));
+                    local_winner = WinningPath::Direct;
+                }
+            }
+        }
+    }
 
-    // Let both endpoint clones drop at end-of-scope. With the
-    // Phase 5 shared-endpoint path, these clones are Arc<Endpoint>
-    // clones of the signal endpoint — dropping them just decrements
-    // the ref count, the socket stays alive for the signal loop +
-    // any further direct-P2P attempts. With the fresh-endpoint
-    // fallback, the drops are the last refs so the sockets close
-    // promptly. Either way the winning transport already owns its
-    // own quinn::Connection reference which is independent of the
-    // Endpoint lifetime.
+    // Give the loser a short grace period (1s) to also complete.
+    // If it does, we have both transports for Phase 6 negotiation.
+    // If it doesn't, we still proceed with just the winner.
+    if direct_result.is_none() {
+        match tokio::time::timeout(Duration::from_secs(1), direct_task).await {
+            Ok(Ok(Ok(Ok(t)))) => { direct_result = Some(Ok(t)); }
+            Ok(Ok(Ok(Err(e)))) => { direct_result = Some(Err(anyhow::anyhow!("{e}"))); }
+            _ => { direct_result = Some(Err(anyhow::anyhow!("direct: no result in grace period"))); }
+        }
+    }
+    if relay_result.is_none() {
+        match tokio::time::timeout(Duration::from_secs(1), relay_task).await {
+            Ok(Ok(Ok(Ok(t)))) => { relay_result = Some(Ok(t)); }
+            Ok(Ok(Ok(Err(e)))) => { relay_result = Some(Err(anyhow::anyhow!("{e}"))); }
+            _ => { relay_result = Some(Err(anyhow::anyhow!("relay: no result in grace period"))); }
+        }
+    }
+
+    let direct_ok = direct_result.as_ref().map(|r| r.is_ok()).unwrap_or(false);
+    let relay_ok = relay_result.as_ref().map(|r| r.is_ok()).unwrap_or(false);
+
+    tracing::info!(
+        ?local_winner,
+        direct_ok,
+        relay_ok,
+        "dual_path: race finished, both results collected for Phase 6 negotiation"
+    );
+
+    if !direct_ok && !relay_ok {
+        return Err(anyhow::anyhow!("both paths failed: no media transport available"));
+    }
+
     let _ = (direct_ep, relay_ep);
 
-    result
+    Ok(RaceResult {
+        direct_transport: direct_result
+            .and_then(|r| r.ok())
+            .map(|t| Arc::new(t)),
+        relay_transport: relay_result
+            .and_then(|r| r.ok())
+            .map(|t| Arc::new(t)),
+        local_winner,
+    })
 }

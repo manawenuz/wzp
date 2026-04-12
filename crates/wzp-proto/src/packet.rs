@@ -846,6 +846,31 @@ pub enum SignalMessage {
         observed_addr: String,
     },
 
+    // ── Phase 6: ICE-style path negotiation ─────────────────────
+
+    /// Phase 6: each side reports the result of its local dual-
+    /// path race to the other side through the relay. Both peers
+    /// send this after their race completes; both wait for the
+    /// other's report before committing a transport to the
+    /// CallEngine.
+    ///
+    /// The decision rule is: if BOTH sides report `direct_ok =
+    /// true`, use the direct P2P connection. If EITHER reports
+    /// `direct_ok = false`, BOTH fall back to relay. This
+    /// eliminates the race condition where one side picks Direct
+    /// and the other picks Relay — they now agree on the path
+    /// before any media flows.
+    MediaPathReport {
+        call_id: String,
+        /// Did the direct QUIC connection (P2P dial or accept)
+        /// complete successfully on this side?
+        direct_ok: bool,
+        /// Which future won the local tokio::select race?
+        /// "Direct" or "Relay" — informational for debug logs.
+        #[serde(default)]
+        race_winner: String,
+    },
+
     // ── Phase 4: cross-relay direct-call signaling ────────────────────
 
     /// Phase 4: relay-to-relay envelope for forwarding direct-call

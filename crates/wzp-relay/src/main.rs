@@ -687,6 +687,23 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
+                    // Phase 6: MediaPathReport forwarded across
+                    // federation — deliver to the local participant
+                    // of the matching call.
+                    SignalMessage::MediaPathReport { ref call_id, .. } => {
+                        // Deliver to the local caller (the cross-relay
+                        // dispatcher only handles calls where the caller
+                        // is local and the callee is remote, or vice versa)
+                        let caller_fp = {
+                            let reg = call_registry_d.lock().await;
+                            reg.get(call_id).map(|c| c.caller_fingerprint.clone())
+                        };
+                        if let Some(fp) = caller_fp {
+                            let hub = signal_hub_d.lock().await;
+                            let _ = hub.send_to(&fp, &inner).await;
+                        }
+                    }
+
                     SignalMessage::Hangup { .. } => {
                         // Best-effort: broadcast the hangup to every
                         // local participant of any call that currently
@@ -1291,6 +1308,21 @@ async fn main() -> anyhow::Result<()> {
                                         drop(hub);
                                         let mut reg = call_registry.lock().await;
                                         reg.end_call(call_id);
+                                    }
+                                }
+
+                                // Phase 6: forward MediaPathReport to the
+                                // call peer so both sides can negotiate
+                                // the media path before committing.
+                                SignalMessage::MediaPathReport { ref call_id, .. } => {
+                                    let peer_fp = {
+                                        let reg = call_registry.lock().await;
+                                        reg.peer_fingerprint(call_id, &client_fp)
+                                            .map(|s| s.to_string())
+                                    };
+                                    if let Some(fp) = peer_fp {
+                                        let hub = signal_hub.lock().await;
+                                        let _ = hub.send_to(&fp, &msg).await;
                                     }
                                 }
 

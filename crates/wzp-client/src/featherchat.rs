@@ -130,6 +130,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         // relay-to-relay message, never rides the featherChat
         // bridge. Catch-all mapping for completeness.
         SignalMessage::FederatedSignalForward { .. } => CallSignalType::Offer,
+        SignalMessage::MediaPathReport { .. } => CallSignalType::Offer, // control-plane
     }
 }
 

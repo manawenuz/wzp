@@ -454,8 +454,6 @@ async fn connect(
                 }));
                 let room_sni = room.clone();
                 let call_sni = format!("call-{room}");
-                // Phase 5: pass the signal endpoint so the race
-                // reuses ONE socket for listen + dial + relay.
                 match wzp_client::dual_path::race(
                     r,
                     candidates,
@@ -466,20 +464,107 @@ async fn connect(
                 )
                 .await
                 {
-                    Ok((transport, path)) => {
-                        tracing::info!(?path, "connect: dual-path race resolved");
-                        emit_call_debug(&app, "connect:dual_path_race_won", serde_json::json!({
-                            "path": format!("{:?}", path),
+                    Ok(race_result) => {
+                        let local_direct_ok = race_result.direct_transport.is_some();
+                        let local_winner = race_result.local_winner;
+                        tracing::info!(
+                            ?local_winner,
+                            local_direct_ok,
+                            has_relay = race_result.relay_transport.is_some(),
+                            "connect: race finished, starting Phase 6 negotiation"
+                        );
+                        emit_call_debug(&app, "connect:dual_path_race_done", serde_json::json!({
+                            "local_winner": format!("{:?}", local_winner),
+                            "local_direct_ok": local_direct_ok,
+                            "has_relay": race_result.relay_transport.is_some(),
                         }));
-                        Some(transport)
+
+                        // Phase 6: send our report to the peer and
+                        // wait for theirs before committing. Both
+                        // sides must agree on the same path to
+                        // prevent the one-picks-Direct-other-picks-
+                        // Relay race condition that causes TX>0 RX=0
+                        // on both sides.
+                        //
+                        // Extract call_id from the room name
+                        // ("call-<id>" → "<id>").
+                        let call_id_for_report = room.strip_prefix("call-")
+                            .unwrap_or(&room)
+                            .to_string();
+
+                        // Install the oneshot for receiving the peer's report
+                        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                        let peer_direct_ok = {
+                            let transport_for_report = {
+                                let mut sig = state.signal.lock().await;
+                                sig.pending_path_report = Some(tx);
+                                sig.transport.as_ref().cloned()
+                            };
+                            // Send our report
+                            if let Some(ref t) = transport_for_report {
+                                let report = wzp_proto::SignalMessage::MediaPathReport {
+                                    call_id: call_id_for_report.clone(),
+                                    direct_ok: local_direct_ok,
+                                    race_winner: format!("{:?}", local_winner),
+                                };
+                                let _ = t.send_signal(&report).await;
+                                emit_call_debug(&app, "connect:path_report_sent", serde_json::json!({
+                                    "direct_ok": local_direct_ok,
+                                    "race_winner": format!("{:?}", local_winner),
+                                }));
+                            }
+                            // Wait for peer's report (3s timeout)
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(3),
+                                rx,
+                            ).await {
+                                Ok(Ok(peer_ok)) => {
+                                    emit_call_debug(&app, "connect:peer_report_received", serde_json::json!({
+                                        "peer_direct_ok": peer_ok,
+                                    }));
+                                    peer_ok
+                                }
+                                _ => {
+                                    // Timeout or channel error — peer
+                                    // may be on an old build without
+                                    // Phase 6. Fall back to relay.
+                                    emit_call_debug(&app, "connect:peer_report_timeout", serde_json::json!({}));
+                                    let mut sig = state.signal.lock().await;
+                                    sig.pending_path_report = None;
+                                    false
+                                }
+                            }
+                        };
+
+                        // Phase 6 decision: BOTH must agree on direct
+                        let use_direct = local_direct_ok && peer_direct_ok;
+                        let chosen_path = if use_direct {
+                            wzp_client::dual_path::WinningPath::Direct
+                        } else {
+                            wzp_client::dual_path::WinningPath::Relay
+                        };
+                        emit_call_debug(&app, "connect:path_negotiated", serde_json::json!({
+                            "use_direct": use_direct,
+                            "local_direct_ok": local_direct_ok,
+                            "peer_direct_ok": peer_direct_ok,
+                            "chosen_path": format!("{:?}", chosen_path),
+                        }));
+                        tracing::info!(
+                            ?chosen_path,
+                            use_direct,
+                            local_direct_ok,
+                            peer_direct_ok,
+                            "connect: Phase 6 path agreed"
+                        );
+
+                        // Pick the agreed transport
+                        if use_direct {
+                            race_result.direct_transport
+                        } else {
+                            race_result.relay_transport
+                        }
                     }
                     Err(e) => {
-                        // Both paths failed — surface to the user.
-                        // CallEngine::start below with None will try
-                        // the relay once more using the old code path
-                        // (which reuses the signal endpoint and has a
-                        // longer timeout) so we don't unconditionally
-                        // fail the call on a transient race blip.
                         tracing::warn!(error = %e, "connect: dual-path race failed, falling back to classic relay connect");
                         emit_call_debug(&app, "connect:dual_path_race_failed", serde_json::json!({
                             "error": e.to_string(),
@@ -744,6 +829,11 @@ struct SignalState {
     /// connection. Prevents duplicate supervisors from spawning
     /// (recv loop exit races with a manual register_signal call).
     reconnect_in_progress: bool,
+    /// Phase 6: pending MediaPathReport from the peer. When the
+    /// connect command sends its own report and waits for the
+    /// peer's, it installs a oneshot sender here. The recv loop
+    /// fires it when MediaPathReport arrives.
+    pending_path_report: Option<tokio::sync::oneshot::Sender<bool>>,
 }
 
 #[tauri::command]
@@ -980,6 +1070,27 @@ fn do_register_signal(
                     emit_call_debug(&app_clone, "recv:Hangup", serde_json::json!({ "reason": format!("{:?}", reason) }));
                     let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None;
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
+                }
+                Ok(Some(SignalMessage::MediaPathReport { call_id, direct_ok, race_winner })) => {
+                    // Phase 6: the peer is telling us whether
+                    // their direct path succeeded. Fire the
+                    // pending oneshot so the connect command can
+                    // make the agreed decision.
+                    tracing::info!(
+                        %call_id,
+                        direct_ok,
+                        %race_winner,
+                        "signal: MediaPathReport from peer"
+                    );
+                    emit_call_debug(&app_clone, "recv:MediaPathReport", serde_json::json!({
+                        "call_id": call_id,
+                        "peer_direct_ok": direct_ok,
+                        "peer_race_winner": race_winner,
+                    }));
+                    let mut sig = signal_state.lock().await;
+                    if let Some(tx) = sig.pending_path_report.take() {
+                        let _ = tx.send(direct_ok);
+                    }
                 }
                 Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
                     // "STUN for QUIC" response — the relay told us our
@@ -1665,6 +1776,7 @@ pub fn run() {
             own_reflex_addr: None,
             desired_relay_addr: None,
             reconnect_in_progress: false,
+            pending_path_report: None,
         })),
     });
 
