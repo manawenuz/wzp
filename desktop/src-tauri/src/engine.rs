@@ -340,8 +340,9 @@ impl CallEngine {
 
         // Transport source: either the pre-connected one from the
         // dual-path race (Phase 3.5) or build a fresh one here.
+        let is_direct_p2p = pre_connected_transport.is_some();
         let transport = if let Some(t) = pre_connected_transport {
-            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: using pre-connected transport from dual-path race");
+            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: using pre-connected transport from dual-path race (direct P2P)");
             t
         } else {
             // QUIC transport + handshake (Phase 0 relay-only path).
@@ -381,14 +382,27 @@ impl CallEngine {
             Arc::new(wzp_transport::QuinnTransport::new(conn))
         };
 
-        let _session = wzp_client::handshake::perform_handshake(
-            &*transport,
-            &seed.0,
-            Some(&alias),
-        )
-        .await
-        .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
-        info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: connected to relay, handshake complete");
+        // The media handshake (CallOffer/CallAnswer + crypto key
+        // exchange) is a relay-specific protocol: the relay runs
+        // `accept_handshake` on its side. On a direct P2P
+        // connection the peer is a phone, not a relay — nobody on
+        // the other end handles the handshake. So skip it when
+        // is_direct_p2p. The QUIC transport already provides TLS
+        // encryption, and both peers' identities were verified
+        // through the signal channel (DirectCallOffer/Answer carry
+        // identity_pub + ephemeral_pub + signature).
+        if !is_direct_p2p {
+            let _session = wzp_client::handshake::perform_handshake(
+                &*transport,
+                &seed.0,
+                Some(&alias),
+            )
+            .await
+            .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
+            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: connected to relay, handshake complete");
+        } else {
+            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
+        }
         event_cb("connected", &format!("joined room {room}"));
 
         // Oboe audio via the wzp-native cdylib that was dlopen'd at
@@ -1011,8 +1025,9 @@ impl CallEngine {
 
         // Transport source: either the pre-connected dual-path
         // winner (Phase 3.5) or build a fresh relay connection here.
+        let is_direct_p2p = pre_connected_transport.is_some();
         let transport = if let Some(t) = pre_connected_transport {
-            info!("using pre-connected transport from dual-path race");
+            info!("using pre-connected transport from dual-path race (direct P2P)");
             t
         } else {
             // Connect — reuse the signal endpoint if the direct-call path gave
@@ -1035,14 +1050,21 @@ impl CallEngine {
             Arc::new(wzp_transport::QuinnTransport::new(conn))
         };
 
-        // Handshake
-        let _session = wzp_client::handshake::perform_handshake(
-            &*transport,
-            &seed.0,
-            Some(&alias),
-        )
-        .await
-        .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
+        // Handshake — relay-specific. Direct P2P connections skip
+        // this because the peer is a phone, not a relay with an
+        // accept_handshake handler. See the android branch's
+        // comment for the full rationale.
+        if !is_direct_p2p {
+            let _session = wzp_client::handshake::perform_handshake(
+                &*transport,
+                &seed.0,
+                Some(&alias),
+            )
+            .await
+            .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
+        } else {
+            info!("direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
+        }
 
         info!("connected to relay, handshake complete");
         event_cb("connected", &format!("joined room {room}"));

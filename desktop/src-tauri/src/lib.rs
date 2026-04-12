@@ -327,8 +327,9 @@ async fn connect(
     // cross-wired by the relay in CallSetup.peer_direct_addr.
     peer_direct_addr: Option<String>,
     // Phase 5.5: peer's LAN host candidates from CallSetup.
-    // JS side passes [] when empty.
-    peer_local_addrs: Vec<String>,
+    // Optional so the room-join path (which has no peer addrs)
+    // can omit it entirely — it's only populated on direct calls.
+    peer_local_addrs: Option<Vec<String>>,
 ) -> Result<String, String> {
     emit_call_debug(&app, "connect:start", serde_json::json!({
         "relay": relay,
@@ -373,7 +374,8 @@ async fn connect(
     // Phase 5.5: build the full peer candidate bundle (reflex +
     // LAN hosts). The dial_order helper will fan them out in
     // priority order for the D-role race.
-    let peer_local_parsed: Vec<std::net::SocketAddr> = peer_local_addrs
+    let peer_local_addrs_vec = peer_local_addrs.unwrap_or_default();
+    let peer_local_parsed: Vec<std::net::SocketAddr> = peer_local_addrs_vec
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
@@ -441,7 +443,7 @@ async fn connect(
             _ => {
                 tracing::info!(
                     has_peer_reflex = peer_direct_addr.is_some(),
-                    has_peer_local = !peer_local_addrs.is_empty(),
+                    has_peer_local = !peer_local_addrs_vec.is_empty(),
                     has_own = own_reflex_addr.is_some(),
                     ?role,
                     %relay,
@@ -450,7 +452,7 @@ async fn connect(
                 );
                 emit_call_debug(&app, "connect:dual_path_skipped", serde_json::json!({
                     "has_peer_reflex": peer_direct_addr.is_some(),
-                    "has_peer_local": !peer_local_addrs.is_empty(),
+                    "has_peer_local": !peer_local_addrs_vec.is_empty(),
                     "has_own": own_reflex_addr.is_some(),
                     "role": format!("{:?}", role),
                 }));
