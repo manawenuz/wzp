@@ -415,6 +415,18 @@ async fn connect(
                     "relay_addr": relay_sockaddr.to_string(),
                     "own_reflex_addr": own_reflex_addr,
                 }));
+                // Phase 6 fix: install the oneshot BEFORE the race
+                // starts. The peer's MediaPathReport can arrive
+                // while our race is still running — if we set up
+                // the oneshot after the race, the recv loop has
+                // nowhere to send the report and it gets dropped,
+                // causing a 3s timeout and false relay fallback.
+                let (path_report_tx, path_report_rx) = tokio::sync::oneshot::channel::<bool>();
+                {
+                    let mut sig = state.signal.lock().await;
+                    sig.pending_path_report = Some(path_report_tx);
+                }
+
                 let room_sni = room.clone();
                 let call_sni = format!("call-{room}");
                 match wzp_client::dual_path::race(
@@ -456,12 +468,14 @@ async fn connect(
                             .unwrap_or(&room)
                             .to_string();
 
-                        // Install the oneshot for receiving the peer's report
-                        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                        // The oneshot was installed BEFORE the race
+                        // (see path_report_tx above) so the peer's
+                        // report is already buffered in path_report_rx
+                        // if it arrived during the race.
+                        let rx = path_report_rx;
                         let peer_direct_ok = {
                             let transport_for_report = {
-                                let mut sig = state.signal.lock().await;
-                                sig.pending_path_report = Some(tx);
+                                let sig = state.signal.lock().await;
                                 sig.transport.as_ref().cloned()
                             };
                             // Send our report
