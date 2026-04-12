@@ -1500,9 +1500,14 @@ impl CallEngine {
         #[cfg(target_os = "android")]
         {
             crate::wzp_native::audio_stop();
-            // Restore MODE_NORMAL so other apps' audio (music, etc.)
-            // routes normally again. Without this, the system stays in
-            // communication mode and BT A2DP music goes to earpiece.
+            // Release the BT SCO communication device so Android can
+            // route media (video, music) back to BT A2DP. Without this,
+            // setCommunicationDevice locks BT to SCO mode and other apps
+            // can't use the headset for media playback until reboot.
+            if let Err(e) = crate::android_audio::stop_bluetooth_sco() {
+                tracing::warn!("stop_bluetooth_sco on call end failed: {e}");
+            }
+            // Restore MODE_NORMAL so other apps' audio routes normally.
             if let Err(e) = crate::android_audio::set_audio_mode_normal() {
                 tracing::warn!("set_audio_mode_normal failed: {e}");
             }
