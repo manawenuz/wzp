@@ -72,17 +72,21 @@ class MainActivity : TauriActivity() {
    * STREAM_VOICE_CALL volume is cranked to max since the in-call volume
    * slider is separate from media volume on most devices.
    */
+  /**
+   * Pre-flight: only set volumes. Do NOT set MODE_IN_COMMUNICATION here —
+   * that hijacks the entire audio routing (music stops, BT A2DP drops to
+   * earpiece) even before a call starts. The Rust side sets the mode via
+   * JNI when the call engine actually starts, and restores MODE_NORMAL
+   * when the call ends.
+   */
   private fun configureAudioForCall() {
     try {
       val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-      Log.i(TAG, "audio state before: mode=${am.mode} speaker=${am.isSpeakerphoneOn} " +
+      Log.i(TAG, "audio state: mode=${am.mode} speaker=${am.isSpeakerphoneOn} " +
         "voiceVol=${am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)}/" +
         "${am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)} " +
         "musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/" +
         "${am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}")
-
-      am.mode = AudioManager.MODE_IN_COMMUNICATION
-      am.isSpeakerphoneOn = false   // default: handset / earpiece
 
       // Crank both voice-call and music volumes so nothing silent slips
       // through regardless of which stream actually ends up driving.
@@ -91,9 +95,7 @@ class MainActivity : TauriActivity() {
       val maxMusic = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
       am.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
 
-      Log.i(TAG, "audio state after: mode=${am.mode} speaker=${am.isSpeakerphoneOn} " +
-        "voiceVol=${am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)}/$maxVoice " +
-        "musicVol=${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/$maxMusic")
+      Log.i(TAG, "volumes set: voiceVol=$maxVoice musicVol=$maxMusic (mode left at ${am.mode})")
     } catch (e: Throwable) {
       Log.e(TAG, "configureAudioForCall failed: ${e.message}", e)
     }

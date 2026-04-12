@@ -436,6 +436,16 @@ impl CallEngine {
         // hitting a "device busy" on some HALs.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+        // Set MODE_IN_COMMUNICATION right before audio starts — NOT at
+        // app launch. Setting it early hijacks system audio routing
+        // (music drops from BT A2DP to earpiece, etc.).
+        #[cfg(target_os = "android")]
+        {
+            if let Err(e) = crate::android_audio::set_audio_mode_communication() {
+                warn!("set_audio_mode_communication failed: {e}");
+            }
+        }
+
         let t_pre_audio = call_t0.elapsed().as_millis();
         if let Err(code) = crate::wzp_native::audio_start() {
             return Err(anyhow::anyhow!("wzp_native_audio_start failed: code {code}"));
@@ -1490,6 +1500,12 @@ impl CallEngine {
         #[cfg(target_os = "android")]
         {
             crate::wzp_native::audio_stop();
+            // Restore MODE_NORMAL so other apps' audio (music, etc.)
+            // routes normally again. Without this, the system stays in
+            // communication mode and BT A2DP music goes to earpiece.
+            if let Err(e) = crate::android_audio::set_audio_mode_normal() {
+                tracing::warn!("set_audio_mode_normal failed: {e}");
+            }
         }
     }
 }

@@ -57,11 +57,37 @@ fn audio_manager<'local>(
     Ok(am)
 }
 
+/// Set `AudioManager.MODE_IN_COMMUNICATION`. Call when a VoIP call starts.
+/// This tells the audio policy to route through the communication device
+/// path (earpiece/BT SCO) instead of the media path (speaker/BT A2DP).
+pub fn set_audio_mode_communication() -> Result<(), String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let am = audio_manager(&mut env, &activity)?;
+    // MODE_IN_COMMUNICATION = 3
+    env.call_method(&am, "setMode", "(I)V", &[JValue::Int(3)])
+        .map_err(|e| format!("setMode(MODE_IN_COMMUNICATION): {e}"))?;
+    tracing::info!("AudioManager: mode set to MODE_IN_COMMUNICATION");
+    Ok(())
+}
+
+/// Restore `AudioManager.MODE_NORMAL`. Call when a VoIP call ends.
+pub fn set_audio_mode_normal() -> Result<(), String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let am = audio_manager(&mut env, &activity)?;
+    // MODE_NORMAL = 0
+    env.call_method(&am, "setMode", "(I)V", &[JValue::Int(0)])
+        .map_err(|e| format!("setMode(MODE_NORMAL): {e}"))?;
+    tracing::info!("AudioManager: mode set to MODE_NORMAL");
+    Ok(())
+}
+
 /// Switch between loud speaker (`true`) and earpiece/handset (`false`).
-///
-/// Calls `AudioManager.setSpeakerphoneOn(on)` on the JVM. Requires that
-/// the audio mode is already `MODE_IN_COMMUNICATION` — MainActivity.kt
-/// sets this at startup, so by the time a call is up this is always true.
 pub fn set_speakerphone(on: bool) -> Result<(), String> {
     let (vm, activity) = jvm_and_activity()?;
     let mut env = vm
