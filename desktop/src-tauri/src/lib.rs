@@ -63,7 +63,7 @@ fn set_call_debug_logs_internal(on: bool) {
 /// Also mirrors to `tracing::info!` so logcat keeps its copy
 /// regardless of the flag — the toggle only controls the GUI
 /// overlay, not the underlying Android log stream.
-fn emit_call_debug(
+pub(crate) fn emit_call_debug(
     app: &tauri::AppHandle,
     step: &str,
     details: serde_json::Value,
@@ -469,7 +469,8 @@ async fn connect(
 
     let app_clone = app.clone();
     emit_call_debug(&app, "connect:call_engine_starting", serde_json::json!({}));
-    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, move |event_kind, message| {
+    let app_for_engine = app.clone();
+    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, app_for_engine, move |event_kind, message| {
         let _ = app_clone.emit(
             "call-event",
             CallEvent {
@@ -1531,6 +1532,73 @@ async fn deregister(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String
     Ok(())
 }
 
+/// End the current call, telling the peer via a signal-plane
+/// `Hangup` message before tearing down the local media engine.
+///
+/// Prior to this command existing, the hangup button just called
+/// `disconnect` which stopped the local engine but didn't notify
+/// the peer — so the OTHER party stayed on the call screen with
+/// nothing to hear. The relay DOES notice the media connection
+/// closing but doesn't forward anything to the peer on its own,
+/// so a real `SignalMessage::Hangup` is the only reliable signal.
+///
+/// Best-effort: if the signal transport is down (e.g. the relay
+/// dropped us mid-call), we still tear down the engine locally
+/// and return success. The peer's CallEngine will eventually
+/// notice the media side dying and the signal-event hangup
+/// handler will fire on receiving it from their signal loop if
+/// the relay is still up on their side.
+#[tauri::command]
+async fn hangup_call(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    use wzp_proto::SignalMessage;
+
+    emit_call_debug(&app, "hangup_call:start", serde_json::json!({}));
+
+    // Step 1: send Hangup over the signal channel so the relay
+    // forwards it to the peer. Do this FIRST so the peer gets
+    // the notification even if the engine shutdown takes a beat.
+    {
+        let sig = state.signal.lock().await;
+        if let Some(ref transport) = sig.transport {
+            match transport
+                .send_signal(&SignalMessage::Hangup {
+                    reason: wzp_proto::HangupReason::Normal,
+                })
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!("hangup_call: Hangup signal sent to relay");
+                    emit_call_debug(&app, "hangup_call:signal_sent", serde_json::json!({}));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "hangup_call: failed to send Hangup signal");
+                    emit_call_debug(
+                        &app,
+                        "hangup_call:signal_send_failed",
+                        serde_json::json!({ "error": e.to_string() }),
+                    );
+                }
+            }
+        } else {
+            tracing::debug!("hangup_call: no signal transport, skipping Hangup send");
+            emit_call_debug(&app, "hangup_call:no_signal_transport", serde_json::json!({}));
+        }
+    }
+
+    // Step 2: tear down the local media engine.
+    let mut engine_lock = state.engine.lock().await;
+    if let Some(engine) = engine_lock.take() {
+        engine.stop().await;
+        emit_call_debug(&app, "hangup_call:engine_stopped", serde_json::json!({}));
+    } else {
+        emit_call_debug(&app, "hangup_call:no_engine", serde_json::json!({}));
+    }
+    Ok(())
+}
+
 // ─── App entry point ─────────────────────────────────────────────────────────
 
 /// Shared Tauri app builder. Used by the desktop `main.rs` and the mobile
@@ -1598,6 +1666,7 @@ pub fn run() {
             connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
             get_reflected_address, detect_nat_type,
+            hangup_call,
             deregister,
             set_speakerphone, is_speakerphone_on,
             get_call_history, get_recent_contacts, clear_call_history,

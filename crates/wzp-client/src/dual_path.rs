@@ -291,7 +291,30 @@ pub async fn race(
     let relay_ep_for_fut = relay_ep.clone();
     let relay_client_cfg = wzp_transport::client_config();
     let relay_sni = room_sni.clone();
+    // Phase 5.5 direct-path head-start: hold the relay dial for
+    // 500ms before attempting it. On same-LAN cone-NAT pairs the
+    // direct dial finishes in ~30-100ms, so giving direct a 500ms
+    // head start means direct reliably wins when it's going to
+    // work at all. The worst case adds 500ms to the fall-back-
+    // to-relay scenario, which is imperceptible for users on
+    // setups where direct isn't available anyway.
+    //
+    // Prior behavior (immediate race) caused the relay to win
+    // ~105ms races on a MikroTik LAN because:
+    //   - Acceptor role's direct_fut = accept() can only fire
+    //     when the peer has completed its outbound LAN dial
+    //   - Dialer role's parallel LAN dials need the peer's
+    //     CallSetup processed + the race started on the other
+    //     side before they can reach us
+    //   - Meanwhile relay_fut is a plain dial that completes in
+    //     whatever the client→relay RTT is (often <100ms)
+    //
+    // The 500ms head start is the minimum that empirically makes
+    // same-LAN direct reliably beat relay, without penalizing
+    // users who genuinely need the relay path.
+    const DIRECT_HEAD_START: Duration = Duration::from_millis(500);
     let relay_fut = async move {
+        tokio::time::sleep(DIRECT_HEAD_START).await;
         let conn =
             wzp_transport::connect(&relay_ep_for_fut, relay_addr, &relay_sni, relay_client_cfg)
                 .await

@@ -897,7 +897,20 @@ spkBtn.addEventListener("click", async () => {
 });
 hangupBtn.addEventListener("click", async () => {
   userDisconnected = true;
-  try { await invoke("disconnect"); } catch {}
+  // Use the new hangup_call command instead of raw disconnect —
+  // it sends a Hangup signal to the relay FIRST so the peer
+  // gets auto-dismissed from the call screen, then tears down
+  // our local engine. Plain `disconnect` would leave the peer
+  // stuck on the call screen with silent audio.
+  try {
+    await invoke("hangup_call");
+  } catch {
+    // Fall back to plain disconnect if hangup_call errors
+    // (older Rust build without the new command).
+    try {
+      await invoke("disconnect");
+    } catch {}
+  }
   showConnectScreen();
 });
 

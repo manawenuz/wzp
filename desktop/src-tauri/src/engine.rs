@@ -302,6 +302,11 @@ impl CallEngine {
         // our own wzp_transport::connect step and use this
         // directly. If None, existing Phase 0 behavior.
         pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>>,
+        // Phase 5.6: Tauri AppHandle for emitting call-debug
+        // events from inside the send/recv tasks. Lets the
+        // debug log pane show first-send/first-recv/heartbeat
+        // events when the user has call debug logs enabled.
+        app: tauri::AppHandle,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
@@ -431,6 +436,7 @@ impl CallEngine {
         let send_quality = quality.clone();
         let send_tx_codec = tx_codec.clone();
         let send_t0 = call_t0;
+        let send_app = app.clone();
         tokio::spawn(async move {
             let profile = resolve_quality(&send_quality);
             let config = match profile {
@@ -516,7 +522,22 @@ impl CallEngine {
                                 }
                             }
                         }
-                        send_fs.fetch_add(1, Ordering::Relaxed);
+                        let before = send_fs.fetch_add(1, Ordering::Relaxed);
+                        if before == 0 {
+                            // First encoded frame successfully handed
+                            // to the transport. Useful for diagnosing
+                            // 1-way audio: if this fires but the
+                            // peer's media:first_recv never does,
+                            // outbound is broken on our side.
+                            crate::emit_call_debug(
+                                &send_app,
+                                "media:first_send",
+                                serde_json::json!({
+                                    "t_ms": send_t0.elapsed().as_millis() as u64,
+                                    "pkt_bytes": last_pkt_bytes,
+                                }),
+                            );
+                        }
                     }
                     Err(e) => error!("encode: {e}"),
                 }
@@ -533,6 +554,24 @@ impl CallEngine {
                         send_drops = drops,
                         "send heartbeat (android)"
                     );
+                    // Phase 5.6: also emit to the GUI debug log
+                    // when call debug is enabled. Helps diagnose
+                    // 1-way audio — a stalled send heartbeat
+                    // (frames_sent == 0 or last_rms == 0) tells
+                    // you capture/mic is broken; a live one with
+                    // no peer recv tells you outbound is being
+                    // dropped somewhere in the media path.
+                    crate::emit_call_debug(
+                        &send_app,
+                        "media:send_heartbeat",
+                        serde_json::json!({
+                            "frames_sent": fs,
+                            "last_rms": last_rms,
+                            "last_pkt_bytes": last_pkt_bytes,
+                            "short_reads": short_reads,
+                            "drops": drops,
+                        }),
+                    );
                     heartbeat = std::time::Instant::now();
                 }
             }
@@ -545,6 +584,7 @@ impl CallEngine {
         let recv_fr = frames_received.clone();
         let recv_rx_codec = rx_codec.clone();
         let recv_t0 = call_t0;
+        let recv_app = app.clone();
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
             // Phase 3b/3c: use concrete AdaptiveDecoder (not Box<dyn
@@ -620,6 +660,22 @@ impl CallEngine {
                                 "first-join diag: recv first media packet"
                             );
                             first_packet_logged = true;
+                            // Phase 5.6 GUI debug: first packet from
+                            // the peer. Useful for diagnosing 1-way
+                            // audio — if this fires and the peer
+                            // never sees media:first_recv, our
+                            // inbound path is fine and theirs is
+                            // broken, and vice versa.
+                            crate::emit_call_debug(
+                                &recv_app,
+                                "media:first_recv",
+                                serde_json::json!({
+                                    "t_ms": recv_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", pkt.header.codec_id),
+                                    "payload_bytes": pkt.payload.len(),
+                                    "is_repair": pkt.header.is_repair,
+                                }),
+                            );
                         }
                         if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
                             {
@@ -814,6 +870,27 @@ impl CallEngine {
                             "recv heartbeat (android)"
                         );
                     }
+                    // Phase 5.6: compact GUI debug emit.
+                    // recv_fr == 0 over time indicates inbound
+                    // media is not reaching the client — either
+                    // nothing is being sent by the peer, or the
+                    // transport is dropping packets, or we're
+                    // connected to the wrong side of the media
+                    // path. Combined with the peer's send_heartbeat
+                    // from the other log, this tells us exactly
+                    // where 1-way audio breaks.
+                    crate::emit_call_debug(
+                        &recv_app,
+                        "media:recv_heartbeat",
+                        serde_json::json!({
+                            "recv_fr": fr,
+                            "decoded_frames": decoded_frames,
+                            "last_written": last_written,
+                            "written_samples": written_samples,
+                            "decode_errs": decode_errs,
+                            "codec": format!("{:?}", current_codec),
+                        }),
+                    );
                     heartbeat = std::time::Instant::now();
                 }
             }
@@ -893,6 +970,13 @@ impl CallEngine {
         // Phase 3.5: caller did the dual-path race and picked a
         // winning transport. If Some, skip our own connect step.
         pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>>,
+        // Phase 5.6: Tauri AppHandle for call-debug event emits
+        // from inside the send/recv tasks. See android branch for
+        // the full rationale. Desktop branch accepts it for API
+        // symmetry but doesn't yet thread it into the send/recv
+        // tasks — android is where the reporter actually sees the
+        // 1-way audio regression.
+        _app: tauri::AppHandle,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
