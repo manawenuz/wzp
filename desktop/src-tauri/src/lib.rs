@@ -588,8 +588,17 @@ async fn connect(
     }
 
     let app_clone = app.clone();
+    // Log transport details for debugging direct P2P media issues
+    let transport_info = pre_connected_transport.as_ref().map(|t| {
+        serde_json::json!({
+            "remote": t.remote_address().to_string(),
+            "max_datagram": t.max_datagram_size(),
+            "close_reason": t.connection().close_reason().map(|r| format!("{r:?}")),
+        })
+    });
     emit_call_debug(&app, "connect:call_engine_starting", serde_json::json!({
         "is_direct_p2p": is_direct_p2p_agreed,
+        "transport": transport_info,
     }));
     let app_for_engine = app.clone();
     match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, is_direct_p2p_agreed, app_for_engine, move |event_kind, message| {

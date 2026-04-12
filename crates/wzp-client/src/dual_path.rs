@@ -194,43 +194,53 @@ pub async fn race(
             let ep_for_fut = ep.clone();
             let v6_ep_for_accept = ipv6_endpoint.clone();
             direct_fut = Box::pin(async move {
-                // Phase 7: accept on both IPv4 and IPv6 endpoints.
-                // First incoming connection on either wins.
-                match v6_ep_for_accept {
-                    Some(v6_ep) => {
-                        tracing::debug!("dual_path: A-role accepting on both v4 + v6 endpoints");
-                        tokio::select! {
-                            v4 = wzp_transport::accept(&ep_for_fut) => {
-                                let conn = v4.map_err(|e| anyhow::anyhow!("v4 accept: {e}"))?;
-                                tracing::info!(
-                                    remote = %conn.remote_address(),
-                                    stable_id = conn.stable_id(),
-                                    "dual_path: A-role accepted on IPv4 endpoint"
-                                );
-                                Ok(QuinnTransport::new(conn))
-                            }
-                            v6 = wzp_transport::accept(&v6_ep) => {
-                                let conn = v6.map_err(|e| anyhow::anyhow!("v6 accept: {e}"))?;
-                                tracing::info!(
-                                    remote = %conn.remote_address(),
-                                    stable_id = conn.stable_id(),
-                                    "dual_path: A-role accepted on IPv6 endpoint"
-                                );
-                                Ok(QuinnTransport::new(conn))
+                // Accept loop: retry if we get a stale/closed
+                // connection from a previous call. Between rapid
+                // successive calls, quinn's accept queue may
+                // contain connections that the peer has already
+                // dropped. Verify the connection is alive via
+                // max_datagram_size() before returning it.
+                loop {
+                    let conn = match &v6_ep_for_accept {
+                        Some(v6_ep) => {
+                            tokio::select! {
+                                v4 = wzp_transport::accept(&ep_for_fut) => {
+                                    v4.map_err(|e| anyhow::anyhow!("v4 accept: {e}"))?
+                                }
+                                v6 = wzp_transport::accept(v6_ep) => {
+                                    v6.map_err(|e| anyhow::anyhow!("v6 accept: {e}"))?
+                                }
                             }
                         }
-                    }
-                    None => {
-                        let conn = wzp_transport::accept(&ep_for_fut)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
-                        tracing::info!(
+                        None => {
+                            wzp_transport::accept(&ep_for_fut)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?
+                        }
+                    };
+
+                    // Validate the connection is alive. A stale
+                    // connection from a previous call will report
+                    // close_reason = Some(...) immediately.
+                    if let Some(reason) = conn.close_reason() {
+                        tracing::warn!(
                             remote = %conn.remote_address(),
                             stable_id = conn.stable_id(),
-                            "dual_path: A-role accepted (v4-only)"
+                            ?reason,
+                            "dual_path: A-role skipping stale connection, re-accepting"
                         );
-                        Ok(QuinnTransport::new(conn))
+                        continue;
                     }
+
+                    let has_dgram = conn.max_datagram_size().is_some();
+                    tracing::info!(
+                        remote = %conn.remote_address(),
+                        stable_id = conn.stable_id(),
+                        has_dgram,
+                        "dual_path: A-role accepted direct connection"
+                    );
+
+                    break Ok(QuinnTransport::new(conn));
                 }
             });
             direct_ep = ep;
