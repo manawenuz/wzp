@@ -323,11 +323,12 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
             b.playout.read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
             b.capture.write_idx.store(0, std::sync::atomic::Ordering::Relaxed);
             b.capture.read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
-            // Re-start
+            // Re-start (stall detector — always non-BT mode)
             let config = WzpOboeConfig {
                 sample_rate: 48_000,
                 frames_per_burst: FRAME_SAMPLES as i32,
                 channel_count: 1,
+                bt_active: 0,
             };
             let rings = WzpOboeRings {
                 capture_buf: b.capture.buf_ptr(),
