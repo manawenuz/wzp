@@ -14,6 +14,7 @@
 
 pub mod bandwidth;
 pub mod codec_id;
+pub mod dred_tuner;
 pub mod error;
 pub mod jitter;
 pub mod packet;
@@ -30,6 +31,7 @@ pub use packet::{
     FRAME_TYPE_MINI,
 };
 pub use bandwidth::{BandwidthEstimator, CongestionState};
+pub use dred_tuner::{DredTuner, DredTuning};
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;

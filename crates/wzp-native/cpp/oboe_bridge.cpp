@@ -8,6 +8,8 @@
 #include <android/log.h>
 #include <cstring>
 #include <atomic>
+#include <chrono>
+#include <thread>
 
 #define LOG_TAG "wzp-oboe"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -386,6 +388,38 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         g_capture_stream.reset();
         g_playout_stream.reset();
         return -5;
+    }
+
+    // Log initial stream states right after requestStart() returns.
+    // On well-behaved HALs both will already be Started; on others
+    // (Nothing A059) they may still be in Starting state.
+    LOGI("requestStart returned: capture_state=%d playout_state=%d",
+         (int)g_capture_stream->getState(),
+         (int)g_playout_stream->getState());
+
+    // Poll until both streams report Started state, up to 2s timeout.
+    // Some Android HALs (Nothing A059) delay transitioning from Starting
+    // to Started; proceeding before the transition completes causes the
+    // first capture/playout callbacks to be dropped silently.
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        int poll_count = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto cap_state = g_capture_stream->getState();
+            auto play_state = g_playout_stream->getState();
+            if (cap_state == oboe::StreamState::Started &&
+                play_state == oboe::StreamState::Started) {
+                LOGI("both streams Started after %d polls", poll_count);
+                break;
+            }
+            poll_count++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        // Log final state even on timeout (helps diagnose HAL quirks)
+        LOGI("stream states after poll: capture=%d playout=%d (polls=%d)",
+             (int)g_capture_stream->getState(),
+             (int)g_playout_stream->getState(),
+             poll_count);
     }
 
     LOGI("Oboe started: sr=%d burst=%d ch=%d",

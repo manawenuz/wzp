@@ -9,7 +9,7 @@
 //! still fails cleanly but the rest of the engine code links in.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::Emitter;
@@ -26,10 +26,37 @@ use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 // Android (where wzp-client is pulled in with default-features=false).
 use wzp_client::call::{CallConfig, CallEncoder};
 
-use wzp_proto::traits::AudioDecoder;
-use wzp_proto::{CodecId, MediaTransport, QualityProfile};
+use wzp_proto::traits::{AudioDecoder, QualityController};
+use wzp_proto::{AdaptiveQualityController, CodecId, MediaTransport, QualityProfile};
 
 const FRAME_SAMPLES_40MS: usize = 1920;
+
+/// Profile index mapping for the AtomicU8 adaptive-quality bridge.
+const PROFILE_NO_CHANGE: u8 = 0xFF;
+
+fn profile_to_index(p: &QualityProfile) -> u8 {
+    match p.codec {
+        CodecId::Opus64k => 0,
+        CodecId::Opus48k => 1,
+        CodecId::Opus32k => 2,
+        CodecId::Opus24k => 3,
+        CodecId::Opus6k => 4,
+        CodecId::Codec2_1200 => 5,
+        _ => 3, // default to GOOD
+    }
+}
+
+fn index_to_profile(idx: u8) -> Option<QualityProfile> {
+    match idx {
+        0 => Some(QualityProfile::STUDIO_64K),
+        1 => Some(QualityProfile::STUDIO_48K),
+        2 => Some(QualityProfile::STUDIO_32K),
+        3 => Some(QualityProfile::GOOD),
+        4 => Some(QualityProfile::DEGRADED),
+        5 => Some(QualityProfile::CATASTROPHIC),
+        _ => None,
+    }
+}
 
 /// Resolve a quality string from the UI to a QualityProfile.
 /// Returns None for "auto" (use default adaptive behavior).
@@ -480,6 +507,10 @@ impl CallEngine {
         let tx_codec = Arc::new(Mutex::new(String::new()));
         let rx_codec = Arc::new(Mutex::new(String::new()));
 
+        // Adaptive quality: shared pending-profile bridge between recv → send.
+        let pending_profile = Arc::new(AtomicU8::new(PROFILE_NO_CHANGE));
+        let auto_profile = resolve_quality(&quality).is_none();
+
         // Send task — drain Oboe capture ring, Opus-encode, push to transport.
         let send_t = transport.clone();
         let send_r = running.clone();
@@ -492,6 +523,7 @@ impl CallEngine {
         let send_tx_codec = tx_codec.clone();
         let send_t0 = call_t0;
         let send_app = app.clone();
+        let send_pending_profile = pending_profile.clone();
         tokio::spawn(async move {
             let profile = resolve_quality(&send_quality);
             let config = match profile {
@@ -512,6 +544,13 @@ impl CallEngine {
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false);
             let mut buf = vec![0i16; frame_samples];
+
+            // Continuous DRED tuning: poll quinn path stats every 25
+            // frames (~500 ms at 20 ms/frame) and adjust DRED duration +
+            // expected-loss hint based on real-time network conditions.
+            let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
+            let mut frames_since_dred_poll: u32 = 0;
+            const DRED_POLL_INTERVAL: u32 = 25;
 
             let mut heartbeat = std::time::Instant::now();
             let mut last_rms: u32 = 0;
@@ -602,6 +641,48 @@ impl CallEngine {
                     Err(e) => error!("encode: {e}"),
                 }
 
+                // Adaptive quality: check if recv task recommended a profile switch.
+                if auto_profile {
+                    let p = send_pending_profile.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
+                    if p != PROFILE_NO_CHANGE {
+                        if let Some(new_profile) = index_to_profile(p) {
+                            info!(to = ?new_profile.codec, "auto: switching encoder profile");
+                            if encoder.set_profile(new_profile).is_ok() {
+                                dred_tuner.set_codec(new_profile.codec);
+                                *send_tx_codec.lock().await = format!("{:?}", new_profile.codec);
+                            }
+                        }
+                    }
+                }
+
+                // DRED tuner: poll quinn path stats periodically and
+                // adjust encoder DRED duration + expected-loss hint.
+                frames_since_dred_poll += 1;
+                if frames_since_dred_poll >= DRED_POLL_INTERVAL {
+                    frames_since_dred_poll = 0;
+                    let snap = send_t.quinn_path_stats();
+                    let pq = send_t.path_quality();
+                    if let Some(tuning) = dred_tuner.update(
+                        snap.loss_pct,
+                        snap.rtt_ms,
+                        pq.jitter_ms,
+                    ) {
+                        encoder.apply_dred_tuning(tuning);
+                        if wzp_codec::dred_verbose_logs() {
+                            info!(
+                                dred_frames = tuning.dred_frames,
+                                dred_ms = tuning.dred_frames as u32 * 10,
+                                expected_loss = tuning.expected_loss_pct,
+                                quinn_loss = format!("{:.1}", snap.loss_pct),
+                                quinn_rtt = snap.rtt_ms,
+                                jitter = pq.jitter_ms,
+                                spike = dred_tuner.spike_boost_active(),
+                                "DRED tuner adjusted encoder"
+                            );
+                        }
+                    }
+                }
+
                 // Heartbeat every 2s with capture+encode+send state
                 if heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
                     let fs = send_fs.load(Ordering::Relaxed);
@@ -647,6 +728,7 @@ impl CallEngine {
         let recv_rx_codec = rx_codec.clone();
         let recv_t0 = call_t0;
         let recv_app = app.clone();
+        let pending_profile_recv = pending_profile.clone();
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
             // Phase 3b/3c: use concrete AdaptiveDecoder (not Box<dyn
@@ -661,6 +743,7 @@ impl CallEngine {
             // Phase 3b/3c DRED reconstruction state — see DredRecvState
             // above for the full flow.
             let mut dred_recv = DredRecvState::new();
+            let mut quality_ctrl = AdaptiveQualityController::new();
             info!(codec = ?current_codec, t_ms = recv_t0.elapsed().as_millis(), "first-join diag: recv task spawned (android/oboe)");
             // First-join diagnostic latches — see send task above for the
             // sibling capture milestones.
@@ -808,6 +891,15 @@ impl CallEngine {
                                         }
                                     },
                                 );
+                            }
+
+                            // Adaptive quality: ingest quality reports from peer
+                            if let Some(ref qr) = pkt.quality_report {
+                                if let Some(new_profile) = quality_ctrl.observe(qr) {
+                                    let idx = profile_to_index(&new_profile);
+                                    info!(to = ?new_profile.codec, "auto: quality adapter recommends switch");
+                                    pending_profile_recv.store(idx, Ordering::Release);
+                                }
                             }
 
                             match decoder.decode(&pkt.payload, &mut pcm) {
@@ -1220,6 +1312,10 @@ impl CallEngine {
         let tx_codec = Arc::new(Mutex::new(String::new()));
         let rx_codec = Arc::new(Mutex::new(String::new()));
 
+        // Adaptive quality: shared pending-profile bridge between recv → send.
+        let pending_profile = Arc::new(AtomicU8::new(PROFILE_NO_CHANGE));
+        let auto_profile = resolve_quality(&quality).is_none();
+
         // Send task
         let send_t = transport.clone();
         let send_r = running.clone();
@@ -1229,6 +1325,7 @@ impl CallEngine {
         let send_drops = Arc::new(AtomicU64::new(0));
         let send_quality = quality.clone();
         let send_tx_codec = tx_codec.clone();
+        let send_pending_profile = pending_profile.clone();
         tokio::spawn(async move {
             let profile = resolve_quality(&send_quality);
             let config = match profile {
@@ -1249,6 +1346,11 @@ impl CallEngine {
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false); // OS AEC or none
             let mut buf = vec![0i16; frame_samples];
+
+            // Continuous DRED tuning (same as Android send task).
+            let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
+            let mut frames_since_dred_poll: u32 = 0;
+            const DRED_POLL_INTERVAL: u32 = 25;
 
             loop {
                 if !send_r.load(Ordering::Relaxed) {
@@ -1285,6 +1387,35 @@ impl CallEngine {
                     }
                     Err(e) => error!("encode: {e}"),
                 }
+
+                // Adaptive quality: check if recv task recommended a profile switch.
+                if auto_profile {
+                    let p = send_pending_profile.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
+                    if p != PROFILE_NO_CHANGE {
+                        if let Some(new_profile) = index_to_profile(p) {
+                            info!(to = ?new_profile.codec, "auto: switching encoder profile");
+                            if encoder.set_profile(new_profile).is_ok() {
+                                dred_tuner.set_codec(new_profile.codec);
+                                *send_tx_codec.lock().await = format!("{:?}", new_profile.codec);
+                            }
+                        }
+                    }
+                }
+
+                // DRED tuner: poll quinn path stats periodically.
+                frames_since_dred_poll += 1;
+                if frames_since_dred_poll >= DRED_POLL_INTERVAL {
+                    frames_since_dred_poll = 0;
+                    let snap = send_t.quinn_path_stats();
+                    let pq = send_t.path_quality();
+                    if let Some(tuning) = dred_tuner.update(
+                        snap.loss_pct,
+                        snap.rtt_ms,
+                        pq.jitter_ms,
+                    ) {
+                        encoder.apply_dred_tuning(tuning);
+                    }
+                }
             }
         });
 
@@ -1294,6 +1425,7 @@ impl CallEngine {
         let recv_spk = spk_muted.clone();
         let recv_fr = frames_received.clone();
         let recv_rx_codec = rx_codec.clone();
+        let pending_profile_recv = pending_profile.clone();
         tokio::spawn(async move {
             let initial_profile = resolve_quality(&quality).unwrap_or(QualityProfile::GOOD);
             // Phase 3b/3c: concrete AdaptiveDecoder (not Box<dyn>) so we
@@ -1306,6 +1438,7 @@ impl CallEngine {
             let mut agc = wzp_codec::AutoGainControl::new();
             let mut pcm = vec![0i16; FRAME_SAMPLES_40MS]; // big enough for any codec
             let mut dred_recv = DredRecvState::new();
+            let mut quality_ctrl = AdaptiveQualityController::new();
 
             loop {
                 if !recv_r.load(Ordering::Relaxed) {
@@ -1368,6 +1501,15 @@ impl CallEngine {
                                         }
                                     },
                                 );
+                            }
+
+                            // Adaptive quality: ingest quality reports from peer
+                            if let Some(ref qr) = pkt.quality_report {
+                                if let Some(new_profile) = quality_ctrl.observe(qr) {
+                                    let idx = profile_to_index(&new_profile);
+                                    info!(to = ?new_profile.codec, "auto: quality adapter recommends switch");
+                                    pending_profile_recv.store(idx, Ordering::Release);
+                                }
                             }
 
                             if let Ok(n) = decoder.decode(&pkt.payload, &mut pcm) {

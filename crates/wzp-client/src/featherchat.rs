@@ -131,6 +131,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         // bridge. Catch-all mapping for completeness.
         SignalMessage::FederatedSignalForward { .. } => CallSignalType::Offer,
         SignalMessage::MediaPathReport { .. } => CallSignalType::Offer, // control-plane
+        SignalMessage::QualityDirective { .. } => CallSignalType::Offer, // relay-initiated
     }
 }
 

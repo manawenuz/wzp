@@ -14,8 +14,9 @@
 //!   networks; short window keeps decoder CPU modest.
 //! - Normal tiers (Opus 16k/24k): 200 ms — balanced baseline covering common
 //!   VoIP loss patterns (20–150 ms bursts from wifi roam, transient congestion).
-//! - Degraded tier (Opus 6k): 500 ms — users on 6k are by definition on a
-//!   bad link; longer DRED buys maximum burst resilience where it matters.
+//! - Degraded tier (Opus 6k): 1040 ms — users on 6k are by definition on a
+//!   bad link; the maximum libopus DRED window buys the best burst resilience
+//!   where it matters. The RDO-VAE naturally degrades quality at longer offsets.
 //!
 //! # Why the 15% packet loss floor
 //!
@@ -78,8 +79,12 @@ pub fn dred_duration_for(codec: CodecId) -> u8 {
         CodecId::Opus32k | CodecId::Opus48k | CodecId::Opus64k => 10,
         // Normal tiers — balanced baseline.
         CodecId::Opus16k | CodecId::Opus24k => 20,
-        // Degraded tier — maximum burst resilience.
-        CodecId::Opus6k => 50,
+        // Degraded tier — maximum burst resilience. 104 × 10 ms = 1040 ms,
+        // the highest value libopus 1.5 supports. Users on 6k are on a bad
+        // link by definition; the RDO-VAE naturally degrades quality at longer
+        // offsets, so the extra window costs only ~1-2 kbps additional overhead
+        // while buying substantially better burst resilience (up from 500 ms).
+        CodecId::Opus6k => 104,
         // Non-Opus (Codec2 / CN): DRED is N/A.
         CodecId::Codec2_1200 | CodecId::Codec2_3200 | CodecId::ComfortNoise => 0,
     }
@@ -334,6 +339,14 @@ impl AudioEncoder for OpusEncoder {
     fn set_dtx(&mut self, enabled: bool) {
         let _ = self.inner.set_dtx(enabled);
     }
+
+    fn set_expected_loss(&mut self, loss_pct: u8) {
+        OpusEncoder::set_expected_loss(self, loss_pct);
+    }
+
+    fn set_dred_duration(&mut self, frames: u8) {
+        OpusEncoder::set_dred_duration(self, frames);
+    }
 }
 
 #[cfg(test)]
@@ -389,8 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn dred_duration_for_degraded_tier_is_500ms() {
-        assert_eq!(dred_duration_for(CodecId::Opus6k), 50);
+    fn dred_duration_for_degraded_tier_is_1040ms() {
+        assert_eq!(dred_duration_for(CodecId::Opus6k), 104);
     }
 
     #[test]

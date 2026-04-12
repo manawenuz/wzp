@@ -52,6 +52,7 @@ fn alice_offer(call_id: &str) -> SignalMessage {
         supported_profiles: vec![],
         caller_reflexive_addr: Some(ALICE_ADDR.into()),
         caller_local_addrs: Vec::new(),
+        caller_build_version: None,
     }
 }
 
@@ -132,6 +133,7 @@ fn bob_answer(call_id: &str) -> SignalMessage {
         chosen_profile: None,
         callee_reflexive_addr: Some(BOB_ADDR.into()),
         callee_local_addrs: Vec::new(),
+        callee_build_version: None,
     }
 }
 

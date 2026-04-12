@@ -120,7 +120,7 @@
 
 - **Web audio drift**: The browser AudioWorklet playback buffer caps at 200ms, but clock drift between the WebSocket message arrival rate and the AudioContext output rate can cause occasional underruns or accumulation. The cap prevents unbounded growth but may cause glitches.
 
-- **No adaptive loop integration**: The `PathMonitor` feeds and `AdaptiveQualityController` are implemented but not wired together in the client's main loop. Quality reports are consumed when present in packets, but the client does not currently generate periodic quality reports from transport metrics.
+- **Adaptive loop integration (resolved)**: AdaptiveQualityController is now fully wired into both desktop and Android send/recv tasks. Relay-coordinated codec switching broadcasts QualityDirective to all participants based on weakest-link policy.
 
 - **Relay FEC pass-through**: In room mode, the relay forwards packets opaquely without FEC decode/re-encode. This means FEC protection is end-to-end only, not per-hop. In forward mode, the relay pipeline does perform FEC decode/re-encode.
 
@@ -128,18 +128,18 @@
 
 ## Test Coverage
 
-119 tests across 7 crates (wzp-web has no Rust tests):
+307+ tests across 7 crates (wzp-web has no Rust tests):
 
-| Crate | Test Files | Test Count |
-|-------|-----------|------------|
-| wzp-proto | 5 | 27 |
-| wzp-codec | 3 | 24 |
-| wzp-fec | 5 | 21 |
-| wzp-crypto | 5 | 21 |
-| wzp-transport | 3 | 12 |
-| wzp-relay | 4 | 10 |
-| wzp-client | 3 | 8 |
-| **Total** | **28** | **119** |
+| Crate | Test Count |
+|-------|------------|
+| wzp-proto | ~79 |
+| wzp-codec | ~69 |
+| wzp-fec | ~21 |
+| wzp-crypto | ~21 |
+| wzp-transport | ~11 |
+| wzp-relay | ~50 |
+| wzp-client | ~57 |
+| **Total** | **307+** |
 
 Tests cover:
 - Wire format roundtrip (header, quality report, full packet)
@@ -214,3 +214,49 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - `build-tauri-android.sh --arch arm64|armv7|all`
 - Separate per-arch APKs (~25MB each vs ~50MB universal)
 - Release APKs signed with `wzp-release.jks` via `apksigner`
+
+### Continuous DRED Tuning (Phase A: opus-DRED-v2)
+- `DredTuner` in `wzp-proto::dred_tuner` maps live network metrics to continuous DRED duration
+- Polls quinn path stats every 25 frames (~500ms): loss%, RTT, jitter
+- Linear interpolation between baseline and ceiling per codec tier (not discrete tier jumps)
+- Jitter-spike detection: >30% EWMA spike pre-emptively boosts DRED to ceiling for ~5s
+- RTT phantom loss: high RTT (>200ms) adds phantom contribution to keep DRED generous
+- `set_expected_loss()` and `set_dred_duration()` added to `AudioEncoder` trait
+- Integrated into both Android and desktop send tasks in engine.rs
+
+### Extended DRED Window
+- Opus6k DRED duration increased from 500ms to 1040ms (max libopus 1.5 supports)
+- RDO-VAE naturally degrades quality at longer offsets — extra window costs ~1-2 kbps
+
+### PMTUD (Path MTU Discovery)
+- Quinn's PLPMTUD explicitly configured: initial 1200, upper bound 1452, 300s interval
+- `QuinnPathSnapshot` exposes discovered MTU via `current_mtu` field
+- `TrunkedForwarder` refreshes `max_bytes` from PMTUD (was hard-coded 1200)
+- Federation trunk frames now fill the discovered path MTU automatically
+
+### New Tests
+- 4 DRED tuner integration tests in wzp-client (encoder adjustment, spike boost, Codec2 no-op, profile switch)
+- 10 unit tests in wzp-proto for DredTuner mapping logic
+- Jitter variance window tests in wzp-transport PathMonitor
+- Pre-existing test fixes: added missing `build_version` fields to 7 SignalMessage constructors
+
+### Desktop Adaptive Quality (#7, #31)
+- `AdaptiveQualityController` wired into both Android and desktop send/recv tasks
+- `pending_profile: Arc<AtomicU8>` bridge between recv (writer) and send (reader)
+- Auto mode: ingests QualityReports from relay, switches encoder profile when adapter recommends
+- `tx_codec` display string updated on profile switch for UI indicator
+- `profile_to_index()` / `index_to_profile()` mapping for 6-tier range
+
+### Relay Coordinated Codec Switching (#25, #26)
+- `ParticipantQuality` struct in relay RoomManager tracks per-participant quality
+- Quality reports from forwarded packets feed per-participant `AdaptiveQualityController`
+- `weakest_tier()` computes room-wide worst tier across all participants
+- `QualityDirective` SignalMessage variant: relay broadcasts recommended profile to all participants
+- Triggered on tier change — instant, no negotiation (weakest-link policy)
+
+### Oboe Stream State Polling (#35)
+- C++ polling loop after `requestStart()`: checks `getState()` every 10ms for up to 2s
+- Waits for both capture and playout streams to reach `Started` state
+- Logs initial state, poll count, and final state for HAL debugging
+- Does NOT fail on timeout — Rust-side stall detector remains as safety net
+- Targets Nothing Phone A059 intermittent silent calls on cold start

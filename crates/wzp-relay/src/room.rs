@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use wzp_proto::packet::TrunkFrame;
+use wzp_proto::quality::{AdaptiveQualityController, Tier};
+use wzp_proto::traits::QualityController;
 use wzp_proto::MediaTransport;
 
 use crate::metrics::RelayMetrics;
@@ -48,6 +50,45 @@ impl DebugTap {
             "TAP"
         );
     }
+}
+
+/// Tracks network quality for a single participant in a room.
+struct ParticipantQuality {
+    controller: AdaptiveQualityController,
+    current_tier: Tier,
+}
+
+impl ParticipantQuality {
+    fn new() -> Self {
+        Self {
+            controller: AdaptiveQualityController::new(),
+            current_tier: Tier::Good,
+        }
+    }
+
+    /// Feed a quality report and return the new tier if it changed.
+    fn observe(&mut self, report: &wzp_proto::packet::QualityReport) -> Option<Tier> {
+        let _ = self.controller.observe(report);
+        let new_tier = self.controller.tier();
+        if new_tier != self.current_tier {
+            self.current_tier = new_tier;
+            Some(new_tier)
+        } else {
+            None
+        }
+    }
+}
+
+/// Compute the weakest (worst) quality tier across all tracked participants.
+fn weakest_tier<'a>(qualities: impl Iterator<Item = &'a ParticipantQuality>) -> Tier {
+    qualities
+        .map(|pq| pq.current_tier)
+        .min_by_key(|t| match t {
+            Tier::Good => 2,
+            Tier::Degraded => 1,
+            Tier::Catastrophic => 0,
+        })
+        .unwrap_or(Tier::Good)
 }
 
 /// Unique participant ID within a room.
@@ -208,6 +249,10 @@ pub struct RoomManager {
     acl: Option<HashMap<String, HashSet<String>>>,
     /// Channel for room lifecycle events (federation subscribes).
     event_tx: tokio::sync::broadcast::Sender<RoomEvent>,
+    /// Per-participant quality tracking, keyed by (room_name, participant_id).
+    qualities: HashMap<(String, ParticipantId), ParticipantQuality>,
+    /// Current room-wide tier per room (to avoid repeated broadcasts).
+    room_tiers: HashMap<String, Tier>,
 }
 
 impl RoomManager {
@@ -217,6 +262,8 @@ impl RoomManager {
             rooms: HashMap::new(),
             acl: None,
             event_tx,
+            qualities: HashMap::new(),
+            room_tiers: HashMap::new(),
         }
     }
 
@@ -227,6 +274,8 @@ impl RoomManager {
             rooms: HashMap::new(),
             acl: Some(HashMap::new()),
             event_tx,
+            qualities: HashMap::new(),
+            room_tiers: HashMap::new(),
         }
     }
 
@@ -277,6 +326,7 @@ impl RoomManager {
             || self.rooms.get(room_name).map_or(true, |r| r.is_empty());
         let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
         let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()));
+        self.qualities.insert((room_name.to_string(), id), ParticipantQuality::new());
         if was_empty {
             let _ = self.event_tx.send(RoomEvent::LocalJoin { room: room_name.to_string() });
         }
@@ -323,10 +373,12 @@ impl RoomManager {
 
     /// Leave a room. Returns (room_update_msg, remaining_senders) for broadcasting, or None if room is now empty.
     pub fn leave(&mut self, room_name: &str, participant_id: ParticipantId) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
+        self.qualities.remove(&(room_name.to_string(), participant_id));
         if let Some(room) = self.rooms.get_mut(room_name) {
             room.remove(participant_id);
             if room.is_empty() {
                 self.rooms.remove(room_name);
+                self.room_tiers.remove(room_name);
                 let _ = self.event_tx.send(RoomEvent::LocalLeave { room: room_name.to_string() });
                 info!(room = room_name, "room closed (empty)");
                 return None;
@@ -363,6 +415,58 @@ impl RoomManager {
     pub fn list(&self) -> Vec<(String, usize)> {
         self.rooms.iter().map(|(k, v)| (k.clone(), v.len())).collect()
     }
+
+    /// Feed a quality report from a participant. If the room-wide weakest
+    /// tier changes, returns `(QualityDirective signal, all senders)` for
+    /// broadcasting.
+    pub fn observe_quality(
+        &mut self,
+        room_name: &str,
+        participant_id: ParticipantId,
+        report: &wzp_proto::packet::QualityReport,
+    ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
+        let key = (room_name.to_string(), participant_id);
+        let tier_changed = self.qualities
+            .get_mut(&key)
+            .and_then(|pq| pq.observe(report))
+            .is_some();
+
+        if !tier_changed {
+            return None;
+        }
+
+        // Compute the weakest tier across all participants in this room
+        let room_qualities = self.qualities.iter()
+            .filter(|((rn, _), _)| rn == room_name)
+            .map(|(_, pq)| pq);
+        let weakest = weakest_tier(room_qualities);
+
+        let current_room_tier = self.room_tiers.get(room_name).copied().unwrap_or(Tier::Good);
+        if weakest == current_room_tier {
+            return None;
+        }
+
+        // Room-wide tier changed — update and broadcast directive
+        self.room_tiers.insert(room_name.to_string(), weakest);
+        let profile = weakest.profile();
+        info!(
+            room = room_name,
+            old_tier = ?current_room_tier,
+            new_tier = ?weakest,
+            codec = ?profile.codec,
+            fec_ratio = profile.fec_ratio,
+            "room quality directive"
+        );
+
+        let directive = wzp_proto::SignalMessage::QualityDirective {
+            recommended_profile: profile,
+            reason: Some(format!("weakest link: {weakest:?}")),
+        };
+        let senders = self.rooms.get(room_name)
+            .map(|r| r.all_senders())
+            .unwrap_or_default();
+        Some((directive, senders))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,18 +486,32 @@ impl TrunkedForwarder {
     /// Create a new trunked forwarder.
     ///
     /// `session_id` tags every entry pushed into the batcher so the receiver
-    /// can demultiplex packets by session.
+    /// can demultiplex packets by session. The batcher's `max_bytes` is
+    /// initialized from the transport's current PMTUD-discovered MTU so that
+    /// trunk frames fill the largest datagram the path supports (instead of
+    /// the conservative 1200-byte default).
     pub fn new(transport: Arc<wzp_transport::QuinnTransport>, session_id: [u8; 2]) -> Self {
+        let mut batcher = TrunkBatcher::new();
+        if let Some(mtu) = transport.max_datagram_size() {
+            batcher.max_bytes = mtu;
+        }
         Self {
             transport,
-            batcher: TrunkBatcher::new(),
+            batcher,
             session_id,
         }
     }
 
     /// Push a media packet into the batcher.  If the batcher is full it will
     /// flush automatically and the resulting trunk frame is sent immediately.
+    ///
+    /// Also refreshes `max_bytes` from the transport's PMTUD-discovered MTU
+    /// so the batcher fills larger datagrams as the path MTU grows.
     pub async fn send(&mut self, pkt: &wzp_proto::MediaPacket) -> anyhow::Result<()> {
+        // Refresh batcher limit from PMTUD (cheap: reads an atomic in quinn).
+        if let Some(mtu) = self.transport.max_datagram_size() {
+            self.batcher.max_bytes = mtu;
+        }
         let payload: Bytes = pkt.to_bytes();
         if let Some(frame) = self.batcher.push(self.session_id, payload) {
             self.send_frame(&frame)?;
@@ -521,11 +639,17 @@ async fn run_participant_plain(
             metrics.update_session_quality(session_id, report);
         }
 
-        // Get current list of other participants
+        // Get current list of other participants + check quality directive
         let lock_start = std::time::Instant::now();
-        let others = {
-            let mgr = room_mgr.lock().await;
-            mgr.others(&room_name, participant_id)
+        let (others, quality_directive) = {
+            let mut mgr = room_mgr.lock().await;
+            let directive = if let Some(ref report) = pkt.quality_report {
+                mgr.observe_quality(&room_name, participant_id, report)
+            } else {
+                None
+            };
+            let o = mgr.others(&room_name, participant_id);
+            (o, directive)
         };
         let lock_ms = lock_start.elapsed().as_millis() as u64;
         if lock_ms > 10 {
@@ -535,6 +659,11 @@ async fn run_participant_plain(
                 lock_ms,
                 "slow room_mgr lock"
             );
+        }
+
+        // Broadcast quality directive to all participants if tier changed
+        if let Some((directive, all_senders)) = quality_directive {
+            broadcast_signal(&all_senders, &directive).await;
         }
 
         // Debug tap: log packet metadata
@@ -705,9 +834,15 @@ async fn run_participant_trunked(
                 }
 
                 let lock_start = std::time::Instant::now();
-                let others = {
-                    let mgr = room_mgr.lock().await;
-                    mgr.others(&room_name, participant_id)
+                let (others, quality_directive) = {
+                    let mut mgr = room_mgr.lock().await;
+                    let directive = if let Some(ref report) = pkt.quality_report {
+                        mgr.observe_quality(&room_name, participant_id, report)
+                    } else {
+                        None
+                    };
+                    let o = mgr.others(&room_name, participant_id);
+                    (o, directive)
                 };
                 let lock_ms = lock_start.elapsed().as_millis() as u64;
                 if lock_ms > 10 {
@@ -717,6 +852,11 @@ async fn run_participant_trunked(
                         lock_ms,
                         "slow room_mgr lock (trunked)"
                     );
+                }
+
+                // Broadcast quality directive to all participants if tier changed
+                if let Some((directive, all_senders)) = quality_directive {
+                    broadcast_signal(&all_senders, &directive).await;
                 }
 
                 let fwd_start = std::time::Instant::now();
@@ -958,5 +1098,48 @@ mod tests {
 
         // Batcher should now be empty — nothing to flush.
         assert!(batcher.flush().is_none());
+    }
+
+    fn make_report(loss_pct_f: f32, rtt_ms: u16) -> wzp_proto::packet::QualityReport {
+        wzp_proto::packet::QualityReport {
+            loss_pct: (loss_pct_f / 100.0 * 255.0) as u8,
+            rtt_4ms: (rtt_ms / 4) as u8,
+            jitter_ms: 10,
+            bitrate_cap_kbps: 200,
+        }
+    }
+
+    #[test]
+    fn participant_quality_starts_good() {
+        let pq = ParticipantQuality::new();
+        assert_eq!(pq.current_tier, Tier::Good);
+    }
+
+    #[test]
+    fn participant_quality_degrades_on_bad_reports() {
+        let mut pq = ParticipantQuality::new();
+        let bad = make_report(50.0, 300);
+        // Feed enough bad reports to trigger downgrade (3 consecutive)
+        for _ in 0..5 {
+            pq.observe(&bad);
+        }
+        assert_ne!(pq.current_tier, Tier::Good, "should degrade from Good");
+    }
+
+    #[test]
+    fn weakest_tier_picks_worst() {
+        let good = ParticipantQuality::new();
+        // good stays at Good tier
+
+        let mut bad = ParticipantQuality::new();
+        let bad_report = make_report(50.0, 300);
+        for _ in 0..5 {
+            bad.observe(&bad_report);
+        }
+        // bad should be degraded or catastrophic
+
+        let participants = vec![good, bad];
+        let weakest = weakest_tier(participants.iter());
+        assert_ne!(weakest, Tier::Good, "weakest should not be Good when one participant is bad");
     }
 }

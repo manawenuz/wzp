@@ -917,6 +917,14 @@ pub enum SignalMessage {
         /// federation link via `send_signal_to_peer`.
         origin_relay_fp: String,
     },
+
+    /// Relay-initiated quality directive: all participants should switch
+    /// to the recommended profile to match the weakest link.
+    QualityDirective {
+        recommended_profile: crate::QualityProfile,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// How the callee responds to a direct call.
@@ -1100,6 +1108,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         };
         let forward = SignalMessage::FederatedSignalForward {
             inner: Box::new(inner),
@@ -1142,6 +1151,7 @@ mod tests {
                 chosen_profile: None,
                 callee_reflexive_addr: Some("198.51.100.9:4433".into()),
                 callee_local_addrs: Vec::new(),
+                callee_build_version: None,
             },
             SignalMessage::CallRinging { call_id: "c1".into() },
             SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
@@ -1177,6 +1187,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         };
         let json = serde_json::to_string(&offer).unwrap();
         assert!(
@@ -1205,6 +1216,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: None,
             caller_local_addrs: Vec::new(),
+            caller_build_version: None,
         };
         let json_none = serde_json::to_string(&offer_none).unwrap();
         assert!(
@@ -1222,6 +1234,7 @@ mod tests {
             chosen_profile: None,
             callee_reflexive_addr: Some("198.51.100.9:4433".into()),
             callee_local_addrs: Vec::new(),
+            callee_build_version: None,
         };
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
@@ -1657,6 +1670,41 @@ mod tests {
                     "frame {i} should be MINI"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn quality_directive_roundtrip() {
+        let msg = SignalMessage::QualityDirective {
+            recommended_profile: crate::QualityProfile::DEGRADED,
+            reason: Some("weakest link degraded".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::QualityDirective { recommended_profile, reason } => {
+                assert_eq!(recommended_profile.codec, CodecId::Opus6k);
+                assert_eq!(reason.as_deref(), Some("weakest link degraded"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn quality_directive_without_reason_roundtrip() {
+        let msg = SignalMessage::QualityDirective {
+            recommended_profile: crate::QualityProfile::GOOD,
+            reason: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // None reason should be omitted from JSON
+        assert!(!json.contains("reason"));
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::QualityDirective { reason, .. } => {
+                assert!(reason.is_none());
+            }
+            _ => panic!("wrong variant"),
         }
     }
 

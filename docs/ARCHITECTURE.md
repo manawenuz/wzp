@@ -103,11 +103,13 @@ sequenceDiagram
     participant RNN as RNNoise<br/>(2 x 480)
     participant VAD as SilenceDetector
     participant Codec as Opus / Codec2
+    participant DT as DredTuner<br/>(wzp-proto)
     participant FEC as RaptorQ FEC
     participant INT as Interleaver<br/>(depth=3)
     participant HDR as MediaHeader<br/>(12B or Mini 4B)
     participant Enc as ChaCha20-Poly1305
     participant QUIC as QUIC Datagram
+    participant QPS as QuinnPathSnapshot
 
     Mic->>Ring: f32 x 512 (macOS callback)
     Ring->>Ring: Accumulate to 960 samples
@@ -118,10 +120,19 @@ sequenceDiagram
     else Silence (>100ms)
         VAD->>Codec: ComfortNoise (every 200ms)
     end
-    Codec->>FEC: Compressed bytes (pad to 256B symbol)
-    FEC->>FEC: Accumulate block (5-10 symbols)
-    FEC->>INT: Source + repair symbols
-    INT->>HDR: Interleaved packets
+
+    Note over QPS,DT: Every 25 frames (~500ms)
+    QPS->>DT: loss_pct, rtt_ms, jitter_ms
+    DT->>Codec: set_dred_duration() + set_expected_loss()
+
+    alt Opus tier (any bitrate)
+        Codec->>HDR: Compressed bytes + DRED side-channel (no RaptorQ)
+    else Codec2 tier
+        Codec->>FEC: Compressed bytes (pad to 256B symbol)
+        FEC->>FEC: Accumulate block (5-10 symbols)
+        FEC->>INT: Source + repair symbols
+        INT->>HDR: Interleaved packets
+    end
     HDR->>Enc: Header as AAD
     Enc->>QUIC: Encrypted payload + 16B tag
 ```
@@ -134,6 +145,9 @@ sequenceDiagram
 - Silence detection uses VAD + 100ms hangover before switching to ComfortNoise
 - FEC symbols are padded to **256 bytes** with a 2-byte LE length prefix
 - MiniHeaders (4 bytes) replace full headers (12 bytes) for 49 of every 50 frames
+- DRED tuner polls quinn path stats every 25 frames (~500ms) and adjusts DRED lookback duration continuously
+- Opus tiers bypass RaptorQ entirely -- DRED handles loss recovery at the codec layer
+- Opus6k DRED window: 1040ms (maximum libopus allows)
 
 ## Audio Decode Pipeline
 
@@ -154,13 +168,30 @@ sequenceDiagram
     Dec->>AR: Decrypt (header = AAD)
     AR->>AR: Check seq window (reject replay)
     AR->>HDR: Verified packet
-    HDR->>DEINT: MediaHeader + payload
-    DEINT->>FEC: Reordered symbols by block
-    FEC->>FEC: Attempt decode (need K of K+R)
-    FEC->>JIT: Recovered audio frames
+
+    alt Opus packet
+        HDR->>JIT: Direct to jitter buffer (no FEC/interleave)
+    else Codec2 packet
+        HDR->>DEINT: MediaHeader + payload
+        DEINT->>FEC: Reordered symbols by block
+        FEC->>FEC: Attempt decode (need K of K+R)
+        FEC->>JIT: Recovered audio frames
+    end
+
     JIT->>JIT: BTreeMap ordered by seq
     JIT->>JIT: Wait until depth >= target
-    JIT->>Codec: Pop lowest seq frame
+
+    alt Packet present
+        JIT->>Codec: Pop lowest seq frame
+    else Packet missing (Opus)
+        JIT->>Codec: DRED reconstruction (neural)
+        alt DRED fails or unavailable
+            Codec->>Codec: Classical PLC fallback
+        end
+    else Packet missing (Codec2)
+        Codec->>Codec: Classical PLC
+    end
+
     Codec->>Ring: PCM i16 x 960
     Ring->>SPK: Audio callback pulls samples
 ```
@@ -172,6 +203,8 @@ sequenceDiagram
 - Jitter buffer target: **10 packets (200ms)** for client, **50 packets (1s)** for relay
 - Desktop client uses **direct playout** (no jitter buffer) with lock-free ring
 - Codec2 frames at 8 kHz are resampled to 48 kHz transparently
+- DRED reconstruction: on packet loss, decoder tries neural DRED reconstruction before falling back to classical PLC
+- Jitter-spike detection pre-emptively boosts DRED to ceiling when jitter variance spikes >30%
 
 ## Relay SFU Forwarding
 
@@ -211,6 +244,7 @@ graph TB
 3. If one send fails, the relay continues to the next participant (best-effort)
 4. The relay never decodes or re-encodes audio (preserves E2E encryption)
 5. With trunking enabled, packets to the same receiver are batched into TrunkFrames (flushed every 5ms)
+6. Relay tracks per-participant quality from QualityReport trailers and broadcasts `QualityDirective` when the room-wide tier degrades (coordinated codec switching)
 
 ## Federation Topology
 
@@ -348,7 +382,7 @@ Used for 49 of every 50 frames (~1s cycle). Saves 8 bytes per packet (67% header
   [session_id: 2][len: u16][payload: len]  x count
 ```
 
-Packs multiple session packets into one QUIC datagram. Maximum 10 entries or 1200 bytes, flushed every 5ms.
+Packs multiple session packets into one QUIC datagram. Maximum 10 entries or PMTUD-discovered MTU (starts at 1200, grows to ~1452 on Ethernet), flushed every 5ms.
 
 ### QualityReport (4 bytes, optional trailer)
 
@@ -360,6 +394,40 @@ Byte 3: bitrate_cap_kbps (0-255 kbps)
 ```
 
 Appended to a media packet when the Q flag is set in the MediaHeader.
+
+## Path MTU Discovery
+
+Quinn's PLPMTUD is enabled with:
+- `initial_mtu`: 1200 bytes (QUIC minimum, always safe)
+- `upper_bound`: 1452 bytes (Ethernet minus IP/UDP/QUIC headers)
+- `interval`: 300s (re-probe every 5 minutes)
+- `black_hole_cooldown`: 30s (faster retry on lossy links)
+
+The discovered MTU is exposed via `QuinnPathSnapshot::current_mtu` and used by:
+- `TrunkedForwarder`: refreshes `max_bytes` on every send to fill larger datagrams
+- Future video framer: larger MTU = fewer application-layer fragments per frame
+
+## Continuous DRED Tuning
+
+Instead of locking DRED duration to 3 discrete quality tiers, the `DredTuner` (in `wzp-proto::dred_tuner`) maps live path quality to a continuous DRED duration:
+
+| Input | Source | Update Rate |
+|-------|--------|-------------|
+| Loss % | `QuinnPathSnapshot::loss_pct` (from quinn ACK frames) | Every 25 packets (~500ms) |
+| RTT ms | `QuinnPathSnapshot::rtt_ms` (quinn congestion controller) | Every 25 packets |
+| Jitter ms | `PathMonitor::jitter_ms` (EWMA of RTT variance) | Every 25 packets |
+
+### Mapping Logic
+
+- **Baseline**: codec-tier default (Studio=100ms, Good=200ms, Degraded=500ms)
+- **Ceiling**: codec-tier max (Studio=300ms, Good=500ms, Degraded=1040ms)
+- **Continuous**: linear interpolation between baseline and ceiling based on loss (0%->baseline, 40%->ceiling)
+- **RTT phantom loss**: high RTT (>200ms) adds phantom loss contribution to keep DRED generous
+- **Jitter spike**: >30% EWMA spike pre-emptively boosts to ceiling for ~5s cooldown
+
+### Output
+
+`DredTuning { dred_frames: u8, expected_loss_pct: u8 }` -> fed to `CallEncoder::apply_dred_tuning()` -> `OpusEncoder::set_dred_duration()` + `set_expected_loss()`
 
 ## Signal Message Handshake Flow
 

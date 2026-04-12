@@ -196,3 +196,19 @@ Implementation strategy: build for P2P first (simpler, 2 parties), then wrap the
 | 4 | Upgrade proposal + negotiation protocol | 2 days |
 | 5 | P2P quality adaptation (direct observation) | 1 day |
 | 6 | Per-participant asymmetric encoding (Option 2) | 1 day |
+
+## Implementation Status (2026-04-12)
+
+Phases 1-2 are now implemented:
+
+### What was built
+
+- **`QualityDirective` signal** (`crates/wzp-proto/src/packet.rs`): New `SignalMessage` variant with `recommended_profile` and optional `reason`
+- **`ParticipantQuality`** (`crates/wzp-relay/src/room.rs`): Per-participant quality tracking using `AdaptiveQualityController`, created on join, removed on leave
+- **Weakest-link broadcast**: `observe_quality()` method computes room-wide worst tier, broadcasts `QualityDirective` to all participants when tier changes
+- **Desktop engine handling** (`desktop/src-tauri/src/engine.rs`): `AdaptiveQualityController` in recv task, `pending_profile` AtomicU8 bridge to send task, auto-mode profile switching
+
+### Phases 3-4 remaining
+
+- Phase 3: Client-side handling of `QualityDirective` (reacting to relay-pushed profile)
+- Phase 4: Upgrade proposal/negotiation protocol for quality recovery

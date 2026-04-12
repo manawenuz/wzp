@@ -2,10 +2,16 @@
 //!
 //! Tracks packet loss (via sequence number gaps), RTT, jitter, and bandwidth.
 
+use std::collections::VecDeque;
+
 use wzp_proto::PathQuality;
 
 /// EWMA smoothing factor.
 const ALPHA: f64 = 0.1;
+
+/// Maximum number of RTT samples in the jitter variance sliding window.
+/// At ~50 packets/sec (20 ms frame), 10 samples ≈ 200 ms.
+const JITTER_VARIANCE_WINDOW_SIZE: usize = 10;
 
 /// Monitors network path quality metrics.
 pub struct PathMonitor {
@@ -31,6 +37,8 @@ pub struct PathMonitor {
     last_rtt_ms: Option<f64>,
     /// Whether we have any observations yet.
     initialized: bool,
+    /// Sliding window of recent RTT samples for variance calculation.
+    rtt_window: VecDeque<f64>,
 }
 
 impl PathMonitor {
@@ -51,6 +59,7 @@ impl PathMonitor {
             total_received: 0,
             last_rtt_ms: None,
             initialized: false,
+            rtt_window: VecDeque::with_capacity(JITTER_VARIANCE_WINDOW_SIZE),
         }
     }
 
@@ -122,6 +131,12 @@ impl PathMonitor {
         } else {
             self.rtt_ewma = ALPHA * rtt + (1.0 - ALPHA) * self.rtt_ewma;
         }
+
+        // Maintain sliding window for variance calculation
+        if self.rtt_window.len() >= JITTER_VARIANCE_WINDOW_SIZE {
+            self.rtt_window.pop_front();
+        }
+        self.rtt_window.push_back(rtt);
     }
 
     /// Get the current estimated path quality.
@@ -153,6 +168,20 @@ impl PathMonitor {
             }
         }
         0
+    }
+
+    /// Compute the jitter (RTT standard deviation) over the sliding window.
+    ///
+    /// Returns the standard deviation in milliseconds, or 0.0 if insufficient
+    /// samples. Used by `DredTuner` for spike detection.
+    pub fn jitter_variance_ms(&self) -> f64 {
+        let n = self.rtt_window.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mean = self.rtt_window.iter().sum::<f64>() / n as f64;
+        let var = self.rtt_window.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n as f64;
+        var.sqrt()
     }
 
     /// Detect whether a network handoff likely occurred.

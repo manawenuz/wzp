@@ -22,6 +22,7 @@ set -euo pipefail
 #   ./scripts/build.sh --init                First-time setup (clone + Docker image)
 #   ./scripts/build.sh --install             Download APK + adb install locally
 #   ./scripts/build.sh --release             Release APK (not debug)
+#   ./scripts/build.sh --android64          Release arm64 APK (shorthand for --android --release)
 # =============================================================================
 
 NTFY_TOPIC="https://ntfy.sh/wzp"
@@ -48,6 +49,7 @@ while [ $# -gt 0 ]; do
         --install)  DO_INSTALL=1 ;;
         --init)     DO_INIT=1 ;;
         --android)  BUILD_ANDROID=1; BUILD_LINUX=0 ;;
+        --android64) BUILD_ANDROID=1; BUILD_LINUX=0; BUILD_RELEASE=1; BRANCH="main" ;;
         --linux)    BUILD_ANDROID=0; BUILD_LINUX=1 ;;
         --all)      BUILD_ANDROID=1; BUILD_LINUX=1 ;;
         --release)  BUILD_RELEASE=1 ;;
