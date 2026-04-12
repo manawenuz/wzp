@@ -327,8 +327,46 @@ for ARCH in $ARCHS; do
         BUILT_APK=$(find gen/android -name "*.apk" -type f 2>/dev/null | sort -t/ -k1 | tail -1)
     fi
     if [ -n "$BUILT_APK" ]; then
-        cp "$BUILT_APK" "$APK_OUTPUT_DIR/wzp-tauri-${ARCH}.apk"
-        echo ">>> $ARCH APK: $(ls -lh "$APK_OUTPUT_DIR/wzp-tauri-${ARCH}.apk" | awk "{print \$5}")"
+        OUT_APK="$APK_OUTPUT_DIR/wzp-tauri-${ARCH}.apk"
+        cp "$BUILT_APK" "$OUT_APK"
+
+        # ─── Sign release APKs with the project keystore ─────────────
+        # Release builds are unsigned by default. Sign with the release
+        # keystore (checked into the repo at android/keystore/) so the
+        # APK can be installed on real devices.
+        # Pick keystore + credentials (release preferred, debug fallback)
+        KS_RELEASE="/build/source/android/keystore/wzp-release.jks"
+        KS_DEBUG="/build/source/android/keystore/wzp-debug.jks"
+        if [ -f "$KS_RELEASE" ]; then
+            KEYSTORE="$KS_RELEASE"; KS_PASS="wzphone2024"; KS_ALIAS="wzp-release"
+        elif [ -f "$KS_DEBUG" ]; then
+            KEYSTORE="$KS_DEBUG"; KS_PASS="android"; KS_ALIAS="wzp-debug"
+        else
+            KEYSTORE=""
+        fi
+        if [ -n "$KEYSTORE" ]; then
+            ZIPALIGN=$(find "$ANDROID_HOME" -name zipalign -type f 2>/dev/null | head -1)
+            APKSIGNER=$(find "$ANDROID_HOME" -name apksigner -type f 2>/dev/null | head -1)
+            if [ -n "$ZIPALIGN" ] && [ -n "$APKSIGNER" ]; then
+                echo ">>> Signing $ARCH APK with $(basename "$KEYSTORE")..."
+                ALIGNED="$APK_OUTPUT_DIR/wzp-tauri-${ARCH}-aligned.apk"
+                "$ZIPALIGN" -f 4 "$OUT_APK" "$ALIGNED"
+                "$APKSIGNER" sign \
+                    --ks "$KEYSTORE" \
+                    --ks-pass "pass:$KS_PASS" \
+                    --ks-key-alias "$KS_ALIAS" \
+                    --key-pass "pass:$KS_PASS" \
+                    "$ALIGNED"
+                mv "$ALIGNED" "$OUT_APK"
+                echo ">>> Signed: $(ls -lh "$OUT_APK" | awk "{print \$5}")"
+            else
+                echo ">>> WARNING: zipalign/apksigner not found — APK is unsigned"
+            fi
+        else
+            echo ">>> WARNING: no keystore found — APK is unsigned"
+        fi
+
+        echo ">>> $ARCH APK: $(ls -lh "$OUT_APK" | awk "{print \$5}")"
     fi
 
     # Restore hidden arches
