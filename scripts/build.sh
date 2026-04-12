@@ -195,6 +195,8 @@ fi
 # ── Tauri Android APK ──────────────────────────────────────────────────
 if [ "\$BUILD_ANDROID" = "1" ]; then
     notify "WZP [\$SERVER_TAG] Tauri Android build STARTED [\$BRANCH @ \$GIT_HASH] — \$GIT_MSG"
+    echo ">>> Cleaning stale APKs from prior builds..."
+    find "\$BASE_DIR/data/source/desktop/src-tauri/gen/android" -name "*.apk" -type f -delete 2>/dev/null || true
     echo ">>> Building Tauri Android APK..."
 
     PROFILE_FLAG="--debug"
@@ -254,7 +256,14 @@ echo "APK_BUILT"
 '
 
     echo ">>> Uploading APK..."
-    APK=\$(find "\$BASE_DIR/data/source/desktop/src-tauri/gen/android" -name "*.apk" -type f 2>/dev/null | head -1)
+    # Clean stale APKs from prior builds so find doesn't pick an old
+    # debug APK over the fresh release one (or vice versa).
+    find "\$BASE_DIR/data/source/desktop/src-tauri/gen/android" -name "*.apk" -type f \
+        ! -newer "\$BASE_DIR/data/source/desktop/src-tauri/gen/android/app/build/outputs" \
+        -delete 2>/dev/null || true
+    # Prefer release APK if it exists, else fall back to debug.
+    APK=\$(find "\$BASE_DIR/data/source/desktop/src-tauri/gen/android" -name "*release*.apk" -type f 2>/dev/null | head -1)
+    [ -z "\$APK" ] && APK=\$(find "\$BASE_DIR/data/source/desktop/src-tauri/gen/android" -name "*.apk" -type f 2>/dev/null | head -1)
     if [ -n "\$APK" ]; then
         APK_SIZE=\$(du -h "\$APK" | cut -f1)
         URL=\$(upload_file "\$APK")
