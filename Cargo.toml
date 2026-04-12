@@ -32,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 
 # Transport
 quinn = "0.11"
+socket2 = "0.5"
 
 # FEC
 raptorq = "2"

@@ -358,9 +358,9 @@ async fn connect(
     // own_reflex_addr, unparseable addrs, equal addrs), we skip
     // the race entirely and fall back to the pure-relay path —
     // identical to Phase 0 behavior.
-    let (own_reflex_addr, signal_endpoint_for_race) = {
-        let sig = state.signal.lock().await;
-        (sig.own_reflex_addr.clone(), sig.endpoint.clone())
+    let (own_reflex_addr, signal_endpoint_for_race, ipv6_endpoint_for_race) = {
+        let mut sig = state.signal.lock().await;
+        (sig.own_reflex_addr.clone(), sig.endpoint.clone(), sig.ipv6_endpoint.take())
     };
     let peer_addr_parsed: Option<std::net::SocketAddr> = peer_direct_addr
         .as_deref()
@@ -424,6 +424,7 @@ async fn connect(
                     room_sni,
                     call_sni,
                     signal_endpoint_for_race.clone(),
+                    ipv6_endpoint_for_race.clone(),
                 )
                 .await
                 {
@@ -765,6 +766,10 @@ struct SignalState {
     /// silently drop packets from a second quinn::Endpoint to the same
     /// relay, so every call after register_signal MUST share this socket.
     endpoint: Option<wzp_transport::Endpoint>,
+    /// Phase 7: per-call IPv6 endpoint with IPV6_V6ONLY=1 for
+    /// dual-stack P2P. Created at place_call/answer_call time,
+    /// consumed by the connect command's dual_path::race.
+    ipv6_endpoint: Option<wzp_transport::Endpoint>,
     fingerprint: String,
     signal_status: String,
     incoming_call_id: Option<String>,
@@ -859,6 +864,7 @@ async fn internal_deregister(
         let _ = t.close().await;
     }
     sig.endpoint = None;
+    sig.ipv6_endpoint = None;
     sig.signal_status = "idle".into();
     sig.incoming_call_id = None;
     sig.incoming_caller_fp = None;
@@ -1043,7 +1049,7 @@ fn do_register_signal(
                 Ok(Some(SignalMessage::Hangup { reason })) => {
                     tracing::info!(?reason, "signal: Hangup");
                     emit_call_debug(&app_clone, "recv:Hangup", serde_json::json!({ "reason": format!("{:?}", reason) }));
-                    let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None;
+                    let mut sig = signal_state.lock().await; sig.signal_status = "registered".into(); sig.incoming_call_id = None; sig.ipv6_endpoint = None;
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
                 }
                 Ok(Some(SignalMessage::MediaPathReport { call_id, direct_ok, race_winner })) => {
@@ -1314,21 +1320,37 @@ async fn place_call(
         emit_call_debug(&app, "place_call:reflect_query_none", serde_json::json!({}));
     }
 
-    // Phase 5.5: gather LAN host candidates using the signal
-    // endpoint's bound port so incoming dials land on the same
-    // socket that's already listening.
+    // Phase 5.5 + 7: gather LAN host candidates. Create a
+    // per-call IPv6 endpoint so we can advertise v6 candidates
+    // with the correct port.
     let caller_local_addrs: Vec<String> = {
-        let sig = state.signal.lock().await;
-        sig.endpoint
+        let mut sig = state.signal.lock().await;
+        let v4_port = sig.endpoint
             .as_ref()
             .and_then(|ep| ep.local_addr().ok())
-            .map(|la| {
-                wzp_client::reflect::local_host_candidates(la.port())
-                    .into_iter()
-                    .map(|a| a.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map(|la| la.port())
+            .unwrap_or(0);
+
+        // Phase 7: create IPv6 endpoint, trying same port as v4
+        let (sc, _) = wzp_transport::server_config();
+        let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
+        let v6_port = v6_ep.as_ref()
+            .and_then(|ep| ep.local_addr().ok())
+            .map(|a| a.port());
+        if let Some(ref ep) = v6_ep {
+            tracing::info!(
+                v4_port,
+                v6_port,
+                v6_local = ?ep.local_addr().ok(),
+                "place_call: IPv6 endpoint created for dual-stack P2P"
+            );
+        }
+        sig.ipv6_endpoint = v6_ep;
+
+        wzp_client::reflect::local_host_candidates(v4_port, v6_port)
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect()
     };
     emit_call_debug(&app, "place_call:host_candidates", serde_json::json!({
         "local_addrs": caller_local_addrs,
@@ -1416,22 +1438,37 @@ async fn answer_call(
         None
     };
 
-    // Phase 5.5: gather LAN host candidates (AcceptTrusted only
-    // for symmetry with the reflex addr — privacy mode keeps
-    // LAN addrs hidden too).
+    // Phase 5.5 + 7: gather LAN host candidates (AcceptTrusted
+    // only — privacy mode keeps LAN addrs hidden).
     let callee_local_addrs: Vec<String> =
         if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
-            let sig = state.signal.lock().await;
-            sig.endpoint
+            let mut sig = state.signal.lock().await;
+            let v4_port = sig.endpoint
                 .as_ref()
                 .and_then(|ep| ep.local_addr().ok())
-                .map(|la| {
-                    wzp_client::reflect::local_host_candidates(la.port())
-                        .into_iter()
-                        .map(|a| a.to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
+                .map(|la| la.port())
+                .unwrap_or(0);
+
+            // Phase 7: create IPv6 endpoint
+            let (sc, _) = wzp_transport::server_config();
+            let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
+            let v6_port = v6_ep.as_ref()
+                .and_then(|ep| ep.local_addr().ok())
+                .map(|a| a.port());
+            if let Some(ref ep) = v6_ep {
+                tracing::info!(
+                    v4_port,
+                    v6_port,
+                    v6_local = ?ep.local_addr().ok(),
+                    "answer_call: IPv6 endpoint created for dual-stack P2P"
+                );
+            }
+            sig.ipv6_endpoint = v6_ep;
+
+            wzp_client::reflect::local_host_candidates(v4_port, v6_port)
+                .into_iter()
+                .map(|a| a.to_string())
+                .collect()
         } else {
             Vec::new()
         };
@@ -1745,7 +1782,7 @@ pub fn run() {
     let state = Arc::new(AppState {
         engine: Mutex::new(None),
         signal: Arc::new(Mutex::new(SignalState {
-            transport: None, endpoint: None, fingerprint: String::new(), signal_status: "idle".into(),
+            transport: None, endpoint: None, ipv6_endpoint: None, fingerprint: String::new(), signal_status: "idle".into(),
             incoming_call_id: None, incoming_caller_fp: None, incoming_caller_alias: None,
             pending_reflect: None,
             own_reflex_addr: None,

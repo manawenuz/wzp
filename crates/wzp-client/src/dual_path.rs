@@ -131,6 +131,11 @@ pub async fn race(
     // When `None`, falls back to fresh endpoints per role.
     // Used by tests.
     shared_endpoint: Option<wzp_transport::Endpoint>,
+    // Phase 7: dedicated IPv6 endpoint with IPV6_V6ONLY=1.
+    // When `Some`, A-role accepts on both v4+v6, D-role routes
+    // each candidate to its matching-AF endpoint. When `None`,
+    // IPv6 candidates are skipped (IPv4-only, pre-Phase-7).
+    ipv6_endpoint: Option<wzp_transport::Endpoint>,
 ) -> anyhow::Result<RaceResult> {
     // Rustls provider must be installed before any quinn endpoint
     // is created. Install attempt is idempotent.
@@ -187,18 +192,33 @@ pub async fn race(
                 }
             };
             let ep_for_fut = ep.clone();
+            let v6_ep_for_accept = ipv6_endpoint.clone();
             direct_fut = Box::pin(async move {
-                // `wzp_transport::accept` wraps the same
-                // `endpoint.accept().await?.await?` dance we want.
-                // If `ep_for_fut` is the shared signal endpoint,
-                // this pulls the NEXT incoming connection —
-                // normally that's the peer's direct-P2P dial.
-                // Signal recv is done via the signal CONNECTION
-                // (accept_bi), not the endpoint, so no conflict.
-                let conn = wzp_transport::accept(&ep_for_fut)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
-                Ok(QuinnTransport::new(conn))
+                // Phase 7: accept on both IPv4 and IPv6 endpoints.
+                // First incoming connection on either wins.
+                match v6_ep_for_accept {
+                    Some(v6_ep) => {
+                        tracing::debug!("dual_path: A-role accepting on both v4 + v6 endpoints");
+                        tokio::select! {
+                            v4 = wzp_transport::accept(&ep_for_fut) => {
+                                let conn = v4.map_err(|e| anyhow::anyhow!("v4 accept: {e}"))?;
+                                tracing::info!("dual_path: A-role accepted on IPv4 endpoint");
+                                Ok(QuinnTransport::new(conn))
+                            }
+                            v6 = wzp_transport::accept(&v6_ep) => {
+                                let conn = v6.map_err(|e| anyhow::anyhow!("v6 accept: {e}"))?;
+                                tracing::info!("dual_path: A-role accepted on IPv6 endpoint");
+                                Ok(QuinnTransport::new(conn))
+                            }
+                        }
+                    }
+                    None => {
+                        let conn = wzp_transport::accept(&ep_for_fut)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
+                        Ok(QuinnTransport::new(conn))
+                    }
+                }
             });
             direct_ep = ep;
         }
@@ -231,6 +251,7 @@ pub async fn race(
                 }
             };
             let ep_for_fut = ep.clone();
+            let v6_ep_for_dial = ipv6_endpoint.clone();
             let dial_order = peer_candidates.dial_order();
             let sni = call_sni.clone();
             direct_fut = Box::pin(async move {
@@ -250,10 +271,26 @@ pub async fn race(
                     // when ALL have failed do we return Err.
                     let mut set = tokio::task::JoinSet::new();
                     for (idx, candidate) in dial_order.iter().enumerate() {
-                        let ep = ep_for_fut.clone();
+                        // Phase 7: route each candidate to the
+                        // endpoint matching its address family.
+                        let candidate = *candidate;
+                        let ep = if candidate.is_ipv6() {
+                            match &v6_ep_for_dial {
+                                Some(v6) => v6.clone(),
+                                None => {
+                                    tracing::debug!(
+                                        %candidate,
+                                        candidate_idx = idx,
+                                        "dual_path: skipping IPv6 candidate, no v6 endpoint"
+                                    );
+                                    continue;
+                                }
+                            }
+                        } else {
+                            ep_for_fut.clone()
+                        };
                         let client_cfg = wzp_transport::client_config();
                         let sni = sni.clone();
-                        let candidate = *candidate;
                         set.spawn(async move {
                             let result = wzp_transport::connect(
                                 &ep,
@@ -474,7 +511,7 @@ pub async fn race(
         return Err(anyhow::anyhow!("both paths failed: no media transport available"));
     }
 
-    let _ = (direct_ep, relay_ep);
+    let _ = (direct_ep, relay_ep, ipv6_endpoint);
 
     Ok(RaceResult {
         direct_transport: direct_result

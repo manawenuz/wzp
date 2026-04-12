@@ -292,7 +292,7 @@ pub async fn detect_nat_type(
 /// Safe to call from any thread; no I/O, no async. The `if-addrs`
 /// crate reads the kernel's interface table via a single
 /// getifaddrs(3) syscall.
-pub fn local_host_candidates(port: u16) -> Vec<SocketAddr> {
+pub fn local_host_candidates(v4_port: u16, v6_port: Option<u16>) -> Vec<SocketAddr> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
     };
@@ -311,28 +311,35 @@ pub fn local_host_candidates(port: u16) -> Vec<SocketAddr> {
                 // Skip public v4 because the reflex addr already
                 // covers that path.
                 if v4.is_private() {
-                    out.push(SocketAddr::new(std::net::IpAddr::V4(v4), port));
+                    out.push(SocketAddr::new(std::net::IpAddr::V4(v4), v4_port));
                 } else if v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40 {
                     // 100.64/10 CGNAT — rare but valid if two
                     // phones are on the same CGNAT-hairpinned
                     // carrier LAN (some hotspot setups).
-                    out.push(SocketAddr::new(std::net::IpAddr::V4(v4), port));
+                    out.push(SocketAddr::new(std::net::IpAddr::V4(v4), v4_port));
                 }
             }
-            std::net::IpAddr::V6(_v6) => {
-                // IPv6 host candidates are disabled until we add
-                // a dedicated IPv6 socket alongside the IPv4 one.
-                // Android's IPV6_V6ONLY=1 default on some kernels
-                // makes [::]:0 dual-stack unreliable — IPv4 dials
-                // silently fail. Advertising IPv6 addrs from an
-                // IPv4-only socket wastes JoinSet slots and adds
-                // timeout delays before the working IPv4 candidate
-                // gets picked.
-                //
-                // TODO: Phase 7 — create a second quinn::Endpoint
-                // on [::]:0 for IPv6-only dials, run them alongside
-                // the IPv4 JoinSet. This gives true dual-stack ICE
-                // without the v4-mapped-address fragility.
+            std::net::IpAddr::V6(v6) => {
+                // Phase 7: IPv6 host candidates via dedicated
+                // IPv6 socket. When v6_port is None, no IPv6
+                // endpoint exists — skip silently.
+                let Some(port) = v6_port else { continue };
+                if v6.is_loopback() || v6.is_unspecified() {
+                    continue;
+                }
+                // fe80::/10 link-local — needs scope ID, not
+                // routable across interfaces.
+                if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                    continue;
+                }
+                // Accept global unicast (2000::/3) and
+                // unique-local (fc00::/7).
+                let first_seg = v6.segments()[0];
+                let is_global = (first_seg & 0xe000) == 0x2000;
+                let is_ula = (first_seg & 0xfe00) == 0xfc00;
+                if is_global || is_ula {
+                    out.push(SocketAddr::new(std::net::IpAddr::V6(v6), port));
+                }
             }
         }
     }
