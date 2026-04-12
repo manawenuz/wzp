@@ -185,10 +185,11 @@ pub fn is_bluetooth_sco_on() -> Result<bool, String> {
         .map_err(|e| format!("isBluetoothScoOn: {e}"))
 }
 
-/// Check whether a Bluetooth SCO-capable device is currently connected.
+/// Check whether a Bluetooth audio device is currently connected.
 ///
 /// Iterates `AudioManager.getDevices(GET_DEVICES_OUTPUTS)` and looks for
-/// `TYPE_BLUETOOTH_SCO` (7).
+/// any Bluetooth device type. Many headsets only register as A2DP until
+/// SCO is explicitly started, so we check for both SCO and A2DP types.
 pub fn is_bluetooth_available() -> Result<bool, String> {
     let (vm, activity) = jvm_and_activity()?;
     let mut env = vm
@@ -220,8 +221,9 @@ pub fn is_bluetooth_available() -> Result<bool, String> {
             .call_method(&device, "getType", "()I", &[])
             .and_then(|v| v.i())
             .unwrap_or(0);
-        // TYPE_BLUETOOTH_SCO = 7
-        if device_type == 7 {
+        // TYPE_BLUETOOTH_SCO = 7, TYPE_BLUETOOTH_A2DP = 8
+        if device_type == 7 || device_type == 8 {
+            tracing::info!(device_type, idx = i, "is_bluetooth_available: found BT device");
             return Ok(true);
         }
     }

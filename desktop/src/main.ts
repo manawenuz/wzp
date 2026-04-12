@@ -939,15 +939,17 @@ async function cycleAudioRoute() {
     const idx = routes.indexOf(currentAudioRoute);
     const next = routes[(idx + 1) % routes.length];
 
-    // Tear down current route
+    // Tear down current route, then activate next.
+    // start_bluetooth_sco() already calls setSpeakerphoneOn(false)
+    // internally, so we skip the separate speakerphone toggle when
+    // transitioning to BT to avoid a redundant Oboe restart.
     if (currentAudioRoute === "bluetooth") {
       await invoke("set_bluetooth_sco", { on: false });
     }
-    // Activate next route
     if (next === "speaker") {
       await invoke("set_speakerphone", { on: true });
     } else if (next === "bluetooth") {
-      await invoke("set_speakerphone", { on: false });
+      // BT start handles speaker-off internally + waits for SCO link
       await invoke("set_bluetooth_sco", { on: true });
     } else {
       // earpiece — turn everything off

@@ -779,6 +779,10 @@ async fn is_speakerphone_on() -> Result<bool, String> {
 
 /// Enable or disable Bluetooth SCO audio routing. Like speakerphone toggling,
 /// this requires an Oboe stream restart so AAudio picks up the new route.
+///
+/// `startBluetoothSco()` is asynchronous — the SCO link takes 500ms-2s to
+/// establish. We poll `isBluetoothScoOn()` up to 3 seconds before restarting
+/// Oboe, so the streams open against the BT device rather than earpiece.
 #[tauri::command]
 #[allow(unused_variables)]
 async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
@@ -786,6 +790,21 @@ async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
     {
         if on {
             android_audio::start_bluetooth_sco()?;
+            // Wait for SCO link to actually connect before restarting Oboe.
+            // startBluetoothSco() is async — jumping straight to Oboe restart
+            // would open streams against earpiece, not the BT device.
+            let mut connected = false;
+            for i in 0..30 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if android_audio::is_bluetooth_sco_on().unwrap_or(false) {
+                    tracing::info!(polls = i + 1, "set_bluetooth_sco: SCO connected");
+                    connected = true;
+                    break;
+                }
+            }
+            if !connected {
+                tracing::warn!("set_bluetooth_sco: SCO did not connect within 3s, proceeding anyway");
+            }
         } else {
             android_audio::stop_bluetooth_sco()?;
         }
