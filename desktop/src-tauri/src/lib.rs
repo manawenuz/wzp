@@ -503,29 +503,13 @@ async fn connect(
                                     peer_ok
                                 }
                                 _ => {
-                                    // Timeout — the peer's report
-                                    // didn't arrive. This happens when
-                                    // peers are on different relays
-                                    // (no federation for MediaPathReport)
-                                    // or the peer is on an old build.
-                                    //
-                                    // If OUR direct path succeeded and
-                                    // the transport is still alive,
-                                    // trust it — the timeout is a relay
-                                    // forwarding issue, not a direct
-                                    // path failure.
+                                    // Timeout or channel error — peer
+                                    // may be on an old build without
+                                    // Phase 6. Fall back to relay.
+                                    emit_call_debug(&app, "connect:peer_report_timeout", serde_json::json!({}));
                                     let mut sig = state.signal.lock().await;
                                     sig.pending_path_report = None;
-                                    let trust_direct = local_direct_ok
-                                        && race_result.direct_transport.as_ref()
-                                            .map(|t| t.connection().close_reason().is_none())
-                                            .unwrap_or(false);
-                                    emit_call_debug(&app, "connect:peer_report_timeout", serde_json::json!({
-                                        "local_direct_ok": local_direct_ok,
-                                        "direct_transport_alive": trust_direct,
-                                        "fallback": if trust_direct { "Direct" } else { "Relay" },
-                                    }));
-                                    trust_direct
+                                    false
                                 }
                             }
                         };
