@@ -73,7 +73,7 @@ if [ "$USE_ALT" = "1" ]; then
     GIT_ORIGIN="ssh://git@git.tbs.amn.gg:2222/manawenuz/wzp.git"
     # Alt server uploads directly (no .env file)
     UPLOAD_MODE="direct"
-    PASTE_URL="http://paste.tbs.amn.gg"
+    PASTE_URL="https://paste.tbs.manko.yoga"
     PASTE_AUTH="X2j6szIQaoJGaxZjLkpl3A8IX9/mTkDgdhhgyYFcpaU="
 else
     SERVER_TAG="PRI"

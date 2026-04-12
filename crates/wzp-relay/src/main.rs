@@ -688,18 +688,28 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // Phase 6: MediaPathReport forwarded across
-                    // federation — deliver to the local participant
-                    // of the matching call.
+                    // federation — deliver to the LOCAL participant.
+                    // The report comes from the remote side, so we
+                    // deliver to whichever participant is local. In
+                    // the cross-relay case, one is local and one is
+                    // remote. Try both — send_to is a no-op if the
+                    // target isn't connected to this relay.
                     SignalMessage::MediaPathReport { ref call_id, .. } => {
-                        // Deliver to the local caller (the cross-relay
-                        // dispatcher only handles calls where the caller
-                        // is local and the callee is remote, or vice versa)
-                        let caller_fp = {
+                        let (caller_fp, callee_fp) = {
                             let reg = call_registry_d.lock().await;
-                            reg.get(call_id).map(|c| c.caller_fingerprint.clone())
+                            match reg.get(call_id) {
+                                Some(c) => (
+                                    Some(c.caller_fingerprint.clone()),
+                                    Some(c.callee_fingerprint.clone()),
+                                ),
+                                None => (None, None),
+                            }
                         };
+                        let hub = signal_hub_d.lock().await;
                         if let Some(fp) = caller_fp {
-                            let hub = signal_hub_d.lock().await;
+                            let _ = hub.send_to(&fp, &inner).await;
+                        }
+                        if let Some(fp) = callee_fp {
                             let _ = hub.send_to(&fp, &inner).await;
                         }
                     }
@@ -1315,14 +1325,43 @@ async fn main() -> anyhow::Result<()> {
                                 // call peer so both sides can negotiate
                                 // the media path before committing.
                                 SignalMessage::MediaPathReport { ref call_id, .. } => {
-                                    let peer_fp = {
+                                    // Look up peer AND check if this is a
+                                    // cross-relay call (same pattern as
+                                    // DirectCallAnswer).
+                                    let (peer_fp, peer_relay_fp) = {
                                         let reg = call_registry.lock().await;
-                                        reg.peer_fingerprint(call_id, &client_fp)
-                                            .map(|s| s.to_string())
+                                        match reg.get(call_id) {
+                                            Some(c) => (
+                                                reg.peer_fingerprint(call_id, &client_fp)
+                                                    .map(|s| s.to_string()),
+                                                c.peer_relay_fp.clone(),
+                                            ),
+                                            None => (None, None),
+                                        }
                                     };
+
                                     if let Some(fp) = peer_fp {
-                                        let hub = signal_hub.lock().await;
-                                        let _ = hub.send_to(&fp, &msg).await;
+                                        if let Some(ref origin_fp) = peer_relay_fp {
+                                            // Cross-relay: wrap and forward
+                                            if let Some(ref fm) = federation_mgr {
+                                                let forward = SignalMessage::FederatedSignalForward {
+                                                    inner: Box::new(msg.clone()),
+                                                    origin_relay_fp: tls_fp.clone(),
+                                                };
+                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                    warn!(
+                                                        %call_id,
+                                                        %origin_fp,
+                                                        error = %e,
+                                                        "cross-relay MediaPathReport forward failed"
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            // Local call
+                                            let hub = signal_hub.lock().await;
+                                            let _ = hub.send_to(&fp, &msg).await;
+                                        }
                                     }
                                 }
 
