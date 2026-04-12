@@ -371,7 +371,65 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: width 0.1s ease-out;
 }
 
-/* ── Participants ── */
+/* ── Direct call phone-style layout ── */
+.direct-call-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 32px 16px;
+  gap: 8px;
+}
+.dc-identicon {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  overflow: hidden;
+  margin-bottom: 12px;
+  box-shadow: 0 0 24px rgba(74, 222, 128, 0.15);
+}
+.dc-identicon canvas,
+.dc-identicon svg,
+.dc-identicon img {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+.dc-name {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+.dc-fp {
+  font-size: 11px;
+  font-family: ui-monospace, Menlo, Monaco, 'Courier New', monospace;
+  color: var(--text-dim);
+  text-align: center;
+  word-break: break-all;
+  max-width: 280px;
+}
+.dc-badge {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  background: rgba(74, 222, 128, 0.12);
+  color: var(--green);
+}
+.dc-badge.relay {
+  background: rgba(96, 165, 250, 0.12);
+  color: #60a5fa;
+}
+.dc-badge.connecting {
+  background: rgba(250, 204, 21, 0.12);
+  color: var(--yellow);
+}
+
+/* ── Participants (group call layout) ── */
 .participants {
   background: var(--surface);
   border-radius: var(--radius);

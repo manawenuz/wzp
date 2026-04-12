@@ -169,6 +169,11 @@ const callTimer = document.getElementById("call-timer")!;
 const callStatus = document.getElementById("call-status")!;
 const levelBar = document.getElementById("level-bar")!;
 const participantsDiv = document.getElementById("participants")!;
+const directCallView = document.getElementById("direct-call-view")!;
+const dcIdenticon = document.getElementById("dc-identicon")!;
+const dcName = document.getElementById("dc-name")!;
+const dcFp = document.getElementById("dc-fp")!;
+const dcBadge = document.getElementById("dc-badge")!;
 const micBtn = document.getElementById("mic-btn")!;
 const micIcon = document.getElementById("mic-icon")!;
 const spkBtn = document.getElementById("spk-btn")!;
@@ -846,7 +851,25 @@ let directCallPeer: { fingerprint: string; alias: string | null } | null = null;
 function showCallScreen() {
   connectScreen.classList.add("hidden");
   callScreen.classList.remove("hidden");
-  roomName.textContent = roomInput.value;
+
+  // Direct call → phone-style layout; room call → group layout.
+  if (directCallPeer) {
+    const fp = directCallPeer.fingerprint || "";
+    const alias = directCallPeer.alias;
+    roomName.textContent = alias || fp.substring(0, 16) || "Direct Call";
+    dcName.textContent = alias || "Unknown";
+    dcFp.textContent = fp;
+    dcIdenticon.innerHTML = "";
+    dcIdenticon.appendChild(createIdenticonEl(fp || "?", 96, true));
+    dcBadge.textContent = "Connecting...";
+    dcBadge.className = "dc-badge connecting";
+    directCallView.classList.remove("hidden");
+    participantsDiv.classList.add("hidden");
+  } else {
+    roomName.textContent = roomInput.value;
+    directCallView.classList.add("hidden");
+    participantsDiv.classList.remove("hidden");
+  }
   callStatus.className = "status-dot";
   statusInterval = window.setInterval(pollStatus, 250);
   // Sync the Speaker/Earpiece label with the OS state (Android only; on
@@ -984,23 +1007,38 @@ async function pollStatus() {
     const pct = rms > 0 ? Math.min(100, (Math.log(rms) / Math.log(32767)) * 100) : 0;
     levelBar.style.width = `${pct}%`;
 
-    // Participants grouped by relay. For direct P2P calls the
-    // relay never sends a RoomUpdate (neither peer joins the
-    // relay's media room) so st.participants is empty. If we
-    // have a directCallPeer from the signal plane, inject a
-    // synthetic entry so the UI shows who we're talking to.
-    const displayParticipants =
-      st.participants.length === 0 && directCallPeer
-        ? [{ ...directCallPeer, relay_label: "P2P Direct" }]
-        : st.participants;
+    // Direct-call phone-style layout: update the connection
+    // badge from the call-debug buffer or from participants.
+    if (directCallPeer) {
+      // Check the debug buffer for the race result to label
+      // the connection type (P2P Direct vs Relay).
+      const raceWon = callDebugBuffer.find((e) => e.step === "connect:dual_path_race_won");
+      const engineOk = callDebugBuffer.find((e) => e.step === "connect:call_engine_started");
+      if (engineOk) {
+        if (raceWon?.details?.path === "Direct") {
+          dcBadge.textContent = "P2P Direct";
+          dcBadge.className = "dc-badge";
+        } else {
+          dcBadge.textContent = "Via Relay";
+          dcBadge.className = "dc-badge relay";
+        }
+      }
+      // Skip the group participant rendering — direct-call
+      // view is already visible and showing the peer.
+    }
 
-    if (displayParticipants.length === 0) {
+    // Participants grouped by relay (group/room calls only).
+    // Hidden when directCallPeer is set — the phone-style
+    // layout above handles the 1:1 display.
+    if (directCallPeer) {
+      // no-op: direct call view handles it
+    } else if (st.participants.length === 0) {
       participantsDiv.innerHTML = '<div class="participants-empty">Waiting for participants...</div>';
     } else {
       participantsDiv.innerHTML = "";
       // Group by relay_label (null = this relay)
       const groups: Record<string, typeof st.participants> = {};
-      displayParticipants.forEach((p: any) => {
+      st.participants.forEach((p: any) => {
         const relay = p.relay_label || "This Relay";
         if (!groups[relay]) groups[relay] = [];
         groups[relay].push(p);

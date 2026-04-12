@@ -111,6 +111,16 @@
         <div class="level-meter">
           <div id="level-bar" class="level-bar-fill"></div>
         </div>
+        <!-- Direct-call phone layout — shown instead of the group
+             participant list when directCallPeer is set. Centered
+             identicon, name, fp, connection badge. Hidden for
+             room calls (directCallPeer == null). -->
+        <div id="direct-call-view" class="direct-call-view hidden">
+          <div id="dc-identicon" class="dc-identicon"></div>
+          <div id="dc-name" class="dc-name">Unknown</div>
+          <div id="dc-fp" class="dc-fp"></div>
+          <div id="dc-badge" class="dc-badge">Connecting...</div>
+        </div>
         <div id="participants" class="participants"></div>
         <div class="controls">
           <button id="mic-btn" class="control-btn" title="Toggle Mic (m)">
