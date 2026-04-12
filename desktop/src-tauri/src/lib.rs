@@ -544,8 +544,21 @@ async fn connect(
                         // it for participant authentication.
                         is_direct_p2p_agreed = use_direct;
                         if use_direct {
+                            // Close losing relay transport so the
+                            // relay sees a clean disconnect instead
+                            // of waiting 30s for idle timeout.
+                            if let Some(loser) = race_result.relay_transport.as_ref() {
+                                loser.connection().close(0u32.into(), b"not-selected");
+                            }
                             race_result.direct_transport
                         } else {
+                            // Close losing direct transport so the
+                            // peer's endpoint doesn't retain a
+                            // phantom connection that pollutes
+                            // future accept() calls.
+                            if let Some(loser) = race_result.direct_transport.as_ref() {
+                                loser.connection().close(0u32.into(), b"not-selected");
+                            }
                             race_result.relay_transport
                         }
                     }
@@ -1358,7 +1371,11 @@ async fn place_call(
             .map(|la| la.port())
             .unwrap_or(0);
 
-        // Phase 7: create IPv6 endpoint, trying same port as v4
+        // Phase 7: create IPv6 endpoint, trying same port as v4.
+        // Close any leftover from a previous call first.
+        if let Some(old) = sig.ipv6_endpoint.take() {
+            old.close(0u32.into(), b"new-call");
+        }
         let (sc, _) = wzp_transport::server_config();
         let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
         let v6_port = v6_ep.as_ref()
@@ -1477,7 +1494,10 @@ async fn answer_call(
                 .map(|la| la.port())
                 .unwrap_or(0);
 
-            // Phase 7: create IPv6 endpoint
+            // Phase 7: create IPv6 endpoint. Close leftover first.
+            if let Some(old) = sig.ipv6_endpoint.take() {
+                old.close(0u32.into(), b"new-call");
+            }
             let (sc, _) = wzp_transport::server_config();
             let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
             let v6_port = v6_ep.as_ref()

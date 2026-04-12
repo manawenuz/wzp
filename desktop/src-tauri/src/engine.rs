@@ -1493,3 +1493,12 @@ impl CallEngine {
         }
     }
 }
+
+impl Drop for CallEngine {
+    fn drop(&mut self) {
+        // Safety net: if stop() was never called (crash, app
+        // backgrounding), signal tasks to exit so they don't
+        // spin on a dropped transport.
+        self.running.store(false, Ordering::SeqCst);
+    }
+}

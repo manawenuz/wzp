@@ -192,43 +192,38 @@ pub async fn race(
                 }
             };
             let ep_for_fut = ep.clone();
-            let v6_ep_for_accept = ipv6_endpoint.clone();
+            // Phase 7: IPv6 accept temporarily disabled (same reason
+            // as dial — IPv6 connections die on datagram send).
+            // Accept on IPv4 shared endpoint only.
+            let _v6_ep_unused = ipv6_endpoint.clone();
             direct_fut = Box::pin(async move {
                 // Accept loop: retry if we get a stale/closed
-                // connection from a previous call. Between rapid
-                // successive calls, quinn's accept queue may
-                // contain connections that the peer has already
-                // dropped. Verify the connection is alive via
-                // max_datagram_size() before returning it.
+                // connection from a previous call. Max 3 retries
+                // to avoid spinning until the race timeout.
+                const MAX_STALE: usize = 3;
+                let mut stale_count: usize = 0;
                 loop {
-                    let conn = match &v6_ep_for_accept {
-                        Some(v6_ep) => {
-                            tokio::select! {
-                                v4 = wzp_transport::accept(&ep_for_fut) => {
-                                    v4.map_err(|e| anyhow::anyhow!("v4 accept: {e}"))?
-                                }
-                                v6 = wzp_transport::accept(v6_ep) => {
-                                    v6.map_err(|e| anyhow::anyhow!("v6 accept: {e}"))?
-                                }
-                            }
-                        }
-                        None => {
-                            wzp_transport::accept(&ep_for_fut)
-                                .await
-                                .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?
-                        }
-                    };
+                    let conn = wzp_transport::accept(&ep_for_fut)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("direct accept: {e}"))?;
 
-                    // Validate the connection is alive. A stale
-                    // connection from a previous call will report
-                    // close_reason = Some(...) immediately.
                     if let Some(reason) = conn.close_reason() {
+                        // Explicitly close so the peer gets a
+                        // close frame instead of idle timeout.
+                        conn.close(0u32.into(), b"stale");
+                        stale_count += 1;
                         tracing::warn!(
                             remote = %conn.remote_address(),
                             stable_id = conn.stable_id(),
+                            stale_count,
                             ?reason,
-                            "dual_path: A-role skipping stale connection, re-accepting"
+                            "dual_path: A-role skipping stale connection"
                         );
+                        if stale_count >= MAX_STALE {
+                            return Err(anyhow::anyhow!(
+                                "A-role: {stale_count} stale connections, aborting"
+                            ));
+                        }
                         continue;
                     }
 
@@ -274,7 +269,7 @@ pub async fn race(
                 }
             };
             let ep_for_fut = ep.clone();
-            let v6_ep_for_dial = ipv6_endpoint.clone();
+            let _v6_ep_for_dial = ipv6_endpoint.clone();
             let dial_order = peer_candidates.dial_order();
             let sni = call_sni.clone();
             direct_fut = Box::pin(async move {
@@ -297,21 +292,22 @@ pub async fn race(
                         // Phase 7: route each candidate to the
                         // endpoint matching its address family.
                         let candidate = *candidate;
-                        let ep = if candidate.is_ipv6() {
-                            match &v6_ep_for_dial {
-                                Some(v6) => v6.clone(),
-                                None => {
-                                    tracing::debug!(
-                                        %candidate,
-                                        candidate_idx = idx,
-                                        "dual_path: skipping IPv6 candidate, no v6 endpoint"
-                                    );
-                                    continue;
-                                }
-                            }
-                        } else {
-                            ep_for_fut.clone()
-                        };
+                        // Phase 7: IPv6 dials temporarily disabled.
+                        // IPv6 QUIC handshakes succeed but the
+                        // connection dies immediately on datagram
+                        // send ("connection lost"). Root cause is
+                        // likely router-level IPv6 UDP filtering.
+                        // Re-enable once IPv6 datagram delivery is
+                        // verified on target networks.
+                        if candidate.is_ipv6() {
+                            tracing::debug!(
+                                %candidate,
+                                candidate_idx = idx,
+                                "dual_path: skipping IPv6 candidate (disabled)"
+                            );
+                            continue;
+                        }
+                        let ep = ep_for_fut.clone();
                         let client_cfg = wzp_transport::client_config();
                         let sni = sni.clone();
                         set.spawn(async move {
