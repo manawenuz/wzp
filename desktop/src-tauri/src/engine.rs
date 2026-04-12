@@ -442,7 +442,7 @@ impl CallEngine {
         #[cfg(target_os = "android")]
         {
             if let Err(e) = crate::android_audio::set_audio_mode_communication() {
-                warn!("set_audio_mode_communication failed: {e}");
+                tracing::warn!("set_audio_mode_communication failed: {e}");
             }
         }
 
