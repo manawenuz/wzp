@@ -1015,10 +1015,10 @@ async function pollStatus() {
     if (directCallPeer) {
       // Check the debug buffer for the race result to label
       // the connection type (P2P Direct vs Relay).
-      const raceWon = callDebugBuffer.find((e) => e.step === "connect:dual_path_race_won");
+      const pathNeg = callDebugBuffer.find((e) => e.step === "connect:path_negotiated");
       const engineOk = callDebugBuffer.find((e) => e.step === "connect:call_engine_started");
       if (engineOk) {
-        if (raceWon?.details?.path === "Direct") {
+        if (pathNeg?.details?.use_direct === true) {
           dcBadge.textContent = "P2P Direct";
           dcBadge.className = "dc-badge";
         } else {
