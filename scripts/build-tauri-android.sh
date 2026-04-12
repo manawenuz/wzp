@@ -348,7 +348,8 @@ ls -lh "$APK_OUTPUT_DIR/"*.apk 2>/dev/null || echo "  (none)"
 '
 
 # ─── Collect and upload APKs ────────────────────────────────────────────
-APK_OUTPUT="$BASE_DIR/data/source/target/apk-output"
+# target/ is mounted from cache, not source
+APK_OUTPUT="$BASE_DIR/data/cache/target/apk-output"
 APK_LIST=$(find "$APK_OUTPUT" -name "wzp-tauri-*.apk" -type f 2>/dev/null | sort)
 
 if [ -z "$APK_LIST" ]; then
