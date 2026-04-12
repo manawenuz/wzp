@@ -342,7 +342,7 @@ impl WzpEngine {
                     Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, .. })) => {
                         info!(call_id = %call_id, mode = ?accept_mode, "signal: call answered");
                     }
-                    Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr })) => {
+                    Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, .. })) => {
                         info!(call_id = %call_id, room = %room, relay = %relay_addr, "signal: call setup");
                         // Connect to media room via the existing start_call mechanism
                         // Store the room info so Kotlin can call startCall with it
