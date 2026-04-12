@@ -755,6 +755,9 @@ pub enum SignalMessage {
         /// the same LAN.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         caller_local_addrs: Vec<String>,
+        /// Build version (git short hash) for debugging.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_build_version: Option<String>,
     },
 
     /// Callee's response to a direct call.
@@ -788,6 +791,9 @@ pub enum SignalMessage {
         /// `callee_reflexive_addr`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         callee_local_addrs: Vec<String>,
+        /// Build version (git short hash) for debugging.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callee_build_version: Option<String>,
     },
 
     /// Relay tells both parties: media room is ready.

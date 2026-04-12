@@ -29,7 +29,7 @@ REMOTE_HOST="SepehrHomeserverdk"
 BASE_DIR="/mnt/storage/manBuilder"
 NTFY_TOPIC="https://ntfy.sh/wzp"
 LOCAL_OUTPUT="target/tauri-android-apk"
-BRANCH="${WZP_BRANCH:-feat/desktop-audio-rewrite}"
+BRANCH="${WZP_BRANCH:-$(git -C "$(dirname "$0")/.." branch --show-current 2>/dev/null || echo "")}"
 SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR"
 
 REBUILD_RUST=0
@@ -49,6 +49,12 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ -z "$BRANCH" ]; then
+    echo "ERROR: could not determine target branch (detached HEAD?). Pass WZP_BRANCH=name."
+    exit 1
+fi
+echo "Target branch: $BRANCH"
 
 log() { echo -e "\033[1;36m>>> $*\033[0m"; }
 ssh_cmd() { ssh -A $SSH_OPTS "$REMOTE_HOST" "$@"; }

@@ -927,7 +927,7 @@ fn do_register_signal(
     let (server_cfg, _cert_der) = wzp_transport::server_config();
     let endpoint = wzp_transport::create_endpoint(bind, Some(server_cfg))
         .map_err(|e| format!("{e}"))?;
-    emit_call_debug(&app, "register_signal:endpoint_created", serde_json::json!({ "bind": bind.to_string() }));
+    emit_call_debug(&app, "register_signal:endpoint_created", serde_json::json!({ "bind": bind.to_string(), "build": GIT_HASH }));
     let conn = wzp_transport::connect(&endpoint, addr, "_signal", wzp_transport::client_config())
         .await
         .map_err(|e| {
@@ -981,13 +981,14 @@ fn do_register_signal(
                     let mut sig = signal_state.lock().await; sig.signal_status = "ringing".into();
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"ringing","call_id":call_id}));
                 }
-                Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, caller_reflexive_addr, .. })) => {
-                    tracing::info!(%call_id, caller = %caller_fingerprint, "signal: DirectCallOffer");
+                Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, caller_reflexive_addr, caller_build_version, .. })) => {
+                    tracing::info!(%call_id, caller = %caller_fingerprint, peer_build = ?caller_build_version, "signal: DirectCallOffer");
                     emit_call_debug(&app_clone, "recv:DirectCallOffer", serde_json::json!({
                         "call_id": call_id,
                         "caller_fp": caller_fingerprint,
                         "caller_alias": caller_alias,
                         "caller_reflexive_addr": caller_reflexive_addr,
+                        "peer_build": caller_build_version,
                     }));
                     let mut sig = signal_state.lock().await; sig.signal_status = "incoming".into();
                     sig.incoming_call_id = Some(call_id.clone()); sig.incoming_caller_fp = Some(caller_fingerprint.clone()); sig.incoming_caller_alias = caller_alias.clone();
@@ -1004,12 +1005,13 @@ fn do_register_signal(
                     let _ = app_clone.emit("signal-event", serde_json::json!({"type":"incoming","call_id":call_id,"caller_fp":caller_fingerprint,"caller_alias":caller_alias}));
                     let _ = app_clone.emit("history-changed", ());
                 }
-                Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, callee_reflexive_addr, .. })) => {
-                    tracing::info!(%call_id, ?accept_mode, "signal: DirectCallAnswer (forwarded by relay)");
+                Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, callee_reflexive_addr, callee_build_version, .. })) => {
+                    tracing::info!(%call_id, ?accept_mode, peer_build = ?callee_build_version, "signal: DirectCallAnswer (forwarded by relay)");
                     emit_call_debug(&app_clone, "recv:DirectCallAnswer", serde_json::json!({
                         "call_id": call_id,
                         "accept_mode": format!("{:?}", accept_mode),
                         "callee_reflexive_addr": callee_reflexive_addr,
+                        "peer_build": callee_build_version,
                     }));
                 }
                 Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr, peer_local_addrs })) => {
@@ -1378,6 +1380,7 @@ async fn place_call(
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
             caller_reflexive_addr: own_reflex.clone(),
             caller_local_addrs: caller_local_addrs.clone(),
+            caller_build_version: Some(GIT_HASH.to_string()),
         })
         .await
         .map_err(|e| {
@@ -1492,6 +1495,7 @@ async fn answer_call(
             chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
             callee_reflexive_addr: own_reflex.clone(),
             callee_local_addrs: callee_local_addrs.clone(),
+            callee_build_version: Some(GIT_HASH.to_string()),
         })
         .await
         .map_err(|e| {
