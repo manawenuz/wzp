@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tauri::Emitter;
 
 use tokio::sync::Mutex;
 use tracing::{error, info};
