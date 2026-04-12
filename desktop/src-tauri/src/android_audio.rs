@@ -195,6 +195,7 @@ fn try_set_communication_device(
             am,
             "getAvailableCommunicationDevices",
             "()Ljava/util/List;",
+            &[],
         )
         .and_then(|v| v.l())
         .map_err(|e| format!("getAvailableCommunicationDevices: {e}"))?;
