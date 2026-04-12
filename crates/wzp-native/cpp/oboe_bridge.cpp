@@ -260,6 +260,11 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
         ->setInputPreset(oboe::InputPreset::VoiceCommunication)
+        // Bluetooth SCO only supports 8/16kHz. Without resampling, opening
+        // a 48kHz capture stream against a BT device fails with
+        // "getInputProfile could not find profile". Oboe resamples internally
+        // so our ring buffers stay at 48kHz regardless of the hardware rate.
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
         ->setDataCallback(&g_capture_cb);
 
     oboe::Result result = captureBuilder.openStream(g_capture_stream);
@@ -320,6 +325,8 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
         ->setUsage(oboe::Usage::VoiceCommunication)
+        // Match capture: Oboe resamples 48kHz ↔ device rate (8/16kHz for BT SCO)
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
         ->setDataCallback(&g_playout_cb);
 
     result = playoutBuilder.openStream(g_playout_stream);
