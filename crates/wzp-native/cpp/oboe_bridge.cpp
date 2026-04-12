@@ -254,16 +254,15 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     oboe::AudioStreamBuilder captureBuilder;
     captureBuilder.setDirection(oboe::Direction::Input)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        ->setSharingMode(oboe::SharingMode::Exclusive)
+        // Shared mode allows Oboe's internal resampler to bridge 48kHz to
+        // the hardware rate (8/16kHz for BT SCO). Exclusive mode bypasses
+        // the resampler and fails with "getInputProfile could not find profile".
+        ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(config->channel_count)
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
         ->setInputPreset(oboe::InputPreset::VoiceCommunication)
-        // Bluetooth SCO only supports 8/16kHz. Without resampling, opening
-        // a 48kHz capture stream against a BT device fails with
-        // "getInputProfile could not find profile". Oboe resamples internally
-        // so our ring buffers stay at 48kHz regardless of the hardware rate.
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
         ->setDataCallback(&g_capture_cb);
 
@@ -319,13 +318,12 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     oboe::AudioStreamBuilder playoutBuilder;
     playoutBuilder.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        ->setSharingMode(oboe::SharingMode::Exclusive)
+        ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(config->channel_count)
         ->setSampleRate(config->sample_rate)
         ->setFramesPerDataCallback(config->frames_per_burst)
         ->setUsage(oboe::Usage::VoiceCommunication)
-        // Match capture: Oboe resamples 48kHz ↔ device rate (8/16kHz for BT SCO)
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
         ->setDataCallback(&g_playout_cb);
 

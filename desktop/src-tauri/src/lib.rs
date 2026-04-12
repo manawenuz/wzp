@@ -794,7 +794,7 @@ async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
             // startBluetoothSco() is async — jumping straight to Oboe restart
             // would open streams against earpiece, not the BT device.
             let mut connected = false;
-            for i in 0..30 {
+            for i in 0..50 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if android_audio::is_bluetooth_sco_on().unwrap_or(false) {
                     tracing::info!(polls = i + 1, "set_bluetooth_sco: SCO connected");
@@ -803,8 +803,12 @@ async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
                 }
             }
             if !connected {
-                tracing::warn!("set_bluetooth_sco: SCO did not connect within 3s, proceeding anyway");
+                tracing::warn!("set_bluetooth_sco: SCO did not connect within 5s, proceeding anyway");
             }
+            // Extra delay: even after getCommunicationDevice reports BT,
+            // the audio policy needs ~500ms to apply the bt-sco route.
+            // Without this, Oboe opens against the old device.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         } else {
             android_audio::stop_bluetooth_sco()?;
         }
