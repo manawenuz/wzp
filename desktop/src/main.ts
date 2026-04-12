@@ -206,6 +206,9 @@ const sCallDebug = document.getElementById("s-call-debug") as HTMLInputElement;
 const sCallDebugSection = document.getElementById("s-call-debug-section") as HTMLDivElement;
 const sCallDebugLogEl = document.getElementById("s-call-debug-log") as HTMLDivElement;
 const sCallDebugClearBtn = document.getElementById("s-call-debug-clear") as HTMLButtonElement;
+const sCallDebugCopyBtn = document.getElementById("s-call-debug-copy") as HTMLButtonElement;
+const sCallDebugShareBtn = document.getElementById("s-call-debug-share") as HTMLButtonElement;
+const sCallDebugCopyStatus = document.getElementById("s-call-debug-copy-status") as HTMLElement;
 const sReflectedAddr = document.getElementById("s-reflected-addr") as HTMLSpanElement;
 const sReflectBtn = document.getElementById("s-reflect-btn") as HTMLButtonElement;
 const sNatType = document.getElementById("s-nat-type") as HTMLSpanElement;
@@ -615,6 +618,100 @@ listen("call-debug-log", (event: any) => {
 sCallDebugClearBtn.addEventListener("click", () => {
   callDebugBuffer.length = 0;
   sCallDebugLogEl.textContent = "";
+});
+
+/// Serialise the rolling call-debug buffer as plain text for
+/// copy/share. One entry per line, HH:MM:SS.mmm + step +
+/// compact JSON details. Same format the on-screen panel uses.
+function formatCallDebugLog(): string {
+  return callDebugBuffer
+    .map((e) => {
+      const iso = new Date(e.ts_ms).toISOString().slice(11, 23);
+      const details =
+        e.details && Object.keys(e.details).length > 0
+          ? " " + JSON.stringify(e.details)
+          : "";
+      return `${iso} ${e.step}${details}`;
+    })
+    .join("\n");
+}
+
+/// One-shot status helper for the copy/share buttons.
+function flashCallDebugStatus(msg: string, isError: boolean = false) {
+  sCallDebugCopyStatus.textContent = msg;
+  sCallDebugCopyStatus.style.color = isError ? "var(--yellow)" : "var(--green)";
+  setTimeout(() => {
+    sCallDebugCopyStatus.textContent = "";
+  }, 2500);
+}
+
+sCallDebugCopyBtn.addEventListener("click", async () => {
+  const text = formatCallDebugLog();
+  if (!text) {
+    flashCallDebugStatus("Log is empty", true);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    flashCallDebugStatus(`✓ Copied ${callDebugBuffer.length} entries`);
+  } catch (e) {
+    // Some WebViews refuse clipboard access without a user
+    // permission prompt; fall back to a selection-based copy.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "0";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) {
+        flashCallDebugStatus(`✓ Copied ${callDebugBuffer.length} entries`);
+      } else {
+        throw new Error("execCommand returned false");
+      }
+    } catch (e2) {
+      flashCallDebugStatus(`⚠ Copy failed: ${String(e2)}`, true);
+    }
+  }
+});
+
+sCallDebugShareBtn.addEventListener("click", async () => {
+  const text = formatCallDebugLog();
+  if (!text) {
+    flashCallDebugStatus("Log is empty", true);
+    return;
+  }
+  // Try the Web Share API first — on Android WebView, this opens
+  // the standard Share sheet and the user can send the text to
+  // any messaging app. Falls back to clipboard copy if the
+  // WebView doesn't expose navigator.share (most desktop
+  // WebViews don't).
+  const nav: any = navigator;
+  if (nav.share) {
+    try {
+      await nav.share({
+        title: "WarzonePhone debug log",
+        text,
+      });
+      flashCallDebugStatus(`✓ Shared ${callDebugBuffer.length} entries`);
+      return;
+    } catch (e) {
+      // User cancelled or WebView rejected — fall through to
+      // clipboard copy as a best-effort.
+      console.debug("share failed, falling back to clipboard", e);
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    flashCallDebugStatus(`✓ Copied (no share API)`);
+  } catch (e) {
+    flashCallDebugStatus(`⚠ Share + copy both failed`, true);
+  }
 });
 
 // Load fingerprint + alias + git hash + render identicon
@@ -1331,7 +1428,15 @@ acceptCallBtn.addEventListener("click", async () => {
   ringer.stop();
   const status = await invoke<any>("get_signal_status");
   if (status.incoming_call_id) {
-    await invoke("answer_call", { callId: status.incoming_call_id, mode: 2 });
+    // mode=1 → AcceptTrusted — enables P2P direct path by
+    // querying + advertising the callee's reflex addr in the
+    // answer. The alternative is mode=2 → AcceptGeneric
+    // (privacy mode) which intentionally skips the reflex query
+    // to keep the callee's IP hidden from the caller but forces
+    // the call onto the relay path. Default to trusted so the
+    // Accept button gets real P2P; privacy can be a future
+    // dedicated button if anyone needs it.
+    await invoke("answer_call", { callId: status.incoming_call_id, mode: 1 });
     incomingCallPanel.classList.add("hidden");
   }
 });
