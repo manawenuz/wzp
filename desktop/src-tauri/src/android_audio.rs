@@ -99,13 +99,13 @@ pub fn is_speakerphone_on() -> Result<bool, String> {
 
 // ─── Bluetooth SCO routing ──────────────────────────────────────────────────
 
-/// Start Bluetooth SCO (Synchronous Connection Oriented) audio routing.
+/// Start Bluetooth SCO audio routing.
 ///
-/// Turns off the loudspeaker, then opens the SCO link so both capture and
-/// playout move to the connected Bluetooth headset. Requires that a SCO-
-/// capable device is paired and connected (check [`is_bluetooth_available`]
-/// first). The caller must restart Oboe streams after this call.
-#[allow(deprecated)]
+/// On API 31+ uses `setCommunicationDevice()` which is the modern way to
+/// route voice audio to a specific device. Falls back to the deprecated
+/// `startBluetoothSco()` path on older APIs.
+///
+/// The caller must restart Oboe streams after this call.
 pub fn start_bluetooth_sco() -> Result<(), String> {
     let (vm, activity) = jvm_and_activity()?;
     let mut env = vm
@@ -113,7 +113,7 @@ pub fn start_bluetooth_sco() -> Result<(), String> {
         .map_err(|e| format!("attach_current_thread: {e}"))?;
     let am = audio_manager(&mut env, &activity)?;
 
-    // Ensure speaker is off — mutually exclusive with SCO.
+    // Ensure speaker is off — mutually exclusive with BT.
     env.call_method(
         &am,
         "setSpeakerphoneOn",
@@ -122,26 +122,24 @@ pub fn start_bluetooth_sco() -> Result<(), String> {
     )
     .map_err(|e| format!("setSpeakerphoneOn(false): {e}"))?;
 
-    env.call_method(&am, "startBluetoothSco", "()V", &[])
-        .map_err(|e| format!("startBluetoothSco: {e}"))?;
+    // Try modern API first (API 31+): setCommunicationDevice(AudioDeviceInfo)
+    // Find a BT SCO or BLE device from getAvailableCommunicationDevices()
+    let used_modern = try_set_communication_device(&mut env, &am, true)?;
 
-    env.call_method(
-        &am,
-        "setBluetoothScoOn",
-        "(Z)V",
-        &[JValue::Bool(1)],
-    )
-    .map_err(|e| format!("setBluetoothScoOn(true): {e}"))?;
+    if !used_modern {
+        // Fallback: deprecated startBluetoothSco (API < 31)
+        tracing::info!("start_bluetooth_sco: falling back to deprecated startBluetoothSco");
+        env.call_method(&am, "startBluetoothSco", "()V", &[])
+            .map_err(|e| format!("startBluetoothSco: {e}"))?;
+    }
 
-    tracing::info!("AudioManager: Bluetooth SCO started");
+    tracing::info!(used_modern, "AudioManager: Bluetooth SCO started");
     Ok(())
 }
 
 /// Stop Bluetooth SCO audio routing, returning audio to the earpiece.
 ///
-/// Safe to call even if SCO is not currently active (no-ops in that case).
 /// The caller must restart Oboe streams after this call.
-#[allow(deprecated)]
 pub fn stop_bluetooth_sco() -> Result<(), String> {
     let (vm, activity) = jvm_and_activity()?;
     let mut env = vm
@@ -149,30 +147,110 @@ pub fn stop_bluetooth_sco() -> Result<(), String> {
         .map_err(|e| format!("attach_current_thread: {e}"))?;
     let am = audio_manager(&mut env, &activity)?;
 
-    let is_on = env
-        .call_method(&am, "isBluetoothScoOn", "()Z", &[])
-        .and_then(|v| v.z())
-        .unwrap_or(false);
+    // Modern API: clearCommunicationDevice() (API 31+)
+    let cleared = try_set_communication_device(&mut env, &am, false)?;
 
-    if is_on {
-        env.call_method(
-            &am,
-            "setBluetoothScoOn",
-            "(Z)V",
-            &[JValue::Bool(0)],
-        )
-        .map_err(|e| format!("setBluetoothScoOn(false): {e}"))?;
-
+    if !cleared {
+        // Fallback: deprecated stopBluetoothSco
         env.call_method(&am, "stopBluetoothSco", "()V", &[])
             .map_err(|e| format!("stopBluetoothSco: {e}"))?;
     }
 
-    tracing::info!(was_on = is_on, "AudioManager: Bluetooth SCO stopped");
+    tracing::info!(cleared, "AudioManager: Bluetooth SCO stopped");
     Ok(())
 }
 
-/// Query whether Bluetooth SCO audio is currently active.
-#[allow(deprecated)]
+/// Try to use the modern `setCommunicationDevice` / `clearCommunicationDevice`
+/// API (Android 12 / API 31+). Returns `true` if the modern API was used.
+fn try_set_communication_device(
+    env: &mut jni::AttachGuard<'_>,
+    am: &JObject<'_>,
+    enable: bool,
+) -> Result<bool, String> {
+    // Check SDK_INT >= 31 (Android 12)
+    let sdk_int = env
+        .get_static_field(
+            "android/os/Build$VERSION",
+            "SDK_INT",
+            "I",
+        )
+        .and_then(|v| v.i())
+        .unwrap_or(0);
+
+    if sdk_int < 31 {
+        return Ok(false);
+    }
+
+    if !enable {
+        // clearCommunicationDevice()
+        env.call_method(am, "clearCommunicationDevice", "()V", &[])
+            .map_err(|e| format!("clearCommunicationDevice: {e}"))?;
+        tracing::info!("clearCommunicationDevice: done");
+        return Ok(true);
+    }
+
+    // getAvailableCommunicationDevices() → List<AudioDeviceInfo>
+    let device_list = env
+        .call_method(
+            am,
+            "getAvailableCommunicationDevices",
+            "()Ljava/util/List;",
+        )
+        .and_then(|v| v.l())
+        .map_err(|e| format!("getAvailableCommunicationDevices: {e}"))?;
+
+    let size = env
+        .call_method(&device_list, "size", "()I", &[])
+        .and_then(|v| v.i())
+        .unwrap_or(0);
+
+    // Find first BT device: TYPE_BLUETOOTH_SCO (7), TYPE_BLUETOOTH_A2DP (8),
+    // TYPE_BLE_HEADSET (26), TYPE_BLE_SPEAKER (27)
+    for i in 0..size {
+        let device = env
+            .call_method(
+                &device_list,
+                "get",
+                "(I)Ljava/lang/Object;",
+                &[JValue::Int(i)],
+            )
+            .and_then(|v| v.l())
+            .map_err(|e| format!("list.get({i}): {e}"))?;
+
+        let device_type = env
+            .call_method(&device, "getType", "()I", &[])
+            .and_then(|v| v.i())
+            .unwrap_or(0);
+
+        // BT SCO = 7, A2DP = 8, BLE headset = 26, BLE speaker = 27
+        if matches!(device_type, 7 | 8 | 26 | 27) {
+            let ok = env
+                .call_method(
+                    am,
+                    "setCommunicationDevice",
+                    "(Landroid/media/AudioDeviceInfo;)Z",
+                    &[JValue::Object(&device)],
+                )
+                .and_then(|v| v.z())
+                .unwrap_or(false);
+
+            tracing::info!(
+                device_type,
+                ok,
+                "setCommunicationDevice: set BT device"
+            );
+            return Ok(ok);
+        }
+    }
+
+    tracing::warn!("setCommunicationDevice: no BT device in available list");
+    Ok(false)
+}
+
+/// Query whether Bluetooth audio is currently the active communication device.
+///
+/// On API 31+ checks `getCommunicationDevice()` type. Falls back to the
+/// deprecated `isBluetoothScoOn()` on older APIs.
 pub fn is_bluetooth_sco_on() -> Result<bool, String> {
     let (vm, activity) = jvm_and_activity()?;
     let mut env = vm
@@ -180,6 +258,29 @@ pub fn is_bluetooth_sco_on() -> Result<bool, String> {
         .map_err(|e| format!("attach_current_thread: {e}"))?;
     let am = audio_manager(&mut env, &activity)?;
 
+    let sdk_int = env
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+        .and_then(|v| v.i())
+        .unwrap_or(0);
+
+    if sdk_int >= 31 {
+        // getCommunicationDevice() → AudioDeviceInfo (nullable)
+        let device = env
+            .call_method(am, "getCommunicationDevice", "()Landroid/media/AudioDeviceInfo;", &[])
+            .and_then(|v| v.l())
+            .unwrap_or(JObject::null());
+        if device.is_null() {
+            return Ok(false);
+        }
+        let device_type = env
+            .call_method(&device, "getType", "()I", &[])
+            .and_then(|v| v.i())
+            .unwrap_or(0);
+        // BT SCO = 7, A2DP = 8, BLE headset = 26, BLE speaker = 27
+        return Ok(matches!(device_type, 7 | 8 | 26 | 27));
+    }
+
+    // Fallback: deprecated API
     env.call_method(&am, "isBluetoothScoOn", "()Z", &[])
         .and_then(|v| v.z())
         .map_err(|e| format!("isBluetoothScoOn: {e}"))
