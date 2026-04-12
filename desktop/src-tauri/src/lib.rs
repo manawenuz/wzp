@@ -966,8 +966,10 @@ fn do_register_signal(
     emit_call_debug(&app, "register_signal:register_presence_sent", serde_json::json!({}));
 
     match transport.recv_signal().await.map_err(|e| format!("{e}"))? {
-        Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {
-            emit_call_debug(&app, "register_signal:ack_received", serde_json::json!({}));
+        Some(SignalMessage::RegisterPresenceAck { success: true, relay_build, .. }) => {
+            emit_call_debug(&app, "register_signal:ack_received", serde_json::json!({
+                "relay_build": relay_build,
+            }));
         }
         _ => {
             emit_call_debug(&app, "register_signal:ack_failed", serde_json::json!({}));

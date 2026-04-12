@@ -716,6 +716,9 @@ pub enum SignalMessage {
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Relay's build version (git short hash).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_build: Option<String>,
     },
 
     /// Direct call offer routed through the relay to a specific peer.

@@ -1006,6 +1006,7 @@ async fn main() -> anyhow::Result<()> {
                 let _ = transport.send_signal(&SignalMessage::RegisterPresenceAck {
                     success: true,
                     error: None,
+                    relay_build: Some(BUILD_GIT_HASH.to_string()),
                 }).await;
 
                 info!(%addr, fingerprint = %client_fp, alias = ?client_alias, "signal client registered");
