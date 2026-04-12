@@ -1077,7 +1077,7 @@ async fn handle_datagram(
         // First: check local rooms (has participants)
         active.iter().find(|r| room_hash(r) == rh).cloned()
             .or_else(|| active.iter().find(|r| fm.global_room_hash(r) == rh).cloned())
-            // Second: check global room config (hub relay may have no local participants)
+            // Second: check static global room config (hub relay may have no local participants)
             .or_else(|| {
                 fm.global_rooms.iter().find(|name| room_hash(name) == rh).cloned()
             })
@@ -1087,6 +1087,23 @@ async fn handle_datagram(
         Some(r) => r,
         None => {
             fm.event_log.emit(Event::new("room_not_found").seq(pkt.header.seq).peer(&peer_label));
+            // Phase 4.1 diagnostic: log the hash + active rooms
+            // so we can diagnose cross-relay call-* media routing
+            // failures. This fires when a peer relay sends media
+            // for a room we don't have locally — could be a
+            // timing issue (peer joined before us) or a hash
+            // mismatch.
+            let active = {
+                let mgr = fm.room_mgr.lock().await;
+                mgr.active_rooms()
+            };
+            warn!(
+                room_hash = ?rh,
+                active_rooms = ?active,
+                seq = pkt.header.seq,
+                peer = %peer_label,
+                "federation datagram for unknown room — no local room matches hash"
+            );
             return;
         }
     };
