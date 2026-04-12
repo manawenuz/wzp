@@ -1450,11 +1450,51 @@ clearHistoryBtn.addEventListener("click", async () => {
   } catch (e) { console.error(e); }
 });
 
+// Track whether a registration is in flight so the same button
+// can toggle between "Register" and "Cancel". The cancel path
+// calls deregister which closes the transport and makes the
+// in-flight connect fail, breaking the await cleanly.
+let registerInFlight = false;
+
 registerBtn.addEventListener("click", async () => {
+  // ── Cancel path: user tapped the button while registration
+  // is in flight (it says "Cancel") → tear down the attempt
+  // so we don't block for 30s on an unreachable relay.
+  if (registerInFlight) {
+    registerInFlight = false;
+    try { await invoke("deregister"); } catch {}
+    registerBtn.textContent = "Register on Relay";
+    registerBtn.disabled = false;
+    connectError.textContent = "Registration cancelled";
+    return;
+  }
+
   const relay = getSelectedRelay();
   if (!relay) { connectError.textContent = "No relay selected"; return; }
+  connectError.textContent = "";
+
+  // ── Pre-flight ping: quick 3s QUIC handshake to check if
+  // the relay is reachable BEFORE committing to the full
+  // register flow (which takes ~10s to time out against a dead
+  // host). If the ping fails, show "server unavailable"
+  // immediately without blocking.
+  registerBtn.textContent = "Checking...";
   registerBtn.disabled = true;
-  registerBtn.textContent = "Registering...";
+  try {
+    await invoke("ping_relay", { relay: relay.address });
+  } catch (e: any) {
+    connectError.textContent = `Server unavailable: ${String(e)}`;
+    registerBtn.disabled = false;
+    registerBtn.textContent = "Register on Relay";
+    return;
+  }
+
+  // ── Register path: ping succeeded, proceed with the full
+  // registration. Show "Cancel" on the button so the user
+  // can bail if the relay goes unreachable mid-handshake.
+  registerInFlight = true;
+  registerBtn.disabled = false;
+  registerBtn.textContent = "Cancel";
   try {
     const fp = await invoke<string>("register_signal", { relay: relay.address });
     registerBtn.classList.add("hidden");
@@ -1462,9 +1502,14 @@ registerBtn.addEventListener("click", async () => {
     callStatusText.textContent = `Your fingerprint: ${fp}`;
     refreshHistory();
   } catch (e: any) {
-    connectError.textContent = String(e);
+    if (registerInFlight) {
+      // Real failure, not a user cancel
+      connectError.textContent = String(e);
+    }
     registerBtn.disabled = false;
     registerBtn.textContent = "Register on Relay";
+  } finally {
+    registerInFlight = false;
   }
 });
 
