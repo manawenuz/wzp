@@ -120,7 +120,7 @@
 
 - **Web audio drift**: The browser AudioWorklet playback buffer caps at 200ms, but clock drift between the WebSocket message arrival rate and the AudioContext output rate can cause occasional underruns or accumulation. The cap prevents unbounded growth but may cause glitches.
 
-- **No adaptive loop integration (partially resolved)**: PathMonitor and DredTuner are wired into the send loop — DRED duration adapts continuously. Full AdaptiveQualityController integration (codec tier switching from transport metrics) remains TODO.
+- **Adaptive loop integration (resolved)**: AdaptiveQualityController is now fully wired into both desktop and Android send/recv tasks. Relay-coordinated codec switching broadcasts QualityDirective to all participants based on weakest-link policy.
 
 - **Relay FEC pass-through**: In room mode, the relay forwards packets opaquely without FEC decode/re-encode. This means FEC protection is end-to-end only, not per-hop. In forward mode, the relay pipeline does perform FEC decode/re-encode.
 
@@ -239,3 +239,24 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - 10 unit tests in wzp-proto for DredTuner mapping logic
 - Jitter variance window tests in wzp-transport PathMonitor
 - Pre-existing test fixes: added missing `build_version` fields to 7 SignalMessage constructors
+
+### Desktop Adaptive Quality (#7, #31)
+- `AdaptiveQualityController` wired into both Android and desktop send/recv tasks
+- `pending_profile: Arc<AtomicU8>` bridge between recv (writer) and send (reader)
+- Auto mode: ingests QualityReports from relay, switches encoder profile when adapter recommends
+- `tx_codec` display string updated on profile switch for UI indicator
+- `profile_to_index()` / `index_to_profile()` mapping for 6-tier range
+
+### Relay Coordinated Codec Switching (#25, #26)
+- `ParticipantQuality` struct in relay RoomManager tracks per-participant quality
+- Quality reports from forwarded packets feed per-participant `AdaptiveQualityController`
+- `weakest_tier()` computes room-wide worst tier across all participants
+- `QualityDirective` SignalMessage variant: relay broadcasts recommended profile to all participants
+- Triggered on tier change — instant, no negotiation (weakest-link policy)
+
+### Oboe Stream State Polling (#35)
+- C++ polling loop after `requestStart()`: checks `getState()` every 10ms for up to 2s
+- Waits for both capture and playout streams to reach `Started` state
+- Logs initial state, poll count, and final state for HAL debugging
+- Does NOT fail on timeout — Rust-side stall detector remains as safety net
+- Targets Nothing Phone A059 intermittent silent calls on cold start

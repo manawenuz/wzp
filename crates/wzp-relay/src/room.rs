@@ -1099,4 +1099,47 @@ mod tests {
         // Batcher should now be empty — nothing to flush.
         assert!(batcher.flush().is_none());
     }
+
+    fn make_report(loss_pct_f: f32, rtt_ms: u16) -> wzp_proto::packet::QualityReport {
+        wzp_proto::packet::QualityReport {
+            loss_pct: (loss_pct_f / 100.0 * 255.0) as u8,
+            rtt_4ms: (rtt_ms / 4) as u8,
+            jitter_ms: 10,
+            bitrate_cap_kbps: 200,
+        }
+    }
+
+    #[test]
+    fn participant_quality_starts_good() {
+        let pq = ParticipantQuality::new();
+        assert_eq!(pq.current_tier, Tier::Good);
+    }
+
+    #[test]
+    fn participant_quality_degrades_on_bad_reports() {
+        let mut pq = ParticipantQuality::new();
+        let bad = make_report(50.0, 300);
+        // Feed enough bad reports to trigger downgrade (3 consecutive)
+        for _ in 0..5 {
+            pq.observe(&bad);
+        }
+        assert_ne!(pq.current_tier, Tier::Good, "should degrade from Good");
+    }
+
+    #[test]
+    fn weakest_tier_picks_worst() {
+        let good = ParticipantQuality::new();
+        // good stays at Good tier
+
+        let mut bad = ParticipantQuality::new();
+        let bad_report = make_report(50.0, 300);
+        for _ in 0..5 {
+            bad.observe(&bad_report);
+        }
+        // bad should be degraded or catastrophic
+
+        let participants = vec![good, bad];
+        let weakest = weakest_tier(participants.iter());
+        assert_ne!(weakest, Tier::Good, "weakest should not be Good when one participant is bad");
+    }
 }

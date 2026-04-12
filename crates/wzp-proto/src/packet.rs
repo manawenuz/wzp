@@ -1674,6 +1674,41 @@ mod tests {
     }
 
     #[test]
+    fn quality_directive_roundtrip() {
+        let msg = SignalMessage::QualityDirective {
+            recommended_profile: crate::QualityProfile::DEGRADED,
+            reason: Some("weakest link degraded".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::QualityDirective { recommended_profile, reason } => {
+                assert_eq!(recommended_profile.codec, CodecId::Opus6k);
+                assert_eq!(reason.as_deref(), Some("weakest link degraded"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn quality_directive_without_reason_roundtrip() {
+        let msg = SignalMessage::QualityDirective {
+            recommended_profile: crate::QualityProfile::GOOD,
+            reason: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // None reason should be omitted from JSON
+        assert!(!json.contains("reason"));
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::QualityDirective { reason, .. } => {
+                assert!(reason.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn mini_frame_disabled() {
         // Simulate disabled mini-frames by always keeping frames_since_full at 0
         // (which is what the encoder does when the feature is off).

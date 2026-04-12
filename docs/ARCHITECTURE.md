@@ -244,6 +244,7 @@ graph TB
 3. If one send fails, the relay continues to the next participant (best-effort)
 4. The relay never decodes or re-encodes audio (preserves E2E encryption)
 5. With trunking enabled, packets to the same receiver are batched into TrunkFrames (flushed every 5ms)
+6. Relay tracks per-participant quality from QualityReport trailers and broadcasts `QualityDirective` when the room-wide tier degrades (coordinated codec switching)
 
 ## Federation Topology
 
