@@ -250,6 +250,43 @@ fi
 echo ">>> cargo tauri android build \${PROFILE_FLAG} --target aarch64 --apk"
 cargo tauri android build \${PROFILE_FLAG} --target aarch64 --apk
 
+# ─── Sign the APK ────────────────────────────────────────────────
+# Release builds from cargo-tauri are unsigned. Sign with the project
+# keystore so the APK can be installed on real devices.
+BUILT_APK=\$(find gen/android -name "*.apk" -type f 2>/dev/null | sort -t/ -k1 | tail -1)
+if [ -n "\$BUILT_APK" ]; then
+    KS_RELEASE="/build/source/android/keystore/wzp-release.jks"
+    KS_DEBUG="/build/source/android/keystore/wzp-debug.jks"
+    if [ -f "\$KS_RELEASE" ]; then
+        KEYSTORE="\$KS_RELEASE"; KS_PASS="wzphone2024"; KS_ALIAS="wzp-release"
+    elif [ -f "\$KS_DEBUG" ]; then
+        KEYSTORE="\$KS_DEBUG"; KS_PASS="android"; KS_ALIAS="wzp-debug"
+    else
+        KEYSTORE=""
+    fi
+    if [ -n "\$KEYSTORE" ]; then
+        ZIPALIGN=\$(find "\$ANDROID_HOME" -name zipalign -type f 2>/dev/null | head -1)
+        APKSIGNER=\$(find "\$ANDROID_HOME" -name apksigner -type f 2>/dev/null | head -1)
+        if [ -n "\$ZIPALIGN" ] && [ -n "\$APKSIGNER" ]; then
+            echo ">>> Signing APK with \$(basename \$KEYSTORE)..."
+            ALIGNED="\${BUILT_APK%.apk}-aligned.apk"
+            "\$ZIPALIGN" -f 4 "\$BUILT_APK" "\$ALIGNED"
+            "\$APKSIGNER" sign \
+                --ks "\$KEYSTORE" \
+                --ks-pass "pass:\$KS_PASS" \
+                --ks-key-alias "\$KS_ALIAS" \
+                --key-pass "pass:\$KS_PASS" \
+                "\$ALIGNED"
+            mv "\$ALIGNED" "\$BUILT_APK"
+            echo ">>> Signed: \$(ls -lh \$BUILT_APK | awk "{print \\\$5}")"
+        else
+            echo ">>> WARNING: zipalign/apksigner not found — APK is unsigned"
+        fi
+    else
+        echo ">>> WARNING: no keystore found — APK is unsigned"
+    fi
+fi
+
 echo ">>> Build artifacts:"
 find gen/android -name "*.apk" -exec ls -lh {} \; 2>/dev/null
 echo "APK_BUILT"
