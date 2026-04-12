@@ -887,6 +887,9 @@ function showConnectScreen() {
   connectBtn.textContent = "Connect";
   levelBar.style.width = "0%";
   directCallPeer = null;
+  // Clear the media-degraded banner if present
+  const banner = document.getElementById("media-degraded-banner");
+  if (banner) banner.remove();
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
 }
 
@@ -1088,6 +1091,42 @@ listen("call-event", (event: any) => {
   const { kind } = event.payload;
   if (kind === "room-update") pollStatus();
   if (kind === "disconnected" && !userDisconnected) pollStatus();
+
+  // Phase 5.6: media health watchdog — show/clear a warning
+  // banner when the media path dies (e.g., P2P direct
+  // established but the network path changed, or cross-relay
+  // media forwarding isn't working).
+  if (kind === "media-degraded") {
+    // Show a warning banner on the call screen. Don't auto-
+    // disconnect — the user might be on a briefly-unstable
+    // network and recovery is possible (the engine tracks
+    // "media-recovered" and clears the banner if packets
+    // resume).
+    let banner = document.getElementById("media-degraded-banner");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "media-degraded-banner";
+      banner.style.cssText =
+        "background:rgba(239,68,68,0.15);color:var(--red);padding:8px 12px;" +
+        "border-radius:8px;text-align:center;font-size:13px;margin:8px 0;";
+      banner.innerHTML =
+        '⚠ No audio — connection may be lost.<br>' +
+        '<small style="color:var(--text-dim)">Try hanging up and reconnecting, or switch to a different relay.</small>';
+      // Insert at the top of the call screen, below the header
+      const participants = document.getElementById("participants");
+      const directView = document.getElementById("direct-call-view");
+      const insertBefore = (directView && !directView.classList.contains("hidden"))
+        ? directView
+        : participants;
+      if (insertBefore?.parentNode) {
+        insertBefore.parentNode.insertBefore(banner, insertBefore);
+      }
+    }
+  }
+  if (kind === "media-recovered") {
+    const banner = document.getElementById("media-degraded-banner");
+    if (banner) banner.remove();
+  }
 });
 
 // ── Settings ──

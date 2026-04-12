@@ -653,6 +653,17 @@ impl CallEngine {
             let mut last_written: usize = 0;
             let mut decode_errs: u64 = 0;
             let mut first_packet_logged = false;
+            // Phase 5.6: media health watchdog — track consecutive
+            // heartbeat ticks where recv_fr hasn't advanced. If
+            // media doesn't arrive for 3 consecutive heartbeats
+            // (6s), emit a user-facing "media-degraded" call-event
+            // so the UI can show a warning like "No audio — try
+            // reconnecting?". Covers the case where P2P direct
+            // established but the underlying network path died
+            // (e.g., phone switched from WiFi to LTE mid-call).
+            let mut last_recv_fr_for_watchdog: u64 = 0;
+            let mut no_recv_ticks: u32 = 0;
+            let mut media_degraded_emitted = false;
 
             loop {
                 if !recv_r.load(Ordering::Relaxed) {
@@ -905,6 +916,59 @@ impl CallEngine {
                             "codec": format!("{:?}", current_codec),
                         }),
                     );
+
+                    // Media health watchdog: if recv_fr hasn't
+                    // advanced in 3 consecutive heartbeats (6s) and
+                    // we've been "connected" for at least 4s (give
+                    // the first few frames time to arrive), emit a
+                    // user-facing "media-degraded" event so the UI
+                    // can show "No audio — connection may be lost".
+                    if fr == last_recv_fr_for_watchdog {
+                        no_recv_ticks += 1;
+                    } else {
+                        no_recv_ticks = 0;
+                        if media_degraded_emitted {
+                            // Was degraded but recovered — clear
+                            // the banner.
+                            media_degraded_emitted = false;
+                            let _ = recv_app.emit(
+                                "call-event",
+                                serde_json::json!({
+                                    "kind": "media-recovered",
+                                }),
+                            );
+                            crate::emit_call_debug(
+                                &recv_app,
+                                "media:recovered",
+                                serde_json::json!({}),
+                            );
+                        }
+                    }
+                    last_recv_fr_for_watchdog = fr;
+
+                    if no_recv_ticks >= 3 && !media_degraded_emitted {
+                        media_degraded_emitted = true;
+                        tracing::warn!(
+                            recv_fr = fr,
+                            no_recv_ticks,
+                            "media watchdog: no inbound packets for 6s"
+                        );
+                        let _ = recv_app.emit(
+                            "call-event",
+                            serde_json::json!({
+                                "kind": "media-degraded",
+                            }),
+                        );
+                        crate::emit_call_debug(
+                            &recv_app,
+                            "media:no_recv_timeout",
+                            serde_json::json!({
+                                "recv_fr": fr,
+                                "no_recv_ticks": no_recv_ticks,
+                            }),
+                        );
+                    }
+
                     heartbeat = std::time::Instant::now();
                 }
             }
