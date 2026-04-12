@@ -974,21 +974,33 @@ Cellular generation is approximated from `getLinkDownstreamBandwidthKbps()` to a
 
 Both Android app variants support 3-way audio routing: **Earpiece → Speaker → Bluetooth SCO**.
 
+### Audio Mode Lifecycle
+
+`MODE_IN_COMMUNICATION` is set by the Rust call engine (via JNI `AudioManager.setMode()`) right before Oboe streams open — NOT at app launch. Restored to `MODE_NORMAL` when the call ends. This prevents hijacking system audio routing (music, BT A2DP) before a call is active.
+
 ### Native Kotlin App
 
-`AudioRouteManager.kt` handles device detection (via `AudioDeviceCallback`), SCO lifecycle (`startBluetoothSco` / `stopBluetoothSco`), and auto-fallback on BT disconnect. `CallViewModel.cycleAudioRoute()` cycles through available routes.
+`AudioRouteManager.kt` handles device detection (via `AudioDeviceCallback`), SCO lifecycle, and auto-fallback on BT disconnect. `CallViewModel.cycleAudioRoute()` cycles through available routes.
 
 ### Tauri Desktop App
 
-`android_audio.rs` provides JNI bridges to `AudioManager` for speakerphone and Bluetooth SCO control. After each route change, Oboe streams are stopped and restarted via `spawn_blocking` to force AAudio to reconfigure with the new routing.
+`android_audio.rs` provides JNI bridges to `AudioManager` for speakerphone and Bluetooth SCO control. After each route change, Oboe streams are stopped and restarted via `spawn_blocking`.
 
 ```
 User tap ──► cycleAudioRoute()
                 │
-                ├─ Earpiece: setSpeakerphoneOn(false)
+                ├─ Earpiece: setSpeakerphoneOn(false) + clearCommunicationDevice()
                 ├─ Speaker:  setSpeakerphoneOn(true)
-                └─ BT SCO:   startBluetoothSco() + setBluetoothScoOn(true)
-                │
+                └─ BT SCO:   setCommunicationDevice(bt_device)  [API 31+]
+                │              fallback: startBluetoothSco()     [API < 31]
                 ▼
-            Oboe stop + start (~60-400ms)
+            Oboe stop + start_bt() for BT / start() for others
 ```
+
+### BT SCO and Oboe
+
+BT SCO only supports 8/16kHz. When `bt_active=1`, Oboe capture skips `setSampleRate(48000)` and `setInputPreset(VoiceCommunication)`, letting the system choose the native BT rate. Oboe's `SampleRateConversionQuality::Best` bridges to our 48kHz ring buffers. Playout uses `Usage::Media` in BT mode to avoid conflicts with the communication device routing.
+
+### Hangup Signal Fix
+
+`SignalMessage::Hangup` now carries an optional `call_id` field. The relay uses it to end only the specific call instead of broadcasting to all active calls for the user — preventing a race where a hangup for call 1 kills a newly-placed call 2.

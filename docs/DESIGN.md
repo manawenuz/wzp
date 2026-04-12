@@ -587,9 +587,19 @@ Signal messages are sent over reliable QUIC streams as length-prefixed JSON:
 
 WarzonePhone supports three audio output routes on Android: **Earpiece**, **Speaker**, and **Bluetooth SCO**. The user cycles through available routes with a single button.
 
+### Audio mode lifecycle
+
+`MODE_IN_COMMUNICATION` is set **when the call engine starts** (right before Oboe `audio_start()`), not at app launch. This is critical — setting it early hijacks system audio routing (e.g. music drops from BT A2DP to earpiece). `MODE_NORMAL` is restored when the call engine stops.
+
+```
+App launch  → MODE_NORMAL (other apps' audio unaffected)
+Call start  → set_audio_mode_communication() → MODE_IN_COMMUNICATION
+Call end    → audio_stop() → set_audio_mode_normal() → MODE_NORMAL
+```
+
 ### Route lifecycle
 
-1. Call starts → Earpiece (default). `AudioManager.MODE_IN_COMMUNICATION` set by `CallService`.
+1. Call starts → Earpiece (default).
 2. User taps route button → cycles to next available route.
 3. Route change requires Oboe stream restart (~60-400ms) because AAudio silently tears down streams on some OEMs when the routing target changes mid-stream.
 4. Bluetooth disconnect mid-call → `AudioDeviceCallback.onAudioDevicesRemoved` fires → auto-fallback to Earpiece or Speaker.
@@ -598,11 +608,13 @@ WarzonePhone supports three audio output routes on Android: **Earpiece**, **Spea
 
 SCO (Synchronous Connection Oriented) is the correct Bluetooth profile for VoIP — it provides bidirectional mono audio at 8/16 kHz with ~30ms latency. A2DP (stereo, high-quality) is unidirectional and adds 100-200ms of buffering, making it unsuitable for real-time voice.
 
-The deprecated `AudioManager.startBluetoothSco()` API is used because the modern `setCommunicationDevice()` requires API 31+ and our minSdk is 26. The deprecated APIs are functional on all tested devices through API 35.
+On API 31+ (Android 12), we use the modern `setCommunicationDevice(AudioDeviceInfo)` API to route audio to the BT SCO device. The deprecated `startBluetoothSco()` + `setBluetoothScoOn()` path is used as fallback on older APIs. `setBluetoothScoOn()` is silently rejected on Android 12+ for non-system apps.
+
+BT SCO devices only support 8/16kHz sample rates, but our pipeline runs at 48kHz. When BT is active, Oboe opens in **BT mode** (`bt_active=1`): capture skips `setSampleRate(48000)` and `setInputPreset(VoiceCommunication)`, letting the system open at the device's native rate. Oboe's `SampleRateConversionQuality::Best` resamples to/from 48kHz for our ring buffers.
 
 ### Two app variants
 
-Both the native Kotlin app (`AudioRouteManager.kt`) and the Tauri app (`android_audio.rs` JNI bridge) call the same `AudioManager` APIs. The native app uses `AudioDeviceCallback` for automatic device detection; the Tauri app queries `getDevices()` on demand.
+Both the native Kotlin app (`AudioRouteManager.kt`) and the Tauri app (`android_audio.rs` JNI bridge) support BT SCO routing. The native app uses `AudioDeviceCallback` for automatic device detection; the Tauri app uses `getAvailableCommunicationDevices()` (API 31+) or `getDevices()` on demand.
 
 ## Network Change Response
 
@@ -631,4 +643,19 @@ These thresholds are conservative. Carriers over-report bandwidth, but for VoIP 
 - **Rust** 1.85+ (2024 edition)
 - **Linux**: cmake, pkg-config, libasound2-dev (for audio feature)
 - **macOS**: Xcode command line tools (CoreAudio included)
-- **Android**: NDK r27c, cmake 3.28+ (from pip)
+- **Android**: NDK 26.1 (r26b), cmake 3.25-3.28 (system package)
+
+### Android APK Builds
+
+```bash
+# arm64 only (default, 25MB release APK)
+./scripts/build-tauri-android.sh --init --release --arch arm64
+
+# armv7 only (smaller devices)
+./scripts/build-tauri-android.sh --init --release --arch armv7
+
+# both architectures as separate APKs
+./scripts/build-tauri-android.sh --init --release --arch all
+```
+
+Release APKs are signed with `android/keystore/wzp-release.jks` via `apksigner`. Per-arch builds produce separate APKs (~25MB each vs ~50MB universal) for easier sharing with testers.

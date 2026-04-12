@@ -50,18 +50,23 @@ Wire Bluetooth SCO routing end-to-end through both app variants, replacing the b
 
 | File | Change |
 |------|--------|
-| `android_audio.rs` | Added `start_bluetooth_sco()`, `stop_bluetooth_sco()`, `is_bluetooth_sco_on()`, `is_bluetooth_available()` |
-| `lib.rs` | Added `set_bluetooth_sco`, `is_bluetooth_available`, `get_audio_route` Tauri commands |
+| `android_audio.rs` | `setCommunicationDevice()` (API 31+) with `startBluetoothSco()` fallback; `set_audio_mode_communication/normal()` for call lifecycle |
+| `lib.rs` | `set_bluetooth_sco`, `is_bluetooth_available`, `get_audio_route` Tauri commands; SCO polling + 500ms route delay |
+| `wzp_native.rs` | Added `audio_start_bt()` for BT-mode Oboe (skips 48kHz + VoiceCommunication preset) |
+| `oboe_bridge.cpp` | `bt_active` flag: capture skips sample rate + input preset; playout uses `Usage::Media`; both use `Shared` mode + `SampleRateConversionQuality::Best` |
+| `engine.rs` | `set_audio_mode_communication()` before `audio_start()`; `set_audio_mode_normal()` after `audio_stop()` |
+| `MainActivity.kt` | Removed `MODE_IN_COMMUNICATION` from app launch — deferred to call start |
 | `main.ts` | Replaced `speakerphoneOn` toggle with `currentAudioRoute` cycling logic |
 | `style.css` | Added `.bt-on` CSS class (blue-400 highlight) |
 
 ## Audio Route Lifecycle
 
-1. **Call starts** → route defaults to Earpiece
-2. **User taps route button** → cycles to next available route
-3. **Route changes** → AudioManager JNI call + Oboe stream restart (~60-400ms)
-4. **BT device disconnects mid-call** → `AudioDeviceCallback.onAudioDevicesRemoved` fires → auto-fallback to Earpiece/Speaker
-5. **Call ends** → route reset to Earpiece, BT SCO stopped
+1. **App launch** → `MODE_NORMAL` (other apps' audio unaffected — BT A2DP music keeps playing)
+2. **Call starts** → `MODE_IN_COMMUNICATION` set via JNI, Oboe opens with earpiece routing
+3. **User taps route button** → cycles to next available route
+4. **Route changes** → `setCommunicationDevice()` (API 31+) + Oboe restart in BT mode or normal mode
+5. **BT device disconnects mid-call** → `AudioDeviceCallback.onAudioDevicesRemoved` fires → auto-fallback to Earpiece/Speaker
+6. **Call ends** → route reset, `MODE_NORMAL` restored
 
 ## Route Cycling Logic
 
@@ -83,8 +88,10 @@ If BT not available:
 ## Known Limitations
 
 - **SCO only** — no A2DP (stereo music profile). SCO is correct for VoIP (bidirectional mono).
-- **Deprecated APIs** — `startBluetoothSco()`, `isBluetoothScoOn` are deprecated in API 31+ but still functional. Modern replacement `setCommunicationDevice()` requires API 31 and more complex device enumeration. Since minSdk is 26, deprecated path is correct.
-- **No auto-switch on BT connect** — when a BT device connects mid-call, `onRouteChanged` fires but we don't auto-switch. User must tap the button.
+- **API 31+ required for modern path** — `setCommunicationDevice()` is the primary BT routing API. Fallback to deprecated `startBluetoothSco()` on API < 31 (untested).
+- **BT SCO capture at 8/16kHz** — Oboe resamples to 48kHz via `SampleRateConversionQuality::Best`. Quality is inherently limited by the SCO codec (CVSD at 8kHz or mSBC at 16kHz).
+- **No auto-switch on BT connect** — when a BT device connects mid-call, user must tap the route button.
+- **500ms route switch delay** — after `setCommunicationDevice()` returns, the audio policy needs time to apply the bt-sco route. We wait 500ms before restarting Oboe.
 
 ## Testing
 

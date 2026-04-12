@@ -191,3 +191,26 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - **Hetzner VPS**: Build script (`scripts/build-linux.sh`) tested for provisioning, building, and downloading Linux binaries
 - **CI**: Gitea workflow defined for amd64/arm64/armv7 builds
 - **Production**: Not yet deployed to production networks
+
+## Recent Changes (2026-04-12)
+
+### Bluetooth Audio Routing
+- 3-way route cycling: Earpiece → Speaker → Bluetooth SCO
+- `setCommunicationDevice()` API 31+ with `startBluetoothSco()` fallback
+- BT-mode Oboe: capture skips 48kHz + VoiceCommunication, Oboe resamples 8/16kHz ↔ 48kHz
+- `MODE_IN_COMMUNICATION` deferred to call start (was at app launch — hijacked system audio)
+
+### Network Change Detection
+- `NetworkMonitor.kt` wraps `ConnectivityManager.NetworkCallback`
+- WiFi/cellular classification via bandwidth heuristics (no READ_PHONE_STATE needed)
+- Feeds `AdaptiveQualityController::signal_network_change()` via JNI → AtomicU8 → recv task
+
+### Hangup Signal Fix
+- `SignalMessage::Hangup` now carries optional `call_id`
+- Relay only ends the named call (not all calls for the user)
+- Fixes race: hangup for call 1 no longer kills newly-placed call 2
+
+### Per-Architecture APK Builds
+- `build-tauri-android.sh --arch arm64|armv7|all`
+- Separate per-arch APKs (~25MB each vs ~50MB universal)
+- Release APKs signed with `wzp-release.jks` via `apksigner`
