@@ -25,10 +25,11 @@ pub mod traits;
 pub use codec_id::{CodecId, QualityProfile};
 pub use error::*;
 pub use packet::{
-    HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader, QualityReport,
-    SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL, FRAME_TYPE_MINI,
+    CallAcceptMode, HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader,
+    QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL,
+    FRAME_TYPE_MINI,
 };
 pub use bandwidth::{BandwidthEstimator, CongestionState};
-pub use quality::{AdaptiveQualityController, Tier};
+pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;

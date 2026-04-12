@@ -9,6 +9,9 @@ members = [
     "crates/wzp-relay",
     "crates/wzp-client",
     "crates/wzp-web",
+    "crates/wzp-android",
+    "crates/wzp-native",
+    "desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -29,17 +32,25 @@ serde = { version = "1", features = ["derive"] }
 
 # Transport
 quinn = "0.11"
+socket2 = "0.5"
 
 # FEC
 raptorq = "2"
 
 # Codec
-audiopus = "0.3.0-rc.0"
+# opusic-c: high-level safe bindings over libopus 1.5.2 (encoder side).
+# opusic-sys: raw FFI for the decoder side — we build our own DecoderHandle
+# because opusic-c::Decoder.inner is pub(crate) and cannot be reached for the
+# Phase 3 DRED reconstruction path. See docs/PRD-dred-integration.md.
+# Pinned exactly (no caret) for reproducible libopus 1.5.2 across the fleet.
+opusic-c = { version = "=1.5.5", default-features = false, features = ["bundled", "dred"] }
+opusic-sys = { version = "=0.6.0", default-features = false, features = ["bundled"] }
+bytemuck = "1"
 codec2 = "0.3"
 
 # Crypto
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
@@ -52,3 +63,29 @@ wzp-fec = { path = "crates/wzp-fec" }
 wzp-crypto = { path = "crates/wzp-crypto" }
 wzp-transport = { path = "crates/wzp-transport" }
 wzp-client = { path = "crates/wzp-client" }
+
+# Fast dev profile: optimized but with debug info and incremental compilation.
+# Use with: cargo run --profile dev-fast
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+
+# Optimize heavy compute deps even in debug builds —
+# real-time audio needs < 20ms per frame, impossible unoptimized.
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+[profile.dev.package.opusic-sys]
+opt-level = 3
+[profile.dev.package.raptorq]
+opt-level = 3
+[profile.dev.package.wzp-codec]
+opt-level = 3
+[profile.dev.package.wzp-fec]
+opt-level = 3
+
+# Phase 0 (opus-DRED): removed the [patch.crates-io] audiopus_sys = { path =
+# "vendor/audiopus_sys" } block. That patch existed to fix a Windows clang-cl
+# SIMD compile bug in libopus 1.3.1. With the swap to opusic-sys (libopus
+# 1.5.2), the upstream SIMD gating was fixed and the vendor patch is
+# obsolete. The vendor/audiopus_sys directory itself should be deleted as
+# part of the same cleanup — see the commit that follows this Phase 0.

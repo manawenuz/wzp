@@ -28,6 +28,9 @@ prometheus = "0.13"
 axum = { version = "0.7", default-features = false, features = ["tokio", "http1", "ws"] }
 tower-http = { version = "0.6", features = ["fs"] }
 futures-util = "0.3"
+dirs = "6"
+sha2 = { workspace = true }
+chrono = "0.4"
 
 [[bin]]
 name = "wzp-relay"

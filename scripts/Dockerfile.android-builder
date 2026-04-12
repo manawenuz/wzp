@@ -1,0 +1,130 @@
+# =============================================================================
+# WZ Phone — Android build environment (Debian 12 / Bookworm)
+#
+# Supports both:
+#   1. Legacy Kotlin+JNI Android app (via cargo-ndk + gradle)
+#   2. Tauri 2.x Mobile Android app (via tauri-cli + Node/npm)
+#
+# Toolchain:
+#   - Debian 12 (cmake 3.25, no Android cross-compilation bugs)
+#   - JDK 17 (Gradle 8.5 + AGP 8.2.0 compatible)
+#   - NDK 26.1 (last stable before scudo/MTE crash on NDK 27+)
+#   - Node.js 20 LTS (for Tauri frontend build)
+#   - Rust stable with all 4 Android targets + cargo-ndk + tauri-cli 2.x
+#
+# Build:  docker build -t wzp-android-builder -f Dockerfile.android-builder .
+# =============================================================================
+FROM debian:bookworm
+
+ARG NDK_VERSION=26.1.10909125
+ARG ANDROID_API=34
+# Tauri 2.x mobile targets compileSdk 36 + build-tools 35 by default. Install
+# both 34 (legacy Kotlin app) and 35/36 (Tauri mobile) so the same image works
+# for both pipelines.
+ARG ANDROID_API_TAURI=36
+ARG BUILD_TOOLS_TAURI=35.0.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    ANDROID_HOME=/opt/android-sdk \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION \
+    ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION
+
+# ── System packages ──────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        curl \
+        git \
+        libssl-dev \
+        pkg-config \
+        unzip \
+        wget \
+        zip \
+        openjdk-17-jdk-headless \
+        ca-certificates \
+        libasound2-dev \
+        file \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 20 LTS (required by Tauri for frontend build) ────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version \
+    && npm --version
+
+# ── Android SDK + NDK 26.1 ──────────────────────────────────────────────────
+RUN mkdir -p $ANDROID_HOME/cmdline-tools \
+    && cd /tmp \
+    && wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip \
+    && unzip -qo cmdtools.zip -d $ANDROID_HOME/cmdline-tools \
+    && mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest \
+    && rm cmdtools.zip
+
+RUN yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 \
+    && $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+        "platforms;android-${ANDROID_API}" \
+        "build-tools;${ANDROID_API}.0.0" \
+        "platforms;android-${ANDROID_API_TAURI}" \
+        "build-tools;${BUILD_TOOLS_TAURI}" \
+        "ndk;${NDK_VERSION}" \
+        "platform-tools" \
+        2>&1 | grep -v '^\[' > /dev/null
+
+# Work around the API-24 libc.a stub in the NDK. Any C++ static lib we
+# link into libwzp_desktop_lib.so (e.g. the Oboe audio bridge) pulls in
+# bionic's static pthread_create from API-24 libc.a via libc++_shared,
+# and that pthread_create crashes at __init_tcb+4 when called from a
+# .so loaded via dlopen (the static stub expects libc init state that
+# only exists for main executables). API-26 has the proper runtime
+# bindings. Tauri-cli hard-codes aarch64-linux-android24-clang as the
+# linker and ignores .cargo/config.toml overrides, so the only sure
+# fix is to replace the NDK's ${abi}24-clang binary itself with a
+# shim that exec()s the ${abi}26-clang equivalent. Applies to all four
+# ABIs × {clang, clang++}. The legacy wzp-android crate works without
+# this because cargo-ndk honours a crate-level linker override; the
+# shim is the minimal targeted fix for the cargo-tauri build path.
+# Added as Option 3 for the incremental Step E regression (commit 4250f1b).
+RUN set -eux; \
+    BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin; \
+    for abi in aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android; do \
+        for suffix in clang clang++; do \
+            mv "$BIN/${abi}24-${suffix}" "$BIN/${abi}24-${suffix}.orig"; \
+            printf '#!/bin/sh\nexec "%s/%s26-%s" "$@"\n' "$BIN" "$abi" "$suffix" > "$BIN/${abi}24-${suffix}"; \
+            chmod +x "$BIN/${abi}24-${suffix}"; \
+        done; \
+    done
+
+# Make SDK world-readable so builder user can access it
+RUN chmod -R a+rX $ANDROID_HOME
+
+# ── Builder user (1000:1000) ─────────────────────────────────────────────────
+RUN groupadd -g 1000 builder \
+    && useradd -m -u 1000 -g 1000 -s /bin/bash builder
+
+USER builder
+WORKDIR /home/builder
+
+# ── Rust toolchain ───────────────────────────────────────────────────────────
+# Install all 4 Android targets (Tauri Mobile builds for all ABIs by default;
+# cargo-ndk legacy path only needs arm64-v8a — both workflows supported).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable \
+    && . $HOME/.cargo/env \
+    && rustup target add \
+        aarch64-linux-android \
+        armv7-linux-androideabi \
+        i686-linux-android \
+        x86_64-linux-android \
+    && cargo install cargo-ndk \
+    && cargo install tauri-cli --version "^2.0" --locked
+
+ENV PATH="/home/builder/.cargo/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
+
+# NDK_HOME is the env var tauri-cli checks (in addition to ANDROID_NDK_HOME)
+ENV NDK_HOME=$ANDROID_NDK_HOME
+
+WORKDIR /build/source

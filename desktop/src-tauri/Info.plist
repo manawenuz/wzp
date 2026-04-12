@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Custom Info.plist keys merged into the bundled WarzonePhone.app by
+      tauri-bundler. The base Info.plist (CFBundleIdentifier, version,
+      etc.) is generated from tauri.conf.json — only put *additional*
+      keys here.
+
+      NSMicrophoneUsageDescription is required by macOS TCC for any
+      app that opens an audio input unit. Without this string the OS
+      silently denies CoreAudio capture (input callbacks return zeros)
+      and the app never appears in System Settings → Privacy &
+      Security → Microphone. This was the root cause of the desktop
+      mic regression where phones could not hear the desktop client.
+    -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>WarzonePhone needs microphone access to transmit your voice during calls.</string>
+</dict>
+</plist>

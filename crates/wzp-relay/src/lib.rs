@@ -8,7 +8,11 @@
 //! quality transitions.
 
 pub mod auth;
+pub mod call_registry;
 pub mod config;
+pub mod event_log;
+pub mod federation;
+pub mod signal_hub;
 pub mod handshake;
 pub mod metrics;
 pub mod pipeline;

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use crate::packet::MediaPacket;
 
@@ -20,19 +21,29 @@ pub struct AdaptivePlayoutDelay {
     max_delay: usize,
     /// Exponential moving average of inter-packet arrival jitter (ms).
     jitter_ema: f64,
-    /// EMA smoothing factor (0.0-1.0, lower = smoother).
-    alpha: f64,
+    /// EMA smoothing factor for jitter increases (fast reaction).
+    alpha_up: f64,
+    /// EMA smoothing factor for jitter decreases (slow decay).
+    alpha_down: f64,
     /// Last packet arrival timestamp (for computing inter-arrival jitter).
     last_arrival_ms: Option<u64>,
     /// Last packet expected timestamp.
     last_expected_ms: Option<u64>,
+    /// Safety margin added to jitter-derived target (in packets).
+    safety_margin: f64,
+    /// Instant when a jitter spike was detected (handoff detection).
+    spike_detected_at: Option<Instant>,
+    /// Duration to hold max_delay after a spike is detected.
+    spike_cooldown: Duration,
+    /// Multiplier of jitter_ema that constitutes a spike.
+    spike_threshold_multiplier: f64,
 }
 
 /// Frame duration in milliseconds (20ms Opus/Codec2 frames).
 const FRAME_DURATION_MS: f64 = 20.0;
-/// Safety margin added to jitter-derived target (in packets).
-const SAFETY_MARGIN_PACKETS: f64 = 2.0;
-/// Default EMA smoothing factor.
+/// Default safety margin in packets.
+const DEFAULT_SAFETY_MARGIN: f64 = 2.0;
+/// Default EMA smoothing factor (used for both up/down in non-mobile mode).
 const DEFAULT_ALPHA: f64 = 0.05;
 
 impl AdaptivePlayoutDelay {
@@ -46,9 +57,14 @@ impl AdaptivePlayoutDelay {
             min_delay,
             max_delay,
             jitter_ema: 0.0,
-            alpha: DEFAULT_ALPHA,
+            alpha_up: DEFAULT_ALPHA,
+            alpha_down: DEFAULT_ALPHA,
             last_arrival_ms: None,
             last_expected_ms: None,
+            safety_margin: DEFAULT_SAFETY_MARGIN,
+            spike_detected_at: None,
+            spike_cooldown: Duration::from_secs(2),
+            spike_threshold_multiplier: 3.0,
         }
     }
 
@@ -64,13 +80,38 @@ impl AdaptivePlayoutDelay {
             let expected_delta = expected_ms as f64 - last_expected as f64;
             let jitter = (actual_delta - expected_delta).abs();
 
-            // Update EMA
-            self.jitter_ema = self.alpha * jitter + (1.0 - self.alpha) * self.jitter_ema;
+            // Spike detection: check before EMA update
+            if self.jitter_ema > 0.0
+                && jitter > self.jitter_ema * self.spike_threshold_multiplier
+            {
+                self.spike_detected_at = Some(Instant::now());
+            }
 
-            // Convert jitter estimate to target delay in packets
-            let raw_target = (self.jitter_ema / FRAME_DURATION_MS).ceil() + SAFETY_MARGIN_PACKETS;
-            self.target_delay =
-                (raw_target as usize).clamp(self.min_delay, self.max_delay);
+            // Asymmetric EMA update
+            let alpha = if jitter > self.jitter_ema {
+                self.alpha_up
+            } else {
+                self.alpha_down
+            };
+            self.jitter_ema = alpha * jitter + (1.0 - alpha) * self.jitter_ema;
+
+            // Check if spike cooldown has expired
+            if let Some(spike_time) = self.spike_detected_at {
+                if spike_time.elapsed() >= self.spike_cooldown {
+                    self.spike_detected_at = None;
+                }
+            }
+
+            // If within spike cooldown, return max_delay
+            if self.spike_detected_at.is_some() {
+                self.target_delay = self.max_delay;
+            } else {
+                // Convert jitter estimate to target delay in packets
+                let raw_target =
+                    (self.jitter_ema / FRAME_DURATION_MS).ceil() + self.safety_margin;
+                self.target_delay =
+                    (raw_target as usize).clamp(self.min_delay, self.max_delay);
+            }
         }
 
         self.last_arrival_ms = Some(arrival_ms);
@@ -86,6 +127,28 @@ impl AdaptivePlayoutDelay {
     /// Get current jitter estimate in ms.
     pub fn jitter_estimate_ms(&self) -> f64 {
         self.jitter_ema
+    }
+
+    /// Enable or disable mobile mode, adjusting parameters for cellular networks.
+    ///
+    /// Mobile mode uses:
+    /// - Asymmetric alpha (fast up=0.3, slow down=0.02) for quicker spike detection
+    /// - Higher safety margin (3.0 packets) to absorb handoff jitter
+    /// - Spike detection with 2-second cooldown at 3x threshold
+    pub fn set_mobile_mode(&mut self, enabled: bool) {
+        if enabled {
+            self.safety_margin = 3.0;
+            self.alpha_up = 0.3;
+            self.alpha_down = 0.02;
+            self.spike_threshold_multiplier = 3.0;
+            self.spike_cooldown = Duration::from_secs(2);
+        } else {
+            self.safety_margin = DEFAULT_SAFETY_MARGIN;
+            self.alpha_up = DEFAULT_ALPHA;
+            self.alpha_down = DEFAULT_ALPHA;
+            self.spike_threshold_multiplier = 3.0;
+            self.spike_cooldown = Duration::from_secs(2);
+        }
     }
 }
 
@@ -210,10 +273,21 @@ impl JitterBuffer {
             return;
         }
 
-        // Check if packet is too old (already played out)
+        // Check if packet is too old (already played out).
+        // A backward jump of >100 seq (~2s at 50fps) indicates a new sender in a
+        // federation room — reset instead of dropping.
         if self.stats.packets_played > 0 && seq_before(seq, self.next_playout_seq) {
-            self.stats.packets_late += 1;
-            return;
+            let backward_distance = self.next_playout_seq.wrapping_sub(seq);
+            tracing::warn!(seq, next = self.next_playout_seq, backward_distance, "jitter: backward seq detected");
+            if backward_distance > 100 {
+                tracing::info!(seq, next = self.next_playout_seq, "jitter: RESET — new sender detected");
+                self.buffer.clear();
+                self.next_playout_seq = seq;
+                self.stats.packets_late = 0;
+            } else {
+                self.stats.packets_late += 1;
+                return;
+            }
         }
 
         // If we haven't started playout yet, adjust next_playout_seq to earliest known
@@ -349,10 +423,21 @@ impl JitterBuffer {
             return;
         }
 
-        // Check if packet is too old (already played out)
+        // Check if packet is too old (already played out).
+        // A backward jump of >100 seq (~2s at 50fps) indicates a new sender in a
+        // federation room — reset instead of dropping.
         if self.stats.packets_played > 0 && seq_before(seq, self.next_playout_seq) {
-            self.stats.packets_late += 1;
-            return;
+            let backward_distance = self.next_playout_seq.wrapping_sub(seq);
+            tracing::warn!(seq, next = self.next_playout_seq, backward_distance, "jitter: backward seq detected");
+            if backward_distance > 100 {
+                tracing::info!(seq, next = self.next_playout_seq, "jitter: RESET — new sender detected");
+                self.buffer.clear();
+                self.next_playout_seq = seq;
+                self.stats.packets_late = 0;
+            } else {
+                self.stats.packets_late += 1;
+                return;
+            }
         }
 
         // If we haven't started playout yet, adjust next_playout_seq to earliest known
@@ -389,6 +474,11 @@ impl JitterBuffer {
     /// Get a reference to the adaptive playout delay estimator, if enabled.
     pub fn adaptive_delay(&self) -> Option<&AdaptivePlayoutDelay> {
         self.adaptive.as_ref()
+    }
+
+    /// Get a mutable reference to the adaptive playout delay estimator.
+    pub fn adaptive_delay_mut(&mut self) -> Option<&mut AdaptivePlayoutDelay> {
+        self.adaptive.as_mut()
     }
 
     /// Adjust target depth based on observed jitter.
@@ -719,5 +809,30 @@ mod tests {
         // With zero jitter, target should stay at min
         let ad = jb.adaptive_delay().unwrap();
         assert_eq!(ad.target_delay(), 3);
+    }
+
+    // ---------------------------------------------------------------
+    // Mobile mode tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn mobile_mode_increases_safety_margin() {
+        let mut apd = AdaptivePlayoutDelay::new(3, 50);
+        apd.set_mobile_mode(true);
+        assert_eq!(apd.safety_margin, 3.0);
+        assert_eq!(apd.alpha_up, 0.3);
+        assert_eq!(apd.alpha_down, 0.02);
+
+        apd.set_mobile_mode(false);
+        assert_eq!(apd.safety_margin, DEFAULT_SAFETY_MARGIN);
+        assert_eq!(apd.alpha_up, DEFAULT_ALPHA);
+        assert_eq!(apd.alpha_down, DEFAULT_ALPHA);
+    }
+
+    #[test]
+    fn mobile_mode_accessible_via_jitter_buffer() {
+        let mut jb = JitterBuffer::new_adaptive(3, 50);
+        jb.adaptive_delay_mut().unwrap().set_mobile_mode(true);
+        assert_eq!(jb.adaptive_delay().unwrap().safety_margin, 3.0);
     }
 }

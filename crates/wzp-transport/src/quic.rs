@@ -33,6 +33,34 @@ impl QuinnTransport {
         &self.connection
     }
 
+    /// Remote address of the peer on this connection.
+    pub fn remote_address(&self) -> std::net::SocketAddr {
+        self.connection.remote_address()
+    }
+
+    /// Send raw bytes as a QUIC datagram (no MediaPacket framing).
+    pub fn send_raw_datagram(&self, data: &[u8]) -> Result<(), TransportError> {
+        self.connection
+            .send_datagram(bytes::Bytes::copy_from_slice(data))
+            .map_err(|e| TransportError::Internal(format!("datagram: {e}")))
+    }
+
+    /// Close the QUIC connection immediately (synchronous, no async needed).
+    /// The relay will detect the close and remove this participant from the room.
+    pub fn close_now(&self) {
+        self.connection.close(quinn::VarInt::from_u32(0), b"hangup");
+    }
+
+    /// Feed an external RTT observation (e.g. from QUIC path stats) into the path monitor.
+    pub fn feed_rtt(&self, rtt_ms: u32) {
+        self.path_monitor.lock().unwrap().observe_rtt(rtt_ms);
+    }
+
+    /// Get raw packet counts from path monitor (sent, received).
+    pub fn monitor_counts(&self) -> (u64, u64) {
+        self.path_monitor.lock().unwrap().counts()
+    }
+
     /// Get the maximum datagram payload size, if datagrams are supported.
     pub fn max_datagram_size(&self) -> Option<usize> {
         datagram::max_datagram_payload(&self.connection)
@@ -120,7 +148,7 @@ impl MediaTransport for QuinnTransport {
             }
         };
 
-        match datagram::deserialize_media(data) {
+        match datagram::deserialize_media(data.clone()) {
             Some(packet) => {
                 // Record receive observation
                 {
@@ -133,8 +161,10 @@ impl MediaTransport for QuinnTransport {
                 Ok(Some(packet))
             }
             None => {
-                tracing::warn!("received malformed media datagram");
-                Ok(None)
+                tracing::warn!(len = data.len(), "skipping malformed media datagram, continuing");
+                // Don't return Ok(None) — that signals connection closed.
+                // Recurse to read the next datagram instead.
+                Box::pin(self.recv_media()).await
             }
         }
     }

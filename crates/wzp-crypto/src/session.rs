@@ -26,6 +26,8 @@ pub struct ChaChaSession {
     rekey_mgr: RekeyManager,
     /// Pending ephemeral secret for rekey (stored until peer responds).
     pending_rekey_secret: Option<StaticSecret>,
+    /// Short Authentication String (4-digit code for verbal verification).
+    sas_code: Option<u32>,
 }
 
 impl ChaChaSession {
@@ -46,7 +48,13 @@ impl ChaChaSession {
             recv_seq: 0,
             rekey_mgr: RekeyManager::new(shared_secret),
             pending_rekey_secret: None,
+            sas_code: None,
         }
+    }
+
+    /// Set the SAS code (called by key exchange after derivation).
+    pub fn set_sas(&mut self, code: u32) {
+        self.sas_code = Some(code);
     }
 
     /// Install a new key (after rekeying).
@@ -135,6 +143,10 @@ impl CryptoSession for ChaChaSession {
         self.recv_seq = 0;
 
         Ok(())
+    }
+
+    fn sas_code(&self) -> Option<u32> {
+        self.sas_code
     }
 }
 

@@ -2,207 +2,57 @@ name: Build Release Binaries
 
 on:
   push:
+    branches:
+      - main
+      - 'feat/*'
     tags:
       - 'v*'
     paths-ignore:
       - '.gitea/**'
   workflow_dispatch:
-    inputs:
-      targets:
-        description: 'Targets to build (comma-separated: amd64,arm64,armv7)'
-        required: false
-        default: 'amd64'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-amd64:
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.inputs.targets, 'amd64')
     runs-on: ubuntu-latest
+    container:
+      image: catthehacker/ubuntu:act-latest
     steps:
-      - name: Checkout
-        run: |
-          apt-get update && apt-get install -y git curl jq
-          AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
-          AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
-          git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
-          git submodule update --init --depth 1
+      - uses: actions/checkout@v4
 
-      - name: Install Rust and dependencies
+      - name: Init submodules
         run: |
-          apt-get install -y cmake pkg-config libasound2-dev libssl-dev build-essential
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          git config --global url."https://git.manko.yoga/".insteadOf "ssh://git@git.manko.yoga:222/"
+          git submodule update --init --recursive
 
-      - name: Build headless binaries
+      - name: Install Rust + dependencies
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "$HOME/.cargo/env"
+          apt-get update && apt-get install -y cmake pkg-config libasound2-dev ninja-build
+          rustc --version
+
+      - name: Build relay + tools
+        run: |
+          source "$HOME/.cargo/env"
           cargo build --release --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
-
-      - name: Build audio client
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --bin wzp-client --features audio
-          cp target/release/wzp-client target/release/wzp-client-audio
-          cargo build --release --bin wzp-client
 
       - name: Run tests
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
+          source "$HOME/.cargo/env"
           cargo test --workspace --lib
 
-      - name: Package
-        run: |
-          mkdir -p dist/wzp-linux-amd64
-          cp target/release/wzp-relay dist/wzp-linux-amd64/
-          cp target/release/wzp-client dist/wzp-linux-amd64/
-          cp target/release/wzp-client-audio dist/wzp-linux-amd64/
-          cp target/release/wzp-web dist/wzp-linux-amd64/
-          cp target/release/wzp-bench dist/wzp-linux-amd64/
-          cp -r crates/wzp-web/static dist/wzp-linux-amd64/
-          cd dist && tar czf wzp-linux-amd64.tar.gz wzp-linux-amd64/
-
-      - name: Upload to release
-        run: |
-          API="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
-          TOKEN="${{ github.token }}"
-          TAG="build-$(date +%Y%m%d-%H%M%S)"
-          SHA=$(git rev-parse --short HEAD)
-          # Create release
-          RELEASE=$(curl -sS -X POST "$API/releases" \
-            -H "Authorization: token $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (amd64)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
-          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
-          # Upload artifact
-          curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-amd64.tar.gz" \
-            -H "Authorization: token $TOKEN" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @dist/wzp-linux-amd64.tar.gz
-          echo "Release created: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
-
-  build-arm64:
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.inputs.targets, 'arm64')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        run: |
-          apt-get update && apt-get install -y git curl jq
-          AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
-          AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
-          git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
-          git submodule update --init --depth 1
-
-      - name: Install Rust and cross-compilation tools
-        run: |
-          dpkg --add-architecture arm64
-          apt-get update
-          apt-get install -y cmake pkg-config gcc-aarch64-linux-gnu libc6-dev-arm64-cross libssl-dev build-essential
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup target add aarch64-unknown-linux-gnu
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Build
+      - name: Upload to rustypaste
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          PASTE_AUTH: ${{ secrets.PASTE_AUTH }}
+          PASTE_URL: ${{ secrets.PASTE_URL }}
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --target aarch64-unknown-linux-gnu \
-            --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
-
-      - name: Package
-        run: |
-          mkdir -p dist/wzp-linux-arm64
-          cp target/aarch64-unknown-linux-gnu/release/wzp-relay dist/wzp-linux-arm64/
-          cp target/aarch64-unknown-linux-gnu/release/wzp-client dist/wzp-linux-arm64/
-          cp target/aarch64-unknown-linux-gnu/release/wzp-web dist/wzp-linux-arm64/
-          cp target/aarch64-unknown-linux-gnu/release/wzp-bench dist/wzp-linux-arm64/
-          cp -r crates/wzp-web/static dist/wzp-linux-arm64/
-          cd dist && tar czf wzp-linux-arm64.tar.gz wzp-linux-arm64/
-
-      - name: Upload to release
-        run: |
-          API="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
-          TOKEN="${{ github.token }}"
-          TAG="build-arm64-$(date +%Y%m%d-%H%M%S)"
-          SHA=$(git rev-parse --short HEAD)
-          RELEASE=$(curl -sS -X POST "$API/releases" \
-            -H "Authorization: token $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (arm64)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
-          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
-          curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-arm64.tar.gz" \
-            -H "Authorization: token $TOKEN" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @dist/wzp-linux-arm64.tar.gz
-          echo "Release created: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
-
-  build-armv7:
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.inputs.targets, 'armv7')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        run: |
-          apt-get update && apt-get install -y git curl jq
-          AUTH_URL="${{ github.server_url }}/${{ github.repository }}.git"
-          AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://${{ github.token }}@|")
-          git clone --depth 1 --branch ${{ github.ref_name }} "$AUTH_URL" .
-          git config --global url."https://git.tbs.amn.gg/manawenuz/featherChat.git".insteadOf "ssh://git@git.manko.yoga:222/manawenuz/featherChat.git"
-          git submodule update --init --depth 1
-
-      - name: Install Rust and cross-compilation tools
-        run: |
-          dpkg --add-architecture armhf
-          apt-get update
-          apt-get install -y cmake pkg-config gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libssl-dev build-essential
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup target add armv7-unknown-linux-gnueabihf
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Build
-        env:
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
-          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --target armv7-unknown-linux-gnueabihf \
-            --bin wzp-relay --bin wzp-client --bin wzp-bench --bin wzp-web
-
-      - name: Package
-        run: |
-          mkdir -p dist/wzp-linux-armv7
-          cp target/armv7-unknown-linux-gnueabihf/release/wzp-relay dist/wzp-linux-armv7/
-          cp target/armv7-unknown-linux-gnueabihf/release/wzp-client dist/wzp-linux-armv7/
-          cp target/armv7-unknown-linux-gnueabihf/release/wzp-web dist/wzp-linux-armv7/
-          cp target/armv7-unknown-linux-gnueabihf/release/wzp-bench dist/wzp-linux-armv7/
-          cp -r crates/wzp-web/static dist/wzp-linux-armv7/
-          cd dist && tar czf wzp-linux-armv7.tar.gz wzp-linux-armv7/
-
-      - name: Upload to release
-        run: |
-          API="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
-          TOKEN="${{ github.token }}"
-          TAG="build-armv7-$(date +%Y%m%d-%H%M%S)"
-          SHA=$(git rev-parse --short HEAD)
-          RELEASE=$(curl -sS -X POST "$API/releases" \
-            -H "Authorization: token $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"$TAG\",\"name\":\"Build $SHA (armv7)\",\"body\":\"Automated build from ${{ github.ref_name }} at $SHA\",\"draft\":false,\"prerelease\":true}")
-          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
-          curl -sS -X POST "$API/releases/$RELEASE_ID/assets?name=wzp-linux-armv7.tar.gz" \
-            -H "Authorization: token $TOKEN" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @dist/wzp-linux-armv7.tar.gz
-          echo "Release created: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
+          tar czf /tmp/wzp-linux-amd64.tar.gz \
+            -C target/release wzp-relay wzp-client wzp-web wzp-bench
+          ls -lh /tmp/wzp-linux-amd64.tar.gz
+          LINK=$(curl -sF "file=@/tmp/wzp-linux-amd64.tar.gz" \
+            -H "Authorization: ${PASTE_AUTH}" \
+            "https://${PASTE_URL}")
+          echo "Download: ${LINK}"

@@ -63,11 +63,11 @@ async fn handshake_succeeds() {
         accept_handshake(server_t.as_ref(), &callee_seed).await
     });
 
-    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed)
+    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
         .expect("perform_handshake should succeed");
 
-    let (callee_session, chosen_profile) = callee_handle
+    let (callee_session, chosen_profile, _caller_fp, _caller_alias) = callee_handle
         .await
         .expect("join callee task")
         .expect("accept_handshake should succeed");
@@ -124,11 +124,11 @@ async fn handshake_verifies_identity() {
         accept_handshake(server_t.as_ref(), &callee_seed).await
     });
 
-    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed)
+    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
         .expect("handshake must succeed even with different identities");
 
-    let (callee_session, _profile) = callee_handle
+    let (callee_session, _profile, _caller_fp, _caller_alias) = callee_handle
         .await
         .expect("join")
         .expect("accept_handshake must succeed");
@@ -183,7 +183,7 @@ async fn auth_then_handshake() {
         };
 
         // 2. Run the cryptographic handshake
-        let (session, profile) = accept_handshake(server_t.as_ref(), &callee_seed)
+        let (session, profile, _caller_fp, _caller_alias) = accept_handshake(server_t.as_ref(), &callee_seed)
             .await
             .expect("accept_handshake after auth");
 
@@ -199,7 +199,7 @@ async fn auth_then_handshake() {
         .await
         .expect("send AuthToken");
 
-    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed)
+    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
         .expect("perform_handshake after auth");
 
@@ -270,6 +270,7 @@ async fn handshake_rejects_bad_signature() {
         ephemeral_pub,
         signature,
         supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+        alias: None,
     };
 
     client_transport

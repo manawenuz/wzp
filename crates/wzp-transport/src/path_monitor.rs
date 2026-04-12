@@ -136,6 +136,11 @@ impl PathMonitor {
         }
     }
 
+    /// Get raw packet counts for debugging.
+    pub fn counts(&self) -> (u64, u64) {
+        (self.total_sent, self.total_received)
+    }
+
     /// Estimate bandwidth in kbps from bytes received over time.
     fn estimate_bandwidth_kbps(&self) -> u32 {
         if let (Some(first), Some(last)) = (self.first_recv_time_ms, self.last_recv_time_ms) {
@@ -148,6 +153,27 @@ impl PathMonitor {
             }
         }
         0
+    }
+
+    /// Detect whether a network handoff likely occurred.
+    ///
+    /// Returns `true` if the most recent RTT jitter measurement exceeds 3x
+    /// the EWMA-smoothed jitter average, which is characteristic of a cellular
+    /// network handoff (tower switch, WiFi-to-cellular transition, etc.).
+    pub fn detect_handoff(&self) -> bool {
+        // We need at least two RTT observations to have a meaningful jitter value,
+        // and the EWMA must be non-zero to avoid division/multiplication by zero.
+        if self.jitter_ewma <= 0.0 {
+            return false;
+        }
+
+        if let (Some(last_rtt), Some(_)) = (self.last_rtt_ms, Some(self.rtt_ewma)) {
+            // Compute the most recent instantaneous jitter (RTT deviation from EWMA)
+            let instant_jitter = (last_rtt - self.rtt_ewma).abs();
+            instant_jitter > self.jitter_ewma * 3.0
+        } else {
+            false
+        }
     }
 }
 

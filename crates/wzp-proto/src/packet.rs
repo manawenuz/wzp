@@ -548,6 +548,9 @@ pub enum SignalMessage {
         signature: Vec<u8>,
         /// Supported quality profiles.
         supported_profiles: Vec<crate::QualityProfile>,
+        /// Optional display name set by the caller.
+        #[serde(default)]
+        alias: Option<String>,
     },
 
     /// Call acceptance (analogous to Warzone's WireMessage::CallAnswer).
@@ -581,12 +584,38 @@ pub enum SignalMessage {
         recommended_profile: crate::QualityProfile,
     },
 
+    /// Phase 4 telemetry: loss-recovery counts for the current session.
+    /// Sent periodically from receivers to the relay so Prometheus metrics
+    /// can distinguish DRED reconstructions from classical PLC invocations.
+    /// Fields default to 0 on old receivers (`#[serde(default)]`), so
+    /// introducing this variant is backward-compatible with pre-Phase-4
+    /// relays — they'll just log "unknown signal variant" on receipt.
+    LossRecoveryUpdate {
+        /// Total frames reconstructed via DRED since call start (monotonic).
+        #[serde(default)]
+        dred_reconstructions: u64,
+        /// Total frames filled via classical Opus/Codec2 PLC since call
+        /// start (monotonic).
+        #[serde(default)]
+        classical_plc_invocations: u64,
+        /// Total frames decoded since call start. Used by the relay to
+        /// compute recovery rates as a fraction of total frames.
+        #[serde(default)]
+        frames_decoded: u64,
+    },
+
     /// Connection keepalive / RTT measurement.
     Ping { timestamp_ms: u64 },
     Pong { timestamp_ms: u64 },
 
-    /// End the call.
-    Hangup { reason: HangupReason },
+    /// End the call. `call_id` is optional for backwards compatibility
+    /// with older clients that send Hangup without it — the relay falls
+    /// back to ending ALL active calls for the sender in that case.
+    Hangup {
+        reason: HangupReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
 
     /// featherChat bearer token for relay authentication.
     /// Sent as the first signal message when --auth-url is configured.
@@ -645,6 +674,274 @@ pub enum SignalMessage {
         session_id: String,
         room_name: String,
     },
+
+    /// Room membership update — sent by relay to all participants when someone joins or leaves.
+    RoomUpdate {
+        /// Current participant count.
+        count: u32,
+        /// List of participants currently in the room.
+        participants: Vec<RoomParticipant>,
+    },
+
+    // ── Federation signals (relay-to-relay) ──
+
+    /// Federation: initial handshake — the connecting relay identifies itself.
+    FederationHello {
+        /// TLS certificate fingerprint of the connecting relay.
+        tls_fingerprint: String,
+    },
+
+    /// Federation: this relay now has local participants in a global room.
+    GlobalRoomActive {
+        room: String,
+        /// Participants on the announcing relay (for federated presence).
+        #[serde(default)]
+        participants: Vec<RoomParticipant>,
+    },
+
+    /// Federation: this relay's last local participant left a global room.
+    GlobalRoomInactive {
+        room: String,
+    },
+
+    // ── Direct calling signals (client ↔ relay signaling) ──
+
+    /// Register on relay for direct calls. Sent on `_signal` connections
+    /// after optional AuthToken.
+    RegisterPresence {
+        /// Client's Ed25519 identity public key.
+        identity_pub: [u8; 32],
+        /// Signature over ("register-presence" || identity_pub).
+        signature: Vec<u8>,
+        /// Optional display name.
+        alias: Option<String>,
+    },
+
+    /// Relay confirms presence registration.
+    RegisterPresenceAck {
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// Relay's build version (git short hash).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_build: Option<String>,
+    },
+
+    /// Direct call offer routed through the relay to a specific peer.
+    DirectCallOffer {
+        /// Caller's fingerprint.
+        caller_fingerprint: String,
+        /// Caller's display name.
+        caller_alias: Option<String>,
+        /// Target's fingerprint.
+        target_fingerprint: String,
+        /// Unique call session ID (UUID).
+        call_id: String,
+        /// Caller's Ed25519 identity pub.
+        identity_pub: [u8; 32],
+        /// Caller's ephemeral X25519 pub (for key exchange on media connect).
+        ephemeral_pub: [u8; 32],
+        /// Signature over (ephemeral_pub || target_fingerprint || call_id).
+        signature: Vec<u8>,
+        /// Supported quality profiles.
+        supported_profiles: Vec<crate::QualityProfile>,
+        /// Phase 3 (hole-punching): caller's own server-reflexive
+        /// address as learned via `SignalMessage::Reflect`. The
+        /// relay stashes this in its call registry and later
+        /// injects it into the callee's `CallSetup.peer_direct_addr`
+        /// so the callee can try a direct QUIC handshake to the
+        /// caller instead of routing media through the relay.
+        /// `None` means "caller doesn't want P2P, use relay only".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_reflexive_addr: Option<String>,
+        /// Phase 5.5 (ICE host candidates): caller's LAN-local
+        /// interface addresses paired with its signal endpoint's
+        /// port. Peers on the same physical LAN can direct-dial
+        /// these without going through the WAN reflex addr,
+        /// which is important because most consumer NATs
+        /// (including MikroTik masquerade) don't support NAT
+        /// hairpinning — the reflex addr is unreachable from
+        /// the same LAN.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caller_local_addrs: Vec<String>,
+        /// Build version (git short hash) for debugging.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_build_version: Option<String>,
+    },
+
+    /// Callee's response to a direct call.
+    DirectCallAnswer {
+        call_id: String,
+        /// How the callee accepts (or rejects).
+        accept_mode: CallAcceptMode,
+        /// Callee's identity pub (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        identity_pub: Option<[u8; 32]>,
+        /// Callee's ephemeral pub (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ephemeral_pub: Option<[u8; 32]>,
+        /// Signature (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<Vec<u8>>,
+        /// Chosen quality profile (present when accepting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chosen_profile: Option<crate::QualityProfile>,
+        /// Phase 3 (hole-punching): callee's own server-reflexive
+        /// address, only populated on `AcceptTrusted` — privacy-mode
+        /// answers leave this `None` so the callee's real IP stays
+        /// hidden (the whole point of `AcceptGeneric`). The relay
+        /// carries it opaquely into the caller's `CallSetup`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callee_reflexive_addr: Option<String>,
+        /// Phase 5.5 (ICE host candidates): callee's LAN-local
+        /// interface addresses. Same purpose as
+        /// `caller_local_addrs` in `DirectCallOffer`. Only
+        /// populated on `AcceptTrusted` alongside
+        /// `callee_reflexive_addr`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        callee_local_addrs: Vec<String>,
+        /// Build version (git short hash) for debugging.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callee_build_version: Option<String>,
+    },
+
+    /// Relay tells both parties: media room is ready.
+    CallSetup {
+        call_id: String,
+        /// Room name on the relay for the media session (e.g., "_call:a1b2c3d4").
+        room: String,
+        /// Relay address for the QUIC media connection.
+        relay_addr: String,
+        /// Phase 3 (hole-punching): the OTHER party's server-reflexive
+        /// address as the relay learned it from the offer/answer
+        /// exchange. When populated, clients attempt a direct QUIC
+        /// handshake to this address in parallel with the existing
+        /// relay path and use whichever connects first. `None`
+        /// means the relay path is the only option — either because
+        /// a peer didn't advertise its addr (Phase 1/2 relay or
+        /// privacy-mode answer) or because the relay decided P2P
+        /// wasn't viable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_direct_addr: Option<String>,
+        /// Phase 5.5 (ICE host candidates): the OTHER party's LAN
+        /// host addresses (RFC1918 IPv4 + CGNAT + non-link-local
+        /// IPv6). On same-LAN calls these are directly dialable
+        /// and bypass the NAT-hairpinning problem that blocks
+        /// same-LAN peers from using `peer_direct_addr`.
+        /// Client-side race tries all of these in parallel.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peer_local_addrs: Vec<String>,
+    },
+
+    /// Ringing notification (relay → caller, callee received the offer).
+    CallRinging {
+        call_id: String,
+    },
+
+    // ── NAT reflection ("STUN for QUIC") ──────────────────────────────
+
+    /// Client → relay: "please tell me the source IP:port you see on
+    /// this connection". A QUIC-native replacement for classic STUN
+    /// that reuses the TLS-authenticated signal channel to the relay
+    /// instead of running a separate UDP reflection service on port
+    /// 3478. The relay answers with `ReflectResponse`.
+    ///
+    /// No payload — the relay already knows which connection the
+    /// request arrived on, and `connection.remote_address()` gives it
+    /// the exact source address (post-NAT) as observed from the
+    /// server side of the TLS session.
+    Reflect,
+
+    /// Relay → client: response to `Reflect`. Carries the socket
+    /// address the relay observes as the client's source for this
+    /// QUIC connection in `SocketAddr::to_string()` form — "a.b.c.d:p"
+    /// for IPv4, "[::1]:p" for IPv6. Clients parse it with
+    /// `SocketAddr::from_str`.
+    ReflectResponse {
+        observed_addr: String,
+    },
+
+    // ── Phase 6: ICE-style path negotiation ─────────────────────
+
+    /// Phase 6: each side reports the result of its local dual-
+    /// path race to the other side through the relay. Both peers
+    /// send this after their race completes; both wait for the
+    /// other's report before committing a transport to the
+    /// CallEngine.
+    ///
+    /// The decision rule is: if BOTH sides report `direct_ok =
+    /// true`, use the direct P2P connection. If EITHER reports
+    /// `direct_ok = false`, BOTH fall back to relay. This
+    /// eliminates the race condition where one side picks Direct
+    /// and the other picks Relay — they now agree on the path
+    /// before any media flows.
+    MediaPathReport {
+        call_id: String,
+        /// Did the direct QUIC connection (P2P dial or accept)
+        /// complete successfully on this side?
+        direct_ok: bool,
+        /// Which future won the local tokio::select race?
+        /// "Direct" or "Relay" — informational for debug logs.
+        #[serde(default)]
+        race_winner: String,
+    },
+
+    // ── Phase 4: cross-relay direct-call signaling ────────────────────
+
+    /// Phase 4: relay-to-relay envelope for forwarding direct-call
+    /// signaling across a federation link. When Alice on Relay A
+    /// sends a `DirectCallOffer` for Bob whose fingerprint isn't
+    /// in A's local SignalHub, Relay A wraps the offer in this
+    /// envelope and broadcasts it over every active federation
+    /// peer link. Whichever peer has Bob registered unwraps the
+    /// inner message and delivers it locally.
+    ///
+    /// Never originated by clients — only relays create and
+    /// consume this variant.
+    ///
+    /// Loop prevention: the receiving relay drops any forward
+    /// where `origin_relay_fp` matches its own federation TLS
+    /// fingerprint. With broadcast-to-all-peers this prevents
+    /// A→B→A echo loops; proper TTL + dedup will land when
+    /// multi-hop federation is added (Phase 4.2).
+    FederatedSignalForward {
+        /// The signal message being forwarded
+        /// (`DirectCallOffer`, `DirectCallAnswer`, `CallRinging`,
+        /// `Hangup`, ...). Boxed because `SignalMessage` is
+        /// relatively large and JSON serde handles recursion
+        /// cleanly.
+        inner: Box<SignalMessage>,
+        /// Federation TLS fingerprint of the sending relay.
+        /// Used (a) for loop prevention by the receiver and (b)
+        /// to route the peer's reply back through the same
+        /// federation link via `send_signal_to_peer`.
+        origin_relay_fp: String,
+    },
+}
+
+/// How the callee responds to a direct call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallAcceptMode {
+    /// Reject the call.
+    Reject,
+    /// Accept with trust — in Phase 2, this enables P2P (reveals IP).
+    /// In Phase 1, behaves the same as AcceptGeneric.
+    AcceptTrusted,
+    /// Accept with privacy — relay always mediates media.
+    AcceptGeneric,
+}
+
+/// A participant entry in a RoomUpdate message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoomParticipant {
+    /// Identity fingerprint (hex string, stable across reconnects if seed is persisted).
+    pub fingerprint: String,
+    /// Optional display name set by the client.
+    pub alias: Option<String>,
+    /// Relay label — identifies which relay this participant is connected to.
+    /// None for local participants, Some("Relay B") for federated.
+    #[serde(default)]
+    pub relay_label: Option<String>,
 }
 
 /// Reasons for ending a call.
@@ -756,6 +1053,267 @@ mod tests {
         assert_eq!(packet.header, decoded.header);
         assert_eq!(packet.payload, decoded.payload);
         assert_eq!(packet.quality_report, decoded.quality_report);
+    }
+
+    #[test]
+    fn reflect_serialize_roundtrip() {
+        // Reflect is a unit variant — the client sends it with no
+        // payload and the relay answers with the observed source addr.
+        let req = SignalMessage::Reflect;
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, SignalMessage::Reflect));
+
+        // ReflectResponse carries a string — exercise both IPv4 and
+        // IPv6 shapes because SocketAddr::to_string uses [::1]:port
+        // for v6 and the client side has to parse that back.
+        for addr in ["192.0.2.17:4433", "[2001:db8::1]:4433", "127.0.0.1:54321"] {
+            let resp = SignalMessage::ReflectResponse {
+                observed_addr: addr.to_string(),
+            };
+            let json = serde_json::to_string(&resp).unwrap();
+            let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+            match decoded {
+                SignalMessage::ReflectResponse { observed_addr } => {
+                    assert_eq!(observed_addr, addr);
+                    // Must parse back to a SocketAddr cleanly.
+                    let _parsed: std::net::SocketAddr = observed_addr.parse()
+                        .expect("observed_addr must parse as SocketAddr");
+                }
+                _ => panic!("wrong variant after roundtrip"),
+            }
+        }
+    }
+
+    #[test]
+    fn federated_signal_forward_roundtrip() {
+        // Wrap a DirectCallOffer inside FederatedSignalForward and
+        // prove both directions of serde preserve every field.
+        let inner = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: Some("Alice".into()),
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [1u8; 32],
+            ephemeral_pub: [2u8; 32],
+            signature: vec![3u8; 64],
+            supported_profiles: vec![],
+            caller_reflexive_addr: Some("192.0.2.1:4433".into()),
+            caller_local_addrs: Vec::new(),
+        };
+        let forward = SignalMessage::FederatedSignalForward {
+            inner: Box::new(inner),
+            origin_relay_fp: "relay-a-tls-fp".into(),
+        };
+        let json = serde_json::to_string(&forward).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
+                assert_eq!(origin_relay_fp, "relay-a-tls-fp");
+                match *inner {
+                    SignalMessage::DirectCallOffer {
+                        caller_fingerprint,
+                        target_fingerprint,
+                        caller_reflexive_addr,
+                        ..
+                    } => {
+                        assert_eq!(caller_fingerprint, "alice");
+                        assert_eq!(target_fingerprint, "bob");
+                        assert_eq!(caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
+                    }
+                    _ => panic!("inner was not DirectCallOffer after roundtrip"),
+                }
+            }
+            _ => panic!("outer was not FederatedSignalForward"),
+        }
+    }
+
+    #[test]
+    fn federated_signal_forward_can_nest_any_inner() {
+        // Sanity check that every direct-call signaling variant
+        // we intend to forward survives being boxed + re-serialized.
+        let cases: Vec<SignalMessage> = vec![
+            SignalMessage::DirectCallAnswer {
+                call_id: "c1".into(),
+                accept_mode: CallAcceptMode::AcceptTrusted,
+                identity_pub: None,
+                ephemeral_pub: None,
+                signature: None,
+                chosen_profile: None,
+                callee_reflexive_addr: Some("198.51.100.9:4433".into()),
+                callee_local_addrs: Vec::new(),
+            },
+            SignalMessage::CallRinging { call_id: "c1".into() },
+            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
+        ];
+        for inner in cases {
+            let inner_disc = std::mem::discriminant(&inner);
+            let forward = SignalMessage::FederatedSignalForward {
+                inner: Box::new(inner),
+                origin_relay_fp: "r".into(),
+            };
+            let json = serde_json::to_string(&forward).unwrap();
+            let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+            match decoded {
+                SignalMessage::FederatedSignalForward { inner, .. } => {
+                    assert_eq!(std::mem::discriminant(&*inner), inner_disc);
+                }
+                _ => panic!("outer variant lost"),
+            }
+        }
+    }
+
+    #[test]
+    fn hole_punching_optional_fields_roundtrip() {
+        // DirectCallOffer with Some(caller_reflexive_addr)
+        let offer = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: None,
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [0; 32],
+            ephemeral_pub: [0; 32],
+            signature: vec![],
+            supported_profiles: vec![],
+            caller_reflexive_addr: Some("192.0.2.1:4433".into()),
+            caller_local_addrs: Vec::new(),
+        };
+        let json = serde_json::to_string(&offer).unwrap();
+        assert!(
+            json.contains("caller_reflexive_addr"),
+            "Some field must serialize: {json}"
+        );
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+                assert_eq!(caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // DirectCallOffer with None — skip_serializing_if must
+        // OMIT the field from the JSON so older relays that don't
+        // know about caller_reflexive_addr don't see it.
+        let offer_none = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: None,
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [0; 32],
+            ephemeral_pub: [0; 32],
+            signature: vec![],
+            supported_profiles: vec![],
+            caller_reflexive_addr: None,
+            caller_local_addrs: Vec::new(),
+        };
+        let json_none = serde_json::to_string(&offer_none).unwrap();
+        assert!(
+            !json_none.contains("caller_reflexive_addr"),
+            "None field must NOT serialize: {json_none}"
+        );
+
+        // DirectCallAnswer with callee_reflexive_addr.
+        let answer = SignalMessage::DirectCallAnswer {
+            call_id: "c1".into(),
+            accept_mode: CallAcceptMode::AcceptTrusted,
+            identity_pub: None,
+            ephemeral_pub: None,
+            signature: None,
+            chosen_profile: None,
+            callee_reflexive_addr: Some("198.51.100.9:4433".into()),
+            callee_local_addrs: Vec::new(),
+        };
+        let decoded: SignalMessage =
+            serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
+        match decoded {
+            SignalMessage::DirectCallAnswer { callee_reflexive_addr, .. } => {
+                assert_eq!(
+                    callee_reflexive_addr.as_deref(),
+                    Some("198.51.100.9:4433")
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // CallSetup with peer_direct_addr.
+        let setup = SignalMessage::CallSetup {
+            call_id: "c1".into(),
+            room: "call-c1".into(),
+            relay_addr: "203.0.113.5:4433".into(),
+            peer_direct_addr: Some("192.0.2.1:4433".into()),
+            peer_local_addrs: Vec::new(),
+        };
+        let decoded: SignalMessage =
+            serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
+        match decoded {
+            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+                assert_eq!(peer_direct_addr.as_deref(), Some("192.0.2.1:4433"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn hole_punching_backward_compat_old_json_parses() {
+        // An older client/relay wouldn't include the new fields at
+        // all — the new code must still accept that JSON because
+        // of #[serde(default)] on the Option<String>.
+        let old_offer_json = r#"{
+            "DirectCallOffer": {
+                "caller_fingerprint": "alice",
+                "caller_alias": null,
+                "target_fingerprint": "bob",
+                "call_id": "c1",
+                "identity_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "ephemeral_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "signature": [],
+                "supported_profiles": []
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(old_offer_json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+                assert!(caller_reflexive_addr.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let old_setup_json = r#"{
+            "CallSetup": {
+                "call_id": "c1",
+                "room": "call-c1",
+                "relay_addr": "203.0.113.5:4433"
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(old_setup_json).unwrap();
+        match decoded {
+            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+                assert!(peer_direct_addr.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn reflect_backward_compat_with_existing_variants() {
+        // Adding Reflect/ReflectResponse at the end of the enum must
+        // not break JSON round-tripping of existing variants. Smoke-
+        // test a sample of the pre-existing ones.
+        let cases = vec![
+            SignalMessage::Ping { timestamp_ms: 12345 },
+            SignalMessage::Hold,
+            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
+            SignalMessage::CallRinging { call_id: "abcd".into() },
+        ];
+        for m in cases {
+            let json = serde_json::to_string(&m).unwrap();
+            let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+            // Discriminant equality proves variant tag survived.
+            assert_eq!(
+                std::mem::discriminant(&m),
+                std::mem::discriminant(&decoded)
+            );
+        }
     }
 
     #[test]

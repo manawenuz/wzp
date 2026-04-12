@@ -3,18 +3,18 @@
 //! Both structs use 48 kHz, mono, i16 format to match the WarzonePhone codec
 //! pipeline. Frames are 960 samples (20 ms at 48 kHz).
 //!
-//! The cpal `Stream` type is not `Send`, so each struct spawns a dedicated OS
-//! thread that owns the stream. The public API exposes only `Send + Sync`
-//! channel handles.
+//! Audio callbacks are **lock-free**: they read/write directly to an `AudioRing`
+//! (atomic SPSC ring buffer). No Mutex, no channel, no allocation on the hot path.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use tracing::{info, warn};
+
+use crate::audio_ring::AudioRing;
 
 /// Number of samples per 20 ms frame at 48 kHz mono.
 pub const FRAME_SAMPLES: usize = 960;
@@ -23,22 +23,24 @@ pub const FRAME_SAMPLES: usize = 960;
 // AudioCapture
 // ---------------------------------------------------------------------------
 
-/// Captures microphone input and yields 960-sample PCM frames.
+/// Captures microphone input via CPAL and writes PCM into a lock-free ring buffer.
 ///
 /// The cpal stream lives on a dedicated OS thread; this handle is `Send + Sync`.
 pub struct AudioCapture {
-    rx: mpsc::Receiver<Vec<i16>>,
+    ring: Arc<AudioRing>,
     running: Arc<AtomicBool>,
 }
 
 impl AudioCapture {
     /// Create and start capturing from the default input device at 48 kHz mono.
     pub fn start() -> Result<Self, anyhow::Error> {
-        let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(64);
+        let ring = Arc::new(AudioRing::new());
         let running = Arc::new(AtomicBool::new(true));
-        let running_clone = running.clone();
 
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+
+        let ring_cb = ring.clone();
+        let running_clone = running.clone();
 
         std::thread::Builder::new()
             .name("wzp-audio-capture".into())
@@ -59,53 +61,51 @@ impl AudioCapture {
 
                     let use_f32 = !supports_i16_input(&device)?;
 
-                    let buf = Arc::new(std::sync::Mutex::new(
-                        Vec::<i16>::with_capacity(FRAME_SAMPLES),
-                    ));
                     let err_cb = |e: cpal::StreamError| {
                         warn!("input stream error: {e}");
                     };
 
+                    let logged_cb_size = Arc::new(AtomicBool::new(false));
+
                     let stream = if use_f32 {
-                        let buf = buf.clone();
-                        let tx = tx.clone();
+                        let ring = ring_cb.clone();
                         let running = running_clone.clone();
+                        let logged = logged_cb_size.clone();
                         device.build_input_stream(
                             &config,
                             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                                 if !running.load(Ordering::Relaxed) {
                                     return;
                                 }
-                                let mut lock = buf.lock().unwrap();
-                                for &s in data {
-                                    lock.push(f32_to_i16(s));
-                                    if lock.len() == FRAME_SAMPLES {
-                                        let frame = lock.drain(..).collect();
-                                        let _ = tx.try_send(frame);
+                                if !logged.swap(true, Ordering::Relaxed) {
+                                    eprintln!("[audio] capture callback: {} f32 samples", data.len());
+                                }
+                                let mut tmp = [0i16; FRAME_SAMPLES];
+                                for chunk in data.chunks(FRAME_SAMPLES) {
+                                    let n = chunk.len();
+                                    for i in 0..n {
+                                        tmp[i] = f32_to_i16(chunk[i]);
                                     }
+                                    ring.write(&tmp[..n]);
                                 }
                             },
                             err_cb,
                             None,
                         )?
                     } else {
-                        let buf = buf.clone();
-                        let tx = tx.clone();
+                        let ring = ring_cb.clone();
                         let running = running_clone.clone();
+                        let logged = logged_cb_size.clone();
                         device.build_input_stream(
                             &config,
                             move |data: &[i16], _: &cpal::InputCallbackInfo| {
                                 if !running.load(Ordering::Relaxed) {
                                     return;
                                 }
-                                let mut lock = buf.lock().unwrap();
-                                for &s in data {
-                                    lock.push(s);
-                                    if lock.len() == FRAME_SAMPLES {
-                                        let frame = lock.drain(..).collect();
-                                        let _ = tx.try_send(frame);
-                                    }
+                                if !logged.swap(true, Ordering::Relaxed) {
+                                    eprintln!("[audio] capture callback: {} i16 samples", data.len());
                                 }
+                                ring.write(data);
                             },
                             err_cb,
                             None,
@@ -114,7 +114,6 @@ impl AudioCapture {
 
                     stream.play().context("failed to start input stream")?;
 
-                    // Signal success to the caller before parking.
                     let _ = init_tx.send(Ok(()));
 
                     // Keep stream alive until stopped.
@@ -135,15 +134,12 @@ impl AudioCapture {
             .map_err(|_| anyhow!("capture thread exited before signaling"))?
             .map_err(|e| anyhow!("{e}"))?;
 
-        Ok(Self { rx, running })
+        Ok(Self { ring, running })
     }
 
-    /// Read the next frame of 960 PCM samples (blocking until available).
-    ///
-    /// Returns `None` when the stream has been stopped or the channel is
-    /// disconnected.
-    pub fn read_frame(&self) -> Option<Vec<i16>> {
-        self.rx.recv().ok()
+    /// Get a reference to the capture ring buffer for direct polling.
+    pub fn ring(&self) -> &Arc<AudioRing> {
+        &self.ring
     }
 
     /// Stop capturing.
@@ -152,26 +148,34 @@ impl AudioCapture {
     }
 }
 
+impl Drop for AudioCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AudioPlayback
 // ---------------------------------------------------------------------------
 
-/// Plays PCM frames through the default output device at 48 kHz mono.
+/// Plays PCM through the default output device, reading from a lock-free ring buffer.
 ///
 /// The cpal stream lives on a dedicated OS thread; this handle is `Send + Sync`.
 pub struct AudioPlayback {
-    tx: mpsc::SyncSender<Vec<i16>>,
+    ring: Arc<AudioRing>,
     running: Arc<AtomicBool>,
 }
 
 impl AudioPlayback {
     /// Create and start playback on the default output device at 48 kHz mono.
     pub fn start() -> Result<Self, anyhow::Error> {
-        let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(64);
+        let ring = Arc::new(AudioRing::new());
         let running = Arc::new(AtomicBool::new(true));
-        let running_clone = running.clone();
 
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+
+        let ring_cb = ring.clone();
+        let running_clone = running.clone();
 
         std::thread::Builder::new()
             .name("wzp-audio-playback".into())
@@ -192,62 +196,40 @@ impl AudioPlayback {
 
                     let use_f32 = !supports_i16_output(&device)?;
 
-                    // Shared ring of samples the cpal callback drains from.
-                    let ring = Arc::new(std::sync::Mutex::new(
-                        std::collections::VecDeque::<i16>::with_capacity(FRAME_SAMPLES * 8),
-                    ));
-
-                    // Background drainer: moves frames from the mpsc channel into the ring.
-                    {
-                        let ring = ring.clone();
-                        let running = running_clone.clone();
-                        std::thread::Builder::new()
-                            .name("wzp-playback-drain".into())
-                            .spawn(move || {
-                                while running.load(Ordering::Relaxed) {
-                                    match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                                        Ok(frame) => {
-                                            let mut lock = ring.lock().unwrap();
-                                            lock.extend(frame);
-                                            while lock.len() > FRAME_SAMPLES * 16 {
-                                                lock.pop_front();
-                                            }
-                                        }
-                                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                                    }
-                                }
-                            })?;
-                    }
-
                     let err_cb = |e: cpal::StreamError| {
                         warn!("output stream error: {e}");
                     };
 
                     let stream = if use_f32 {
-                        let ring = ring.clone();
+                        let ring = ring_cb.clone();
                         device.build_output_stream(
                             &config,
                             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                                let mut lock = ring.lock().unwrap();
-                                for sample in data.iter_mut() {
-                                    *sample = match lock.pop_front() {
-                                        Some(s) => i16_to_f32(s),
-                                        None => 0.0,
-                                    };
+                                let mut tmp = [0i16; FRAME_SAMPLES];
+                                for chunk in data.chunks_mut(FRAME_SAMPLES) {
+                                    let n = chunk.len();
+                                    let read = ring.read(&mut tmp[..n]);
+                                    for i in 0..read {
+                                        chunk[i] = i16_to_f32(tmp[i]);
+                                    }
+                                    // Fill remainder with silence if ring underran
+                                    for i in read..n {
+                                        chunk[i] = 0.0;
+                                    }
                                 }
                             },
                             err_cb,
                             None,
                         )?
                     } else {
-                        let ring = ring.clone();
+                        let ring = ring_cb.clone();
                         device.build_output_stream(
                             &config,
                             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                                let mut lock = ring.lock().unwrap();
-                                for sample in data.iter_mut() {
-                                    *sample = lock.pop_front().unwrap_or(0);
+                                let read = ring.read(data);
+                                // Fill remainder with silence if ring underran
+                                for sample in &mut data[read..] {
+                                    *sample = 0;
                                 }
                             },
                             err_cb,
@@ -257,7 +239,6 @@ impl AudioPlayback {
 
                     stream.play().context("failed to start output stream")?;
 
-                    // Signal success to the caller before parking.
                     let _ = init_tx.send(Ok(()));
 
                     // Keep stream alive until stopped.
@@ -278,12 +259,12 @@ impl AudioPlayback {
             .map_err(|_| anyhow!("playback thread exited before signaling"))?
             .map_err(|e| anyhow!("{e}"))?;
 
-        Ok(Self { tx, running })
+        Ok(Self { ring, running })
     }
 
-    /// Write a frame of PCM samples for playback.
-    pub fn write_frame(&self, pcm: &[i16]) {
-        let _ = self.tx.try_send(pcm.to_vec());
+    /// Get a reference to the playout ring buffer for direct writing.
+    pub fn ring(&self) -> &Arc<AudioRing> {
+        &self.ring
     }
 
     /// Stop playback.
@@ -292,11 +273,16 @@ impl AudioPlayback {
     }
 }
 
+impl Drop for AudioPlayback {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Check if the input device supports i16 at 48 kHz mono.
 fn supports_i16_input(device: &cpal::Device) -> Result<bool, anyhow::Error> {
     let supported = device
         .supported_input_configs()
@@ -313,7 +299,6 @@ fn supports_i16_input(device: &cpal::Device) -> Result<bool, anyhow::Error> {
     Ok(false)
 }
 
-/// Check if the output device supports i16 at 48 kHz mono.
 fn supports_i16_output(device: &cpal::Device) -> Result<bool, anyhow::Error> {
     let supported = device
         .supported_output_configs()

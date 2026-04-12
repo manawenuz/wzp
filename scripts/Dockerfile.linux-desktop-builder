@@ -1,0 +1,59 @@
+# =============================================================================
+# WZ Phone — Linux x86_64 Tauri desktop build image
+#
+# Thin extension of wzp-android-builder that adds the GTK3 + WebKit2GTK 4.1 +
+# libsoup-3.0 + AppIndicator dev packages needed to build the Tauri desktop
+# app for Linux. Everything else (Rust, Node.js, cmake, pkg-config, cpal
+# libasound deps, tauri-cli) is inherited from the base image.
+#
+# Build:
+#   docker build -t wzp-linux-desktop-builder -f Dockerfile.linux-desktop-builder .
+#
+# Run: driven by scripts/build-linux-desktop-docker.sh (see that file).
+# =============================================================================
+FROM wzp-android-builder
+
+USER root
+
+# Tauri 2.x Linux dependencies.
+# - libwebkit2gtk-4.1-dev: the WebView backend. Tauri 2.x uses 4.1 (not 4.0).
+# - libsoup-3.0-dev: HTTP client used by webkit2gtk. Must match its major.
+# - libgtk-3-dev: GTK3 headers (webkit2gtk still uses GTK3).
+# - libayatana-appindicator3-dev: system tray / status icon. Optional at
+#   runtime but tauri-build's feature-detection includes it.
+# - librsvg2-dev: SVG rendering in the menu/icon code.
+# - libglib2.0-dev: GObject introspection headers (transitive, but explicit).
+# - patchelf: used by the tauri bundler to rewrite rpaths in the final binary.
+# - file: already in the base, but tauri-build checks for it by name.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libwebkit2gtk-4.1-dev \
+        libsoup-3.0-dev \
+        libgtk-3-dev \
+        libayatana-appindicator3-dev \
+        librsvg2-dev \
+        libglib2.0-dev \
+        patchelf \
+        libwebrtc-audio-processing-dev \
+        clang \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── webrtc-audio-processing build requirements ──────────────────────────────
+# The `webrtc-audio-processing` Rust crate (0.3.x line) links against Debian
+# Bookworm's `libwebrtc-audio-processing-dev` apt package (0.3-1+b1), which
+# provides the PulseAudio fork of the WebRTC audio processing module. This is
+# the library that Pulse's module-echo-cancel and PipeWire's filter-chain
+# use for their AEC modes — same algorithm family, runtime-linked via
+# pkg-config at cargo build time.
+#
+# An attempt was made to use the 2.x line with the `bundled` sub-feature
+# (which would give AEC3 instead of AEC2) but both the crates.io tarball
+# and the upstream git `main` branch hit a `meson setup --reconfigure` bug
+# that panics on first-run empty build dirs. The 0.3 line avoids the
+# bundled build path entirely and is what we ship for now.
+#
+# `clang` is listed explicitly because the Rust crate's bindgen may need
+# it at compile time depending on the version of the underlying
+# webrtc-audio-processing-sys build script.
+
+USER builder
+WORKDIR /build/source

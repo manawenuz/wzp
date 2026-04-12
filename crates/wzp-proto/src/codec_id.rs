@@ -18,6 +18,12 @@ pub enum CodecId {
     Codec2_1200 = 4,
     /// Comfort noise descriptor (silence suppression)
     ComfortNoise = 5,
+    /// Opus at 32kbps (studio low)
+    Opus32k = 6,
+    /// Opus at 48kbps (studio)
+    Opus48k = 7,
+    /// Opus at 64kbps (studio high)
+    Opus64k = 8,
 }
 
 impl CodecId {
@@ -27,6 +33,9 @@ impl CodecId {
             Self::Opus24k => 24_000,
             Self::Opus16k => 16_000,
             Self::Opus6k => 6_000,
+            Self::Opus32k => 32_000,
+            Self::Opus48k => 48_000,
+            Self::Opus64k => 64_000,
             Self::Codec2_3200 => 3_200,
             Self::Codec2_1200 => 1_200,
             Self::ComfortNoise => 0,
@@ -36,8 +45,7 @@ impl CodecId {
     /// Preferred frame duration in milliseconds.
     pub const fn frame_duration_ms(self) -> u8 {
         match self {
-            Self::Opus24k => 20,
-            Self::Opus16k => 20,
+            Self::Opus24k | Self::Opus16k | Self::Opus32k | Self::Opus48k | Self::Opus64k => 20,
             Self::Opus6k => 40,
             Self::Codec2_3200 => 20,
             Self::Codec2_1200 => 40,
@@ -48,7 +56,8 @@ impl CodecId {
     /// Sample rate expected by this codec.
     pub const fn sample_rate_hz(self) -> u32 {
         match self {
-            Self::Opus24k | Self::Opus16k | Self::Opus6k => 48_000,
+            Self::Opus24k | Self::Opus16k | Self::Opus6k
+            | Self::Opus32k | Self::Opus48k | Self::Opus64k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
             Self::ComfortNoise => 48_000,
         }
@@ -63,6 +72,9 @@ impl CodecId {
             3 => Some(Self::Codec2_3200),
             4 => Some(Self::Codec2_1200),
             5 => Some(Self::ComfortNoise),
+            6 => Some(Self::Opus32k),
+            7 => Some(Self::Opus48k),
+            8 => Some(Self::Opus64k),
             _ => None,
         }
     }
@@ -70,6 +82,12 @@ impl CodecId {
     /// Encode to the 4-bit wire representation.
     pub const fn to_wire(self) -> u8 {
         self as u8
+    }
+
+    /// Returns true if this is an Opus variant.
+    pub const fn is_opus(self) -> bool {
+        matches!(self, Self::Opus6k | Self::Opus16k | Self::Opus24k
+            | Self::Opus32k | Self::Opus48k | Self::Opus64k)
     }
 }
 
@@ -109,6 +127,30 @@ impl QualityProfile {
         fec_ratio: 1.0,
         frame_duration_ms: 40,
         frames_per_block: 8,
+    };
+
+    /// Studio low: Opus 32kbps, minimal FEC.
+    pub const STUDIO_32K: Self = Self {
+        codec: CodecId::Opus32k,
+        fec_ratio: 0.1,
+        frame_duration_ms: 20,
+        frames_per_block: 5,
+    };
+
+    /// Studio: Opus 48kbps, minimal FEC.
+    pub const STUDIO_48K: Self = Self {
+        codec: CodecId::Opus48k,
+        fec_ratio: 0.1,
+        frame_duration_ms: 20,
+        frames_per_block: 5,
+    };
+
+    /// Studio high: Opus 64kbps, minimal FEC.
+    pub const STUDIO_64K: Self = Self {
+        codec: CodecId::Opus64k,
+        fec_ratio: 0.1,
+        frame_duration_ms: 20,
+        frames_per_block: 5,
     };
 
     /// Estimated total bandwidth in kbps including FEC overhead.

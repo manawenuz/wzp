@@ -16,12 +16,22 @@ pub struct RelayMetrics {
     pub bytes_forwarded: IntCounter,
     pub auth_attempts: IntCounterVec,
     pub handshake_duration: Histogram,
+    // Federation metrics
+    pub federation_peer_status: IntGaugeVec,
+    pub federation_peer_rtt_ms: GaugeVec,
+    pub federation_packets_forwarded: IntCounterVec,
+    pub federation_packets_deduped: IntCounter,
+    pub federation_packets_rate_limited: IntCounter,
+    pub federation_active_rooms: IntGauge,
     // Per-session metrics
     pub session_buffer_depth: IntGaugeVec,
     pub session_loss_pct: GaugeVec,
     pub session_rtt_ms: GaugeVec,
     pub session_underruns: IntCounterVec,
     pub session_overruns: IntCounterVec,
+    // Phase 4: loss-recovery breakdown per session.
+    pub session_dred_reconstructions: IntCounterVec,
+    pub session_classical_plc: IntCounterVec,
     registry: Registry,
 }
 
@@ -59,6 +69,28 @@ impl RelayMetrics {
             .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]),
         )
         .expect("metric");
+
+        let federation_peer_status = IntGaugeVec::new(
+            Opts::new("wzp_federation_peer_status", "Peer connection status (0=disconnected, 1=connected)"),
+            &["peer"],
+        ).expect("metric");
+        let federation_peer_rtt_ms = GaugeVec::new(
+            Opts::new("wzp_federation_peer_rtt_ms", "QUIC RTT to federated peer in milliseconds"),
+            &["peer"],
+        ).expect("metric");
+        let federation_packets_forwarded = IntCounterVec::new(
+            Opts::new("wzp_federation_packets_forwarded_total", "Packets forwarded to/from federated peers"),
+            &["peer", "direction"],
+        ).expect("metric");
+        let federation_packets_deduped = IntCounter::with_opts(
+            Opts::new("wzp_federation_packets_deduped_total", "Duplicate federation packets dropped"),
+        ).expect("metric");
+        let federation_packets_rate_limited = IntCounter::with_opts(
+            Opts::new("wzp_federation_packets_rate_limited_total", "Federation packets dropped by rate limiter"),
+        ).expect("metric");
+        let federation_active_rooms = IntGauge::with_opts(
+            Opts::new("wzp_federation_active_rooms", "Number of federated rooms currently active"),
+        ).expect("metric");
 
         let session_buffer_depth = IntGaugeVec::new(
             Opts::new(
@@ -101,17 +133,42 @@ impl RelayMetrics {
         )
         .expect("metric");
 
+        let session_dred_reconstructions = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_session_dred_reconstructions_total",
+                "Frames reconstructed via DRED (Deep REDundancy) per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+        let session_classical_plc = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_session_classical_plc_total",
+                "Frames filled via classical Opus/Codec2 PLC per session",
+            ),
+            &["session_id"],
+        )
+        .expect("metric");
+
         registry.register(Box::new(active_sessions.clone())).expect("register");
         registry.register(Box::new(active_rooms.clone())).expect("register");
         registry.register(Box::new(packets_forwarded.clone())).expect("register");
         registry.register(Box::new(bytes_forwarded.clone())).expect("register");
         registry.register(Box::new(auth_attempts.clone())).expect("register");
         registry.register(Box::new(handshake_duration.clone())).expect("register");
+        registry.register(Box::new(federation_peer_status.clone())).expect("register");
+        registry.register(Box::new(federation_peer_rtt_ms.clone())).expect("register");
+        registry.register(Box::new(federation_packets_forwarded.clone())).expect("register");
+        registry.register(Box::new(federation_packets_deduped.clone())).expect("register");
+        registry.register(Box::new(federation_packets_rate_limited.clone())).expect("register");
+        registry.register(Box::new(federation_active_rooms.clone())).expect("register");
         registry.register(Box::new(session_buffer_depth.clone())).expect("register");
         registry.register(Box::new(session_loss_pct.clone())).expect("register");
         registry.register(Box::new(session_rtt_ms.clone())).expect("register");
         registry.register(Box::new(session_underruns.clone())).expect("register");
         registry.register(Box::new(session_overruns.clone())).expect("register");
+        registry.register(Box::new(session_dred_reconstructions.clone())).expect("register");
+        registry.register(Box::new(session_classical_plc.clone())).expect("register");
 
         Self {
             active_sessions,
@@ -120,11 +177,19 @@ impl RelayMetrics {
             bytes_forwarded,
             auth_attempts,
             handshake_duration,
+            federation_peer_status,
+            federation_peer_rtt_ms,
+            federation_packets_forwarded,
+            federation_packets_deduped,
+            federation_packets_rate_limited,
+            federation_active_rooms,
             session_buffer_depth,
             session_loss_pct,
             session_rtt_ms,
             session_underruns,
             session_overruns,
+            session_dred_reconstructions,
+            session_classical_plc,
             registry,
         }
     }
@@ -176,6 +241,39 @@ impl RelayMetrics {
         }
     }
 
+    /// Phase 4: update per-session loss-recovery counters from a client's
+    /// `LossRecoveryUpdate` signal message. The client sends monotonic
+    /// totals (frames reconstructed since call start); we compute the
+    /// delta against the current Prometheus counter and increment by it.
+    /// IntCounterVec only increases, so a client restart that resets the
+    /// counter to 0 simply produces no delta until the new totals exceed
+    /// the Prometheus state.
+    pub fn update_session_loss_recovery(
+        &self,
+        session_id: &str,
+        dred_reconstructions: u64,
+        classical_plc: u64,
+    ) {
+        let cur_dred = self
+            .session_dred_reconstructions
+            .with_label_values(&[session_id])
+            .get();
+        if dred_reconstructions > cur_dred {
+            self.session_dred_reconstructions
+                .with_label_values(&[session_id])
+                .inc_by(dred_reconstructions - cur_dred);
+        }
+        let cur_plc = self
+            .session_classical_plc
+            .with_label_values(&[session_id])
+            .get();
+        if classical_plc > cur_plc {
+            self.session_classical_plc
+                .with_label_values(&[session_id])
+                .inc_by(classical_plc - cur_plc);
+        }
+    }
+
     /// Remove all per-session label values for a disconnected session.
     pub fn remove_session_metrics(&self, session_id: &str) {
         let _ = self.session_buffer_depth.remove_label_values(&[session_id]);
@@ -183,6 +281,10 @@ impl RelayMetrics {
         let _ = self.session_rtt_ms.remove_label_values(&[session_id]);
         let _ = self.session_underruns.remove_label_values(&[session_id]);
         let _ = self.session_overruns.remove_label_values(&[session_id]);
+        let _ = self
+            .session_dred_reconstructions
+            .remove_label_values(&[session_id]);
+        let _ = self.session_classical_plc.remove_label_values(&[session_id]);
     }
 
     /// Get a reference to the underlying Prometheus registry.
@@ -377,15 +479,67 @@ mod tests {
         };
         m.update_session_quality("sess-cleanup", &report);
         m.update_session_buffer("sess-cleanup", 42, 3, 1);
+        m.update_session_loss_recovery("sess-cleanup", 17, 4);
 
         // Verify they appear
         let output = m.metrics_handler();
         assert!(output.contains("sess-cleanup"));
+        assert!(output.contains("wzp_relay_session_dred_reconstructions_total"));
+        assert!(output.contains("wzp_relay_session_classical_plc_total"));
 
         // Remove and verify they are gone
         m.remove_session_metrics("sess-cleanup");
         let output = m.metrics_handler();
         assert!(!output.contains("sess-cleanup"));
+    }
+
+    /// Phase 4: LossRecoveryUpdate → per-session counters, monotonic delta
+    /// application.
+    #[test]
+    fn session_loss_recovery_monotonic_delta() {
+        let m = RelayMetrics::new();
+        let sess = "sess-dred";
+
+        // First update: 10 DRED, 2 PLC
+        m.update_session_loss_recovery(sess, 10, 2);
+        let dred1 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc1 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred1, 10);
+        assert_eq!(plc1, 2);
+
+        // Second update: 25 DRED, 5 PLC — counter advances by (15, 3)
+        m.update_session_loss_recovery(sess, 25, 5);
+        let dred2 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc2 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred2, 25);
+        assert_eq!(plc2, 5);
+
+        // Third update with LOWER values (e.g., client reset) — counters
+        // hold steady, no decrement.
+        m.update_session_loss_recovery(sess, 5, 1);
+        let dred3 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc3 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred3, 25, "counter must not decrease");
+        assert_eq!(plc3, 5, "counter must not decrease");
+
+        // Fourth update: client caught up and exceeded the old max.
+        m.update_session_loss_recovery(sess, 30, 8);
+        let dred4 = m
+            .session_dred_reconstructions
+            .with_label_values(&[sess])
+            .get();
+        let plc4 = m.session_classical_plc.with_label_values(&[sess]).get();
+        assert_eq!(dred4, 30);
+        assert_eq!(plc4, 8);
     }
 
     #[test]

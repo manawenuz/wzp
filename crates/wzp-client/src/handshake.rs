@@ -17,6 +17,7 @@ use wzp_proto::{MediaTransport, QualityProfile, SignalMessage};
 pub async fn perform_handshake(
     transport: &dyn MediaTransport,
     seed: &[u8; 32],
+    alias: Option<&str>,
 ) -> Result<Box<dyn CryptoSession>, anyhow::Error> {
     // 1. Create key exchange from identity seed
     let mut kx = WarzoneKeyExchange::from_identity_seed(seed);
@@ -37,10 +38,14 @@ pub async fn perform_handshake(
         ephemeral_pub,
         signature,
         supported_profiles: vec![
+            QualityProfile::STUDIO_64K,
+            QualityProfile::STUDIO_48K,
+            QualityProfile::STUDIO_32K,
             QualityProfile::GOOD,
             QualityProfile::DEGRADED,
             QualityProfile::CATASTROPHIC,
         ],
+        alias: alias.map(|s| s.to_string()),
     };
     transport.send_signal(&offer).await?;
 

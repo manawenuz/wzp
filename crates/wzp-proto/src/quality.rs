@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::packet::QualityReport;
 use crate::traits::QualityController;
@@ -24,24 +25,71 @@ impl Tier {
         }
     }
 
-    /// Determine which tier a quality report belongs to.
+    /// Determine which tier a quality report belongs to (default/WiFi thresholds).
     pub fn classify(report: &QualityReport) -> Self {
+        Self::classify_with_context(report, NetworkContext::Unknown)
+    }
+
+    /// Classify with network-context-aware thresholds.
+    pub fn classify_with_context(report: &QualityReport, context: NetworkContext) -> Self {
         let loss = report.loss_percent();
         let rtt = report.rtt_ms();
 
-        if loss > 40.0 || rtt > 600 {
-            Self::Catastrophic
-        } else if loss > 10.0 || rtt > 400 {
-            Self::Degraded
-        } else {
-            Self::Good
+        match context {
+            NetworkContext::CellularLte
+            | NetworkContext::Cellular5g
+            | NetworkContext::Cellular3g => {
+                // Tighter thresholds for cellular networks
+                if loss > 25.0 || rtt > 500 {
+                    Self::Catastrophic
+                } else if loss > 8.0 || rtt > 300 {
+                    Self::Degraded
+                } else {
+                    Self::Good
+                }
+            }
+            NetworkContext::WiFi | NetworkContext::Unknown => {
+                // Original thresholds
+                if loss > 40.0 || rtt > 600 {
+                    Self::Catastrophic
+                } else if loss > 10.0 || rtt > 400 {
+                    Self::Degraded
+                } else {
+                    Self::Good
+                }
+            }
         }
+    }
+
+    /// Return the next lower (worse) tier, or None if already at the worst.
+    pub fn downgrade(self) -> Option<Tier> {
+        match self {
+            Self::Good => Some(Self::Degraded),
+            Self::Degraded => Some(Self::Catastrophic),
+            Self::Catastrophic => None,
+        }
+    }
+}
+
+/// Describes the network transport type for context-aware quality decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkContext {
+    WiFi,
+    CellularLte,
+    Cellular5g,
+    Cellular3g,
+    Unknown,
+}
+
+impl Default for NetworkContext {
+    fn default() -> Self {
+        Self::Unknown
     }
 }
 
 /// Adaptive quality controller with hysteresis to prevent tier flapping.
 ///
-/// - Downgrade: 3 consecutive reports in a worse tier
+/// - Downgrade: 3 consecutive reports in a worse tier (2 on cellular)
 /// - Upgrade: 10 consecutive reports in a better tier
 pub struct AdaptiveQualityController {
     current_tier: Tier,
@@ -54,14 +102,26 @@ pub struct AdaptiveQualityController {
     history: VecDeque<QualityReport>,
     /// Whether the profile was manually forced (disables adaptive logic).
     forced: bool,
+    /// Current network context for threshold selection.
+    network_context: NetworkContext,
+    /// FEC boost expiry time (set during network handoff).
+    fec_boost_until: Option<Instant>,
+    /// FEC boost amount to add during handoff recovery window.
+    fec_boost_amount: f32,
 }
 
 /// Threshold for downgrading (fast reaction to degradation).
 const DOWNGRADE_THRESHOLD: u32 = 3;
+/// Threshold for downgrading on cellular networks (even faster).
+const CELLULAR_DOWNGRADE_THRESHOLD: u32 = 2;
 /// Threshold for upgrading (slow, cautious improvement).
 const UPGRADE_THRESHOLD: u32 = 10;
 /// Maximum history window size.
 const HISTORY_SIZE: usize = 20;
+/// Default FEC boost amount during handoff recovery.
+const DEFAULT_FEC_BOOST: f32 = 0.2;
+/// Duration of FEC boost after a network handoff.
+const FEC_BOOST_DURATION_SECS: u64 = 10;
 
 impl AdaptiveQualityController {
     pub fn new() -> Self {
@@ -72,12 +132,78 @@ impl AdaptiveQualityController {
             consecutive_down: 0,
             history: VecDeque::with_capacity(HISTORY_SIZE),
             forced: false,
+            network_context: NetworkContext::default(),
+            fec_boost_until: None,
+            fec_boost_amount: DEFAULT_FEC_BOOST,
         }
     }
 
     /// Get the current tier.
     pub fn tier(&self) -> Tier {
         self.current_tier
+    }
+
+    /// Get the current network context.
+    pub fn network_context(&self) -> NetworkContext {
+        self.network_context
+    }
+
+    /// Signal a network transport change (e.g., WiFi to cellular handoff).
+    ///
+    /// When switching from WiFi to any cellular type, this preemptively
+    /// downgrades one quality tier and activates a temporary FEC boost.
+    pub fn signal_network_change(&mut self, new_context: NetworkContext) {
+        let old = self.network_context;
+        self.network_context = new_context;
+
+        let new_is_cellular = matches!(
+            new_context,
+            NetworkContext::CellularLte | NetworkContext::Cellular5g | NetworkContext::Cellular3g
+        );
+
+        // If switching from WiFi to cellular, preemptively downgrade one tier
+        if old == NetworkContext::WiFi && new_is_cellular {
+            if let Some(lower_tier) = self.current_tier.downgrade() {
+                self.current_tier = lower_tier;
+                self.current_profile = lower_tier.profile();
+            }
+            // Reset counters to avoid stale hysteresis state
+            self.consecutive_up = 0;
+            self.consecutive_down = 0;
+            // Un-force so adaptive logic resumes
+            self.forced = false;
+        }
+
+        // Activate FEC boost for any network change
+        self.fec_boost_until = Some(Instant::now() + Duration::from_secs(FEC_BOOST_DURATION_SECS));
+    }
+
+    /// Returns the FEC boost amount if within the handoff recovery window, 0.0 otherwise.
+    ///
+    /// Callers should add this to their base FEC ratio during the boost window.
+    pub fn fec_boost(&self) -> f32 {
+        if let Some(until) = self.fec_boost_until {
+            if Instant::now() < until {
+                return self.fec_boost_amount;
+            }
+        }
+        0.0
+    }
+
+    /// Reset the hysteresis counters.
+    pub fn reset_counters(&mut self) {
+        self.consecutive_up = 0;
+        self.consecutive_down = 0;
+    }
+
+    /// Get the effective downgrade threshold based on network context.
+    fn downgrade_threshold(&self) -> u32 {
+        match self.network_context {
+            NetworkContext::CellularLte
+            | NetworkContext::Cellular5g
+            | NetworkContext::Cellular3g => CELLULAR_DOWNGRADE_THRESHOLD,
+            _ => DOWNGRADE_THRESHOLD,
+        }
     }
 
     fn try_transition(&mut self, observed_tier: Tier) -> Option<QualityProfile> {
@@ -96,7 +222,7 @@ impl AdaptiveQualityController {
         if is_worse {
             self.consecutive_up = 0;
             self.consecutive_down += 1;
-            if self.consecutive_down >= DOWNGRADE_THRESHOLD {
+            if self.consecutive_down >= self.downgrade_threshold() {
                 self.current_tier = observed_tier;
                 self.current_profile = observed_tier.profile();
                 self.consecutive_down = 0;
@@ -142,7 +268,7 @@ impl QualityController for AdaptiveQualityController {
             return None;
         }
 
-        let observed = Tier::classify(report);
+        let observed = Tier::classify_with_context(report, self.network_context);
         self.try_transition(observed)
     }
 
@@ -245,5 +371,111 @@ mod tests {
         assert_eq!(Tier::classify(&make_report(5.0, 500)), Tier::Degraded);
         assert_eq!(Tier::classify(&make_report(50.0, 200)), Tier::Catastrophic);
         assert_eq!(Tier::classify(&make_report(5.0, 700)), Tier::Catastrophic);
+    }
+
+    // ---------------------------------------------------------------
+    // Network context tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cellular_tighter_thresholds() {
+        // 12% loss: Good on WiFi, Degraded on cellular
+        let report = make_report(12.0, 200);
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::WiFi),
+            Tier::Degraded
+        );
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::CellularLte),
+            Tier::Degraded
+        );
+
+        // 9% loss: Good on WiFi, Degraded on cellular
+        let report = make_report(9.0, 200);
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::WiFi),
+            Tier::Good
+        );
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::CellularLte),
+            Tier::Degraded
+        );
+
+        // 30% loss: Degraded on WiFi, Catastrophic on cellular
+        let report = make_report(30.0, 200);
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::WiFi),
+            Tier::Degraded
+        );
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::Cellular3g),
+            Tier::Catastrophic
+        );
+    }
+
+    #[test]
+    fn cellular_rtt_thresholds() {
+        // RTT 350ms: Good on WiFi, Degraded on cellular
+        let report = make_report(2.0, 348); // rtt_4ms rounds so use 348
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::WiFi),
+            Tier::Good
+        );
+        assert_eq!(
+            Tier::classify_with_context(&report, NetworkContext::CellularLte),
+            Tier::Degraded
+        );
+    }
+
+    #[test]
+    fn cellular_faster_downgrade() {
+        let mut ctrl = AdaptiveQualityController::new();
+        ctrl.signal_network_change(NetworkContext::CellularLte);
+        // Reset tier back to Good for testing downgrade threshold
+        ctrl.current_tier = Tier::Good;
+        ctrl.current_profile = Tier::Good.profile();
+
+        // On cellular, downgrade threshold is 2 instead of 3
+        let bad = make_report(50.0, 200);
+        assert!(ctrl.observe(&bad).is_none()); // 1st bad
+        let result = ctrl.observe(&bad); // 2nd bad — should trigger on cellular
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn signal_network_change_preemptive_downgrade() {
+        let mut ctrl = AdaptiveQualityController::new();
+        assert_eq!(ctrl.tier(), Tier::Good);
+
+        // Switch from WiFi to cellular
+        ctrl.network_context = NetworkContext::WiFi;
+        ctrl.signal_network_change(NetworkContext::CellularLte);
+
+        // Should have downgraded one tier: Good -> Degraded
+        assert_eq!(ctrl.tier(), Tier::Degraded);
+    }
+
+    #[test]
+    fn signal_network_change_fec_boost() {
+        let mut ctrl = AdaptiveQualityController::new();
+        assert_eq!(ctrl.fec_boost(), 0.0);
+
+        ctrl.signal_network_change(NetworkContext::CellularLte);
+
+        // FEC boost should be active
+        assert!(ctrl.fec_boost() > 0.0);
+        assert_eq!(ctrl.fec_boost(), DEFAULT_FEC_BOOST);
+    }
+
+    #[test]
+    fn tier_downgrade() {
+        assert_eq!(Tier::Good.downgrade(), Some(Tier::Degraded));
+        assert_eq!(Tier::Degraded.downgrade(), Some(Tier::Catastrophic));
+        assert_eq!(Tier::Catastrophic.downgrade(), None);
+    }
+
+    #[test]
+    fn network_context_default() {
+        assert_eq!(NetworkContext::default(), NetworkContext::Unknown);
     }
 }

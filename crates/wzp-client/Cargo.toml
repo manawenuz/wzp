@@ -23,10 +23,77 @@ serde_json = "1"
 chrono = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 cpal = { version = "0.15", optional = true }
+libc = "0.2"
+# Phase 5.5 — LAN host-candidate ICE: enumerate local network
+# interface addresses for inclusion in DirectCallOffer/Answer so
+# peers on the same LAN can direct-connect without NAT hairpinning
+# through the WAN reflex addr (which many consumer NATs, including
+# MikroTik's default masquerade, don't support).
+if-addrs = "0.13"
+
+# coreaudio-rs is Apple-framework-only; gate it to macOS so enabling
+# the `vpio` feature from a non-macOS target builds cleanly instead of
+# pulling in a crate that can only link against Apple frameworks.
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = { version = "0.11", optional = true }
+
+# Windows-only: direct WASAPI bindings for the `windows-aec` feature.
+# `windows` is Microsoft's official Rust COM bindings crate. We pull in
+# only the audio + COM subfeatures we need — the crate is organized as
+# a massive optional-feature tree, so enabling just these keeps compile
+# times reasonable (~5s for these features vs ~60s for the full crate).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+
+# Linux-only: WebRTC AEC (Audio Processing Module) bindings for the
+# `linux-aec` feature. This is the 0.3.x line of the `tonarino/
+# webrtc-audio-processing` crate, which links against Debian's
+# `libwebrtc-audio-processing-dev` apt package (0.3-1+b1 on Bookworm).
+#
+# Note: we attempted the 2.x line with its `bundled` sub-feature first
+# (which would give us AEC3 instead of AEC2), but both the crates.io
+# tarball AND the upstream git `main` branch of webrtc-audio-processing-sys
+# 2.0.3 hit a `meson setup --reconfigure` bug where the build.rs passes
+# --reconfigure unconditionally even on first-run empty build dirs,
+# causing the bundled build to fail with "Directory does not contain a
+# valid build tree". The 0.x line doesn't use bundled mode and sidesteps
+# this entirely by linking the apt-provided library. AEC2 is older than
+# AEC3 but still the same algorithm family — this is what PulseAudio's
+# module-echo-cancel and PipeWire's filter-chain use by default on
+# current Debian-family distros.
+[target.'cfg(target_os = "linux")'.dependencies]
+webrtc-audio-processing = { version = "0.3", optional = true }
 
 [features]
 default = []
 audio = ["cpal"]
+# vpio enables coreaudio-rs but that dep is itself gated to macOS above,
+# so enabling this feature on Windows/Linux is a no-op (the audio_vpio
+# module is also #[cfg(target_os = "macos")] in lib.rs).
+vpio = ["dep:coreaudio-rs"]
+# windows-aec enables a direct WASAPI capture backend that opens the
+# microphone under AudioCategory_Communications, turning on Windows's
+# OS-level communications audio processing (AEC + noise suppression +
+# AGC). The `windows` dep is itself target-gated to Windows above, so
+# enabling this feature on non-Windows targets is a no-op (the
+# audio_wasapi module is also #[cfg(target_os = "windows")] in lib.rs).
+windows-aec = ["dep:windows"]
+# linux-aec enables a CPAL + WebRTC AEC3 capture/playback backend that
+# runs the WebRTC Audio Processing Module (same algo as Chrome / Zoom /
+# Teams) in-process, using the playback PCM as the reference signal for
+# echo cancellation. The webrtc-audio-processing dep is target-gated to
+# Linux above, so enabling this feature on non-Linux targets is a no-op
+# (the audio_linux_aec module is also #[cfg(target_os = "linux")] in
+# lib.rs).
+linux-aec = ["dep:webrtc-audio-processing"]
 
 [[bin]]
 name = "wzp-client"

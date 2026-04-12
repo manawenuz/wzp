@@ -15,25 +15,27 @@ use wzp_proto::{MediaTransport, QualityProfile, SignalMessage};
 /// 5. Derive shared ChaCha20-Poly1305 session
 /// 6. Send `CallAnswer` back
 ///
-/// Returns the derived `CryptoSession` and the chosen `QualityProfile`.
+/// Returns the derived `CryptoSession`, the chosen `QualityProfile`, the caller's fingerprint,
+/// and the caller's alias (if provided in CallOffer).
 pub async fn accept_handshake(
     transport: &dyn MediaTransport,
     seed: &[u8; 32],
-) -> Result<(Box<dyn CryptoSession>, QualityProfile), anyhow::Error> {
+) -> Result<(Box<dyn CryptoSession>, QualityProfile, String, Option<String>), anyhow::Error> {
     // 1. Receive CallOffer
     let offer = transport
         .recv_signal()
         .await?
         .ok_or_else(|| anyhow::anyhow!("connection closed before receiving CallOffer"))?;
 
-    let (caller_identity_pub, caller_ephemeral_pub, caller_signature, supported_profiles) =
+    let (caller_identity_pub, caller_ephemeral_pub, caller_signature, supported_profiles, caller_alias) =
         match offer {
             SignalMessage::CallOffer {
                 identity_pub,
                 ephemeral_pub,
                 signature,
                 supported_profiles,
-            } => (identity_pub, ephemeral_pub, signature, supported_profiles),
+                alias,
+            } => (identity_pub, ephemeral_pub, signature, supported_profiles, alias),
             other => {
                 return Err(anyhow::anyhow!(
                     "expected CallOffer, got {:?}",
@@ -76,25 +78,30 @@ pub async fn accept_handshake(
     };
     transport.send_signal(&answer).await?;
 
-    Ok((session, chosen_profile))
+    // Derive caller fingerprint: SHA-256(Ed25519 pub)[:16], formatted as xxxx:xxxx:...
+    // Must match the format used in signal registration and presence.
+    let caller_fp = {
+        use sha2::{Sha256, Digest};
+        let hash = Sha256::digest(&caller_identity_pub);
+        let fp = wzp_crypto::Fingerprint([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+            hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+        ]);
+        fp.to_string()
+    };
+
+    Ok((session, chosen_profile, caller_fp, caller_alias))
 }
 
 /// Select the best quality profile from those the caller supports.
-fn choose_profile(supported: &[QualityProfile]) -> QualityProfile {
-    // Prefer higher-quality profiles. Use GOOD as default if supported list is empty.
-    if supported.is_empty() {
-        return QualityProfile::GOOD;
-    }
-    // Pick the profile with the highest bitrate.
-    supported
-        .iter()
-        .max_by(|a, b| {
-            a.total_bitrate_kbps()
-                .partial_cmp(&b.total_bitrate_kbps())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .copied()
-        .unwrap_or(QualityProfile::GOOD)
+///
+/// The `_supported` list is currently ignored — we hardcode GOOD (24k) until
+/// studio tiers (32k/48k/64k) have been validated across federation (large
+/// packets may exceed path MTU and fragment in unpleasant ways). Once that's
+/// tested, the body should pick the highest supported profile ≤ the relay's
+/// configured ceiling.
+fn choose_profile(_supported: &[QualityProfile]) -> QualityProfile {
+    QualityProfile::GOOD
 }
 
 #[cfg(test)]

@@ -10,18 +10,43 @@
 //! trait-object encoders/decoders that handle adaptive switching internally.
 
 pub mod adaptive;
+pub mod aec;
+pub mod agc;
 pub mod codec2_dec;
 pub mod codec2_enc;
 pub mod denoise;
+pub mod dred_ffi;
 pub mod opus_dec;
 pub mod opus_enc;
 pub mod resample;
 pub mod silence;
 
 pub use adaptive::{AdaptiveDecoder, AdaptiveEncoder};
+pub use aec::EchoCanceller;
+pub use agc::AutoGainControl;
 pub use denoise::NoiseSupressor;
 pub use silence::{ComfortNoise, SilenceDetector};
 pub use wzp_proto::{AudioDecoder, AudioEncoder, CodecId, QualityProfile};
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global verbose-logging flag for DRED. Off by default — when enabled
+/// (via the GUI debug toggle wired through Tauri), the encoder logs its
+/// DRED config + libopus version, and the recv path logs every DRED
+/// reconstruction, classical PLC fill, and parse heartbeat. Off in
+/// "normal" mode keeps logcat clean.
+static DRED_VERBOSE_LOGS: AtomicBool = AtomicBool::new(false);
+
+/// Returns whether DRED verbose logging is currently enabled.
+#[inline]
+pub fn dred_verbose_logs() -> bool {
+    DRED_VERBOSE_LOGS.load(Ordering::Relaxed)
+}
+
+/// Enable/disable DRED verbose logging at runtime.
+pub fn set_dred_verbose_logs(enabled: bool) {
+    DRED_VERBOSE_LOGS.store(enabled, Ordering::Relaxed);
+}
 
 /// Create an adaptive encoder starting at the given quality profile.
 ///

@@ -96,6 +96,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::Hangup { .. } => CallSignalType::Hangup,
         SignalMessage::Rekey { .. } => CallSignalType::Offer, // reuse
         SignalMessage::QualityUpdate { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::LossRecoveryUpdate { .. } => CallSignalType::Offer, // reuse (telemetry)
         SignalMessage::Ping { .. } | SignalMessage::Pong { .. } => CallSignalType::Offer,
         SignalMessage::AuthToken { .. } => CallSignalType::Offer,
         SignalMessage::Hold => CallSignalType::Hold,
@@ -109,6 +110,27 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::RouteResponse { .. } => CallSignalType::Offer, // reuse
         SignalMessage::SessionForward { .. } => CallSignalType::Offer, // reuse
         SignalMessage::SessionForwardAck { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::RoomUpdate { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::FederationHello { .. }
+        | SignalMessage::GlobalRoomActive { .. }
+        | SignalMessage::GlobalRoomInactive { .. } => CallSignalType::Offer, // relay-only
+        SignalMessage::DirectCallOffer { .. } => CallSignalType::Offer,
+        SignalMessage::DirectCallAnswer { .. } => CallSignalType::Answer,
+        SignalMessage::CallSetup { .. } => CallSignalType::Offer, // relay-only
+        SignalMessage::CallRinging { .. } => CallSignalType::Ringing,
+        SignalMessage::RegisterPresence { .. }
+        | SignalMessage::RegisterPresenceAck { .. } => CallSignalType::Offer, // relay-only
+        // NAT reflection is a client↔relay control exchange that
+        // never crosses the featherChat bridge — if it ever reaches
+        // this mapper something is wrong, but we still have to give
+        // an answer. "Offer" is the generic catch-all.
+        SignalMessage::Reflect
+        | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
+        // Phase 4 cross-relay forwarding envelope — strictly a
+        // relay-to-relay message, never rides the featherChat
+        // bridge. Catch-all mapping for completeness.
+        SignalMessage::FederatedSignalForward { .. } => CallSignalType::Offer,
+        SignalMessage::MediaPathReport { .. } => CallSignalType::Offer, // control-plane
     }
 }
 
@@ -124,6 +146,7 @@ mod tests {
             ephemeral_pub: [2u8; 32],
             signature: vec![3u8; 64],
             supported_profiles: vec![QualityProfile::GOOD],
+            alias: None,
         };
 
         let encoded = encode_call_payload(&signal, Some("relay.example.com:4433"), Some("myroom"));
@@ -141,11 +164,13 @@ mod tests {
             ephemeral_pub: [0; 32],
             signature: vec![],
             supported_profiles: vec![],
+            alias: None,
         };
         assert!(matches!(signal_to_call_type(&offer), CallSignalType::Offer));
 
         let hangup = SignalMessage::Hangup {
             reason: wzp_proto::HangupReason::Normal,
+            call_id: None,
         };
         assert!(matches!(signal_to_call_type(&hangup), CallSignalType::Hangup));
 

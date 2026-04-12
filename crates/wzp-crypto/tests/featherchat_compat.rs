@@ -115,6 +115,7 @@ fn wzp_signal_serializes_into_fc_callsignal_payload() {
         ephemeral_pub: [2u8; 32],
         signature: vec![3u8; 64],
         supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+        alias: None,
     };
 
     // Encode as featherChat CallSignal payload
@@ -198,6 +199,7 @@ fn wzp_answer_round_trips_through_fc_callsignal() {
 fn wzp_hangup_round_trips_through_fc_callsignal() {
     let hangup = wzp_proto::SignalMessage::Hangup {
         reason: wzp_proto::HangupReason::Normal,
+        call_id: None,
     };
 
     let payload = wzp_client::featherchat::encode_call_payload(&hangup, None, None);
@@ -273,13 +275,14 @@ fn auth_invalid_response_matches() {
 
 #[test]
 fn all_signal_types_map_correctly() {
-    use wzp_client::featherchat::{signal_to_call_type, CallSignalType};
+    use wzp_client::featherchat::signal_to_call_type;
 
     let cases: Vec<(wzp_proto::SignalMessage, &str)> = vec![
         (
             wzp_proto::SignalMessage::CallOffer {
                 identity_pub: [0; 32], ephemeral_pub: [0; 32],
                 signature: vec![], supported_profiles: vec![],
+                alias: None,
             },
             "Offer",
         ),
@@ -300,6 +303,7 @@ fn all_signal_types_map_correctly() {
         (
             wzp_proto::SignalMessage::Hangup {
                 reason: wzp_proto::HangupReason::Normal,
+                call_id: None,
             },
             "Hangup",
         ),

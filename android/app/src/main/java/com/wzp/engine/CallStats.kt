@@ -1,0 +1,120 @@
+package com.wzp.engine
+
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Snapshot of call statistics, mirroring the Rust `CallStats` struct.
+ *
+ * Constructed from the JSON string returned by [WzpEngine.getStats].
+ */
+data class CallStats(
+    /** Current call state ordinal (see [CallStateConstants]). */
+    val state: Int = 0,
+    /** Call duration in seconds. */
+    val durationSecs: Double = 0.0,
+    /** Quality tier: 0 = Good, 1 = Degraded, 2 = Catastrophic. */
+    val qualityTier: Int = 0,
+    /** Observed packet loss percentage (0..100). */
+    val lossPct: Float = 0f,
+    /** Smoothed round-trip time in milliseconds. */
+    val rttMs: Int = 0,
+    /** Jitter in milliseconds. */
+    val jitterMs: Int = 0,
+    /** Current jitter buffer depth in packets. */
+    val jitterBufferDepth: Int = 0,
+    /** Total frames encoded since call start. */
+    val framesEncoded: Long = 0,
+    /** Total frames decoded since call start. */
+    val framesDecoded: Long = 0,
+    /** Number of playout underruns (buffer empty when audio was needed). */
+    val underruns: Long = 0,
+    /** Frames recovered by FEC. */
+    val fecRecovered: Long = 0,
+    /** Current mic audio level (RMS, 0-32767). */
+    val audioLevel: Int = 0,
+    /** Our current outgoing codec (e.g. "Opus24k"). */
+    val currentCodec: String = "",
+    /** Last seen incoming codec from peers. */
+    val peerCodec: String = "",
+    /** Whether auto quality mode is active. */
+    val autoMode: Boolean = false,
+    /** Number of participants in the room. */
+    val roomParticipantCount: Int = 0,
+    /** Participants in the room (fingerprint + optional alias). */
+    val roomParticipants: List<RoomMember> = emptyList(),
+    /** SAS verification code (4-digit, null if not in a call). */
+    val sasCode: Int? = null,
+    /** Incoming call ID (or "relay|room" for CallSetup). */
+    val incomingCallId: String? = null,
+    /** Incoming caller's fingerprint. */
+    val incomingCallerFp: String? = null,
+    /** Incoming caller's alias. */
+    val incomingCallerAlias: String? = null,
+) {
+    /** Human-readable quality label. */
+    val qualityLabel: String
+        get() = when (qualityTier) {
+            0 -> "Good"
+            1 -> "Degraded"
+            2 -> "Catastrophic"
+            else -> "Unknown"
+        }
+
+    companion object {
+        private fun parseParticipants(arr: JSONArray?): List<RoomMember> {
+            if (arr == null) return emptyList()
+            return (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                RoomMember(
+                    fingerprint = o.optString("fingerprint", ""),
+                    alias = if (o.isNull("alias")) null else o.optString("alias", null),
+                    relayLabel = if (o.isNull("relay_label")) null else o.optString("relay_label", null)
+                )
+            }
+        }
+
+        /** Deserialise from the JSON string produced by the native engine. */
+        fun fromJson(json: String): CallStats {
+            return try {
+                val obj = JSONObject(json)
+                CallStats(
+                    state = obj.optInt("state", 0),
+                    durationSecs = obj.optDouble("duration_secs", 0.0),
+                    qualityTier = obj.optInt("quality_tier", 0),
+                    lossPct = obj.optDouble("loss_pct", 0.0).toFloat(),
+                    rttMs = obj.optInt("rtt_ms", 0),
+                    jitterMs = obj.optInt("jitter_ms", 0),
+                    jitterBufferDepth = obj.optInt("jitter_buffer_depth", 0),
+                    framesEncoded = obj.optLong("frames_encoded", 0),
+                    framesDecoded = obj.optLong("frames_decoded", 0),
+                    underruns = obj.optLong("underruns", 0),
+                    fecRecovered = obj.optLong("fec_recovered", 0),
+                    audioLevel = obj.optInt("audio_level", 0),
+                    currentCodec = obj.optString("current_codec", ""),
+                    peerCodec = obj.optString("peer_codec", ""),
+                    autoMode = obj.optBoolean("auto_mode", false),
+                    roomParticipantCount = obj.optInt("room_participant_count", 0),
+                    roomParticipants = parseParticipants(obj.optJSONArray("room_participants")),
+                    sasCode = if (obj.has("sas_code")) obj.optInt("sas_code") else null,
+                    incomingCallId = if (obj.isNull("incoming_call_id")) null else obj.optString("incoming_call_id", null),
+                    incomingCallerFp = if (obj.isNull("incoming_caller_fp")) null else obj.optString("incoming_caller_fp", null),
+                    incomingCallerAlias = if (obj.isNull("incoming_caller_alias")) null else obj.optString("incoming_caller_alias", null),
+                )
+            } catch (e: Exception) {
+                CallStats()
+            }
+        }
+    }
+}
+
+data class RoomMember(
+    val fingerprint: String,
+    val alias: String? = null,
+    val relayLabel: String? = null
+) {
+    /** Short display name: alias if set, otherwise first 8 chars of fingerprint. */
+    val displayName: String
+        get() = alias?.takeIf { it.isNotBlank() }
+            ?: fingerprint.take(8).ifEmpty { "unknown" }
+}

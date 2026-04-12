@@ -47,6 +47,11 @@ struct CliArgs {
     room: Option<String>,
     token: Option<String>,
     _metrics_file: Option<String>,
+    version_check: bool,
+    /// Connect to relay for persistent signaling (direct calls).
+    signal: bool,
+    /// Place a direct call to a fingerprint (requires --signal).
+    call_target: Option<String>,
 }
 
 impl CliArgs {
@@ -88,12 +93,20 @@ fn parse_args() -> CliArgs {
     let mut room = None;
     let mut token = None;
     let mut metrics_file = None;
+    let mut version_check = false;
     let mut relay_str = None;
+    let mut signal = false;
+    let mut call_target = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--live" => live = true,
+            "--signal" => signal = true,
+            "--call" => {
+                i += 1;
+                call_target = Some(args.get(i).expect("--call requires a fingerprint").to_string());
+            }
             "--send-tone" => {
                 i += 1;
                 send_tone_secs = Some(
@@ -169,6 +182,7 @@ fn parse_args() -> CliArgs {
                 );
             }
             "--sweep" => sweep = true,
+            "--version-check" => { version_check = true; }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
                 eprintln!();
@@ -221,6 +235,9 @@ fn parse_args() -> CliArgs {
         room,
         token,
         _metrics_file: metrics_file,
+        version_check,
+        signal,
+        call_target,
     }
 }
 
@@ -239,6 +256,32 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // --version-check: query relay version over QUIC and exit
+    if cli.version_check {
+        let client_config = wzp_transport::client_config();
+        let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+        let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+        let conn = wzp_transport::connect(&endpoint, cli.relay_addr, "version", client_config).await?;
+        match conn.accept_uni().await {
+            Ok(mut recv) => {
+                let data = recv.read_to_end(256).await.unwrap_or_default();
+                let version = String::from_utf8_lossy(&data);
+                println!("{} {}", cli.relay_addr, version.trim());
+            }
+            Err(e) => {
+                eprintln!("relay {} does not support version query: {e}", cli.relay_addr);
+            }
+        }
+        endpoint.close(0u32.into(), b"done");
+        return Ok(());
+    }
+
+    // --signal mode: persistent signaling for direct calls
+    if cli.signal {
+        let seed = cli.resolve_seed();
+        return run_signal_mode(cli.relay_addr, seed, cli.token, cli.call_target).await;
+    }
+
     let seed = cli.resolve_seed();
 
     info!(
@@ -250,12 +293,11 @@ async fn main() -> anyhow::Result<()> {
         "WarzonePhone client"
     );
 
-    // Hash room name for SNI privacy (or "default" if none specified)
+    // Use raw room name as SNI (consistent with Android + Desktop clients for federation)
     let sni = match &cli.room {
         Some(name) => {
-            let hashed = wzp_crypto::hash_room_name(name);
-            info!(room = %name, hashed = %hashed, "room name hashed for SNI");
-            hashed
+            info!(room = %name, "using room name as SNI");
+            name.clone()
         }
         None => "default".to_string(),
     };
@@ -274,6 +316,26 @@ async fn main() -> anyhow::Result<()> {
 
     let transport = Arc::new(wzp_transport::QuinnTransport::new(connection));
 
+    // Register shutdown handler so SIGTERM/SIGINT always closes QUIC cleanly.
+    // Without this, killed clients leave zombie connections on the relay for ~30s.
+    {
+        let shutdown_transport = transport.clone();
+        tokio::spawn(async move {
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to register SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => { info!("SIGTERM received, closing connection..."); }
+                _ = sigint.recv() => { info!("SIGINT received, closing connection..."); }
+            }
+            // Close the QUIC connection immediately (APPLICATION_CLOSE frame).
+            // Don't call process::exit — let the main task detect the closed
+            // connection and perform clean shutdown (e.g., save recordings).
+            shutdown_transport.connection().close(0u32.into(), b"shutdown");
+        });
+    }
+
     // Send auth token if provided (relay with --auth-url expects this first)
     if let Some(ref token) = cli.token {
         let auth = wzp_proto::SignalMessage::AuthToken {
@@ -287,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
     let _crypto_session = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
+        None, // alias — desktop client doesn't set one yet
     ).await?;
     info!("crypto handshake complete");
 
@@ -361,6 +424,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
     info!(total_source, total_repair, total_bytes, "done — closing");
     let hangup = wzp_proto::SignalMessage::Hangup {
         reason: wzp_proto::HangupReason::Normal,
+        call_id: None,
     };
     transport.send_signal(&hangup).await.ok();
     transport.close().await?;
@@ -512,6 +576,7 @@ async fn run_file_mode(
     // Send Hangup signal so the relay knows we're done
     let hangup = wzp_proto::SignalMessage::Hangup {
         reason: wzp_proto::HangupReason::Normal,
+        call_id: None,
     };
     transport.send_signal(&hangup).await.ok();
 
@@ -563,11 +628,21 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
         .spawn(move || {
             let config = CallConfig::default();
             let mut encoder = CallEncoder::new(&config);
+            let mut frame = vec![0i16; FRAME_SAMPLES];
             loop {
-                let frame = match capture.read_frame() {
-                    Some(f) => f,
-                    None => break,
-                };
+                // Pull a full 20 ms frame from the capture ring. The ring
+                // may return a partial read when the CPAL callback hasn't
+                // produced enough samples yet — keep reading until we
+                // accumulate a whole frame, sleeping briefly on empty
+                // returns so we don't hot-spin the CPU.
+                let mut filled = 0usize;
+                while filled < FRAME_SAMPLES {
+                    let n = capture.ring().read(&mut frame[filled..]);
+                    filled += n;
+                    if n == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
                 let packets = match encoder.encode_frame(&frame) {
                     Ok(p) => p,
                     Err(e) => {
@@ -598,7 +673,13 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
                     // Repair packets feed the FEC decoder but don't produce audio.
                     if !is_repair {
                         if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
-                            playback.write_frame(&pcm_buf);
+                            // Push the decoded frame into the playback
+                            // ring. The CPAL output callback drains from
+                            // here on its own clock; if the ring is full
+                            // (rare in CLI live mode) the write returns
+                            // a short count and the tail is dropped,
+                            // which is the correct real-time behavior.
+                            playback.ring().write(&pcm_buf);
                         }
                     }
                 }
@@ -621,5 +702,207 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
     drop(send_handle);
     transport.close().await?;
     info!("done");
+    Ok(())
+}
+
+/// Persistent signaling mode for direct 1:1 calls.
+async fn run_signal_mode(
+    relay_addr: SocketAddr,
+    seed: wzp_crypto::Seed,
+    token: Option<String>,
+    call_target: Option<String>,
+) -> anyhow::Result<()> {
+    use wzp_proto::SignalMessage;
+
+    let identity = seed.derive_identity();
+    let pub_id = identity.public_identity();
+    let fp = pub_id.fingerprint.to_string();
+    let identity_pub = *pub_id.signing.as_bytes();
+    info!(fingerprint = %fp, "signal mode");
+
+    // Connect to relay with SNI "_signal"
+    let client_config = wzp_transport::client_config();
+    let bind_addr: SocketAddr = if relay_addr.is_ipv6() {
+        "[::]:0".parse()?
+    } else {
+        "0.0.0.0:0".parse()?
+    };
+    let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
+    let conn = wzp_transport::connect(&endpoint, relay_addr, "_signal", client_config).await?;
+    let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
+    info!("connected to relay (signal channel)");
+
+    // Auth if token provided
+    if let Some(ref tok) = token {
+        transport.send_signal(&SignalMessage::AuthToken { token: tok.clone() }).await?;
+    }
+
+    // Register presence (signature not verified in Phase 1)
+    transport.send_signal(&SignalMessage::RegisterPresence {
+        identity_pub,
+        signature: vec![], // Phase 1: not verified
+        alias: None,
+    }).await?;
+
+    // Wait for ack
+    match transport.recv_signal().await? {
+        Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {
+            info!(fingerprint = %fp, "registered on relay — waiting for calls");
+        }
+        Some(SignalMessage::RegisterPresenceAck { success: false, error, .. }) => {
+            anyhow::bail!("registration failed: {}", error.unwrap_or_default());
+        }
+        other => {
+            anyhow::bail!("unexpected response: {other:?}");
+        }
+    }
+
+    // If --call specified, place the call
+    if let Some(ref target) = call_target {
+        info!(target = %target, "placing direct call...");
+        let call_id = format!("{:016x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+        transport.send_signal(&SignalMessage::DirectCallOffer {
+            caller_fingerprint: fp.clone(),
+            caller_alias: None,
+            target_fingerprint: target.clone(),
+            call_id: call_id.clone(),
+            identity_pub,
+            ephemeral_pub: [0u8; 32], // Phase 1: not used for key exchange
+            signature: vec![],
+            supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+            // CLI client doesn't attempt hole-punching; always
+            // relay-path.
+            caller_reflexive_addr: None,
+            caller_local_addrs: Vec::new(),
+            caller_build_version: None,
+        }).await?;
+    }
+
+    // Signal recv loop — handle incoming signals
+    let signal_transport = transport.clone();
+    let relay = relay_addr;
+    let my_seed = seed.0;
+
+    loop {
+        match signal_transport.recv_signal().await {
+            Ok(Some(msg)) => match msg {
+                SignalMessage::CallRinging { call_id } => {
+                    info!(call_id = %call_id, "ringing...");
+                }
+                SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, .. } => {
+                    info!(
+                        from = %caller_fingerprint,
+                        alias = ?caller_alias,
+                        call_id = %call_id,
+                        "incoming call — auto-accepting (generic)"
+                    );
+                    // Auto-accept for CLI testing
+                    let _ = signal_transport.send_signal(&SignalMessage::DirectCallAnswer {
+                        call_id,
+                        accept_mode: wzp_proto::CallAcceptMode::AcceptGeneric,
+                        identity_pub: Some(identity_pub),
+                        ephemeral_pub: None,
+                        signature: None,
+                        chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
+                        // CLI auto-accept uses generic (privacy) mode,
+                        // so callee addr stays hidden from the caller.
+                        callee_reflexive_addr: None,
+                        callee_local_addrs: Vec::new(),
+                        callee_build_version: None,
+                    }).await;
+                }
+                SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
+                    info!(call_id = %call_id, mode = ?accept_mode, "call answered");
+                }
+                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _, peer_local_addrs: _ } => {
+                    info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
+
+                    // Connect to the media room
+                    let media_relay: SocketAddr = setup_relay.parse().unwrap_or(relay);
+                    let media_cfg = wzp_transport::client_config();
+                    match wzp_transport::connect(&endpoint, media_relay, &room, media_cfg).await {
+                        Ok(media_conn) => {
+                            let media_transport = Arc::new(wzp_transport::QuinnTransport::new(media_conn));
+
+                            // Crypto handshake
+                            match wzp_client::handshake::perform_handshake(&*media_transport, &my_seed, None).await {
+                                Ok(_session) => {
+                                    info!("media connected — sending tone (press Ctrl+C to hang up)");
+
+                                    // Simple tone sender for testing
+                                    let mt = media_transport.clone();
+                                    let send_task = tokio::spawn(async move {
+                                        let config = wzp_client::call::CallConfig::default();
+                                        let mut encoder = wzp_client::call::CallEncoder::new(&config);
+                                        let duration = tokio::time::Duration::from_millis(20);
+                                        loop {
+                                            let pcm: Vec<i16> = (0..FRAME_SAMPLES)
+                                                .map(|_| 0i16) // silence — could be tone
+                                                .collect();
+                                            if let Ok(pkts) = encoder.encode_frame(&pcm) {
+                                                for pkt in &pkts {
+                                                    if mt.send_media(pkt).await.is_err() { return; }
+                                                }
+                                            }
+                                            tokio::time::sleep(duration).await;
+                                        }
+                                    });
+
+                                    // Wait for hangup or ctrl+c
+                                    loop {
+                                        tokio::select! {
+                                            sig = signal_transport.recv_signal() => {
+                                                match sig {
+                                                    Ok(Some(SignalMessage::Hangup { .. })) => {
+                                                        info!("remote hung up");
+                                                        break;
+                                                    }
+                                                    Ok(None) | Err(_) => break,
+                                                    _ => {}
+                                                }
+                                            }
+                                            _ = tokio::signal::ctrl_c() => {
+                                                info!("hanging up...");
+                                                let _ = signal_transport.send_signal(&SignalMessage::Hangup {
+                                                    reason: wzp_proto::HangupReason::Normal,
+                                                    call_id: None,
+                                                }).await;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    send_task.abort();
+                                    media_transport.close().await.ok();
+                                    info!("call ended");
+                                }
+                                Err(e) => error!("media handshake failed: {e}"),
+                            }
+                        }
+                        Err(e) => error!("media connect failed: {e}"),
+                    }
+                }
+                SignalMessage::Hangup { reason, .. } => {
+                    info!(reason = ?reason, "call ended by remote");
+                }
+                SignalMessage::Pong { .. } => {}
+                other => {
+                    info!("signal: {:?}", std::mem::discriminant(&other));
+                }
+            },
+            Ok(None) => {
+                info!("signal connection closed");
+                break;
+            }
+            Err(e) => {
+                error!("signal error: {e}");
+                break;
+            }
+        }
+    }
+
+    transport.close().await.ok();
     Ok(())
 }

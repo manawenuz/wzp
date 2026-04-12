@@ -1,0 +1,108 @@
+[package]
+name = "wzp-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "WarzonePhone Desktop — encrypted VoIP client"
+default-run = "wzp-desktop"
+
+# Library target — required for Tauri mobile (Android/iOS link the app as a cdylib)
+# and also used by the desktop binary below.
+#
+# `staticlib` was DROPPED from crate-type because rust-lang/rust#104707
+# documents that having staticlib alongside cdylib leaks non-exported
+# symbols from staticlibs into the cdylib. Bionic's private `__init_tcb`
+# / `pthread_create` symbols end up bound LOCALLY inside our .so instead
+# of resolved dynamically against libc.so at dlopen time — which crashes
+# at launch as soon as tao tries to std::thread::spawn() from the JNI
+# onCreate callback. The legacy wzp-android crate uses ["cdylib", "rlib"]
+# and runs fine on the same phone with the same NDK + Rust toolchain.
+#
+# iOS Tauri builds that actually need staticlib can re-add it behind a
+# target cfg if we ever ship on iOS.
+[lib]
+name = "wzp_desktop_lib"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "wzp-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# cc is no longer needed — all C++ moved to crates/wzp-native (built with
+# cargo-ndk and loaded via libloading at runtime). wzp-desktop's .so on
+# Android is now pure Rust.
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# WarzonePhone crates — protocol layer is platform-independent
+wzp-proto = { path = "../../crates/wzp-proto" }
+wzp-codec = { path = "../../crates/wzp-codec" }
+wzp-fec = { path = "../../crates/wzp-fec" }
+wzp-crypto = { path = "../../crates/wzp-crypto" }
+wzp-transport = { path = "../../crates/wzp-transport" }
+
+# wzp-client pulls in CPAL on every desktop target and, additionally on
+# macOS, VoiceProcessingIO (coreaudio-rs behind the "vpio" feature). The
+# vpio feature MUST NOT be enabled on Windows / Linux because coreaudio-rs
+# is Apple-framework-only and will fail to build. Task #24 will add a
+# matching Windows Voice Capture DSP path behind its own feature; until
+# then, Windows desktops use plain CPAL with AEC disabled.
+
+# macOS: CPAL + VoiceProcessingIO (hardware AEC via Core Audio).
+[target.'cfg(target_os = "macos")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", features = ["audio", "vpio"] }
+
+# Windows: CPAL for playback + direct WASAPI for capture with OS-level
+# AEC (AudioCategory_Communications). The wzp-client `windows-aec`
+# feature swaps the default CPAL AudioCapture for a WASAPI one that
+# opens the mic under AudioCategory_Communications, turning on Windows's
+# communications audio processing chain (AEC, NS, AGC). The reference
+# signal for AEC is the system render mix, so echo from our CPAL
+# playback is cancelled automatically without extra plumbing.
+[target.'cfg(target_os = "windows")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", features = ["audio", "windows-aec"] }
+
+# Linux: CPAL playback+capture baseline. AEC is enabled via the top-level
+# `linux-aec` feature in wzp-desktop, which forwards to wzp-client/linux-aec.
+# Keeping it opt-in at the wzp-desktop level (rather than forcing it always
+# on here) lets `cargo tauri build` produce two variants from the same
+# source tree — a noAEC baseline and an AEC build — by toggling the feature
+# at build time: `cargo tauri build -- --features wzp-desktop/linux-aec`.
+[target.'cfg(target_os = "linux")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", features = ["audio"] }
+
+# Android: no CPAL, no vpio — audio goes through the standalone wzp-native
+# cdylib that we dlopen via libloading at runtime. See the wzp_native
+# module in src/.
+[target.'cfg(target_os = "android")'.dependencies]
+wzp-client = { path = "../../crates/wzp-client", default-features = false }
+# libloading: runtime dlopen of libwzp_native.so — the standalone cdylib
+# crate that owns all C++ (Oboe bridge). Keeps wzp-desktop's .so free of
+# any C/C++ static archives that would otherwise leak bionic's internal
+# pthread_create into our cdylib and trigger the __init_tcb crash.
+libloading = "0.8"
+# jni + ndk-context: called from android_audio.rs to invoke
+# AudioManager.setSpeakerphoneOn on the JVM side at runtime, so the
+# Oboe playout stream (opened with Usage::VoiceCommunication) can route
+# between earpiece and loud speaker without restarting.
+jni = "0.21"
+ndk-context = "0.1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# linux-aec: forwards to wzp-client/linux-aec so `cargo tauri build -- --features
+# wzp-desktop/linux-aec` enables the WebRTC AEC3 backend on Linux. No-op on
+# other targets because wzp-client/linux-aec is itself cfg(target_os = "linux").
+linux-aec = ["wzp-client/linux-aec"]
