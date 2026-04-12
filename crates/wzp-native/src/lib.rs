@@ -47,6 +47,10 @@ struct WzpOboeConfig {
     sample_rate: i32,
     frames_per_burst: i32,
     channel_count: i32,
+    /// When nonzero, capture stream skips setSampleRate and setInputPreset
+    /// so the system can route to BT SCO at its native rate (8/16kHz).
+    /// Oboe's SampleRateConversionQuality::Best resamples to 48kHz.
+    bt_active: i32,
 }
 
 #[repr(C)]
@@ -204,6 +208,17 @@ fn backend() -> &'static AudioBackend {
 /// Idempotent — calling while already running is a no-op that returns 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn wzp_native_audio_start() -> i32 {
+    audio_start_inner(false)
+}
+
+/// Start Oboe in Bluetooth SCO mode — skips sample rate and input preset
+/// on capture so the system can route to the BT SCO device natively.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_start_bt() -> i32 {
+    audio_start_inner(true)
+}
+
+fn audio_start_inner(bt: bool) -> i32 {
     let b = backend();
     let mut started = match b.started.lock() {
         Ok(g) => g,
@@ -217,6 +232,7 @@ pub extern "C" fn wzp_native_audio_start() -> i32 {
         sample_rate: 48_000,
         frames_per_burst: FRAME_SAMPLES as i32,
         channel_count: 1,
+        bt_active: if bt { 1 } else { 0 },
     };
     let rings = WzpOboeRings {
         capture_buf: b.capture.buf_ptr(),

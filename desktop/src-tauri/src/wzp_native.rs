@@ -26,6 +26,7 @@ static LIB: OnceLock<libloading::Library> = OnceLock::new();
 static VERSION: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static HELLO: OnceLock<unsafe extern "C" fn(*mut u8, usize) -> usize> = OnceLock::new();
 static AUDIO_START: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
+static AUDIO_START_BT: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static AUDIO_STOP: OnceLock<unsafe extern "C" fn()> = OnceLock::new();
 static AUDIO_READ_CAPTURE: OnceLock<unsafe extern "C" fn(*mut i16, usize) -> usize> = OnceLock::new();
 static AUDIO_WRITE_PLAYOUT: OnceLock<unsafe extern "C" fn(*const i16, usize) -> usize> = OnceLock::new();
@@ -65,6 +66,7 @@ pub fn init() -> Result<(), String> {
         resolve!(VERSION, unsafe extern "C" fn() -> i32, b"wzp_native_version");
         resolve!(HELLO, unsafe extern "C" fn(*mut u8, usize) -> usize, b"wzp_native_hello");
         resolve!(AUDIO_START, unsafe extern "C" fn() -> i32, b"wzp_native_audio_start");
+        resolve!(AUDIO_START_BT, unsafe extern "C" fn() -> i32, b"wzp_native_audio_start_bt");
         resolve!(AUDIO_STOP, unsafe extern "C" fn(), b"wzp_native_audio_stop");
         resolve!(AUDIO_READ_CAPTURE, unsafe extern "C" fn(*mut i16, usize) -> usize, b"wzp_native_audio_read_capture");
         resolve!(AUDIO_WRITE_PLAYOUT, unsafe extern "C" fn(*const i16, usize) -> usize, b"wzp_native_audio_write_playout");
@@ -100,6 +102,14 @@ pub fn hello() -> String {
 /// failure. Idempotent on the wzp-native side.
 pub fn audio_start() -> Result<(), i32> {
     let f = AUDIO_START.get().ok_or(-100_i32)?;
+    let ret = unsafe { f() };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+/// Start Oboe in Bluetooth SCO mode — capture skips sample rate and
+/// input preset so the system routes to the BT SCO device natively.
+pub fn audio_start_bt() -> Result<(), i32> {
+    let f = AUDIO_START_BT.get().ok_or(-100_i32)?;
     let ret = unsafe { f() };
     if ret == 0 { Ok(()) } else { Err(ret) }
 }

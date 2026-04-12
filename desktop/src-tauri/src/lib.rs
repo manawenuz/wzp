@@ -814,10 +814,18 @@ async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
         }
         if wzp_native::is_loaded() && wzp_native::audio_is_running() {
             tracing::info!(on, "set_bluetooth_sco: restarting Oboe for route change");
-            tokio::task::spawn_blocking(|| {
+            tokio::task::spawn_blocking(move || {
                 wzp_native::audio_stop();
-                wzp_native::audio_start()
-                    .map_err(|code| format!("audio_start after BT toggle: code {code}"))
+                if on {
+                    // BT mode: skip sample rate + input preset on capture
+                    // so the system can route to the BT SCO device natively.
+                    wzp_native::audio_start_bt()
+                        .map_err(|code| format!("audio_start_bt after BT on: code {code}"))
+                } else {
+                    // Normal mode: restore 48kHz + VoiceCommunication preset.
+                    wzp_native::audio_start()
+                        .map_err(|code| format!("audio_start after BT off: code {code}"))
+                }
             })
             .await
             .map_err(|e| format!("spawn_blocking join: {e}"))??;

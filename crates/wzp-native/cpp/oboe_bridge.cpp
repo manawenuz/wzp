@@ -254,17 +254,27 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     oboe::AudioStreamBuilder captureBuilder;
     captureBuilder.setDirection(oboe::Direction::Input)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        // Shared mode allows Oboe's internal resampler to bridge 48kHz to
-        // the hardware rate (8/16kHz for BT SCO). Exclusive mode bypasses
-        // the resampler and fails with "getInputProfile could not find profile".
         ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(config->channel_count)
-        ->setSampleRate(config->sample_rate)
-        ->setFramesPerDataCallback(config->frames_per_burst)
-        ->setInputPreset(oboe::InputPreset::VoiceCommunication)
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
         ->setDataCallback(&g_capture_cb);
+
+    if (config->bt_active) {
+        // BT SCO mode: do NOT set sample rate or input preset.
+        // Requesting 48kHz against a BT SCO device fails with
+        // "getInputProfile could not find profile". Letting the system
+        // choose the native rate (8/16kHz) and relying on Oboe's
+        // resampler (SampleRateConversionQuality::Best) to bridge
+        // to our 48kHz ring buffer is the only path that works.
+        // InputPreset::VoiceCommunication can also prevent BT SCO
+        // routing on some devices — skip it for BT.
+        LOGI("capture: BT mode — no sample rate or input preset set");
+    } else {
+        captureBuilder.setSampleRate(config->sample_rate)
+            ->setFramesPerDataCallback(config->frames_per_burst)
+            ->setInputPreset(oboe::InputPreset::VoiceCommunication);
+    }
 
     oboe::Result result = captureBuilder.openStream(g_capture_stream);
     if (result != oboe::Result::OK) {
@@ -321,11 +331,19 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
         ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(config->channel_count)
-        ->setSampleRate(config->sample_rate)
-        ->setFramesPerDataCallback(config->frames_per_burst)
-        ->setUsage(oboe::Usage::VoiceCommunication)
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
         ->setDataCallback(&g_playout_cb);
+
+    if (config->bt_active) {
+        LOGI("playout: BT mode — no sample rate set, using Usage::Media");
+        // Usage::Media instead of VoiceCommunication for BT output
+        // to avoid conflicts with the communication device routing.
+        playoutBuilder.setUsage(oboe::Usage::Media);
+    } else {
+        playoutBuilder.setSampleRate(config->sample_rate)
+            ->setFramesPerDataCallback(config->frames_per_burst)
+            ->setUsage(oboe::Usage::VoiceCommunication);
+    }
 
     result = playoutBuilder.openStream(g_playout_stream);
     if (result != oboe::Result::OK) {

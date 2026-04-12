@@ -16,6 +16,7 @@ typedef struct {
     int32_t sample_rate;
     int32_t frames_per_burst;
     int32_t channel_count;
+    int32_t bt_active;  /* nonzero = BT SCO mode: skip sample rate + input preset */
 } WzpOboeConfig;
 
 typedef struct {
