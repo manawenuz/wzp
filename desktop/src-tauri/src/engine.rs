@@ -303,6 +303,15 @@ impl CallEngine {
         // our own wzp_transport::connect step and use this
         // directly. If None, existing Phase 0 behavior.
         pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>>,
+        // Phase 6: explicit flag for whether the agreed media path
+        // is truly direct P2P (skip handshake) or relay-mediated
+        // (must run handshake). Previously derived from
+        // pre_connected_transport.is_some() which was WRONG: when
+        // Phase 6 negotiated relay but delivered the relay transport
+        // via pre_connected_transport, the engine skipped the
+        // handshake → relay couldn't authenticate the participant
+        // → silent call.
+        is_direct_p2p: bool,
         // Phase 5.6: Tauri AppHandle for emitting call-debug
         // events from inside the send/recv tasks. Lets the
         // debug log pane show first-send/first-recv/heartbeat
@@ -313,17 +322,12 @@ impl CallEngine {
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
-        // Single "call epoch" timestamp threaded through send + recv tasks
-        // so every milestone log can carry t_ms_since_call_start. Used to
-        // diagnose the first-join no-audio regression by giving us a clean
-        // ordering between audio_start, first capture, first recv, first
-        // decode, first playout-ring write, and the C++ Oboe first-callback
-        // logs (which already exist in cpp/oboe_bridge.cpp).
         let call_t0 = std::time::Instant::now();
         info!(
             %relay, %room, %alias, %quality,
             has_reuse = reuse_endpoint.is_some(),
             has_pre_connected = pre_connected_transport.is_some(),
+            is_direct_p2p,
             t_ms = 0u128,
             "CallEngine::start (android) invoked"
         );
@@ -332,7 +336,6 @@ impl CallEngine {
         let relay_addr: SocketAddr = relay.parse()?;
         info!(%relay_addr, "resolved relay addr");
 
-        // Identity via shared helper (uses Tauri path().app_data_dir()).
         let seed = crate::load_or_create_seed()
             .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
         let fp = seed.derive_identity().public_identity().fingerprint;
@@ -340,10 +343,9 @@ impl CallEngine {
         info!(%fp, "identity loaded");
 
         // Transport source: either the pre-connected one from the
-        // dual-path race (Phase 3.5) or build a fresh one here.
-        let is_direct_p2p = pre_connected_transport.is_some();
+        // dual-path race or build a fresh one here.
         let transport = if let Some(t) = pre_connected_transport {
-            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: using pre-connected transport from dual-path race (direct P2P)");
+            info!(t_ms = call_t0.elapsed().as_millis(), is_direct_p2p, "first-join diag: using pre-connected transport");
             t
         } else {
             // QUIC transport + handshake (Phase 0 relay-only path).
@@ -1049,12 +1051,8 @@ impl CallEngine {
         // Phase 3.5: caller did the dual-path race and picked a
         // winning transport. If Some, skip our own connect step.
         pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>>,
-        // Phase 5.6: Tauri AppHandle for call-debug event emits
-        // from inside the send/recv tasks. See android branch for
-        // the full rationale. Desktop branch accepts it for API
-        // symmetry but doesn't yet thread it into the send/recv
-        // tasks — android is where the reporter actually sees the
-        // 1-way audio regression.
+        // Phase 6: explicit is_direct_p2p flag (see android branch).
+        is_direct_p2p: bool,
         _app: tauri::AppHandle,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
@@ -1065,34 +1063,22 @@ impl CallEngine {
             %relay, %room, %alias, %quality,
             has_reuse = reuse_endpoint.is_some(),
             has_pre_connected = pre_connected_transport.is_some(),
+            is_direct_p2p,
             "CallEngine::start (desktop) invoked"
         );
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
 
-        // Identity via the SHARED helper — same path resolution as
-        // register_signal (Tauri app_data_dir, e.g. on macOS
-        // ~/Library/Application Support/com.wzp.desktop/.wzp/identity).
-        //
-        // The previous implementation loaded the seed manually from
-        // $HOME/.wzp/identity which is a DIFFERENT file on macOS, so
-        // register_signal and CallEngine::start were using different
-        // identities — direct calls placed from desktop were routed
-        // by the relay under the CallEngine fingerprint but the callee
-        // had registered under a different fingerprint, making the
-        // call unroutable.
         let seed = crate::load_or_create_seed()
             .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
         let fp = seed.derive_identity().public_identity().fingerprint;
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
 
-        // Transport source: either the pre-connected dual-path
-        // winner (Phase 3.5) or build a fresh relay connection here.
-        let is_direct_p2p = pre_connected_transport.is_some();
+        // Transport source: either pre-connected or fresh.
         let transport = if let Some(t) = pre_connected_transport {
-            info!("using pre-connected transport from dual-path race (direct P2P)");
+            info!(is_direct_p2p, "using pre-connected transport");
             t
         } else {
             // Connect — reuse the signal endpoint if the direct-call path gave

@@ -366,7 +366,7 @@ async fn connect(
         .as_deref()
         .and_then(|s| s.parse().ok());
     let relay_addr_parsed: Option<std::net::SocketAddr> = relay.parse().ok();
-    let mut role = wzp_client::reflect::determine_role(
+    let role = wzp_client::reflect::determine_role(
         own_reflex_addr.as_deref(),
         peer_direct_addr.as_deref(),
     );
@@ -385,6 +385,11 @@ async fn connect(
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
+
+    // Phase 6: tracks whether the agreed path is truly direct P2P
+    // (skip handshake) or relay-mediated (must run handshake).
+    // Set inside the Phase 6 negotiation block below.
+    let mut is_direct_p2p_agreed = false;
 
     let pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>> =
         match (role, relay_addr_parsed) {
@@ -515,7 +520,14 @@ async fn connect(
                             "connect: Phase 6 path agreed"
                         );
 
-                        // Pick the agreed transport
+                        // Pick the agreed transport. Tag it with
+                        // whether this is truly a direct P2P conn
+                        // so CallEngine knows whether to skip the
+                        // handshake. Critical: relay transports
+                        // delivered via pre_connected MUST still
+                        // run perform_handshake — the relay expects
+                        // it for participant authentication.
+                        is_direct_p2p_agreed = use_direct;
                         if use_direct {
                             race_result.direct_transport
                         } else {
@@ -561,9 +573,11 @@ async fn connect(
     }
 
     let app_clone = app.clone();
-    emit_call_debug(&app, "connect:call_engine_starting", serde_json::json!({}));
+    emit_call_debug(&app, "connect:call_engine_starting", serde_json::json!({
+        "is_direct_p2p": is_direct_p2p_agreed,
+    }));
     let app_for_engine = app.clone();
-    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, app_for_engine, move |event_kind, message| {
+    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, is_direct_p2p_agreed, app_for_engine, move |event_kind, message| {
         let _ = app_clone.emit(
             "call-event",
             CallEvent {
