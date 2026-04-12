@@ -255,27 +255,55 @@ impl FederationManager {
     }
 
     /// Check if a room name (which may be hashed) is a global room.
+    ///
+    /// Phase 4.1: ALL `call-*` rooms are implicitly global for
+    /// federation. This is the simplest path to cross-relay direct
+    /// calling with relay-mediated media fallback: when both peers
+    /// join the same `call-<id>` room on their respective relays,
+    /// the federation media pipeline automatically forwards
+    /// datagrams between them. The relay's existing ACL (`call-*`
+    /// rooms are restricted to the two authorized participants in
+    /// the call registry) prevents random clients from creating or
+    /// joining `call-*` rooms.
     pub fn is_global_room(&self, room: &str) -> bool {
+        if room.starts_with("call-") {
+            return true;
+        }
         self.resolve_global_room(room).is_some()
     }
 
     /// Resolve a room name (raw or hashed) to the canonical global room name.
     /// Returns the configured global room name if it matches.
-    pub fn resolve_global_room(&self, room: &str) -> Option<&str> {
+    ///
+    /// Phase 4.1: `call-*` rooms resolve to themselves (they ARE
+    /// the canonical name — no hashing or aliasing involved).
+    ///
+    /// Returns `Option<String>` (owned) instead of `Option<&str>`
+    /// because call-* room names aren't stored on `self` — they
+    /// come from the caller and we just confirm "yes, this is
+    /// global" by returning it back. Pre-4.1 callers that used
+    /// the reference for equality checks or hashing work
+    /// unchanged via String/&str auto-deref.
+    pub fn resolve_global_room(&self, room: &str) -> Option<String> {
+        // Phase 4.1: call-* rooms are implicitly global, resolve
+        // to themselves
+        if room.starts_with("call-") {
+            return Some(room.to_string());
+        }
         // Direct match (raw room name, e.g. Android clients)
         if self.global_rooms.contains(room) {
-            return Some(self.global_rooms.iter().find(|n| n.as_str() == room).unwrap());
+            return Some(room.to_string());
         }
         // Hashed match (desktop clients hash room names for SNI privacy)
         self.global_rooms.iter().find(|name| {
             wzp_crypto::hash_room_name(name) == room
-        }).map(|s| s.as_str())
+        }).map(|s| s.to_string())
     }
 
     /// Get the canonical federation room hash for a room.
     /// Always uses the configured global room name, not the client-provided name.
     pub fn global_room_hash(&self, room: &str) -> [u8; 8] {
-        if let Some(canonical) = self.resolve_global_room(room) {
+        if let Some(ref canonical) = self.resolve_global_room(room) {
             room_hash(canonical)
         } else {
             room_hash(room)
@@ -347,8 +375,8 @@ impl FederationManager {
         let mut result = Vec::new();
         for link in links.values() {
             // Check canonical name
-            if let Some(c) = canonical {
-                if let Some(remote) = link.remote_participants.get(c) {
+            if let Some(ref c) = canonical {
+                if let Some(remote) = link.remote_participants.get(c.as_str()) {
                     result.extend(remote.iter().cloned());
                 }
                 // Also check raw room name, but only if different from canonical
@@ -807,12 +835,12 @@ async fn handle_signal(
                         let mut all_participants = mgr.local_participant_list(&local_room);
                         let links = fm.peer_links.lock().await;
                         for link in links.values() {
-                            if let Some(canonical) = fm.resolve_global_room(&local_room) {
-                                if let Some(remote) = link.remote_participants.get(canonical) {
+                            if let Some(ref canonical) = fm.resolve_global_room(&local_room) {
+                                if let Some(remote) = link.remote_participants.get(canonical.as_str()) {
                                     all_participants.extend(remote.iter().cloned());
                                 }
                                 // Also check raw room name, but only if different from canonical
-                                if canonical != local_room {
+                                if canonical != &local_room {
                                     if let Some(remote) = link.remote_participants.get(&local_room) {
                                         all_participants.extend(remote.iter().cloned());
                                     }
@@ -843,8 +871,8 @@ async fn handle_signal(
                 // Clear remote participants for this peer+room
                 link.remote_participants.remove(&room);
                 // Also try canonical name
-                if let Some(canonical) = fm.resolve_global_room(&room) {
-                    link.remote_participants.remove(canonical);
+                if let Some(ref canonical) = fm.resolve_global_room(&room) {
+                    link.remote_participants.remove(canonical.as_str());
                 }
             }
 
@@ -858,8 +886,8 @@ async fn handle_signal(
                 let mut result = Vec::new();
                 for (fp, link) in links.iter() {
                     if fp == peer_fp { continue; }
-                    if let Some(c) = canonical {
-                        if let Some(remote) = link.remote_participants.get(c) {
+                    if let Some(ref c) = canonical {
+                        if let Some(remote) = link.remote_participants.get(c.as_str()) {
                             result.extend(remote.iter().cloned());
                         }
                     }
