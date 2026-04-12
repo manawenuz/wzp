@@ -625,10 +625,13 @@ async fn main() -> anyhow::Result<()> {
                         // then read back everything needed to cross-
                         // wire peer_direct_addr + peer_local_addrs in
                         // the local CallSetup.
+                        // Also set peer_relay_fp so the originating
+                        // relay knows where to forward MediaPathReport.
                         let room_name = format!("call-{call_id}");
                         let (callee_addr_for_setup, callee_local_for_setup) = {
                             let mut reg = call_registry_d.lock().await;
                             reg.set_active(call_id, accept_mode, room_name.clone());
+                            reg.set_peer_relay_fp(call_id, Some(origin_relay_fp.clone()));
                             reg.set_callee_reflexive_addr(
                                 call_id,
                                 callee_reflexive_addr.clone(),
