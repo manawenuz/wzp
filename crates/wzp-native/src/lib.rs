@@ -174,6 +174,13 @@ struct AudioBackend {
     started: std::sync::Mutex<bool>,
     /// Per-write logging throttle counter for wzp_native_audio_write_playout.
     playout_write_log_count: std::sync::atomic::AtomicU64,
+    /// Fix A (task #35): the playout ring's read_idx at the last
+    /// check. If audio_write_playout observes read_idx hasn't
+    /// advanced after N writes, the Oboe playout callback has
+    /// stopped firing → restart the streams.
+    playout_last_read_idx: std::sync::atomic::AtomicI32,
+    /// Number of writes since the last read_idx advance.
+    playout_stall_writes: std::sync::atomic::AtomicU32,
 }
 
 static BACKEND: OnceLock<&'static AudioBackend> = OnceLock::new();
@@ -185,6 +192,8 @@ fn backend() -> &'static AudioBackend {
             playout: RingBuffer::new(RING_CAPACITY),
             started: std::sync::Mutex::new(false),
             playout_write_log_count: std::sync::atomic::AtomicU64::new(0),
+            playout_last_read_idx: std::sync::atomic::AtomicI32::new(0),
+            playout_stall_writes: std::sync::atomic::AtomicU32::new(0),
         }))
     })
 }
@@ -262,6 +271,76 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
     }
     let slice = unsafe { std::slice::from_raw_parts(input, in_len) };
     let b = backend();
+
+    // Fix A (task #35): detect playout callback stall. If the
+    // playout ring's read_idx hasn't advanced in 50+ writes
+    // (~1 second at 50 writes/sec), the Oboe playout callback
+    // has stopped firing → restart the streams. This is the
+    // self-healing behavior that makes rejoin work: teardown +
+    // rebuild clears whatever HAL state locked up the callback.
+    let current_read_idx = b.playout.read_idx.load(std::sync::atomic::Ordering::Relaxed);
+    let last_read_idx = b.playout_last_read_idx.load(std::sync::atomic::Ordering::Relaxed);
+    if current_read_idx == last_read_idx {
+        let stall = b.playout_stall_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if stall >= 50 {
+            // Callback hasn't drained anything in ~1 second.
+            // Force a stream restart.
+            unsafe {
+                android_log("playout STALL detected (50 writes, read_idx unchanged) — restarting Oboe streams");
+            }
+            b.playout_stall_writes.store(0, std::sync::atomic::Ordering::Relaxed);
+            // Release the started lock, stop, re-start.
+            // This is the same logic as the Rust-side
+            // audio_stop() + audio_start() but done inline
+            // because we can't call the extern "C" fns
+            // recursively. Just call the C++ side directly.
+            {
+                if let Ok(mut started) = b.started.lock() {
+                    if *started {
+                        unsafe { wzp_oboe_stop() };
+                        *started = false;
+                    }
+                }
+            }
+            // Clear the rings so the restart doesn't read stale data
+            b.playout.write_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            b.playout.read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            b.capture.write_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            b.capture.read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            // Re-start
+            let config = WzpOboeConfig {
+                sample_rate: 48_000,
+                frames_per_burst: FRAME_SAMPLES as i32,
+                channel_count: 1,
+            };
+            let rings = WzpOboeRings {
+                capture_buf: b.capture.buf_ptr(),
+                capture_capacity: b.capture.capacity as i32,
+                capture_write_idx: b.capture.write_idx_ptr(),
+                capture_read_idx: b.capture.read_idx_ptr(),
+                playout_buf: b.playout.buf_ptr(),
+                playout_capacity: b.playout.capacity as i32,
+                playout_write_idx: b.playout.write_idx_ptr(),
+                playout_read_idx: b.playout.read_idx_ptr(),
+            };
+            let ret = unsafe { wzp_oboe_start(&config, &rings) };
+            if ret == 0 {
+                if let Ok(mut started) = b.started.lock() {
+                    *started = true;
+                }
+                unsafe { android_log("playout restart OK — Oboe streams rebuilt"); }
+            } else {
+                unsafe { android_log(&format!("playout restart FAILED: {ret}")); }
+            }
+            b.playout_last_read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            return 0; // caller will retry on next frame
+        }
+    } else {
+        // read_idx advanced — callback is alive, reset counter
+        b.playout_stall_writes.store(0, std::sync::atomic::Ordering::Relaxed);
+        b.playout_last_read_idx.store(current_read_idx, std::sync::atomic::Ordering::Relaxed);
+    }
+
     let before_w = b.playout.write_idx.load(std::sync::atomic::Ordering::Relaxed);
     let before_r = b.playout.read_idx.load(std::sync::atomic::Ordering::Relaxed);
     let written = b.playout.write(slice);

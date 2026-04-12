@@ -170,14 +170,14 @@ pub async fn race(
                 }
                 None => {
                     let (sc, _cert_der) = wzp_transport::server_config();
-                    // [::]:0 = dual-stack socket — handles both IPv4 (via
-                    // v4-mapped addrs) and IPv6 natively. Pre-Phase-5.5
-                    // used 0.0.0.0:0 (IPv4-only) which silently made
-                    // all IPv6 host candidates non-functional: dials
-                    // to [2a0d:...] failed or hung, accepts from IPv6
-                    // peers never arrived, and the JoinSet wasted time
-                    // on dead candidates before the IPv4 one won.
-                    let bind: SocketAddr = "[::]:0".parse().unwrap();
+                    // 0.0.0.0:0 = IPv4 socket. [::]:0 dual-stack was
+                    // tried but breaks on Android devices where
+                    // IPV6_V6ONLY=1 (default on some kernels) —
+                    // IPv4 candidates silently fail. IPv6 host
+                    // candidates are skipped for now; they need a
+                    // dedicated IPv6 socket alongside the v4 one
+                    // (like WebRTC's dual-socket approach).
+                    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
                     let fresh = wzp_transport::create_endpoint(bind, Some(sc))?;
                     tracing::info!(
                         local_addr = ?fresh.local_addr().ok(),
@@ -213,14 +213,14 @@ pub async fn race(
                     ep
                 }
                 None => {
-                    // [::]:0 = dual-stack socket — handles both IPv4 (via
-                    // v4-mapped addrs) and IPv6 natively. Pre-Phase-5.5
-                    // used 0.0.0.0:0 (IPv4-only) which silently made
-                    // all IPv6 host candidates non-functional: dials
-                    // to [2a0d:...] failed or hung, accepts from IPv6
-                    // peers never arrived, and the JoinSet wasted time
-                    // on dead candidates before the IPv4 one won.
-                    let bind: SocketAddr = "[::]:0".parse().unwrap();
+                    // 0.0.0.0:0 = IPv4 socket. [::]:0 dual-stack was
+                    // tried but breaks on Android devices where
+                    // IPV6_V6ONLY=1 (default on some kernels) —
+                    // IPv4 candidates silently fail. IPv6 host
+                    // candidates are skipped for now; they need a
+                    // dedicated IPv6 socket alongside the v4 one
+                    // (like WebRTC's dual-socket approach).
+                    let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
                     let fresh = wzp_transport::create_endpoint(bind, None)?;
                     tracing::info!(
                         local_addr = ?fresh.local_addr().ok(),

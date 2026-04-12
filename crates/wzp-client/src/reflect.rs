@@ -102,8 +102,7 @@ pub async fn probe_reflect_addr(
     let endpoint = match existing_endpoint {
         Some(ep) => ep,
         None => {
-            // [::]:0 = dual-stack socket for both IPv4 + IPv6
-            let bind: SocketAddr = "[::]:0".parse().unwrap();
+            let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
             create_endpoint(bind, None).map_err(|e| format!("endpoint: {e}"))?
         }
     };
@@ -320,25 +319,20 @@ pub fn local_host_candidates(port: u16) -> Vec<SocketAddr> {
                     out.push(SocketAddr::new(std::net::IpAddr::V4(v4), port));
                 }
             }
-            std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback() || v6.is_unspecified() {
-                    continue;
-                }
-                // Link-local (fe80::/10) — skip because it needs
-                // a zone/scope ID to be usable and that scope is
-                // meaningless to the peer.
-                let first = v6.segments()[0];
-                if (first & 0xffc0) == 0xfe80 {
-                    continue;
-                }
-                // Include everything else: ULA (fc00::/7, high
-                // bits 0xfc00/0xfd00) and global unicast
-                // (2000::/3, first segment 0x2000-0x3fff). Both
-                // are directly dialable from a peer on the same
-                // dual-stack LAN, and on Starlink / most modern
-                // ISPs the IPv6 path usually has no CGNAT and
-                // works even when the v4 path doesn't hairpin.
-                out.push(SocketAddr::new(std::net::IpAddr::V6(v6), port));
+            std::net::IpAddr::V6(_v6) => {
+                // IPv6 host candidates are disabled until we add
+                // a dedicated IPv6 socket alongside the IPv4 one.
+                // Android's IPV6_V6ONLY=1 default on some kernels
+                // makes [::]:0 dual-stack unreliable — IPv4 dials
+                // silently fail. Advertising IPv6 addrs from an
+                // IPv4-only socket wastes JoinSet slots and adds
+                // timeout delays before the working IPv4 candidate
+                // gets picked.
+                //
+                // TODO: Phase 7 — create a second quinn::Endpoint
+                // on [::]:0 for IPv6-only dials, run them alongside
+                // the IPv4 JoinSet. This gives true dual-stack ICE
+                // without the v4-mapped-address fragility.
             }
         }
     }
