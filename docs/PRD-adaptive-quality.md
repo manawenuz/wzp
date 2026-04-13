@@ -203,3 +203,12 @@ The `CallEncoder` already has `set_profile()`. The `CallDecoder` already auto-sw
 | 1c | UI indicator (current codec) | 0.5 day | Done |
 | 2 | Extended 5-tier classification (Studio64k→Catastrophic) | 0.5 day | Done (2026-04-13) |
 | 3 | Bandwidth probing | 2 days | Pending (task #10) |
+
+## Implementation Status Update (2026-04-13)
+
+All phases implemented:
+- Phase 1: QualityAdapter with 3-tier classification — DONE
+- Phase 2: Extended 5-tier (Studio 64k/48k/32k + GOOD + DEGRADED + CATASTROPHIC) — DONE
+- Phase 3: Bandwidth probing — NOT DONE (see remaining tasks)
+- P2P adaptive quality: QualityReport::from_path_stats() + self-observation from quinn stats — DONE
+- Both relay and P2P calls now have full adaptive quality switching

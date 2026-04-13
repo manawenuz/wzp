@@ -155,3 +155,10 @@ Phases 1-2, 4-7 are implemented. First P2P call completed 2026-04-12.
 ### Known regression
 
 Phase 7 added `ipv6_endpoint: Option<Endpoint>` parameter to `race()` in `crates/wzp-client/src/dual_path.rs` but the 3 test call sites in `crates/wzp-client/tests/dual_path.rs` (lines 111, 153, 191) were not updated — they pass 6 args instead of 7. Fix: add `None,` after the `shared_endpoint` arg in each call.
+
+## Update (2026-04-13)
+
+P2P adaptive quality (#23) now implemented:
+- Both peers self-observe network quality from QUIC path stats
+- Quality reports generated every ~1s and attached to outgoing packets
+- AdaptiveQualityController drives codec switching on both P2P and relay calls

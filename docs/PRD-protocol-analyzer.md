@@ -186,3 +186,15 @@ wzp-analyzer --replay capture.wzp --report report.html
 - Modifying packets in transit
 - Automated quality scoring (MOS estimation)
 - Video support
+
+## Implementation Status (2026-04-13)
+
+All phases implemented:
+- Phase 1 (Observer + stats): wzp-analyzer binary, passive room observer, per-participant stats — DONE
+- Phase 2 (TUI): ratatui display with color-coded loss severity — DONE
+- Phase 3 (Capture/Replay): Binary .wzp format + CaptureReader for offline replay — DONE
+- Phase 4 (HTML report): Self-contained with Chart.js loss/jitter timelines — DONE
+- Phase 5 (Encrypted decode): Stub — SFU E2E encryption requires session context. Header-only analysis works. — PARTIAL
+
+Binary: `cargo build --bin wzp-analyzer`
+Usage: `wzp-analyzer relay:4433 --room test [--capture out.wzp] [--html report.html] [--no-tui]`

@@ -128,18 +128,18 @@
 
 ## Test Coverage
 
-307+ tests across 7 crates (wzp-web has no Rust tests):
+372+ tests across 7 crates (wzp-web has no Rust tests):
 
 | Crate | Test Count |
 |-------|------------|
-| wzp-proto | ~79 |
+| wzp-proto | ~84 |
 | wzp-codec | ~69 |
 | wzp-fec | ~21 |
 | wzp-crypto | ~21 |
 | wzp-transport | ~11 |
-| wzp-relay | ~50 |
+| wzp-relay | ~120 |
 | wzp-client | ~57 |
-| **Total** | **307+** |
+| **Total** | **372+** |
 
 Tests cover:
 - Wire format roundtrip (header, quality report, full packet)
@@ -193,6 +193,31 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - **Production**: Not yet deployed to production networks
 
 ## Recent Changes (2026-04-13)
+
+### P2P Adaptive Quality (#23, 2026-04-13)
+- QualityReport::from_path_stats() — construct reports from local quinn stats
+- CallEncoder.pending_quality_report — one-shot attachment to source packets
+- Send tasks generate quality reports every 50 frames (~1s) from path stats
+- Recv tasks self-observe from own QUIC stats for P2P adaptation
+- Both relay and P2P calls now have full adaptive quality
+
+### Protocol Analyzer (#13-17, 2026-04-13)
+- New binary: wzp-analyzer (crates/wzp-client/src/analyzer.rs, ~900 lines)
+- Passive observer: joins room, receives all media, never sends
+- TUI mode (ratatui): per-participant table with loss%, jitter, codec, color-coded
+- No-TUI mode: stats printed to stderr every 2s
+- Binary capture format (.wzp) with microsecond timestamps
+- Replay mode: offline analysis from capture files
+- HTML report: self-contained with Chart.js loss/jitter timelines
+- Encrypted decode: stub (needs session key + nonce context for SFU E2E)
+
+### Codebase Refactoring (2026-04-13)
+- DashMap relay concurrency: global Mutex → 64-shard DashMap
+- Federation clone-before-send: eliminated last lock-during-I/O
+- Engine deduplication: 3 shared helpers, eliminated 250 lines duplication
+- 29 federation tests (was 0)
+- Clap CLI parser for relay (replaced 154-line manual parser)
+- Magic number constants, error handling helpers, safety docs
 
 ### 5-Tier Adaptive Quality Classification (#9)
 - `Tier` enum extended from 3 to 6 levels: Studio64k > Studio48k > Studio32k > Good > Degraded > Catastrophic

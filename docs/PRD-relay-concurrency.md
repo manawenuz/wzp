@@ -304,3 +304,11 @@ Option: Move quality observation to a background task:
 - Phase 2: 0.5 day (federation clone-and-release)
 - Phase 3: 0.5 day (optional, quality tracking with atomics)
 - Total: 1.5–2 days
+
+## Implementation Status (2026-04-13)
+
+Phase 1 (DashMap): DONE — global Mutex → DashMap<String, Room> with 64 shards
+Phase 2 (Federation clone-before-send): DONE — forward_to_peers, broadcast_signal, send_signal_to_peer
+Phase 3 (Quality atomics): NOT DONE — optional optimization
+
+See also: docs/REFACTOR-relay-concurrency.md for the full post-refactor analysis.

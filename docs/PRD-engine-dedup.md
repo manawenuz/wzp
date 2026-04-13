@@ -130,3 +130,11 @@ These are small blocks but appear in both send and recv tasks. Extract as inline
 - Audio I/O trait abstraction (Oboe vs CPAL) — different project, different risk profile
 - Moving Android-specific diagnostics (first-join, PCM recorder) into a feature flag
 - Splitting engine.rs into multiple files
+
+## Implementation Status (2026-04-13)
+
+All phases implemented:
+- build_call_config(): shared CallConfig construction — DONE
+- codec_to_profile(): shared CodecId → QualityProfile mapping — DONE
+- run_signal_task(): shared signal handler — DONE
+- Net reduction: ~39 lines, 6 duplicated blocks → single-line calls
