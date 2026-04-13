@@ -1114,10 +1114,11 @@ impl CallEngine {
             }
         });
 
-        // Signal task (presence — same shape as desktop).
+        // Signal task (presence + quality directives).
         let sig_t = transport.clone();
         let sig_r = running.clone();
         let sig_p = participants.clone();
+        let sig_pending_profile = pending_profile.clone();
         let event_cb = Arc::new(event_cb);
         let sig_cb = event_cb.clone();
         tokio::spawn(async move {
@@ -1148,6 +1149,18 @@ impl CallEngine {
                         let count = unique.len();
                         *sig_p.lock().await = unique;
                         sig_cb("room-update", &format!("{count} participants"));
+                    }
+                    Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
+                        recommended_profile,
+                        reason,
+                    }))) => {
+                        let idx = profile_to_index(&recommended_profile);
+                        info!(
+                            codec = ?recommended_profile.codec,
+                            reason = reason.as_deref().unwrap_or(""),
+                            "relay quality directive: switching profile"
+                        );
+                        sig_pending_profile.store(idx, Ordering::Release);
                     }
                     Ok(Ok(Some(_))) => {}
                     Ok(Ok(None)) => break,
@@ -1534,10 +1547,11 @@ impl CallEngine {
             }
         });
 
-        // Signal task (presence)
+        // Signal task (presence + quality directives)
         let sig_t = transport.clone();
         let sig_r = running.clone();
         let sig_p = participants.clone();
+        let sig_pending_profile = pending_profile.clone();
         let event_cb = Arc::new(event_cb);
         let sig_cb = event_cb.clone();
         tokio::spawn(async move {
@@ -1568,6 +1582,18 @@ impl CallEngine {
                         let count = unique.len();
                         *sig_p.lock().await = unique;
                         sig_cb("room-update", &format!("{count} participants"));
+                    }
+                    Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
+                        recommended_profile,
+                        reason,
+                    }))) => {
+                        let idx = profile_to_index(&recommended_profile);
+                        info!(
+                            codec = ?recommended_profile.codec,
+                            reason = reason.as_deref().unwrap_or(""),
+                            "relay quality directive: switching profile"
+                        );
+                        sig_pending_profile.store(idx, Ordering::Release);
                     }
                     Ok(Ok(Some(_))) => {}
                     Ok(Ok(None)) => break,

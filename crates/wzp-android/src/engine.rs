@@ -1209,6 +1209,15 @@ async fn run_call(
                     stats.room_participant_count = count;
                     stats.room_participants = members;
                 }
+                Ok(Some(SignalMessage::QualityDirective { recommended_profile, reason })) => {
+                    let idx = profile_to_index(&recommended_profile);
+                    info!(
+                        codec = ?recommended_profile.codec,
+                        reason = reason.as_deref().unwrap_or(""),
+                        "relay quality directive: switching profile"
+                    );
+                    pending_profile_recv.store(idx, Ordering::Release);
+                }
                 Ok(Some(msg)) => {
                     info!("signal received: {:?}", std::mem::discriminant(&msg));
                 }

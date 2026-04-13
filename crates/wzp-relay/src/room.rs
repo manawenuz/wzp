@@ -96,6 +96,62 @@ impl DebugTap {
             "TAP EVENT"
         );
     }
+
+    pub fn log_stats(&self, room: &str, stats: &TapStats) {
+        let codecs: Vec<String> = stats.codecs_seen.iter().map(|c| format!("{c:?}")).collect();
+        info!(
+            target: "debug_tap",
+            room = %room,
+            period = "5s",
+            in_pkts = stats.in_pkts,
+            out_pkts = stats.out_pkts,
+            fan_out_avg = format!("{:.1}", if stats.in_pkts > 0 { stats.out_pkts as f64 / stats.in_pkts as f64 } else { 0.0 }),
+            seq_gaps = stats.seq_gaps,
+            codecs_seen = ?codecs,
+            "TAP STATS"
+        );
+    }
+}
+
+/// Per-participant stats for the debug tap periodic summary.
+pub struct TapStats {
+    pub in_pkts: u64,
+    pub out_pkts: u64,
+    pub seq_gaps: u64,
+    pub codecs_seen: std::collections::HashSet<wzp_proto::CodecId>,
+    last_seq: Option<u16>,
+}
+
+impl TapStats {
+    pub fn new() -> Self {
+        Self {
+            in_pkts: 0,
+            out_pkts: 0,
+            seq_gaps: 0,
+            codecs_seen: std::collections::HashSet::new(),
+            last_seq: None,
+        }
+    }
+
+    pub fn record_in(&mut self, pkt: &wzp_proto::MediaPacket, fan_out: usize) {
+        self.in_pkts += 1;
+        self.out_pkts += fan_out as u64;
+        self.codecs_seen.insert(pkt.header.codec_id);
+        if let Some(prev) = self.last_seq {
+            let expected = prev.wrapping_add(1);
+            if pkt.header.seq != expected {
+                self.seq_gaps += 1;
+            }
+        }
+        self.last_seq = Some(pkt.header.seq);
+    }
+
+    pub fn reset_period(&mut self) {
+        self.in_pkts = 0;
+        self.out_pkts = 0;
+        self.seq_gaps = 0;
+        // Keep codecs_seen and last_seq across periods
+    }
 }
 
 /// Tracks network quality for a single participant in a room.
@@ -129,11 +185,7 @@ impl ParticipantQuality {
 fn weakest_tier<'a>(qualities: impl Iterator<Item = &'a ParticipantQuality>) -> Tier {
     qualities
         .map(|pq| pq.current_tier)
-        .min_by_key(|t| match t {
-            Tier::Good => 2,
-            Tier::Degraded => 1,
-            Tier::Catastrophic => 0,
-        })
+        .min()
         .unwrap_or(Tier::Good)
 }
 
@@ -638,6 +690,12 @@ async fn run_participant_plain(
     let mut send_errors = 0u64;
     let mut last_log_instant = std::time::Instant::now();
 
+    let mut tap_stats = if debug_tap.as_ref().map_or(false, |t| t.matches(&room_name)) {
+        Some(TapStats::new())
+    } else {
+        None
+    };
+
     info!(
         room = %room_name,
         participant = participant_id,
@@ -717,11 +775,14 @@ async fn run_participant_plain(
             broadcast_signal(&all_senders, &directive).await;
         }
 
-        // Debug tap: log packet metadata
+        // Debug tap: log packet metadata + record stats
         if let Some(ref tap) = debug_tap {
             if tap.matches(&room_name) {
                 tap.log_packet(&room_name, "in", &addr, &pkt, others.len());
             }
+        }
+        if let Some(ref mut ts) = tap_stats {
+            ts.record_in(&pkt, others.len());
         }
 
         // Forward to all others
@@ -795,6 +856,10 @@ async fn run_participant_plain(
                 send_errors,
                 "participant stats"
             );
+            if let (Some(tap), Some(ts)) = (&debug_tap, &mut tap_stats) {
+                tap.log_stats(&room_name, ts);
+                ts.reset_period();
+            }
             max_recv_gap_ms = 0;
             max_forward_ms = 0;
             last_log_instant = std::time::Instant::now();
