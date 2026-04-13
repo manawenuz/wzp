@@ -167,6 +167,18 @@ if [ "\$DO_PULL" = "1" ]; then
     git reset --hard "origin/\$BRANCH"
     git submodule update --init || true
     echo ">>> HEAD: \$(git rev-parse --short HEAD) — \$(git log -1 --format=%s)"
+
+    # Ensure signing keystores exist. They're gitignored so git reset/clean
+    # may delete them. Copy from the persistent cache if available, or warn.
+    KS_DIR="\$BASE_DIR/data/source/android/keystore"
+    KS_CACHE="\$BASE_DIR/data/keystore"
+    mkdir -p "\$KS_DIR"
+    if [ -d "\$KS_CACHE" ] && ls "\$KS_CACHE"/*.jks >/dev/null 2>&1; then
+        cp -n "\$KS_CACHE"/*.jks "\$KS_DIR/" 2>/dev/null || true
+        echo ">>> Keystores synced from cache"
+    elif ! ls "\$KS_DIR"/*.jks >/dev/null 2>&1; then
+        echo ">>> WARNING: no keystores in \$KS_DIR or \$KS_CACHE — APK will be unsigned!"
+    fi
 fi
 
 GIT_HASH=\$(cd "\$BASE_DIR/data/source" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
