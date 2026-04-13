@@ -1,3 +1,5 @@
+//! See also: [`crate::dred_tuner`] for continuous DRED tuning within a tier.
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 

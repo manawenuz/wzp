@@ -18,10 +18,14 @@ use crate::session::ChaChaSession;
 pub struct WarzoneKeyExchange {
     /// Ed25519 signing key (identity).
     signing_key: SigningKey,
-    /// X25519 static secret (derived from seed, used for identity encryption).
+    /// X25519 static secret derived from identity seed. Reserved for future
+    /// use in static-key federation authentication (not used in current
+    /// ephemeral-only handshake protocol).
     #[allow(dead_code)]
     x25519_static_secret: StaticSecret,
-    /// X25519 static public key.
+    /// X25519 static public key derived from identity seed. Reserved for
+    /// future use in static-key federation authentication (not used in
+    /// current ephemeral-only handshake protocol).
     #[allow(dead_code)]
     x25519_static_public: X25519PublicKey,
     /// Ephemeral X25519 secret for the current call (set by generate_ephemeral).

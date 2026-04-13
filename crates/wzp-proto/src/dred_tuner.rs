@@ -10,6 +10,10 @@
 //! prediction): when jitter variance spikes >30% over a 200 ms window — typical
 //! of Starlink satellite handovers — it temporarily boosts DRED to the maximum
 //! allowed for the current codec before packets actually start dropping.
+//!
+//! See also: [`crate::quality`] for discrete tier classification that drives
+//! codec switching. DredTuner operates within a tier, adjusting DRED
+//! parameters continuously based on live network metrics.
 
 use crate::CodecId;
 

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::Parser;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -30,6 +31,72 @@ async fn close_transport(t: &dyn wzp_proto::MediaTransport, context: &str) {
     }
 }
 
+/// WarzonePhone relay daemon — SFU, federation, direct-call signaling
+#[derive(Parser, Debug)]
+#[command(name = "wzp-relay", version = env!("WZP_BUILD_HASH"))]
+struct Args {
+    /// Load config from TOML file (creates example if missing)
+    #[arg(short = 'c', long = "config")]
+    config_file: Option<String>,
+
+    /// Identity file path (creates if missing, uses OsRng)
+    #[arg(short = 'i', long)]
+    identity: Option<String>,
+
+    /// Listen address for QUIC connections
+    #[arg(long)]
+    listen: Option<SocketAddr>,
+
+    /// Remote relay address for forwarding (disables room mode)
+    #[arg(long)]
+    remote: Option<SocketAddr>,
+
+    /// featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate).
+    /// When set, clients must send a bearer token as first signal message.
+    #[arg(long)]
+    auth_url: Option<String>,
+
+    /// Prometheus metrics HTTP port (e.g., 9090). Disabled if not set.
+    #[arg(long)]
+    metrics_port: Option<u16>,
+
+    /// Peer relay to probe for health monitoring (repeatable)
+    #[arg(long = "probe")]
+    probe: Vec<SocketAddr>,
+
+    /// Enable mesh mode (probes all --probe targets concurrently)
+    #[arg(long)]
+    probe_mesh: bool,
+
+    /// Enable trunk batching for outgoing media in room mode
+    #[arg(long)]
+    trunking: bool,
+
+    /// WebSocket listener port for browser clients (e.g., 8080)
+    #[arg(long)]
+    ws_port: Option<u16>,
+
+    /// Directory to serve static files from (HTML/JS/WASM)
+    #[arg(long)]
+    static_dir: Option<String>,
+
+    /// Declare a room as global (bridged across federation). Repeatable.
+    #[arg(long = "global-room")]
+    global_room: Vec<String>,
+
+    /// Log packet headers for a room ('*' for all rooms)
+    #[arg(long)]
+    debug_tap: Option<String>,
+
+    /// JSONL event log file path for protocol analysis
+    #[arg(long)]
+    event_log: Option<String>,
+
+    /// Print mesh health table and exit (diagnostic)
+    #[arg(long)]
+    mesh_status: bool,
+}
+
 /// Parsed CLI result — config + identity path.
 struct CliResult {
     config: RelayConfig,
@@ -39,25 +106,21 @@ struct CliResult {
 }
 
 fn parse_args() -> CliResult {
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
 
-    // First pass: extract --config and --identity
-    let mut config_file = None;
-    let mut identity_path = None;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" => { i += 1; config_file = args.get(i).cloned(); }
-            "--identity" | "-i" => { i += 1; identity_path = args.get(i).cloned(); }
-            _ => {}
-        }
-        i += 1;
+    // Handle --mesh-status: print and exit
+    if args.mesh_status {
+        let m = RelayMetrics::new();
+        print!("{}", wzp_relay::probe::mesh_summary(m.registry()));
+        std::process::exit(0);
     }
 
     // Track if we need to create the config after identity is known
-    let config_needs_create = config_file.as_ref().map(|p| !std::path::Path::new(p).exists()).unwrap_or(false);
+    let config_needs_create = args.config_file.as_ref()
+        .map(|p| !std::path::Path::new(p).exists())
+        .unwrap_or(false);
 
-    let mut config = if let Some(ref path) = config_file {
+    let mut config = if let Some(ref path) = args.config_file {
         if config_needs_create {
             // Will be re-created with personalized info after identity is loaded
             RelayConfig::default()
@@ -73,125 +136,49 @@ fn parse_args() -> CliResult {
     };
 
     // CLI flags override config file values
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" => { i += 1; } // already handled
-            "--identity" | "-i" => { i += 1; } // already handled
-            "--listen" => {
-                i += 1;
-                config.listen_addr = args.get(i).expect("--listen requires an address")
-                    .parse().expect("invalid --listen address");
-            }
-            "--remote" => {
-                i += 1;
-                config.remote_relay = Some(
-                    args.get(i).expect("--remote requires an address")
-                        .parse().expect("invalid --remote address"),
-                );
-            }
-            "--auth-url" => {
-                i += 1;
-                config.auth_url = Some(
-                    args.get(i).expect("--auth-url requires a URL").to_string(),
-                );
-            }
-            "--metrics-port" => {
-                i += 1;
-                config.metrics_port = Some(
-                    args.get(i).expect("--metrics-port requires a port number")
-                        .parse().expect("invalid --metrics-port number"),
-                );
-            }
-            "--probe" => {
-                i += 1;
-                let addr: SocketAddr = args.get(i)
-                    .expect("--probe requires an address")
-                    .parse()
-                    .expect("invalid --probe address");
-                config.probe_targets.push(addr);
-            }
-            "--probe-mesh" => {
-                config.probe_mesh = true;
-            }
-            "--trunking" => {
-                config.trunking_enabled = true;
-            }
-            "--ws-port" => {
-                i += 1;
-                config.ws_port = Some(
-                    args.get(i).expect("--ws-port requires a port number")
-                        .parse().expect("invalid --ws-port number"),
-                );
-            }
-            "--static-dir" => {
-                i += 1;
-                config.static_dir = Some(
-                    args.get(i).expect("--static-dir requires a directory path").to_string(),
-                );
-            }
-            "--global-room" => {
-                i += 1;
-                config.global_rooms.push(wzp_relay::config::GlobalRoomConfig {
-                    name: args.get(i).expect("--global-room requires a room name").to_string(),
-                });
-            }
-            "--debug-tap" => {
-                i += 1;
-                config.debug_tap = Some(
-                    args.get(i).expect("--debug-tap requires a room name (or '*' for all)").to_string(),
-                );
-            }
-            "--event-log" => {
-                i += 1;
-                config.event_log = Some(
-                    args.get(i).expect("--event-log requires a file path").to_string(),
-                );
-            }
-            "--version" | "-V" => {
-                println!("wzp-relay {}", env!("WZP_BUILD_HASH"));
-                std::process::exit(0);
-            }
-            "--mesh-status" => {
-                // Print mesh table from a fresh registry and exit.
-                // In practice this is useful after the relay has been running;
-                // here we just demonstrate the formatter with an empty registry.
-                let m = RelayMetrics::new();
-                print!("{}", wzp_relay::probe::mesh_summary(m.registry()));
-                std::process::exit(0);
-            }
-            "--help" | "-h" => {
-                eprintln!("Usage: wzp-relay [--config <path>] [--listen <addr>] [--remote <addr>] [--auth-url <url>] [--metrics-port <port>] [--probe <addr>]... [--probe-mesh] [--mesh-status]");
-                eprintln!();
-                eprintln!("Options:");
-                eprintln!("  -c, --config <path>    Load config from TOML file (creates example if missing)");
-                eprintln!("  -i, --identity <path>  Identity file path (creates if missing, uses OsRng)");
-                eprintln!("  --listen <addr>        Listen address (default: 0.0.0.0:4433)");
-                eprintln!("  --remote <addr>        Remote relay for forwarding (disables room mode)");
-                eprintln!("  --auth-url <url>       featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate)");
-                eprintln!("                         When set, clients must send a bearer token as first signal message.");
-                eprintln!("  --metrics-port <port>  Prometheus metrics HTTP port (e.g., 9090). Disabled if not set.");
-                eprintln!("  --probe <addr>         Peer relay to probe for health monitoring (repeatable).");
-                eprintln!("  --probe-mesh           Enable mesh mode (mark config flag, probes all --probe targets).");
-                eprintln!("  --mesh-status          Print mesh health table and exit (diagnostic).");
-                eprintln!("  --trunking             Enable trunk batching for outgoing media in room mode.");
-                eprintln!("  --global-room <name>   Declare a room as global (bridged across federation). Repeatable.");
-                eprintln!("  --debug-tap <room>     Log packet headers for a room ('*' for all rooms).");
-                eprintln!("  --ws-port <port>       WebSocket listener port for browser clients (e.g., 8080).");
-                eprintln!("  --static-dir <dir>     Directory to serve static files from (HTML/JS/WASM).");
-                eprintln!();
-                eprintln!("Room mode (default):");
-                eprintln!("  Clients join rooms by name. Packets forwarded to all others (SFU).");
-                std::process::exit(0);
-            }
-            other => {
-                eprintln!("unknown argument: {other}");
-                std::process::exit(1);
-            }
-        }
-        i += 1;
+    if let Some(addr) = args.listen {
+        config.listen_addr = addr;
     }
-    CliResult { config, identity_path, config_file, config_needs_create }
+    if let Some(addr) = args.remote {
+        config.remote_relay = Some(addr);
+    }
+    if let Some(url) = args.auth_url {
+        config.auth_url = Some(url);
+    }
+    if let Some(port) = args.metrics_port {
+        config.metrics_port = Some(port);
+    }
+    if !args.probe.is_empty() {
+        config.probe_targets.extend(args.probe);
+    }
+    if args.probe_mesh {
+        config.probe_mesh = true;
+    }
+    if args.trunking {
+        config.trunking_enabled = true;
+    }
+    if let Some(port) = args.ws_port {
+        config.ws_port = Some(port);
+    }
+    if let Some(dir) = args.static_dir {
+        config.static_dir = Some(dir);
+    }
+    for name in args.global_room {
+        config.global_rooms.push(wzp_relay::config::GlobalRoomConfig { name });
+    }
+    if let Some(tap) = args.debug_tap {
+        config.debug_tap = Some(tap);
+    }
+    if let Some(log) = args.event_log {
+        config.event_log = Some(log);
+    }
+
+    CliResult {
+        config,
+        identity_path: args.identity,
+        config_file: args.config_file,
+        config_needs_create,
+    }
 }
 
 struct RelayStats {

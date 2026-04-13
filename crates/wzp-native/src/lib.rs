@@ -26,6 +26,11 @@ pub extern "C" fn wzp_native_version() -> i32 {
 
 /// Writes a NUL-terminated string into `out` (capped at `cap`) and
 /// returns bytes written excluding the NUL.
+///
+/// # Safety
+/// `out` must be a valid pointer to at least `cap` contiguous bytes of
+/// writable memory. Passing a null pointer or zero capacity is safe
+/// (returns 0), but a dangling non-null pointer is undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wzp_native_hello(out: *mut u8, cap: usize) -> usize {
     const MSG: &[u8] = b"hello from wzp-native\0";
@@ -273,6 +278,11 @@ pub extern "C" fn wzp_native_audio_capture_available() -> usize {
 /// Read captured PCM samples from the capture ring. Returns the number
 /// of `i16` samples actually copied into `out` (may be less than
 /// `out_len` if the ring is empty).
+///
+/// # Safety
+/// `out` must be a valid pointer to `out_len` contiguous `i16` values.
+/// The caller must ensure no other thread writes to the same buffer
+/// concurrently. Passing a null pointer or zero length is safe (returns 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wzp_native_audio_read_capture(out: *mut i16, out_len: usize) -> usize {
     if out.is_null() || out_len == 0 {
@@ -286,6 +296,12 @@ pub unsafe extern "C" fn wzp_native_audio_read_capture(out: *mut i16, out_len: u
 /// samples actually enqueued (may be less than `in_len` if the ring
 /// is nearly full — in practice the caller should pace to 20 ms
 /// frames and spin briefly if the ring is full).
+///
+/// # Safety
+/// `input` must be a valid pointer to `in_len` contiguous `i16` values
+/// that remain valid for the duration of the call. Passing a null pointer
+/// or zero length is safe (returns 0). The caller must not free or mutate
+/// the buffer while this function is executing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_len: usize) -> usize {
     if input.is_null() || in_len == 0 {
