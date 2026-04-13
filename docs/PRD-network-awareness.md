@@ -103,7 +103,7 @@ Sentinel value `0xFF` means "no change pending". The recv task polls on every re
 
 ### Tauri Desktop App (com.wzp.desktop)
 
-The Tauri engine doesn't use `AdaptiveQualityController` — quality is resolved once at call start. Adding network monitoring requires first adding adaptive quality to the Tauri call engine, which is a larger change.
+~~The Tauri engine doesn't use `AdaptiveQualityController` — quality is resolved once at call start.~~ **Update (2026-04-13):** Desktop now has `AdaptiveQualityController` wired into the recv task with `pending_profile` AtomicU8 bridge. Network monitoring on desktop is now feasible — the blocker was adaptive quality, which is done. Remaining work: platform-specific network change detection (macOS: `SCNetworkReachability` or `NWPathMonitor`; Linux: `netlink` socket).
 
 ### Mid-Call ICE Re-gathering
 

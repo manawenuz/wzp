@@ -50,6 +50,52 @@ impl DebugTap {
             "TAP"
         );
     }
+
+    pub fn log_signal(&self, room: &str, signal: &wzp_proto::SignalMessage) {
+        match signal {
+            wzp_proto::SignalMessage::RoomUpdate { count, participants } => {
+                let names: Vec<&str> = participants.iter()
+                    .map(|p| p.alias.as_deref().unwrap_or("?"))
+                    .collect();
+                info!(
+                    target: "debug_tap",
+                    room = %room,
+                    signal = "RoomUpdate",
+                    count,
+                    participants = ?names,
+                    "TAP SIGNAL"
+                );
+            }
+            wzp_proto::SignalMessage::QualityDirective { recommended_profile, reason } => {
+                info!(
+                    target: "debug_tap",
+                    room = %room,
+                    signal = "QualityDirective",
+                    codec = ?recommended_profile.codec,
+                    reason = reason.as_deref().unwrap_or(""),
+                    "TAP SIGNAL"
+                );
+            }
+            other => {
+                info!(
+                    target: "debug_tap",
+                    room = %room,
+                    signal = ?std::mem::discriminant(other),
+                    "TAP SIGNAL"
+                );
+            }
+        }
+    }
+
+    pub fn log_event(&self, room: &str, event: &str, detail: &str) {
+        info!(
+            target: "debug_tap",
+            room = %room,
+            event,
+            detail,
+            "TAP EVENT"
+        );
+    }
 }
 
 /// Tracks network quality for a single participant in a room.
@@ -663,6 +709,11 @@ async fn run_participant_plain(
 
         // Broadcast quality directive to all participants if tier changed
         if let Some((directive, all_senders)) = quality_directive {
+            if let Some(ref tap) = debug_tap {
+                if tap.matches(&room_name) {
+                    tap.log_signal(&room_name, &directive);
+                }
+            }
             broadcast_signal(&all_senders, &directive).await;
         }
 
@@ -754,7 +805,21 @@ async fn run_participant_plain(
     let mut mgr = room_mgr.lock().await;
     if let Some((update, senders)) = mgr.leave(&room_name, participant_id) {
         drop(mgr); // release lock before async broadcast
+        if let Some(ref tap) = debug_tap {
+            if tap.matches(&room_name) {
+                tap.log_event(&room_name, "leave", &format!(
+                    "participant={participant_id} addr={addr} forwarded={packets_forwarded}"
+                ));
+                tap.log_signal(&room_name, &update);
+            }
+        }
         broadcast_signal(&senders, &update).await;
+    } else if let Some(ref tap) = debug_tap {
+        if tap.matches(&room_name) {
+            tap.log_event(&room_name, "leave", &format!(
+                "participant={participant_id} addr={addr} (room closed)"
+            ));
+        }
     }
 }
 

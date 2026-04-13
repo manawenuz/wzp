@@ -509,7 +509,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if let Some(ref tap) = config.debug_tap {
-        info!(filter = %tap, "debug tap enabled — logging packet headers");
+        info!(filter = %tap, "debug tap enabled — logging packets, signals, join/leave events");
     }
 
     // Phase 4: cross-relay direct-call dispatcher task.
@@ -1663,6 +1663,15 @@ async fn main() -> anyhow::Result<()> {
                                 } else { update }
                             } else { update };
 
+                            if let Some(ref tap) = debug_tap {
+                                if tap.matches(&room_name) {
+                                    tap.log_signal(&room_name, &merged_update);
+                                    tap.log_event(&room_name, "join", &format!(
+                                        "participant={id} addr={addr} alias={}",
+                                        caller_alias.as_deref().unwrap_or("?")
+                                    ));
+                                }
+                            }
                             room::broadcast_signal(&senders, &merged_update).await;
                             id
                         }

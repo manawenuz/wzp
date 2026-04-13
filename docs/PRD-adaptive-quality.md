@@ -61,12 +61,16 @@ Catastrophic       →  Codec2 1.2k (minimum viable voice)
    - Encoder can switch codec mid-stream
    - Decoder already auto-detects incoming codec from packet headers
 
-### What's missing
+### What's been implemented since PRD was written
 
-1. **QualityReport ingestion** — neither Android engine nor desktop engine reads quality reports from the relay
-2. **Profile switch loop** — no periodic check that feeds reports to `QualityAdapter` and applies recommended switches
-3. **Upward adaptation** — `QualityAdapter` only classifies into 3 tiers (GOOD/DEGRADED/CATASTROPHIC). Needs extension to recommend studio tiers when conditions are excellent (loss < 1%, RTT < 50ms)
-4. **Notification to UI** — when quality changes, the UI should show the current active codec
+1. **QualityReport ingestion** — ~~neither Android engine nor desktop engine reads quality reports from the relay~~ **Done**: both Android (`crates/wzp-android/src/engine.rs`) and desktop (`desktop/src-tauri/src/engine.rs`) recv tasks ingest quality reports and feed `AdaptiveQualityController`
+2. **Profile switch loop** — ~~no periodic check~~ **Done**: `pending_profile` AtomicU8 bridges recv→send task in both engines; send task applies profile switch at frame boundary
+3. **Notification to UI** — ~~when quality changes, the UI should show the current active codec~~ **Done**: `tx_codec`/`rx_codec` in desktop `EngineStatus`; `currentCodec`/`peerCodec` in Android `CallStats`
+
+### What's still missing
+
+1. **Upward adaptation** — `QualityAdapter` only classifies into 3 tiers (GOOD/DEGRADED/CATASTROPHIC). Needs extension to recommend studio tiers when conditions are excellent (loss < 1%, RTT < 50ms). See Phase 2 below.
+2. **Relay QualityDirective handling** — relay broadcasts coordinated quality directives but neither engine processes them (signals are silently discarded). See PRD-coordinated-codec.md for details.
 
 ## Requirements
 

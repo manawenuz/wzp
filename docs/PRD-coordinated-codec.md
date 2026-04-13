@@ -197,18 +197,26 @@ Implementation strategy: build for P2P first (simpler, 2 parties), then wrap the
 | 5 | P2P quality adaptation (direct observation) | 1 day |
 | 6 | Per-participant asymmetric encoding (Option 2) | 1 day |
 
-## Implementation Status (2026-04-12)
+## Implementation Status (2026-04-13)
 
-Phases 1-2 are now implemented:
+Phases 1-2 are implemented. Phase 3 has a critical gap.
 
 ### What was built
 
 - **`QualityDirective` signal** (`crates/wzp-proto/src/packet.rs`): New `SignalMessage` variant with `recommended_profile` and optional `reason`
 - **`ParticipantQuality`** (`crates/wzp-relay/src/room.rs`): Per-participant quality tracking using `AdaptiveQualityController`, created on join, removed on leave
 - **Weakest-link broadcast**: `observe_quality()` method computes room-wide worst tier, broadcasts `QualityDirective` to all participants when tier changes
-- **Desktop engine handling** (`desktop/src-tauri/src/engine.rs`): `AdaptiveQualityController` in recv task, `pending_profile` AtomicU8 bridge to send task, auto-mode profile switching
+- **Desktop engine handling** (`desktop/src-tauri/src/engine.rs`): `AdaptiveQualityController` in recv task, `pending_profile` AtomicU8 bridge to send task, auto-mode profile switching based on **inbound quality reports**
 
-### Phases 3-4 remaining
+### Gap: QualityDirective signals silently discarded
 
-- Phase 3: Client-side handling of `QualityDirective` (reacting to relay-pushed profile)
+Both engines receive `QualityDirective` from the relay but **do not process it**:
+- **Desktop** (`engine.rs` ~line 1152): signal recv loop matches `RoomUpdate` only; `QualityDirective` falls through the catch-all `Ok(Ok(Some(_))) => {}` arm
+- **Android** (`engine.rs` ~line 1198): same pattern — `QualityDirective` falls through to a generic log `info!("signal received: {:?}", ...)` with no action
+
+The relay broadcasts directives correctly, but clients ignore them. Desktop adaptive quality currently works **only** via local `AdaptiveQualityController` observing inbound quality reports — not via relay-coordinated directives.
+
+### Phases remaining
+
+- Phase 3: **Client-side handling of `QualityDirective`** — add match arms in both engines' signal recv loops to apply `recommended_profile` via `pending_profile` AtomicU8. ~0.5 day since the plumbing already exists.
 - Phase 4: Upgrade proposal/negotiation protocol for quality recovery

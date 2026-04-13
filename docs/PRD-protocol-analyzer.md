@@ -62,6 +62,16 @@ if debug_tap_enabled {
 
 ### Effort: 0.5 day
 
+### Implementation Status (2026-04-13)
+
+Fully implemented. `--debug-tap <room>` (or `*` for all rooms) logs:
+
+- **Per-packet metadata** (`TAP`): direction, addr, seq, codec, timestamp, FEC fields, payload size, fan_out
+- **Signal events** (`TAP SIGNAL`): `RoomUpdate` (count + participant names), `QualityDirective` (codec + reason), other signals by discriminant
+- **Lifecycle events** (`TAP EVENT`): participant join (id, addr, alias), participant leave (id, addr, forwarded count, or room closed)
+
+All output uses tracing `target: "debug_tap"` so it can be filtered with `RUST_LOG=debug_tap=info`.
+
 ---
 
 ## 2. Full Protocol Analyzer (Standalone Tool)

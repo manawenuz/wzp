@@ -138,9 +138,20 @@ The existing relay connection carries `IceCandidate` signals. No new infrastruct
 
 ## Milestones
 
-| Phase | Scope | Effort |
-|-------|-------|--------|
-| 1 | STUN client + candidate gathering | 2 days |
-| 2 | QUIC hole punching + identity verification | 3 days |
-| 3 | Adaptive quality on P2P connection | 2 days |
-| 4 | Hybrid mode (relay + P2P, seamless migration) | 3 days |
+| Phase | Scope | Effort | Status |
+|-------|-------|--------|--------|
+| 1 | STUN client + candidate gathering | 2 days | Done |
+| 2 | QUIC hole punching + identity verification | 3 days | Done |
+| 3 | Adaptive quality on P2P connection | 2 days | Pending (needs 5-tier classification, task #9) |
+| 4 | Hybrid mode (relay + P2P, seamless migration) | 3 days | Done |
+| 5 | Single-socket Nebula (shared signal+direct endpoint) | 2 days | Done |
+| 6 | ICE path negotiation + dual-path race | 3 days | Done |
+| 7 | IPv6 dual-socket | 2 days | Done (but `dual_path.rs` integration tests broken — missing `ipv6_endpoint` arg) |
+
+## Implementation Status (2026-04-13)
+
+Phases 1-2, 4-7 are implemented. First P2P call completed 2026-04-12.
+
+### Known regression
+
+Phase 7 added `ipv6_endpoint: Option<Endpoint>` parameter to `race()` in `crates/wzp-client/src/dual_path.rs` but the 3 test call sites in `crates/wzp-client/tests/dual_path.rs` (lines 111, 153, 191) were not updated — they pass 6 args instead of 7. Fix: add `None,` after the `shared_endpoint` arg in each call.

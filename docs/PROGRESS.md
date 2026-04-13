@@ -120,7 +120,9 @@
 
 - **Web audio drift**: The browser AudioWorklet playback buffer caps at 200ms, but clock drift between the WebSocket message arrival rate and the AudioContext output rate can cause occasional underruns or accumulation. The cap prevents unbounded growth but may cause glitches.
 
-- **Adaptive loop integration (resolved)**: AdaptiveQualityController is now fully wired into both desktop and Android send/recv tasks. Relay-coordinated codec switching broadcasts QualityDirective to all participants based on weakest-link policy.
+- **Adaptive loop integration (partial)**: AdaptiveQualityController is wired into both desktop and Android send/recv tasks for **inbound quality report observation**. Relay broadcasts QualityDirective to all participants based on weakest-link policy, but **neither engine processes QualityDirective signals** — they fall through catch-all match arms silently. Local adaptive quality works; relay-coordinated quality does not.
+
+- **dual_path.rs test regression (Phase 7)**: Phase 7 (IPv6 dual-socket) added `ipv6_endpoint: Option<Endpoint>` parameter to `race()` in `crates/wzp-client/src/dual_path.rs`, but the integration tests in `crates/wzp-client/tests/dual_path.rs` were not updated — 3 call sites pass 6 args instead of 7. `cargo test --workspace` fails to compile.
 
 - **Relay FEC pass-through**: In room mode, the relay forwards packets opaquely without FEC decode/re-encode. This means FEC protection is end-to-end only, not per-hop. In forward mode, the relay pipeline does perform FEC decode/re-encode.
 
