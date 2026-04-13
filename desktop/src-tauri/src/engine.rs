@@ -38,6 +38,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const HEARTBEAT_INTERVAL_SECS: u64 = 2;
 const DRED_POLL_INTERVAL: u32 = 25;
+/// Generate and attach a QualityReport every N frames (~1s at 20ms/frame).
+const QUALITY_REPORT_INTERVAL: u32 = 50;
 
 /// Profile index mapping for the AtomicU8 adaptive-quality bridge.
 const PROFILE_NO_CHANGE: u8 = 0xFF;
@@ -643,6 +645,7 @@ impl CallEngine {
             // expected-loss hint based on real-time network conditions.
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
             let mut frames_since_dred_poll: u32 = 0;
+            let mut frames_since_quality_report: u32 = 0;
 
             let mut heartbeat = std::time::Instant::now();
             let mut last_rms: u32 = 0;
@@ -782,6 +785,21 @@ impl CallEngine {
                     }
                 }
 
+                // Quality report: generate from quinn stats and attach to next packet.
+                // The peer's recv task (or relay) uses this for adaptive quality.
+                frames_since_quality_report += 1;
+                if frames_since_quality_report >= QUALITY_REPORT_INTERVAL {
+                    frames_since_quality_report = 0;
+                    let snap = send_t.quinn_path_stats();
+                    let pq = send_t.path_quality();
+                    let report = wzp_proto::QualityReport::from_path_stats(
+                        snap.loss_pct,
+                        snap.rtt_ms,
+                        pq.jitter_ms,
+                    );
+                    encoder.set_pending_quality_report(report);
+                }
+
                 // Heartbeat every 2s with capture+encode+send state
                 if heartbeat.elapsed() >= std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS) {
                     let fs = send_fs.load(Ordering::Relaxed);
@@ -843,6 +861,7 @@ impl CallEngine {
             // above for the full flow.
             let mut dred_recv = DredRecvState::new();
             let mut quality_ctrl = AdaptiveQualityController::new();
+            let mut recv_quality_counter: u32 = 0;
             info!(codec = ?current_codec, t_ms = recv_t0.elapsed().as_millis(), "first-join diag: recv task spawned (android/oboe)");
             // First-join diagnostic latches — see send task above for the
             // sibling capture milestones.
@@ -986,6 +1005,29 @@ impl CallEngine {
                                     let idx = profile_to_index(&new_profile);
                                     info!(to = ?new_profile.codec, "auto: quality adapter recommends switch");
                                     pending_profile_recv.store(idx, Ordering::Release);
+                                }
+                            }
+
+                            // P2P self-observation: if no quality reports from peer,
+                            // generate local observations from our own QUIC path stats.
+                            // This ensures adaptive quality works even on P2P calls
+                            // where the peer hasn't been updated to send reports yet.
+                            recv_quality_counter += 1;
+                            if recv_quality_counter >= QUALITY_REPORT_INTERVAL {
+                                recv_quality_counter = 0;
+                                let snap = recv_t.quinn_path_stats();
+                                let pq = recv_t.path_quality();
+                                let local_report = wzp_proto::QualityReport::from_path_stats(
+                                    snap.loss_pct,
+                                    snap.rtt_ms,
+                                    pq.jitter_ms,
+                                );
+                                if auto_profile {
+                                    if let Some(new_profile) = quality_ctrl.observe(&local_report) {
+                                        let idx = profile_to_index(&new_profile);
+                                        info!(to = ?new_profile.codec, "auto: local quality observation recommends switch");
+                                        pending_profile_recv.store(idx, Ordering::Release);
+                                    }
                                 }
                             }
 
@@ -1392,6 +1434,7 @@ impl CallEngine {
             // Continuous DRED tuning (same as Android send task).
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
             let mut frames_since_dred_poll: u32 = 0;
+            let mut frames_since_quality_report: u32 = 0;
 
             loop {
                 if !send_r.load(Ordering::Relaxed) {
@@ -1460,6 +1503,21 @@ impl CallEngine {
                         encoder.apply_dred_tuning(tuning);
                     }
                 }
+
+                // Quality report: generate from quinn stats and attach to next packet.
+                // The peer's recv task (or relay) uses this for adaptive quality.
+                frames_since_quality_report += 1;
+                if frames_since_quality_report >= QUALITY_REPORT_INTERVAL {
+                    frames_since_quality_report = 0;
+                    let snap = send_t.quinn_path_stats();
+                    let pq = send_t.path_quality();
+                    let report = wzp_proto::QualityReport::from_path_stats(
+                        snap.loss_pct,
+                        snap.rtt_ms,
+                        pq.jitter_ms,
+                    );
+                    encoder.set_pending_quality_report(report);
+                }
             }
         });
 
@@ -1483,6 +1541,7 @@ impl CallEngine {
             let mut pcm = vec![0i16; FRAME_SAMPLES_40MS]; // big enough for any codec
             let mut dred_recv = DredRecvState::new();
             let mut quality_ctrl = AdaptiveQualityController::new();
+            let mut recv_quality_counter: u32 = 0;
 
             loop {
                 if !recv_r.load(Ordering::Relaxed) {
@@ -1541,6 +1600,29 @@ impl CallEngine {
                                     let idx = profile_to_index(&new_profile);
                                     info!(to = ?new_profile.codec, "auto: quality adapter recommends switch");
                                     pending_profile_recv.store(idx, Ordering::Release);
+                                }
+                            }
+
+                            // P2P self-observation: if no quality reports from peer,
+                            // generate local observations from our own QUIC path stats.
+                            // This ensures adaptive quality works even on P2P calls
+                            // where the peer hasn't been updated to send reports yet.
+                            recv_quality_counter += 1;
+                            if recv_quality_counter >= QUALITY_REPORT_INTERVAL {
+                                recv_quality_counter = 0;
+                                let snap = recv_t.quinn_path_stats();
+                                let pq = recv_t.path_quality();
+                                let local_report = wzp_proto::QualityReport::from_path_stats(
+                                    snap.loss_pct,
+                                    snap.rtt_ms,
+                                    pq.jitter_ms,
+                                );
+                                if auto_profile {
+                                    if let Some(new_profile) = quality_ctrl.observe(&local_report) {
+                                        let idx = profile_to_index(&new_profile);
+                                        info!(to = ?new_profile.codec, "auto: local quality observation recommends switch");
+                                        pending_profile_recv.store(idx, Ordering::Release);
+                                    }
                                 }
                             }
 

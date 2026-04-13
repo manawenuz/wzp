@@ -180,6 +180,19 @@ impl QualityReport {
         self.rtt_4ms as u16 * 4
     }
 
+    /// Construct a QualityReport from locally-observed path statistics.
+    ///
+    /// Used by the send task to embed quality data in outgoing packets so
+    /// the peer's recv task (or relay) can drive adaptive quality switching.
+    pub fn from_path_stats(loss_pct: f32, rtt_ms: u32, jitter_ms: u32) -> Self {
+        Self {
+            loss_pct: (loss_pct / 100.0 * 255.0).clamp(0.0, 255.0) as u8,
+            rtt_4ms: (rtt_ms / 4).min(255) as u8,
+            jitter_ms: jitter_ms.min(255) as u8,
+            bitrate_cap_kbps: 200,
+        }
+    }
+
     pub fn write_to(&self, buf: &mut impl BufMut) {
         buf.put_u8(self.loss_pct);
         buf.put_u8(self.rtt_4ms);
@@ -965,6 +978,32 @@ pub enum HangupReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_report_from_path_stats_basic() {
+        let qr = QualityReport::from_path_stats(10.0, 100, 20);
+        // 10.0 / 100.0 * 255.0 = 25.5 → truncated to 25
+        assert_eq!(qr.loss_pct, 25);
+        assert_eq!(qr.rtt_4ms, 25); // 100 / 4 = 25
+        assert_eq!(qr.jitter_ms, 20);
+        assert_eq!(qr.bitrate_cap_kbps, 200);
+    }
+
+    #[test]
+    fn quality_report_from_path_stats_zero() {
+        let qr = QualityReport::from_path_stats(0.0, 0, 0);
+        assert_eq!(qr.loss_pct, 0);
+        assert_eq!(qr.rtt_4ms, 0);
+        assert_eq!(qr.jitter_ms, 0);
+    }
+
+    #[test]
+    fn quality_report_from_path_stats_clamps_high() {
+        let qr = QualityReport::from_path_stats(100.0, 2000, 300);
+        assert_eq!(qr.loss_pct, 255);
+        assert_eq!(qr.rtt_4ms, 255); // 2000/4=500, clamped to 255
+        assert_eq!(qr.jitter_ms, 255);
+    }
 
     #[test]
     fn header_roundtrip() {

@@ -234,6 +234,8 @@ pub struct CallEncoder {
     mini_frames_enabled: bool,
     /// Frames encoded since the last full header was emitted.
     frames_since_full: u32,
+    /// Pending quality report to attach to the next source packet.
+    pending_quality_report: Option<QualityReport>,
 }
 
 impl CallEncoder {
@@ -264,6 +266,7 @@ impl CallEncoder {
             mini_context: MiniFrameContext::default(),
             mini_frames_enabled: config.mini_frames_enabled,
             frames_since_full: 0,
+            pending_quality_report: None,
         }
     }
 
@@ -367,7 +370,7 @@ impl CallEncoder {
                 version: 0,
                 is_repair: false,
                 codec_id: self.profile.codec,
-                has_quality_report: false,
+                has_quality_report: self.pending_quality_report.is_some(),
                 fec_ratio_encoded,
                 seq: self.seq,
                 timestamp: self.timestamp_ms,
@@ -377,7 +380,7 @@ impl CallEncoder {
                 csrc_count: 0,
             },
             payload: Bytes::from(encoded.clone()),
-            quality_report: None,
+            quality_report: self.pending_quality_report.take(),
         };
 
         self.seq = self.seq.wrapping_add(1);
@@ -452,6 +455,13 @@ impl CallEncoder {
     pub fn apply_dred_tuning(&mut self, tuning: wzp_proto::DredTuning) {
         self.audio_enc.set_dred_duration(tuning.dred_frames);
         self.audio_enc.set_expected_loss(tuning.expected_loss_pct);
+    }
+
+    /// Queue a quality report for attachment to the next source packet.
+    /// Used by the send task to embed locally-observed path quality so
+    /// the peer can drive adaptive quality switching.
+    pub fn set_pending_quality_report(&mut self, report: QualityReport) {
+        self.pending_quality_report = Some(report);
     }
 
     /// Enable or disable acoustic echo cancellation.
@@ -1577,5 +1587,29 @@ mod tests {
             .collect();
         let packets = enc.encode_frame(&pcm).unwrap();
         assert!(!packets.is_empty());
+    }
+
+    #[test]
+    fn encoder_attaches_quality_report() {
+        let mut enc = CallEncoder::new(&CallConfig {
+            profile: QualityProfile::GOOD,
+            suppression_enabled: false,
+            ..Default::default()
+        });
+
+        // Set a quality report
+        enc.set_pending_quality_report(QualityReport::from_path_stats(5.0, 80, 10));
+
+        // Encode a frame — should have quality_report attached
+        let pcm = voice_frame_20ms(0);
+        let packets = enc.encode_frame(&pcm).unwrap();
+        assert!(!packets.is_empty());
+        assert!(packets[0].header.has_quality_report, "first packet should have quality report");
+        assert!(packets[0].quality_report.is_some());
+
+        // Next frame should NOT have quality_report (it was consumed)
+        let packets2 = enc.encode_frame(&voice_frame_20ms(960)).unwrap();
+        assert!(!packets2[0].header.has_quality_report, "second packet should not have quality report");
+        assert!(packets2[0].quality_report.is_none());
     }
 }
