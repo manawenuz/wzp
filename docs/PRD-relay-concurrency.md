@@ -1,4 +1,4 @@
-# PRD: Relay Concurrency — Per-Room Lock Sharding
+# PRD: Relay Concurrency — DashMap Room Sharding
 
 ## Problem
 
@@ -188,72 +188,119 @@ for sender in senders.iter() {
 - Snapshot doesn't include mutable room state (quality tiers)
 - More complex join/leave (must rebuild snapshot atomically)
 
-**Verdict: Best theoretical performance, but adds complexity. Worth it if Option A proves insufficient.**
+**Verdict: Best theoretical performance, but adds complexity. Consider if DashMap proves insufficient.**
 
-## Recommended Implementation: Option A + Federation Fix
+## Recommended Implementation: Option B (DashMap) + Federation Fix
 
-### Phase 1: Per-Room Locks (Biggest Win)
+DashMap is the right tool here. The original objections don't hold up:
 
-1. Move `qualities` and `room_tiers` into the `Room` struct (they're per-room anyway)
-2. Wrap each Room in `Arc<Mutex<Room>>`
-3. RoomManager outer lock becomes a thin room-lookup layer
-4. Per-packet hot path acquires only the per-room lock
+- "Guards can't be held across `.await`" — we already drop locks before any async sends
+- "Less control" — DashMap's 64 internal shards give finer granularity than manual per-room locks
+- "New dependency" — one crate, battle-tested, widely used in the Rust ecosystem
+
+DashMap's advantages over manual per-room `Arc<Mutex<Room>>`:
+- **No two-level locking** — single `rooms.get()` vs outer-lock → Arc clone → drop → inner-lock
+- **Read/write separation** — `get()` is a shared shard lock, multiple rooms on the same shard can read concurrently
+- **Less code** — no manual Arc/Mutex wrapping, no explicit lock choreography
+- **Iteration without global lock** — federation room announcements don't block media forwarding
+
+### Phase 1: DashMap Room Storage (Biggest Win)
+
+1. Add `dashmap` dependency to `wzp-relay`
+2. Replace `rooms: HashMap<String, Room>` with `rooms: DashMap<String, Room>`
+3. Move `qualities` and `room_tiers` into the `Room` struct (per-room state, not global)
+4. RoomManager no longer needs a wrapping Mutex — it becomes `Arc<RoomManager>` directly
+5. Per-packet hot path: `rooms.get(&name)` takes a shared shard lock, releases on drop
+
+```rust
+pub struct RoomManager {
+    rooms: DashMap<String, Room>,
+    acl: Option<HashMap<String, HashSet<String>>>,  // read-only after init
+    event_tx: broadcast::Sender<RoomEvent>,
+}
+
+struct Room {
+    participants: Vec<Participant>,
+    qualities: HashMap<ParticipantId, ParticipantQuality>,
+    current_tier: Tier,
+}
+
+// Hot path becomes:
+let (others, directive) = if let Some(mut room) = room_mgr.rooms.get_mut(&room_name) {
+    let directive = if let Some(ref qr) = pkt.quality_report {
+        room.observe_quality(participant_id, qr)
+    } else {
+        None
+    };
+    let o = room.others(participant_id);
+    (o, directive)
+} else {
+    (vec![], None)
+};
+// Shard lock released here — fan-out sends are lock-free
+```
 
 **Files to modify:**
-- `crates/wzp-relay/src/room.rs` — Room struct, RoomManager refactor
-- `crates/wzp-relay/src/lib.rs` — re-exports if needed
+- `crates/wzp-relay/Cargo.toml` — add `dashmap` dependency
+- `crates/wzp-relay/src/room.rs` — RoomManager struct, Room struct, all methods
+- `crates/wzp-relay/src/lib.rs` — change from `Arc<Mutex<RoomManager>>` to `Arc<RoomManager>`
+- `crates/wzp-relay/src/main.rs` — update RoomManager construction and all `.lock().await` call sites
+- `crates/wzp-relay/src/federation.rs` — update room_mgr usage (no more `.lock().await`)
 
-**Expected change:** ~100 lines modified, ~20 new
+**Key behavior change:** `Arc<Mutex<RoomManager>>` → `Arc<RoomManager>`. Every call site that does `room_mgr.lock().await.some_method()` becomes `room_mgr.some_method()` directly. The DashMap handles internal locking.
 
 **Concurrency improvement:**
-- Before: 100 rooms × 10 people = all 1000 tasks compete for 1 lock
-- After: 100 rooms × 10 people = 10 tasks compete for 1 lock per room (100× improvement)
+- Before: 100 rooms × 10 people = all 1000 tasks compete for 1 Mutex
+- After: 100 rooms × 10 people = distributed across 64 shards, ~15 tasks per shard average
+- Within a room: participants still serialize through the shard lock, but hold time is <0.1ms for `get()` and `others()` (just Vec clone of Arcs)
 
 ### Phase 2: Federation Lock Fix
 
-Fix `forward_to_peers()` and `broadcast_signal()` to clone the peer list, release the lock, then send:
+Clone the peer list, release lock, then send:
 
 ```rust
 pub async fn forward_to_peers(&self, room_hash: &[u8; 8], media_data: &Bytes) {
     let peers: Vec<_> = {
         let links = self.peer_links.lock().await;
         links.values().map(|l| (l.label.clone(), l.transport.clone())).collect()
-    };  // lock released
+    };  // lock released immediately
     
     for (label, transport) in &peers {
-        // send without holding lock
+        // send without holding lock — slow peer doesn't block others
     }
 }
 ```
 
+Also apply to `broadcast_signal()` and `send_signal_to_peer()`.
+
 **Files to modify:**
-- `crates/wzp-relay/src/federation.rs` — `forward_to_peers()`, `broadcast_signal()`, `send_signal_to_peer()`
+- `crates/wzp-relay/src/federation.rs` — 3 methods
 
-**Expected change:** ~30 lines modified
-
-**Concurrency improvement:** Federation sends no longer block each other or room operations.
+**Concurrency improvement:** A slow federation peer no longer blocks all other peers' media delivery.
 
 ### Phase 3: Quality Tracking Optimization (Optional)
 
-Move `observe_quality()` out of the per-packet critical path:
+With DashMap, quality tracking uses `get_mut()` (exclusive shard lock) on every packet that carries a QualityReport. For rooms where quality reports are frequent, this creates write contention on the shard.
 
-1. Accumulate quality reports in a lock-free counter per participant
-2. A background task (every 1s) reads counters, computes tiers, broadcasts directives
-3. Per-packet path becomes: `lock → others() → unlock` (no quality computation)
+Option: Move quality observation to a background task:
+1. Per-participant `AtomicU8` for latest loss/RTT (lock-free write from hot path)
+2. Background task every 1s reads atomics, computes tiers, broadcasts directives
+3. Hot path becomes read-only: `rooms.get()` (shared lock) → `others()` → done
 
-**Reduces per-packet lock hold time from ~1ms to ~0.1ms.**
+**Reduces shard lock from exclusive (`get_mut`) to shared (`get`) on every packet.**
 
 ## Verification
 
-1. **Correctness:** Run existing relay tests (`cargo test -p wzp-relay`) — must pass
-2. **Load test:** 10 rooms × 10 participants, verify all 10 rooms forward concurrently
-3. **Large room test:** 1 room × 50 participants, verify no deadlocks
-4. **Federation test:** 3 relays, verify media still bridges with new lock pattern
-5. **Benchmark:** Before/after packets-per-second on a multi-core machine with `wzp-bench`
+1. **Correctness:** `cargo test -p wzp-relay` — all existing tests must pass
+2. **Compile check:** `cargo check --workspace` — no regressions
+3. **Load test:** 10 rooms × 10 participants, verify rooms forward concurrently
+4. **Large room:** 1 room × 50 participants, no deadlocks
+5. **Federation:** 3 relays, media bridges correctly with new lock pattern
+6. **Benchmark:** Before/after packets-per-second on multi-core with `wzp-bench`
 
 ## Effort
 
-- Phase 1: 1 day
-- Phase 2: 0.5 day
-- Phase 3: 1 day (optional)
-- Total: 1.5–2.5 days
+- Phase 1: 1 day (DashMap migration + test updates)
+- Phase 2: 0.5 day (federation clone-and-release)
+- Phase 3: 0.5 day (optional, quality tracking with atomics)
+- Total: 1.5–2 days

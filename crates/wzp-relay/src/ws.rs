@@ -31,7 +31,7 @@ use crate::session_mgr::SessionManager;
 /// Shared state for WebSocket handlers.
 #[derive(Clone)]
 pub struct WsState {
-    pub room_mgr: Arc<Mutex<RoomManager>>,
+    pub room_mgr: Arc<RoomManager>,
     pub session_mgr: Arc<Mutex<SessionManager>>,
     pub auth_url: Option<String>,
     pub metrics: Arc<RelayMetrics>,
@@ -143,10 +143,9 @@ async fn handle_ws_connection(socket: WebSocket, room: String, state: WsState) {
     // 4. Join room with WS sender
     let addr: SocketAddr = ([0, 0, 0, 0], 0).into();
     let participant_id = {
-        let mut mgr = state.room_mgr.lock().await;
-        match mgr.join_ws(&room, addr, tx, fingerprint.as_deref()) {
+        match state.room_mgr.join_ws(&room, addr, tx, fingerprint.as_deref()) {
             Ok(id) => {
-                state.metrics.active_rooms.set(mgr.list().len() as i64);
+                state.metrics.active_rooms.set(state.room_mgr.list().len() as i64);
                 id
             }
             Err(e) => {
@@ -184,10 +183,7 @@ async fn handle_ws_connection(socket: WebSocket, room: String, state: WsState) {
     loop {
         match ws_rx.next().await {
             Some(Ok(Message::Binary(data))) => {
-                let others = {
-                    let mgr = state.room_mgr.lock().await;
-                    mgr.others(&room, participant_id)
-                };
+                let others = state.room_mgr.others(&room, participant_id);
                 for other in &others {
                     let _ = other.send_raw(&data).await;
                 }
@@ -214,11 +210,8 @@ async fn handle_ws_connection(socket: WebSocket, room: String, state: WsState) {
         reg.unregister_local(fp);
     }
 
-    {
-        let mut mgr = state.room_mgr.lock().await;
-        mgr.leave(&room, participant_id);
-        state.metrics.active_rooms.set(mgr.list().len() as i64);
-    }
+    state.room_mgr.leave(&room, participant_id);
+    state.metrics.active_rooms.set(state.room_mgr.list().len() as i64);
 
     let session_id_str: String = session_id.iter().map(|b| format!("{b:02x}")).collect();
     state.metrics.remove_session_metrics(&session_id_str);

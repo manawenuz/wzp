@@ -416,7 +416,7 @@ async fn main() -> anyhow::Result<()> {
         };
 
     // Room manager (room mode only)
-    let room_mgr = Arc::new(Mutex::new(RoomManager::new()));
+    let room_mgr = Arc::new(RoomManager::new());
 
     // Event log for protocol analysis
     let event_log = wzp_relay::event_log::start_event_log(
@@ -1621,9 +1621,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // Call rooms: enforce 2-participant limit
                 if room_name.starts_with("call-") {
-                    let mgr = room_mgr.lock().await;
-                    if mgr.room_size(&room_name) >= 2 {
-                        drop(mgr);
+                    if room_mgr.room_size(&room_name) >= 2 {
                         warn!(%addr, room = %room_name, "call room full (max 2 participants)");
                         metrics.active_sessions.dec();
                         let mut smgr = session_mgr.lock().await;
@@ -1634,8 +1632,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let participant_id = {
-                    let mut mgr = room_mgr.lock().await;
-                    match mgr.join(
+                    match room_mgr.join(
                         &room_name,
                         addr,
                         room::ParticipantSender::Quic(transport.clone()),
@@ -1643,8 +1640,7 @@ async fn main() -> anyhow::Result<()> {
                         caller_alias.as_deref(),
                     ) {
                         Ok((id, update, senders)) => {
-                            metrics.active_rooms.set(mgr.list().len() as i64);
-                            drop(mgr); // release lock before async broadcast
+                            metrics.active_rooms.set(room_mgr.list().len() as i64);
 
                             // Merge federated participants into RoomUpdate if this is a global room
                             let merged_update = if let Some(ref fm) = federation_mgr {
@@ -1729,10 +1725,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 metrics.remove_session_metrics(&session_id_str);
                 metrics.active_sessions.dec();
-                {
-                    let mgr = room_mgr.lock().await;
-                    metrics.active_rooms.set(mgr.list().len() as i64);
-                }
+                metrics.active_rooms.set(room_mgr.list().len() as i64);
                 {
                     let mut smgr = session_mgr.lock().await;
                     smgr.remove_session(session_id);

@@ -134,7 +134,7 @@ pub struct FederationManager {
     peers: Vec<PeerConfig>,
     trusted: Vec<TrustedConfig>,
     global_rooms: HashSet<String>,
-    room_mgr: Arc<Mutex<RoomManager>>,
+    room_mgr: Arc<RoomManager>,
     endpoint: quinn::Endpoint,
     local_tls_fp: String,
     metrics: Arc<crate::metrics::RelayMetrics>,
@@ -161,7 +161,7 @@ impl FederationManager {
         peers: Vec<PeerConfig>,
         trusted: Vec<TrustedConfig>,
         global_rooms: HashSet<String>,
-        room_mgr: Arc<Mutex<RoomManager>>,
+        room_mgr: Arc<RoomManager>,
         endpoint: quinn::Endpoint,
         local_tls_fp: String,
         metrics: Arc<crate::metrics::RelayMetrics>,
@@ -333,10 +333,7 @@ impl FederationManager {
         }
 
         // Room event dispatcher
-        let room_events = {
-            let mgr = self.room_mgr.lock().await;
-            mgr.subscribe_events()
-        };
+        let room_events = self.room_mgr.subscribe_events();
         let this = self.clone();
         handles.push(tokio::spawn(async move {
             run_room_event_dispatcher(this, room_events).await;
@@ -483,10 +480,7 @@ async fn run_room_event_dispatcher(
         match events.recv().await {
             Ok(RoomEvent::LocalJoin { room }) => {
                 if fm.is_global_room(&room) {
-                    let participants = {
-                        let mgr = fm.room_mgr.lock().await;
-                        mgr.local_participant_list(&room)
-                    };
+                    let participants = fm.room_mgr.local_participant_list(&room);
                     info!(room = %room, count = participants.len(), "global room now active, announcing to peers");
                     let msg = SignalMessage::GlobalRoomActive { room, participants };
                     let links = fm.peer_links.lock().await;
@@ -560,11 +554,11 @@ async fn run_stale_presence_sweeper(fm: Arc<FederationManager>) {
 
         // Broadcast updated RoomUpdate for affected rooms
         for room in &affected_rooms {
-            let mgr = fm.room_mgr.lock().await;
-            for local_room in mgr.active_rooms() {
-                if fm.resolve_global_room(&local_room) == fm.resolve_global_room(room) {
-                    let mut all_participants = mgr.local_participant_list(&local_room);
-                    let remote = fm.get_remote_participants(&local_room).await;
+            let active = fm.room_mgr.active_rooms();
+            for local_room in &active {
+                if fm.resolve_global_room(local_room) == fm.resolve_global_room(room) {
+                    let mut all_participants = fm.room_mgr.local_participant_list(local_room);
+                    let remote = fm.get_remote_participants(local_room).await;
                     all_participants.extend(remote);
                     let mut seen = HashSet::new();
                     all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
@@ -572,8 +566,7 @@ async fn run_stale_presence_sweeper(fm: Arc<FederationManager>) {
                         count: all_participants.len() as u32,
                         participants: all_participants,
                     };
-                    let senders = mgr.local_senders(&local_room);
-                    drop(mgr);
+                    let senders = fm.room_mgr.local_senders(local_room);
                     room::broadcast_signal(&senders, &update).await;
                     info!(room = %room, "swept stale presence — broadcast updated RoomUpdate");
                     break;
@@ -651,14 +644,13 @@ async fn run_federation_link(
     // Announce our currently active global rooms to this new peer
     // Collect all announcements first, then send (avoid holding locks across await)
     let announcements = {
-        let mgr = fm.room_mgr.lock().await;
-        let active = mgr.active_rooms();
+        let active = fm.room_mgr.active_rooms();
         let mut msgs = Vec::new();
 
         // Local rooms
         for room_name in &active {
             if fm.is_global_room(room_name) {
-                let participants = mgr.local_participant_list(room_name);
+                let participants = fm.room_mgr.local_participant_list(room_name);
                 info!(peer = %peer_label, room = %room_name, participants = participants.len(), "announcing local global room to new peer");
                 msgs.push(SignalMessage::GlobalRoomActive { room: room_name.clone(), participants });
             }
@@ -828,21 +820,23 @@ async fn handle_signal(
 
                 // Broadcast updated RoomUpdate to local clients in this room
                 // Find the local room name (may be hashed or raw)
-                let mgr = fm.room_mgr.lock().await;
-                for local_room in mgr.active_rooms() {
-                    if fm.is_global_room(&local_room) && fm.resolve_global_room(&local_room) == fm.resolve_global_room(&room) {
+                let active = fm.room_mgr.active_rooms();
+                for local_room in &active {
+                    if fm.is_global_room(local_room) && fm.resolve_global_room(local_room) == fm.resolve_global_room(&room) {
                         // Build merged participant list: local + all remote (deduped)
-                        let mut all_participants = mgr.local_participant_list(&local_room);
-                        let links = fm.peer_links.lock().await;
-                        for link in links.values() {
-                            if let Some(ref canonical) = fm.resolve_global_room(&local_room) {
-                                if let Some(remote) = link.remote_participants.get(canonical.as_str()) {
-                                    all_participants.extend(remote.iter().cloned());
-                                }
-                                // Also check raw room name, but only if different from canonical
-                                if canonical != &local_room {
-                                    if let Some(remote) = link.remote_participants.get(&local_room) {
+                        let mut all_participants = fm.room_mgr.local_participant_list(local_room);
+                        {
+                            let links = fm.peer_links.lock().await;
+                            for link in links.values() {
+                                if let Some(ref canonical) = fm.resolve_global_room(local_room) {
+                                    if let Some(remote) = link.remote_participants.get(canonical.as_str()) {
                                         all_participants.extend(remote.iter().cloned());
+                                    }
+                                    // Also check raw room name, but only if different from canonical
+                                    if canonical != local_room {
+                                        if let Some(remote) = link.remote_participants.get(local_room) {
+                                            all_participants.extend(remote.iter().cloned());
+                                        }
                                     }
                                 }
                             }
@@ -854,9 +848,7 @@ async fn handle_signal(
                             count: all_participants.len() as u32,
                             participants: all_participants,
                         };
-                        let senders = mgr.local_senders(&local_room);
-                        drop(links);
-                        drop(mgr);
+                        let senders = fm.room_mgr.local_senders(local_room);
                         room::broadcast_signal(&senders, &update).await;
                         break;
                     }
@@ -899,10 +891,7 @@ async fn handle_signal(
 
             // Propagate to other peers: send updated GlobalRoomActive with revised list,
             // or GlobalRoomInactive if no participants remain anywhere
-            let local_active = {
-                let mgr = fm.room_mgr.lock().await;
-                mgr.active_rooms().iter().any(|r| fm.resolve_global_room(r) == fm.resolve_global_room(&room))
-            };
+            let local_active = fm.room_mgr.active_rooms().iter().any(|r| fm.resolve_global_room(r) == fm.resolve_global_room(&room));
             let has_remaining = !remaining_remote.is_empty() || local_active;
 
             // Collect peer transports to send to (avoid holding lock across await)
@@ -916,10 +905,9 @@ async fn handle_signal(
                 // Send updated participant list to other peers
                 let mut updated_participants = remaining_remote.clone();
                 if local_active {
-                    let mgr = fm.room_mgr.lock().await;
-                    for local_room in mgr.active_rooms() {
+                    for local_room in fm.room_mgr.active_rooms() {
                         if fm.resolve_global_room(&local_room) == fm.resolve_global_room(&room) {
-                            updated_participants.extend(mgr.local_participant_list(&local_room));
+                            updated_participants.extend(fm.room_mgr.local_participant_list(&local_room));
                             break;
                         }
                     }
@@ -940,10 +928,10 @@ async fn handle_signal(
             }
 
             // Broadcast updated RoomUpdate to local clients (remote participant removed)
-            let mgr = fm.room_mgr.lock().await;
-            for local_room in mgr.active_rooms() {
-                if fm.is_global_room(&local_room) && fm.resolve_global_room(&local_room) == fm.resolve_global_room(&room) {
-                    let mut all_participants = mgr.local_participant_list(&local_room);
+            let active = fm.room_mgr.active_rooms();
+            for local_room in &active {
+                if fm.is_global_room(local_room) && fm.resolve_global_room(local_room) == fm.resolve_global_room(&room) {
+                    let mut all_participants = fm.room_mgr.local_participant_list(local_room);
                     all_participants.extend(remaining_remote.iter().cloned());
                     // Deduplicate by fingerprint
                     let mut seen = HashSet::new();
@@ -952,8 +940,7 @@ async fn handle_signal(
                         count: all_participants.len() as u32,
                         participants: all_participants,
                     };
-                    let senders = mgr.local_senders(&local_room);
-                    drop(mgr);
+                    let senders = fm.room_mgr.local_senders(local_room);
                     room::broadcast_signal(&senders, &update).await;
                     info!(room = %room, "broadcast updated presence (remote participant removed)");
                     break;
@@ -1070,10 +1057,9 @@ async fn handle_datagram(
         }
     }
 
-    // Find room by hash — check local rooms AND global room config
+    // Find room by hash -- check local rooms AND global room config
     let room_name = {
-        let mgr = fm.room_mgr.lock().await;
-        let active = mgr.active_rooms();
+        let active = fm.room_mgr.active_rooms();
         // First: check local rooms (has participants)
         active.iter().find(|r| room_hash(r) == rh).cloned()
             .or_else(|| active.iter().find(|r| fm.global_room_hash(r) == rh).cloned())
@@ -1093,10 +1079,7 @@ async fn handle_datagram(
             // for a room we don't have locally — could be a
             // timing issue (peer joined before us) or a hash
             // mismatch.
-            let active = {
-                let mgr = fm.room_mgr.lock().await;
-                mgr.active_rooms()
-            };
+            let active = fm.room_mgr.active_rooms();
             warn!(
                 room_hash = ?rh,
                 active_rooms = ?active,
@@ -1121,10 +1104,7 @@ async fn handle_datagram(
 
     // Deliver to all local participants — forward the raw bytes as-is.
     // The original sender's MediaPacket is preserved exactly (no re-serialization).
-    let locals = {
-        let mgr = fm.room_mgr.lock().await;
-        mgr.local_senders(&room_name)
-    };
+    let locals = fm.room_mgr.local_senders(&room_name);
     for sender in &locals {
         match sender {
             room::ParticipantSender::Quic(t) => {

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::Mutex;
+use dashmap::DashMap;
 use tracing::{error, info, warn};
 
 use wzp_proto::packet::TrunkFrame;
@@ -277,12 +277,18 @@ struct Participant {
 /// A room holding multiple participants.
 struct Room {
     participants: Vec<Participant>,
+    /// Per-participant quality tracking, keyed by participant_id.
+    qualities: HashMap<ParticipantId, ParticipantQuality>,
+    /// Current room-wide tier (to avoid repeated broadcasts).
+    current_tier: Tier,
 }
 
 impl Room {
     fn new() -> Self {
         Self {
             participants: Vec::new(),
+            qualities: HashMap::new(),
+            current_tier: Tier::Good,
         }
     }
 
@@ -339,29 +345,27 @@ impl Room {
 }
 
 /// Manages all rooms on the relay.
+///
+/// Uses `DashMap` for per-room sharded locking -- rooms are independently
+/// lockable so the media hot-path never contends on a single mutex.
 pub struct RoomManager {
-    rooms: HashMap<String, Room>,
-    /// Room access control list. Maps hashed room name → allowed fingerprints.
+    rooms: DashMap<String, Room>,
+    /// Room access control list. Maps hashed room name -> allowed fingerprints.
     /// When `None`, rooms are open (no auth mode). When `Some`, only listed
-    /// fingerprints can join the corresponding room.
-    acl: Option<HashMap<String, HashSet<String>>>,
+    /// fingerprints can join the corresponding room. Protected by std Mutex
+    /// since ACL mutations are rare (only during call setup).
+    acl: Option<std::sync::Mutex<HashMap<String, HashSet<String>>>>,
     /// Channel for room lifecycle events (federation subscribes).
     event_tx: tokio::sync::broadcast::Sender<RoomEvent>,
-    /// Per-participant quality tracking, keyed by (room_name, participant_id).
-    qualities: HashMap<(String, ParticipantId), ParticipantQuality>,
-    /// Current room-wide tier per room (to avoid repeated broadcasts).
-    room_tiers: HashMap<String, Tier>,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
-            rooms: HashMap::new(),
+            rooms: DashMap::new(),
             acl: None,
             event_tx,
-            qualities: HashMap::new(),
-            room_tiers: HashMap::new(),
         }
     }
 
@@ -369,11 +373,9 @@ impl RoomManager {
     pub fn with_acl() -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
-            rooms: HashMap::new(),
-            acl: Some(HashMap::new()),
+            rooms: DashMap::new(),
+            acl: Some(std::sync::Mutex::new(HashMap::new())),
             event_tx,
-            qualities: HashMap::new(),
-            room_tiers: HashMap::new(),
         }
     }
 
@@ -383,9 +385,10 @@ impl RoomManager {
     }
 
     /// Grant a fingerprint access to a room.
-    pub fn allow(&mut self, room_name: &str, fingerprint: &str) {
-        if let Some(ref mut acl) = self.acl {
-            acl.entry(room_name.to_string())
+    pub fn allow(&self, room_name: &str, fingerprint: &str) {
+        if let Some(ref acl) = self.acl {
+            acl.lock().unwrap()
+                .entry(room_name.to_string())
                 .or_default()
                 .insert(fingerprint.to_string());
         }
@@ -398,6 +401,7 @@ impl RoomManager {
             (None, _) => true, // no ACL = open
             (Some(_), None) => false, // ACL enabled but no fingerprint
             (Some(acl), Some(fp)) => {
+                let acl = acl.lock().unwrap();
                 // Room not in ACL = open room (allow anyone authenticated)
                 match acl.get(room_name) {
                     None => true,
@@ -409,7 +413,7 @@ impl RoomManager {
 
     /// Join a room. Returns (participant_id, room_update_msg, all_senders) for broadcasting.
     pub fn join(
-        &mut self,
+        &self,
         room_name: &str,
         addr: std::net::SocketAddr,
         sender: ParticipantSender,
@@ -420,25 +424,25 @@ impl RoomManager {
             warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
             return Err("not authorized for this room".to_string());
         }
-        let was_empty = !self.rooms.contains_key(room_name)
-            || self.rooms.get(room_name).map_or(true, |r| r.is_empty());
-        let room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
+        let was_empty = self.rooms.get(room_name).map_or(true, |r| r.is_empty());
+        let mut room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
         let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()));
-        self.qualities.insert((room_name.to_string(), id), ParticipantQuality::new());
-        if was_empty {
-            let _ = self.event_tx.send(RoomEvent::LocalJoin { room: room_name.to_string() });
-        }
+        room.qualities.insert(id, ParticipantQuality::new());
         let update = wzp_proto::SignalMessage::RoomUpdate {
             count: room.len() as u32,
             participants: room.participant_list(),
         };
         let senders = room.all_senders();
+        drop(room); // release DashMap guard before event_tx send (not async, but good practice)
+        if was_empty {
+            let _ = self.event_tx.send(RoomEvent::LocalJoin { room: room_name.to_string() });
+        }
         Ok((id, update, senders))
     }
 
     /// Join a room via WebSocket. Convenience wrapper around `join()`.
     pub fn join_ws(
-        &mut self,
+        &self,
         room_name: &str,
         addr: std::net::SocketAddr,
         sender: tokio::sync::mpsc::Sender<Bytes>,
@@ -450,7 +454,7 @@ impl RoomManager {
 
     /// Get list of active room names.
     pub fn active_rooms(&self) -> Vec<String> {
-        self.rooms.keys().cloned().collect()
+        self.rooms.iter().map(|r| r.key().clone()).collect()
     }
 
     /// Get participant list for a room (fingerprint + alias).
@@ -470,26 +474,29 @@ impl RoomManager {
     }
 
     /// Leave a room. Returns (room_update_msg, remaining_senders) for broadcasting, or None if room is now empty.
-    pub fn leave(&mut self, room_name: &str, participant_id: ParticipantId) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
-        self.qualities.remove(&(room_name.to_string(), participant_id));
-        if let Some(room) = self.rooms.get_mut(room_name) {
-            room.remove(participant_id);
-            if room.is_empty() {
-                self.rooms.remove(room_name);
-                self.room_tiers.remove(room_name);
-                let _ = self.event_tx.send(RoomEvent::LocalLeave { room: room_name.to_string() });
-                info!(room = room_name, "room closed (empty)");
-                return None;
+    pub fn leave(&self, room_name: &str, participant_id: ParticipantId) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
+        let result = {
+            if let Some(mut room) = self.rooms.get_mut(room_name) {
+                room.qualities.remove(&participant_id);
+                room.remove(participant_id);
+                if room.is_empty() {
+                    drop(room); // release write guard before remove
+                    self.rooms.remove(room_name);
+                    let _ = self.event_tx.send(RoomEvent::LocalLeave { room: room_name.to_string() });
+                    info!(room = room_name, "room closed (empty)");
+                    return None;
+                }
+                let update = wzp_proto::SignalMessage::RoomUpdate {
+                    count: room.len() as u32,
+                    participants: room.participant_list(),
+                };
+                let senders = room.all_senders();
+                Some((update, senders))
+            } else {
+                None
             }
-            let update = wzp_proto::SignalMessage::RoomUpdate {
-                count: room.len() as u32,
-                participants: room.participant_list(),
-            };
-            let senders = room.all_senders();
-            Some((update, senders))
-        } else {
-            None
-        }
+        };
+        result
     }
 
     /// Get senders for all OTHER participants in a room.
@@ -509,23 +516,29 @@ impl RoomManager {
         self.rooms.get(room_name).map(|r| r.len()).unwrap_or(0)
     }
 
+    /// Check if a room exists and has participants.
+    pub fn is_room_active(&self, room_name: &str) -> bool {
+        self.rooms.contains_key(room_name)
+    }
+
     /// List all rooms with their sizes.
     pub fn list(&self) -> Vec<(String, usize)> {
-        self.rooms.iter().map(|(k, v)| (k.clone(), v.len())).collect()
+        self.rooms.iter().map(|r| (r.key().clone(), r.len())).collect()
     }
 
     /// Feed a quality report from a participant. If the room-wide weakest
     /// tier changes, returns `(QualityDirective signal, all senders)` for
     /// broadcasting.
     pub fn observe_quality(
-        &mut self,
+        &self,
         room_name: &str,
         participant_id: ParticipantId,
         report: &wzp_proto::packet::QualityReport,
     ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
-        let key = (room_name.to_string(), participant_id);
-        let tier_changed = self.qualities
-            .get_mut(&key)
+        let mut room = self.rooms.get_mut(room_name)?;
+
+        let tier_changed = room.qualities
+            .get_mut(&participant_id)
             .and_then(|pq| pq.observe(report))
             .is_some();
 
@@ -534,22 +547,19 @@ impl RoomManager {
         }
 
         // Compute the weakest tier across all participants in this room
-        let room_qualities = self.qualities.iter()
-            .filter(|((rn, _), _)| rn == room_name)
-            .map(|(_, pq)| pq);
-        let weakest = weakest_tier(room_qualities);
+        let weakest = weakest_tier(room.qualities.values());
 
-        let current_room_tier = self.room_tiers.get(room_name).copied().unwrap_or(Tier::Good);
-        if weakest == current_room_tier {
+        if weakest == room.current_tier {
             return None;
         }
 
-        // Room-wide tier changed — update and broadcast directive
-        self.room_tiers.insert(room_name.to_string(), weakest);
+        // Room-wide tier changed -- update and broadcast directive
+        let old_tier = room.current_tier;
+        room.current_tier = weakest;
         let profile = weakest.profile();
         info!(
             room = room_name,
-            old_tier = ?current_room_tier,
+            old_tier = ?old_tier,
             new_tier = ?weakest,
             codec = ?profile.codec,
             fec_ratio = profile.fec_ratio,
@@ -560,9 +570,7 @@ impl RoomManager {
             recommended_profile: profile,
             reason: Some(format!("weakest link: {weakest:?}")),
         };
-        let senders = self.rooms.get(room_name)
-            .map(|r| r.all_senders())
-            .unwrap_or_default();
+        let senders = room.all_senders();
         Some((directive, senders))
     }
 }
@@ -646,7 +654,7 @@ impl TrunkedForwarder {
 /// into [`TrunkedForwarder`]s and flushed every 5 ms or when the batcher is
 /// full, reducing QUIC datagram overhead.
 pub async fn run_participant(
-    room_mgr: Arc<Mutex<RoomManager>>,
+    room_mgr: Arc<RoomManager>,
     room_name: String,
     participant_id: ParticipantId,
     transport: Arc<wzp_transport::QuinnTransport>,
@@ -672,7 +680,7 @@ pub async fn run_participant(
 
 /// Plain (non-trunked) forwarding loop — original behaviour.
 async fn run_participant_plain(
-    room_mgr: Arc<Mutex<RoomManager>>,
+    room_mgr: Arc<RoomManager>,
     room_name: String,
     participant_id: ParticipantId,
     transport: Arc<wzp_transport::QuinnTransport>,
@@ -746,13 +754,12 @@ async fn run_participant_plain(
         // Get current list of other participants + check quality directive
         let lock_start = std::time::Instant::now();
         let (others, quality_directive) = {
-            let mut mgr = room_mgr.lock().await;
             let directive = if let Some(ref report) = pkt.quality_report {
-                mgr.observe_quality(&room_name, participant_id, report)
+                room_mgr.observe_quality(&room_name, participant_id, report)
             } else {
                 None
             };
-            let o = mgr.others(&room_name, participant_id);
+            let o = room_mgr.others(&room_name, participant_id);
             (o, directive)
         };
         let lock_ms = lock_start.elapsed().as_millis() as u64;
@@ -841,10 +848,7 @@ async fn run_participant_plain(
 
         // Periodic stats log every 5 seconds
         if last_log_instant.elapsed() >= Duration::from_secs(5) {
-            let room_size = {
-                let mgr = room_mgr.lock().await;
-                mgr.room_size(&room_name)
-            };
+            let room_size = room_mgr.room_size(&room_name);
             info!(
                 room = %room_name,
                 participant = participant_id,
@@ -867,9 +871,7 @@ async fn run_participant_plain(
     }
 
     // Clean up — leave room and broadcast update to remaining participants
-    let mut mgr = room_mgr.lock().await;
-    if let Some((update, senders)) = mgr.leave(&room_name, participant_id) {
-        drop(mgr); // release lock before async broadcast
+    if let Some((update, senders)) = room_mgr.leave(&room_name, participant_id) {
         if let Some(ref tap) = debug_tap {
             if tap.matches(&room_name) {
                 tap.log_event(&room_name, "leave", &format!(
@@ -890,7 +892,7 @@ async fn run_participant_plain(
 
 /// Trunked forwarding loop — batches outgoing packets per peer.
 async fn run_participant_trunked(
-    room_mgr: Arc<Mutex<RoomManager>>,
+    room_mgr: Arc<RoomManager>,
     room_name: String,
     participant_id: ParticipantId,
     transport: Arc<wzp_transport::QuinnTransport>,
@@ -965,13 +967,12 @@ async fn run_participant_trunked(
 
                 let lock_start = std::time::Instant::now();
                 let (others, quality_directive) = {
-                    let mut mgr = room_mgr.lock().await;
                     let directive = if let Some(ref report) = pkt.quality_report {
-                        mgr.observe_quality(&room_name, participant_id, report)
+                        room_mgr.observe_quality(&room_name, participant_id, report)
                     } else {
                         None
                     };
-                    let o = mgr.others(&room_name, participant_id);
+                    let o = room_mgr.others(&room_name, participant_id);
                     (o, directive)
                 };
                 let lock_ms = lock_start.elapsed().as_millis() as u64;
@@ -1037,10 +1038,7 @@ async fn run_participant_trunked(
 
                 // Periodic stats every 5 seconds
                 if last_log_instant.elapsed() >= Duration::from_secs(5) {
-                    let room_size = {
-                        let mgr = room_mgr.lock().await;
-                        mgr.room_size(&room_name)
-                    };
+                    let room_size = room_mgr.room_size(&room_name);
                     info!(
                         room = %room_name,
                         participant = participant_id,
@@ -1081,9 +1079,7 @@ async fn run_participant_trunked(
         let _ = fwd.flush().await;
     }
 
-    let mut mgr = room_mgr.lock().await;
-    if let Some((update, senders)) = mgr.leave(&room_name, participant_id) {
-        drop(mgr);
+    if let Some((update, senders)) = room_mgr.leave(&room_name, participant_id) {
         broadcast_signal(&senders, &update).await;
     }
 }
@@ -1129,7 +1125,7 @@ mod tests {
 
     #[test]
     fn acl_restricts_to_allowed() {
-        let mut mgr = RoomManager::with_acl();
+        let mgr = RoomManager::with_acl();
         mgr.allow("room1", "alice");
         mgr.allow("room1", "bob");
         assert!(mgr.is_authorized("room1", Some("alice")));
