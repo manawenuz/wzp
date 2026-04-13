@@ -538,12 +538,14 @@ impl CallEngine {
                     ..CallConfig::default()
                 },
             };
-            let frame_samples = (config.profile.frame_duration_ms as usize) * 48;
+            let mut frame_samples = (config.profile.frame_duration_ms as usize) * 48;
             info!(codec = ?config.profile.codec, frame_samples, t_ms = send_t0.elapsed().as_millis(), "first-join diag: send task spawned (android/oboe)");
             *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false);
-            let mut buf = vec![0i16; frame_samples];
+            // Sized for max frame (40ms = 1920 samples) so profile
+            // switches between 20ms ↔ 40ms codecs don't need realloc.
+            let mut buf = vec![0i16; 1920];
 
             // Continuous DRED tuning: poll quinn path stats every 25
             // frames (~500 ms at 20 ms/frame) and adjust DRED duration +
@@ -572,7 +574,7 @@ impl CallEngine {
                 // to read a full frame and sleep briefly if the ring is
                 // short. Oboe's capture callback fills at a steady rate
                 // so in steady state this spins once per frame.
-                let read = crate::wzp_native::audio_read_capture(&mut buf);
+                let read = crate::wzp_native::audio_read_capture(&mut buf[..frame_samples]);
                 if read < frame_samples {
                     short_reads += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -589,8 +591,8 @@ impl CallEngine {
                 }
 
                 // RMS for UI meter
-                let sum_sq: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
-                let rms = (sum_sq / buf.len() as f64).sqrt() as u32;
+                let sum_sq: f64 = buf[..frame_samples].iter().map(|&s| (s as f64) * (s as f64)).sum();
+                let rms = (sum_sq / frame_samples as f64).sqrt() as u32;
                 send_level.store(rms, Ordering::Relaxed);
                 last_rms = rms;
                 if !first_nonzero_rms_logged && rms > 0 {
@@ -603,9 +605,9 @@ impl CallEngine {
                 }
 
                 if send_mic.load(Ordering::Relaxed) {
-                    buf.fill(0);
+                    buf[..frame_samples].fill(0);
                 }
-                match encoder.encode_frame(&buf) {
+                match encoder.encode_frame(&buf[..frame_samples]) {
                     Ok(pkts) => {
                         for pkt in &pkts {
                             last_pkt_bytes = pkt.payload.len();
@@ -646,8 +648,10 @@ impl CallEngine {
                     let p = send_pending_profile.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
                     if p != PROFILE_NO_CHANGE {
                         if let Some(new_profile) = index_to_profile(p) {
-                            info!(to = ?new_profile.codec, "auto: switching encoder profile");
+                            let new_fs = (new_profile.frame_duration_ms as usize) * 48;
+                            info!(to = ?new_profile.codec, frame_samples = new_fs, "auto: switching encoder profile (android)");
                             if encoder.set_profile(new_profile).is_ok() {
+                                frame_samples = new_fs;
                                 dred_tuner.set_codec(new_profile.codec);
                                 *send_tx_codec.lock().await = format!("{:?}", new_profile.codec);
                             }
@@ -1353,12 +1357,12 @@ impl CallEngine {
                     ..CallConfig::default()
                 },
             };
-            let frame_samples = (config.profile.frame_duration_ms as usize) * 48;
+            let mut frame_samples = (config.profile.frame_duration_ms as usize) * 48;
             info!(codec = ?config.profile.codec, frame_samples, "send task starting");
             *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
             let mut encoder = CallEncoder::new(&config);
             encoder.set_aec_enabled(false); // OS AEC or none
-            let mut buf = vec![0i16; frame_samples];
+            let mut buf = vec![0i16; 1920]; // max frame (40ms)
 
             // Continuous DRED tuning (same as Android send task).
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
@@ -1373,19 +1377,20 @@ impl CallEngine {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     continue;
                 }
-                capture_ring.read(&mut buf);
+                capture_ring.read(&mut buf[..frame_samples]);
 
                 // Compute RMS audio level for UI meter
-                if !buf.is_empty() {
-                    let sum_sq: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
-                    let rms = (sum_sq / buf.len() as f64).sqrt() as u32;
+                {
+                    let pcm = &buf[..frame_samples];
+                    let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
+                    let rms = (sum_sq / pcm.len() as f64).sqrt() as u32;
                     send_level.store(rms, Ordering::Relaxed);
                 }
 
                 if send_mic.load(Ordering::Relaxed) {
-                    buf.fill(0);
+                    buf[..frame_samples].fill(0);
                 }
-                match encoder.encode_frame(&buf) {
+                match encoder.encode_frame(&buf[..frame_samples]) {
                     Ok(pkts) => {
                         for pkt in &pkts {
                             if let Err(e) = send_t.send_media(pkt).await {
@@ -1406,8 +1411,10 @@ impl CallEngine {
                     let p = send_pending_profile.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
                     if p != PROFILE_NO_CHANGE {
                         if let Some(new_profile) = index_to_profile(p) {
-                            info!(to = ?new_profile.codec, "auto: switching encoder profile");
+                            let new_fs = (new_profile.frame_duration_ms as usize) * 48;
+                            info!(to = ?new_profile.codec, frame_samples = new_fs, "auto: switching encoder profile (desktop)");
                             if encoder.set_profile(new_profile).is_ok() {
+                                frame_samples = new_fs;
                                 dred_tuner.set_codec(new_profile.codec);
                                 *send_tx_codec.lock().await = format!("{:?}", new_profile.codec);
                             }
