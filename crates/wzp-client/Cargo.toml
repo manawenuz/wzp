@@ -21,6 +21,9 @@ anyhow = "1"
 serde = { workspace = true }
 serde_json = "1"
 chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 cpal = { version = "0.15", optional = true }
 libc = "0.2"
@@ -98,6 +101,10 @@ linux-aec = ["dep:webrtc-audio-processing"]
 [[bin]]
 name = "wzp-client"
 path = "src/cli.rs"
+
+[[bin]]
+name = "wzp-analyzer"
+path = "src/analyzer.rs"
 
 [[bin]]
 name = "wzp-bench"
