@@ -264,6 +264,12 @@ pub extern "C" fn wzp_native_audio_stop() {
     }
 }
 
+/// Number of capture samples available to read without blocking.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzp_native_audio_capture_available() -> usize {
+    backend().capture.available_read()
+}
+
 /// Read captured PCM samples from the capture ring. Returns the number
 /// of `i16` samples actually copied into `out` (may be less than
 /// `out_len` if the ring is empty).

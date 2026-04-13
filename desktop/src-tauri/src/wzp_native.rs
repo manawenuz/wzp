@@ -28,6 +28,7 @@ static HELLO: OnceLock<unsafe extern "C" fn(*mut u8, usize) -> usize> = OnceLock
 static AUDIO_START: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static AUDIO_START_BT: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static AUDIO_STOP: OnceLock<unsafe extern "C" fn()> = OnceLock::new();
+static AUDIO_CAPTURE_AVAILABLE: OnceLock<extern "C" fn() -> usize> = OnceLock::new();
 static AUDIO_READ_CAPTURE: OnceLock<unsafe extern "C" fn(*mut i16, usize) -> usize> = OnceLock::new();
 static AUDIO_WRITE_PLAYOUT: OnceLock<unsafe extern "C" fn(*const i16, usize) -> usize> = OnceLock::new();
 static AUDIO_IS_RUNNING: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
@@ -68,6 +69,7 @@ pub fn init() -> Result<(), String> {
         resolve!(AUDIO_START, unsafe extern "C" fn() -> i32, b"wzp_native_audio_start");
         resolve!(AUDIO_START_BT, unsafe extern "C" fn() -> i32, b"wzp_native_audio_start_bt");
         resolve!(AUDIO_STOP, unsafe extern "C" fn(), b"wzp_native_audio_stop");
+        resolve!(AUDIO_CAPTURE_AVAILABLE, extern "C" fn() -> usize, b"wzp_native_audio_capture_available");
         resolve!(AUDIO_READ_CAPTURE, unsafe extern "C" fn(*mut i16, usize) -> usize, b"wzp_native_audio_read_capture");
         resolve!(AUDIO_WRITE_PLAYOUT, unsafe extern "C" fn(*const i16, usize) -> usize, b"wzp_native_audio_write_playout");
         resolve!(AUDIO_IS_RUNNING, unsafe extern "C" fn() -> i32, b"wzp_native_audio_is_running");
@@ -119,6 +121,12 @@ pub fn audio_stop() {
     if let Some(f) = AUDIO_STOP.get() {
         unsafe { f() };
     }
+}
+
+/// Number of capture samples available to read without blocking.
+pub fn audio_capture_available() -> usize {
+    let Some(f) = AUDIO_CAPTURE_AVAILABLE.get() else { return 0; };
+    f()
 }
 
 /// Read captured i16 PCM into `out`. Returns bytes actually copied.

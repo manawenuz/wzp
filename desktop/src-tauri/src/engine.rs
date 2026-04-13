@@ -570,14 +570,19 @@ impl CallEngine {
                 if !send_r.load(Ordering::Relaxed) {
                     break;
                 }
-                // wzp-native doesn't expose `available()`, so we just try
-                // to read a full frame and sleep briefly if the ring is
-                // short. Oboe's capture callback fills at a steady rate
-                // so in steady state this spins once per frame.
-                let read = crate::wzp_native::audio_read_capture(&mut buf[..frame_samples]);
-                if read < frame_samples {
+                // Check ring has enough samples before reading to avoid
+                // partial reads that consume samples and then get
+                // overwritten on the next attempt (caused 40ms codecs
+                // like Opus6k to produce ~11 frames/s instead of 25).
+                if crate::wzp_native::audio_capture_available() < frame_samples {
                     short_reads += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    continue;
+                }
+                let read = crate::wzp_native::audio_read_capture(&mut buf[..frame_samples]);
+                if read < frame_samples {
+                    // Shouldn't happen after available() check, but guard anyway.
+                    short_reads += 1;
                     continue;
                 }
                 if !first_full_read_logged {
