@@ -23,6 +23,13 @@ use wzp_relay::presence::PresenceRegistry;
 use wzp_relay::room::{self, RoomManager};
 use wzp_relay::session_mgr::SessionManager;
 
+/// Close a transport gracefully, logging any error at debug level.
+async fn close_transport(t: &dyn wzp_proto::MediaTransport, context: &str) {
+    if let Err(e) = t.close().await {
+        tracing::debug!(context, error = %e, "transport close (non-fatal)");
+    }
+}
+
 /// Parsed CLI result — config + identity path.
 struct CliResult {
     config: RelayConfig,
@@ -908,7 +915,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                transport.close().await.ok();
+                close_transport(&*transport, "cleanup").await;
                 return;
             }
 
@@ -1475,7 +1482,7 @@ async fn main() -> anyhow::Result<()> {
                     reg.unregister_local(&client_fp);
                 }
 
-                transport.close().await.ok();
+                close_transport(&*transport, "cleanup").await;
                 return;
             }
 
@@ -1499,14 +1506,14 @@ async fn main() -> anyhow::Result<()> {
                             Err(e) => {
                                 metrics.auth_attempts.with_label_values(&["fail"]).inc();
                                 error!(%addr, "auth failed: {e}");
-                                transport.close().await.ok();
+                                close_transport(&*transport, "cleanup").await;
                                 return;
                             }
                         }
                     }
                     Ok(Some(_)) => {
                         error!(%addr, "expected AuthToken as first signal, got something else");
-                        transport.close().await.ok();
+                        close_transport(&*transport, "cleanup").await;
                         return;
                     }
                     Ok(None) => {
@@ -1515,7 +1522,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         error!(%addr, "signal recv error during auth: {e}");
-                        transport.close().await.ok();
+                        close_transport(&*transport, "cleanup").await;
                         return;
                     }
                 }
@@ -1537,7 +1544,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     error!(%addr, "handshake failed: {e}");
-                    transport.close().await.ok();
+                    close_transport(&*transport, "cleanup").await;
                     return;
                 }
             };
@@ -1561,7 +1568,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 if !authorized {
                     warn!(%addr, room = %room_name, fp = %participant_fp, "rejected: not authorized for this call room");
-                    transport.close().await.ok();
+                    close_transport(&*transport, "cleanup").await;
                     return;
                 }
                 info!(%addr, room = %room_name, fp = %participant_fp, "authorized for call room");
@@ -1602,7 +1609,7 @@ async fn main() -> anyhow::Result<()> {
 
                 tokio::select! { _ = up => {} _ = dn => {} }
                 stats_handle.abort();
-                transport.close().await.ok();
+                close_transport(&*transport, "cleanup").await;
             } else {
                 // Room mode — enforce max sessions, then join room
                 let session_id = {
@@ -1611,7 +1618,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(id) => id,
                         Err(e) => {
                             error!(%addr, room = %room_name, "session rejected: {e}");
-                            transport.close().await.ok();
+                            close_transport(&*transport, "cleanup").await;
                             return;
                         }
                     }
@@ -1626,7 +1633,7 @@ async fn main() -> anyhow::Result<()> {
                         metrics.active_sessions.dec();
                         let mut smgr = session_mgr.lock().await;
                         smgr.remove_session(session_id);
-                        transport.close().await.ok();
+                        close_transport(&*transport, "cleanup").await;
                         return;
                     }
                 }
@@ -1676,7 +1683,7 @@ async fn main() -> anyhow::Result<()> {
                             metrics.active_sessions.dec();
                             let mut smgr = session_mgr.lock().await;
                             smgr.remove_session(session_id);
-                            transport.close().await.ok();
+                            close_transport(&*transport, "cleanup").await;
                             return;
                         }
                     }
@@ -1731,7 +1738,7 @@ async fn main() -> anyhow::Result<()> {
                     smgr.remove_session(session_id);
                 }
 
-                transport.close().await.ok();
+                close_transport(&*transport, "cleanup").await;
             }
         });
     }

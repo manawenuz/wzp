@@ -30,6 +30,14 @@ use wzp_proto::traits::{AudioDecoder, QualityController};
 use wzp_proto::{AdaptiveQualityController, CodecId, MediaTransport, QualityProfile};
 
 const FRAME_SAMPLES_40MS: usize = 1920;
+const CAPTURE_POLL_MS: u64 = 5;
+const RECV_TIMEOUT_MS: u64 = 100;
+const SIGNAL_TIMEOUT_MS: u64 = 200;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const HEARTBEAT_INTERVAL_SECS: u64 = 2;
+const DRED_POLL_INTERVAL: u32 = 25;
 
 /// Profile index mapping for the AtomicU8 adaptive-quality bridge.
 const PROFILE_NO_CHANGE: u8 = 0xFF;
@@ -75,6 +83,101 @@ fn resolve_quality(quality: &str) -> Option<QualityProfile> {
         "studio-48k" => Some(QualityProfile::STUDIO_48K),
         "studio-64k" => Some(QualityProfile::STUDIO_64K),
         _ => None, // "auto" or unknown
+    }
+}
+
+/// Build a CallConfig from a quality string. Used by both Android and desktop send tasks.
+fn build_call_config(quality: &str) -> CallConfig {
+    let profile = resolve_quality(quality);
+    match profile {
+        Some(p) => CallConfig {
+            noise_suppression: false,
+            suppression_enabled: false,
+            ..CallConfig::from_profile(p)
+        },
+        None => CallConfig {
+            noise_suppression: false,
+            suppression_enabled: false,
+            ..CallConfig::default()
+        },
+    }
+}
+
+/// Map a received codec ID to the corresponding QualityProfile.
+/// Used by recv tasks when the peer switches codecs.
+fn codec_to_profile(codec: CodecId) -> QualityProfile {
+    match codec {
+        CodecId::Opus24k => QualityProfile::GOOD,
+        CodecId::Opus6k => QualityProfile::DEGRADED,
+        CodecId::Opus32k => QualityProfile::STUDIO_32K,
+        CodecId::Opus48k => QualityProfile::STUDIO_48K,
+        CodecId::Opus64k => QualityProfile::STUDIO_64K,
+        CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
+        CodecId::Codec2_3200 => QualityProfile {
+            codec: CodecId::Codec2_3200,
+            fec_ratio: 0.5,
+            frame_duration_ms: 20,
+            frames_per_block: 5,
+        },
+        other => QualityProfile { codec: other, ..QualityProfile::GOOD },
+    }
+}
+
+/// Signal handler task -- shared between Android and desktop.
+/// Handles RoomUpdate (participant list), QualityDirective (relay-pushed
+/// codec switch), and Hangup from the relay signal stream.
+async fn run_signal_task(
+    transport: Arc<wzp_transport::QuinnTransport>,
+    running: Arc<AtomicBool>,
+    pending_profile: Arc<AtomicU8>,
+    participants: Arc<Mutex<Vec<ParticipantInfo>>>,
+    event_cb: Arc<dyn Fn(&str, &str) + Send + Sync>,
+) {
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(SIGNAL_TIMEOUT_MS),
+            transport.recv_signal(),
+        )
+        .await
+        {
+            Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate {
+                participants: parts,
+                ..
+            }))) => {
+                let mut seen = std::collections::HashSet::new();
+                let unique: Vec<ParticipantInfo> = parts
+                    .into_iter()
+                    .filter(|p| seen.insert((p.fingerprint.clone(), p.alias.clone())))
+                    .map(|p| ParticipantInfo {
+                        fingerprint: p.fingerprint,
+                        alias: p.alias,
+                        relay_label: p.relay_label,
+                    })
+                    .collect();
+                let count = unique.len();
+                *participants.lock().await = unique;
+                event_cb("room-update", &format!("{count} participants"));
+            }
+            Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
+                recommended_profile,
+                reason,
+            }))) => {
+                let idx = profile_to_index(&recommended_profile);
+                info!(
+                    codec = ?recommended_profile.codec,
+                    reason = reason.as_deref().unwrap_or(""),
+                    "relay quality directive: switching profile"
+                );
+                pending_profile.store(idx, Ordering::Release);
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
     }
 }
 
@@ -395,7 +498,7 @@ impl CallEngine {
             };
             let client_config = wzp_transport::client_config();
             let conn = match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
                 wzp_transport::connect(&endpoint, relay_addr, &room, client_config),
             ).await {
                 Ok(Ok(c)) => c,
@@ -404,8 +507,8 @@ impl CallEngine {
                     return Err(e.into());
                 }
                 Err(_) => {
-                    error!("connect TIMED OUT after 10s — QUIC handshake never completed. Relay may be unreachable from this endpoint.");
-                    return Err(anyhow::anyhow!("QUIC connect timeout (10s)"));
+                    error!("connect TIMED OUT after {CONNECT_TIMEOUT_SECS}s — QUIC handshake never completed. Relay may be unreachable from this endpoint.");
+                    return Err(anyhow::anyhow!("QUIC connect timeout ({CONNECT_TIMEOUT_SECS}s)"));
                 }
             };
             info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: QUIC connection established, performing handshake");
@@ -525,19 +628,7 @@ impl CallEngine {
         let send_app = app.clone();
         let send_pending_profile = pending_profile.clone();
         tokio::spawn(async move {
-            let profile = resolve_quality(&send_quality);
-            let config = match profile {
-                Some(p) => CallConfig {
-                    noise_suppression: false,
-                    suppression_enabled: false,
-                    ..CallConfig::from_profile(p)
-                },
-                None => CallConfig {
-                    noise_suppression: false,
-                    suppression_enabled: false,
-                    ..CallConfig::default()
-                },
-            };
+            let config = build_call_config(&send_quality);
             let mut frame_samples = (config.profile.frame_duration_ms as usize) * 48;
             info!(codec = ?config.profile.codec, frame_samples, t_ms = send_t0.elapsed().as_millis(), "first-join diag: send task spawned (android/oboe)");
             *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
@@ -552,7 +643,6 @@ impl CallEngine {
             // expected-loss hint based on real-time network conditions.
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
             let mut frames_since_dred_poll: u32 = 0;
-            const DRED_POLL_INTERVAL: u32 = 25;
 
             let mut heartbeat = std::time::Instant::now();
             let mut last_rms: u32 = 0;
@@ -576,7 +666,7 @@ impl CallEngine {
                 // like Opus6k to produce ~11 frames/s instead of 25).
                 if crate::wzp_native::audio_capture_available() < frame_samples {
                     short_reads += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(CAPTURE_POLL_MS)).await;
                     continue;
                 }
                 let read = crate::wzp_native::audio_read_capture(&mut buf[..frame_samples]);
@@ -693,7 +783,7 @@ impl CallEngine {
                 }
 
                 // Heartbeat every 2s with capture+encode+send state
-                if heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                if heartbeat.elapsed() >= std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS) {
                     let fs = send_fs.load(Ordering::Relaxed);
                     let drops = send_drops.load(Ordering::Relaxed);
                     info!(
@@ -810,7 +900,7 @@ impl CallEngine {
                     break;
                 }
                 match tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_millis(RECV_TIMEOUT_MS),
                     recv_t.recv_media(),
                 )
                 .await
@@ -849,19 +939,7 @@ impl CallEngine {
                                 if *rx != codec_name { *rx = codec_name; }
                             }
                             if pkt.header.codec_id != current_codec {
-                                let new_profile = match pkt.header.codec_id {
-                                    CodecId::Opus24k => QualityProfile::GOOD,
-                                    CodecId::Opus6k => QualityProfile::DEGRADED,
-                                    CodecId::Opus32k => QualityProfile::STUDIO_32K,
-                                    CodecId::Opus48k => QualityProfile::STUDIO_48K,
-                                    CodecId::Opus64k => QualityProfile::STUDIO_64K,
-                                    CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
-                                    CodecId::Codec2_3200 => QualityProfile {
-                                        codec: CodecId::Codec2_3200,
-                                        fec_ratio: 0.5, frame_duration_ms: 20, frames_per_block: 5,
-                                    },
-                                    other => QualityProfile { codec: other, ..QualityProfile::GOOD },
-                                };
+                                let new_profile = codec_to_profile(pkt.header.codec_id);
                                 info!(from = ?current_codec, to = ?pkt.header.codec_id, "recv: switching decoder");
                                 let _ = decoder.set_profile(new_profile);
                                 current_profile = new_profile;
@@ -1015,7 +1093,7 @@ impl CallEngine {
                 }
 
                 // Heartbeat every 2s with decode+playout state
-                if heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                if heartbeat.elapsed() >= std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS) {
                     let fr = recv_fr.load(Ordering::Relaxed);
                     if wzp_codec::dred_verbose_logs() {
                         info!(
@@ -1124,60 +1202,14 @@ impl CallEngine {
         });
 
         // Signal task (presence + quality directives).
-        let sig_t = transport.clone();
-        let sig_r = running.clone();
-        let sig_p = participants.clone();
-        let sig_pending_profile = pending_profile.clone();
         let event_cb = Arc::new(event_cb);
-        let sig_cb = event_cb.clone();
-        tokio::spawn(async move {
-            loop {
-                if !sig_r.load(Ordering::Relaxed) {
-                    break;
-                }
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    sig_t.recv_signal(),
-                )
-                .await
-                {
-                    Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate {
-                        participants: parts,
-                        ..
-                    }))) => {
-                        let mut seen = std::collections::HashSet::new();
-                        let unique: Vec<ParticipantInfo> = parts
-                            .into_iter()
-                            .filter(|p| seen.insert((p.fingerprint.clone(), p.alias.clone())))
-                            .map(|p| ParticipantInfo {
-                                fingerprint: p.fingerprint,
-                                alias: p.alias,
-                                relay_label: p.relay_label,
-                            })
-                            .collect();
-                        let count = unique.len();
-                        *sig_p.lock().await = unique;
-                        sig_cb("room-update", &format!("{count} participants"));
-                    }
-                    Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
-                        recommended_profile,
-                        reason,
-                    }))) => {
-                        let idx = profile_to_index(&recommended_profile);
-                        info!(
-                            codec = ?recommended_profile.codec,
-                            reason = reason.as_deref().unwrap_or(""),
-                            "relay quality directive: switching profile"
-                        );
-                        sig_pending_profile.store(idx, Ordering::Release);
-                    }
-                    Ok(Ok(Some(_))) => {}
-                    Ok(Ok(None)) => break,
-                    Ok(Err(_)) => break,
-                    Err(_) => {}
-                }
-            }
-        });
+        tokio::spawn(run_signal_task(
+            transport.clone(),
+            running.clone(),
+            pending_profile.clone(),
+            participants.clone(),
+            event_cb.clone(),
+        ));
 
         Ok(Self {
             running,
@@ -1349,19 +1381,7 @@ impl CallEngine {
         let send_tx_codec = tx_codec.clone();
         let send_pending_profile = pending_profile.clone();
         tokio::spawn(async move {
-            let profile = resolve_quality(&send_quality);
-            let config = match profile {
-                Some(p) => CallConfig {
-                    noise_suppression: false,
-                    suppression_enabled: false,
-                    ..CallConfig::from_profile(p)
-                },
-                None => CallConfig {
-                    noise_suppression: false,
-                    suppression_enabled: false,
-                    ..CallConfig::default()
-                },
-            };
+            let config = build_call_config(&send_quality);
             let mut frame_samples = (config.profile.frame_duration_ms as usize) * 48;
             info!(codec = ?config.profile.codec, frame_samples, "send task starting");
             *send_tx_codec.lock().await = format!("{:?}", config.profile.codec);
@@ -1372,14 +1392,13 @@ impl CallEngine {
             // Continuous DRED tuning (same as Android send task).
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
             let mut frames_since_dred_poll: u32 = 0;
-            const DRED_POLL_INTERVAL: u32 = 25;
 
             loop {
                 if !send_r.load(Ordering::Relaxed) {
                     break;
                 }
                 if capture_ring.available() < frame_samples {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(CAPTURE_POLL_MS)).await;
                     continue;
                 }
                 capture_ring.read(&mut buf[..frame_samples]);
@@ -1470,7 +1489,7 @@ impl CallEngine {
                     break;
                 }
                 match tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_millis(RECV_TIMEOUT_MS),
                     recv_t.recv_media(),
                 )
                 .await
@@ -1485,19 +1504,7 @@ impl CallEngine {
                             }
                             // Auto-switch decoder if incoming codec differs
                             if pkt.header.codec_id != current_codec {
-                                let new_profile = match pkt.header.codec_id {
-                                    CodecId::Opus24k => QualityProfile::GOOD,
-                                    CodecId::Opus6k => QualityProfile::DEGRADED,
-                                    CodecId::Opus32k => QualityProfile::STUDIO_32K,
-                                    CodecId::Opus48k => QualityProfile::STUDIO_48K,
-                                    CodecId::Opus64k => QualityProfile::STUDIO_64K,
-                                    CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
-                                    CodecId::Codec2_3200 => QualityProfile {
-                                        codec: CodecId::Codec2_3200,
-                                        fec_ratio: 0.5, frame_duration_ms: 20, frames_per_block: 5,
-                                    },
-                                    other => QualityProfile { codec: other, ..QualityProfile::GOOD },
-                                };
+                                let new_profile = codec_to_profile(pkt.header.codec_id);
                                 info!(from = ?current_codec, to = ?pkt.header.codec_id, "recv: switching decoder");
                                 let _ = decoder.set_profile(new_profile);
                                 current_profile = new_profile;
@@ -1560,60 +1567,14 @@ impl CallEngine {
         });
 
         // Signal task (presence + quality directives)
-        let sig_t = transport.clone();
-        let sig_r = running.clone();
-        let sig_p = participants.clone();
-        let sig_pending_profile = pending_profile.clone();
         let event_cb = Arc::new(event_cb);
-        let sig_cb = event_cb.clone();
-        tokio::spawn(async move {
-            loop {
-                if !sig_r.load(Ordering::Relaxed) {
-                    break;
-                }
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    sig_t.recv_signal(),
-                )
-                .await
-                {
-                    Ok(Ok(Some(wzp_proto::SignalMessage::RoomUpdate {
-                        participants: parts,
-                        ..
-                    }))) => {
-                        let mut seen = std::collections::HashSet::new();
-                        let unique: Vec<ParticipantInfo> = parts
-                            .into_iter()
-                            .filter(|p| seen.insert((p.fingerprint.clone(), p.alias.clone())))
-                            .map(|p| ParticipantInfo {
-                                fingerprint: p.fingerprint,
-                                alias: p.alias,
-                                relay_label: p.relay_label,
-                            })
-                            .collect();
-                        let count = unique.len();
-                        *sig_p.lock().await = unique;
-                        sig_cb("room-update", &format!("{count} participants"));
-                    }
-                    Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
-                        recommended_profile,
-                        reason,
-                    }))) => {
-                        let idx = profile_to_index(&recommended_profile);
-                        info!(
-                            codec = ?recommended_profile.codec,
-                            reason = reason.as_deref().unwrap_or(""),
-                            "relay quality directive: switching profile"
-                        );
-                        sig_pending_profile.store(idx, Ordering::Release);
-                    }
-                    Ok(Ok(Some(_))) => {}
-                    Ok(Ok(None)) => break,
-                    Ok(Err(_)) => break,
-                    Err(_) => {}
-                }
-            }
-        });
+        tokio::spawn(run_signal_task(
+            transport.clone(),
+            running.clone(),
+            pending_profile.clone(),
+            participants.clone(),
+            event_cb.clone(),
+        ));
 
         Ok(Self {
             running,

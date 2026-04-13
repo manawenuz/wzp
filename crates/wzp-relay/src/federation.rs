@@ -213,16 +213,19 @@ impl FederationManager {
     /// `origin_relay_fp` against its own fp and drops self-sourced
     /// forwards.
     pub async fn broadcast_signal(&self, msg: &wzp_proto::SignalMessage) -> usize {
-        let links = self.peer_links.lock().await;
+        let peers: Vec<(String, String, Arc<QuinnTransport>)> = {
+            let links = self.peer_links.lock().await;
+            links.iter().map(|(fp, l)| (fp.clone(), l.label.clone(), l.transport.clone())).collect()
+        };  // lock released
         let mut count = 0;
-        for (fp, link) in links.iter() {
-            match link.transport.send_signal(msg).await {
+        for (fp, label, transport) in &peers {
+            match transport.send_signal(msg).await {
                 Ok(()) => {
                     count += 1;
-                    tracing::debug!(peer = %link.label, %fp, "federation: broadcast signal ok");
+                    tracing::debug!(peer = %label, %fp, "federation: broadcast signal ok");
                 }
                 Err(e) => {
-                    tracing::warn!(peer = %link.label, %fp, error = %e, "federation: broadcast signal failed");
+                    tracing::warn!(peer = %label, %fp, error = %e, "federation: broadcast signal failed");
                 }
             }
         }
@@ -243,10 +246,12 @@ impl FederationManager {
         msg: &wzp_proto::SignalMessage,
     ) -> Result<(), String> {
         let normalized = normalize_fp(peer_relay_fp);
-        let links = self.peer_links.lock().await;
-        match links.get(&normalized) {
-            Some(link) => link
-                .transport
+        let transport = {
+            let links = self.peer_links.lock().await;
+            links.get(&normalized).map(|l| l.transport.clone())
+        };  // lock released
+        match transport {
+            Some(t) => t
                 .send_signal(msg)
                 .await
                 .map_err(|e| format!("send to peer {normalized}: {e}")),
@@ -403,20 +408,22 @@ impl FederationManager {
     /// or rate limiting; the body currently forwards on `room_hash` alone
     /// because that's what the wire format carries.
     pub async fn forward_to_peers(&self, _room_name: &str, room_hash: &[u8; 8], media_data: &Bytes) {
-        let links = self.peer_links.lock().await;
-        if links.is_empty() {
-            return;
-        }
-        for (_fp, link) in links.iter() {
+        let peers: Vec<(String, Arc<QuinnTransport>)> = {
+            let links = self.peer_links.lock().await;
+            if links.is_empty() { return; }
+            links.values().map(|l| (l.label.clone(), l.transport.clone())).collect()
+        };  // lock released
+
+        for (label, transport) in &peers {
             let mut tagged = Vec::with_capacity(8 + media_data.len());
             tagged.extend_from_slice(room_hash);
             tagged.extend_from_slice(media_data);
-            match link.transport.send_raw_datagram(&tagged) {
+            match transport.send_raw_datagram(&tagged) {
                 Ok(()) => {
                     self.metrics.federation_packets_forwarded
-                        .with_label_values(&[&link.label, "out"]).inc();
+                        .with_label_values(&[label, "out"]).inc();
                 }
-                Err(e) => warn!(peer = %link.label, "federation send error: {e}"),
+                Err(e) => warn!(peer = %label, "federation send error: {e}"),
             }
         }
     }
@@ -483,9 +490,12 @@ async fn run_room_event_dispatcher(
                     let participants = fm.room_mgr.local_participant_list(&room);
                     info!(room = %room, count = participants.len(), "global room now active, announcing to peers");
                     let msg = SignalMessage::GlobalRoomActive { room, participants };
-                    let links = fm.peer_links.lock().await;
-                    for link in links.values() {
-                        let _ = link.transport.send_signal(&msg).await;
+                    let transports: Vec<Arc<QuinnTransport>> = {
+                        let links = fm.peer_links.lock().await;
+                        links.values().map(|l| l.transport.clone()).collect()
+                    };
+                    for t in &transports {
+                        let _ = t.send_signal(&msg).await;
                     }
                 }
             }
@@ -493,9 +503,12 @@ async fn run_room_event_dispatcher(
                 if fm.is_global_room(&room) {
                     info!(room = %room, "global room now inactive, announcing to peers");
                     let msg = SignalMessage::GlobalRoomInactive { room };
-                    let links = fm.peer_links.lock().await;
-                    for link in links.values() {
-                        let _ = link.transport.send_signal(&msg).await;
+                    let transports: Vec<Arc<QuinnTransport>> = {
+                        let links = fm.peer_links.lock().await;
+                        links.values().map(|l| l.transport.clone()).collect()
+                    };
+                    for t in &transports {
+                        let _ = t.send_signal(&msg).await;
                     }
                 }
             }
