@@ -208,15 +208,14 @@ Phases 1-2 are implemented. Phase 3 has a critical gap.
 - **Weakest-link broadcast**: `observe_quality()` method computes room-wide worst tier, broadcasts `QualityDirective` to all participants when tier changes
 - **Desktop engine handling** (`desktop/src-tauri/src/engine.rs`): `AdaptiveQualityController` in recv task, `pending_profile` AtomicU8 bridge to send task, auto-mode profile switching based on **inbound quality reports**
 
-### Gap: QualityDirective signals silently discarded
+### Phase 3 completed (2026-04-13)
 
-Both engines receive `QualityDirective` from the relay but **do not process it**:
-- **Desktop** (`engine.rs` ~line 1152): signal recv loop matches `RoomUpdate` only; `QualityDirective` falls through the catch-all `Ok(Ok(Some(_))) => {}` arm
-- **Android** (`engine.rs` ~line 1198): same pattern — `QualityDirective` falls through to a generic log `info!("signal received: {:?}", ...)` with no action
+Both engines now handle `QualityDirective` signals from the relay:
+- **Desktop** (`engine.rs`): both P2P and relay signal tasks match `QualityDirective`, extract `recommended_profile`, store index via `sig_pending_profile.store(idx, Release)`. Send task picks it up at the next frame boundary.
+- **Android** (`engine.rs`): signal task matches `QualityDirective`, stores via `pending_profile_recv.store(idx, Release)`.
 
-The relay broadcasts directives correctly, but clients ignore them. Desktop adaptive quality currently works **only** via local `AdaptiveQualityController` observing inbound quality reports — not via relay-coordinated directives.
+Relay-coordinated codec switching is now end-to-end: relay monitors → broadcasts directive → clients switch.
 
-### Phases remaining
+### Phase remaining
 
-- Phase 3: **Client-side handling of `QualityDirective`** — add match arms in both engines' signal recv loops to apply `recommended_profile` via `pending_profile` AtomicU8. ~0.5 day since the plumbing already exists.
-- Phase 4: Upgrade proposal/negotiation protocol for quality recovery
+- Phase 4: Upgrade proposal/negotiation protocol for quality recovery (task #28)

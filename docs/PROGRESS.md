@@ -120,9 +120,7 @@
 
 - **Web audio drift**: The browser AudioWorklet playback buffer caps at 200ms, but clock drift between the WebSocket message arrival rate and the AudioContext output rate can cause occasional underruns or accumulation. The cap prevents unbounded growth but may cause glitches.
 
-- **Adaptive loop integration (partial)**: AdaptiveQualityController is wired into both desktop and Android send/recv tasks for **inbound quality report observation**. Relay broadcasts QualityDirective to all participants based on weakest-link policy, but **neither engine processes QualityDirective signals** — they fall through catch-all match arms silently. Local adaptive quality works; relay-coordinated quality does not.
-
-- **dual_path.rs test regression (Phase 7)**: Phase 7 (IPv6 dual-socket) added `ipv6_endpoint: Option<Endpoint>` parameter to `race()` in `crates/wzp-client/src/dual_path.rs`, but the integration tests in `crates/wzp-client/tests/dual_path.rs` were not updated — 3 call sites pass 6 args instead of 7. `cargo test --workspace` fails to compile.
+- **Adaptive loop integration (resolved)**: AdaptiveQualityController wired into both desktop and Android send/recv tasks. Relay-coordinated codec switching broadcasts QualityDirective — now handled by both engines (fixed 2026-04-13). 5-tier classification (Studio64k through Catastrophic) with asymmetric hysteresis.
 
 - **Relay FEC pass-through**: In room mode, the relay forwards packets opaquely without FEC decode/re-encode. This means FEC protection is end-to-end only, not per-hop. In forward mode, the relay pipeline does perform FEC decode/re-encode.
 
@@ -194,7 +192,37 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - **CI**: Gitea workflow defined for amd64/arm64/armv7 builds
 - **Production**: Not yet deployed to production networks
 
-## Recent Changes (2026-04-12)
+## Recent Changes (2026-04-13)
+
+### 5-Tier Adaptive Quality Classification (#9)
+- `Tier` enum extended from 3 to 6 levels: Studio64k > Studio48k > Studio32k > Good > Degraded > Catastrophic
+- WiFi thresholds: loss < 1%/RTT < 30ms (Studio64k) through loss >= 15%/RTT >= 200ms (Catastrophic)
+- Cellular stays at Good ceiling (no studio tiers on mobile data)
+- Asymmetric hysteresis: downgrade 3 reports, upgrade 5, studio upgrade 10
+- `Tier` derives `Ord` — ordering matches quality level (Catastrophic=0, Studio64k=5)
+- `weakest_tier()` simplified to `.min()` via Ord
+
+### Client QualityDirective Handling (#27)
+- Both desktop signal tasks (P2P and relay engines) now match `QualityDirective` signals
+- Android signal task matches `QualityDirective` and stores profile index via `pending_profile_recv`
+- Relay-coordinated codec switching now works end-to-end: relay broadcasts → clients react
+- Closes the gap documented in PRD-coordinated-codec.md
+
+### Debug Tap Enhancements (#11, #12)
+- `log_signal()`: logs `RoomUpdate` (count + participant names), `QualityDirective` (codec + reason)
+- `log_event()`: logs participant join/leave lifecycle events
+- `log_stats()`: periodic 5-second summary — packets in/out, fan-out avg, seq gaps, codecs seen
+- `TapStats` struct tracks per-participant metrics across the forwarding loop
+- All output via `target: "debug_tap"` for RUST_LOG filtering
+
+### Bug Fix: dual_path.rs Phase 7 regression
+- Added missing `ipv6_endpoint: None` parameter to 3 `race()` call sites in integration tests
+- Phase 7 IPv6 dual-socket changed the function signature but tests were not updated
+
+### Build: Keystore sync (f17420a)
+- `build.sh` syncs keystores from persistent cache before build
+
+## Previous Changes (2026-04-12)
 
 ### Bluetooth Audio Routing
 - 3-way route cycling: Earpiece → Speaker → Bluetooth SCO

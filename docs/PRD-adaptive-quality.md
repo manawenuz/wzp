@@ -195,11 +195,11 @@ The `CallEncoder` already has `set_profile()`. The `CallDecoder` already auto-sw
 
 ## Milestones
 
-| Phase | Scope | Effort | Dependency |
-|-------|-------|--------|------------|
-| 0 | Verify relay sends QualityReports | 0.5 day | None |
-| 1a | Wire QualityAdapter in Android engine | 1 day | Phase 0 |
-| 1b | Wire QualityAdapter in desktop engine | 1 day | Phase 0 |
-| 1c | UI indicator (current codec) | 0.5 day | Phase 1a/1b |
-| 2 | Extended 5-tier classification | 0.5 day | Phase 1 |
-| 3 | Bandwidth probing | 2 days | Phase 2 |
+| Phase | Scope | Effort | Status |
+|-------|-------|--------|--------|
+| 0 | Verify relay sends QualityReports | 0.5 day | Done |
+| 1a | Wire QualityAdapter in Android engine | 1 day | Done |
+| 1b | Wire QualityAdapter in desktop engine | 1 day | Done |
+| 1c | UI indicator (current codec) | 0.5 day | Done |
+| 2 | Extended 5-tier classification (Studio64k→Catastrophic) | 0.5 day | Done (2026-04-13) |
+| 3 | Bandwidth probing | 2 days | Pending (task #10) |
