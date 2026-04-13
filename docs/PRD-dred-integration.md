@@ -386,3 +386,17 @@ When instantaneous jitter exceeds the EWMA × 1.3 (asymmetric: fast-up α=0.3, s
 
 - 10 unit tests for tuner math (baseline, scaling, spike, cooldown, codec switch, Codec2 no-op)
 - 4 integration tests (encoder adjustment, spike boost, Codec2 no-op, profile switch with encode verification)
+
+### Opus6k Frame Starvation Bug (Fixed 2026-04-13)
+
+During testing of the extended 1040ms DRED window on Opus6k, the 40ms codec produced only ~11 frames/s instead of 25 — making audio choppy regardless of DRED quality.
+
+**Root cause:** The Android capture ring read loop did partial reads that consumed samples from the ring but discarded them when retrying:
+1. Ring has 960 samples (one Oboe burst)
+2. `audio_read_capture(&mut buf[..1920])` reads 960 into `buf[0..960]`, returns 960
+3. Loop sees 960 < 1920, sleeps, retries from `buf[0..]` → overwrites the consumed samples
+4. ~50% of captured audio thrown away per frame
+
+**Fix:** Added `wzp_native_audio_capture_available()` to check ring fill level before reading (same pattern as the desktop CPAL path's `capture_ring.available()`). Also made `frame_samples` mutable so codec switches update the read size.
+
+**Affected codecs:** Only 40ms frame codecs (Opus6k, Codec2_1200). 20ms codecs (Opus24k, etc.) were unaffected because a single Oboe burst fills the entire request.

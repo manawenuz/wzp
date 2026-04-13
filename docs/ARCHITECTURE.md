@@ -473,6 +473,34 @@ sequenceDiagram
     R->>R: Remove from room, broadcast RoomUpdate
 ```
 
+## Relay Concurrency Model
+
+### Threading
+- Multi-threaded Tokio runtime (all available cores, work-stealing scheduler)
+- Task-per-connection: each QUIC connection gets a dedicated `tokio::spawn`
+- Task-per-participant-per-room: each participant's media forwarding loop is independent
+
+### Shared State & Locking
+
+| Lock | Protected Data | Hold Duration | Contention |
+|------|---------------|---------------|------------|
+| `RoomManager` (Mutex) | Rooms, participants, quality tiers | ~1ms/packet | O(N) per room |
+| `PresenceRegistry` (Mutex) | Fingerprint registrations | ~1ms | Low (join/leave only) |
+| `SessionManager` (Mutex) | Active session tracking | ~1ms | Low |
+| `FederationManager.peer_links` (Mutex) | Peer connections | ~10ms during forward | Per-federation-packet |
+
+### Scaling Characteristics
+
+- **Many small rooms**: Scales well across all cores (rooms are independent)
+- **Large single room (100+ participants)**: Serialized by RoomManager lock
+- **Federation**: Per-peer tasks scale; `peer_links` lock held during send loop
+
+### Primary Bottleneck
+
+The RoomManager Mutex is acquired per-packet by every participant to get the fan-out peer list. Lock is released before I/O (sends happen outside lock), but packet processing is serialized through the lock within a room.
+
+Future optimization: per-room locks or lock-free participant lists via `DashMap`.
+
 ## Client Architecture
 
 ### Desktop Engine (Tauri)

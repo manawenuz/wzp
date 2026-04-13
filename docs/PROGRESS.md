@@ -290,3 +290,17 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - Logs initial state, poll count, and final state for HAL debugging
 - Does NOT fail on timeout — Rust-side stall detector remains as safety net
 - Targets Nothing Phone A059 intermittent silent calls on cold start
+
+### Opus6k Frame Starvation Fix (2026-04-13)
+- Root cause: partial reads from capture ring consumed samples that were discarded on retry
+- `audio_read_capture(&mut buf[..1920])` with only 960 available → read 960, loop retried from buf[0], overwriting
+- Added `wzp_native_audio_capture_available()` — check before reading (matches desktop pattern)
+- `frame_samples` made mutable and updated on adaptive profile switch
+- `buf` sized to max frame (1920) with `[..frame_samples]` slices throughout
+- Result: Opus6k frame rate restored from ~11/s to expected 25/s
+
+### Build Script Fixes (2026-04-13)
+- Stale APK cleanup: delete all APKs before build, prefer `*release*.apk` on upload
+- APK signing: added zipalign + apksigner pipeline to `build.sh` (was in `build-tauri-android.sh` only)
+- Keystore persistence: `$BASE_DIR/data/keystore/` cache synced into source tree before build
+- Fixes: 384MB debug APK uploaded instead of 25MB release; unsigned APK on alt server
