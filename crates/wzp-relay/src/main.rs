@@ -1016,6 +1016,13 @@ async fn main() -> anyhow::Result<()> {
 
                 info!(%addr, fingerprint = %client_fp, alias = ?client_alias, "signal client registered");
 
+                // Broadcast updated presence to all signal clients
+                {
+                    let hub = signal_hub.lock().await;
+                    let presence = hub.presence_list();
+                    hub.broadcast(&presence).await;
+                }
+
                 // Signal recv loop
                 loop {
                     match transport.recv_signal().await {
@@ -1560,6 +1567,9 @@ async fn main() -> anyhow::Result<()> {
                 {
                     let mut hub = signal_hub.lock().await;
                     hub.unregister(&client_fp);
+                    // Broadcast updated presence to remaining clients
+                    let presence_msg = hub.presence_list();
+                    hub.broadcast(&presence_msg).await;
                 }
                 {
                     let mut reg = presence.lock().await;

@@ -86,6 +86,26 @@ impl SignalHub {
     pub fn alias(&self, fp: &str) -> Option<&str> {
         self.clients.get(fp).and_then(|c| c.alias.as_deref())
     }
+
+    /// Build a PresenceList message with all online users.
+    pub fn presence_list(&self) -> SignalMessage {
+        let users: Vec<wzp_proto::PresenceUser> = self
+            .clients
+            .values()
+            .map(|c| wzp_proto::PresenceUser {
+                fingerprint: c.fingerprint.clone(),
+                alias: c.alias.clone(),
+            })
+            .collect();
+        SignalMessage::PresenceList { users }
+    }
+
+    /// Broadcast a message to ALL connected signal clients.
+    pub async fn broadcast(&self, msg: &SignalMessage) {
+        for client in self.clients.values() {
+            let _ = client.transport.send_signal(msg).await;
+        }
+    }
 }
 
 #[cfg(test)]

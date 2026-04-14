@@ -138,6 +138,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         | SignalMessage::UpgradeResponse { .. }
         | SignalMessage::UpgradeConfirm { .. }
         | SignalMessage::QualityCapability { .. } => CallSignalType::Offer, // quality negotiation
+        SignalMessage::PresenceList { .. } => CallSignalType::Offer, // lobby presence
         SignalMessage::QualityDirective { .. } => CallSignalType::Offer, // relay-initiated
     }
 }
