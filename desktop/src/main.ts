@@ -209,6 +209,7 @@ const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sDredDebug = document.getElementById("s-dred-debug") as HTMLInputElement;
 const sCallDebug = document.getElementById("s-call-debug") as HTMLInputElement;
 const sDirectOnly = document.getElementById("s-direct-only") as HTMLInputElement;
+const sBirthdayAttack = document.getElementById("s-birthday-attack") as HTMLInputElement;
 const sCallDebugSection = document.getElementById("s-call-debug-section") as HTMLDivElement;
 const sCallDebugLogEl = document.getElementById("s-call-debug-log") as HTMLDivElement;
 const sCallDebugClearBtn = document.getElementById("s-call-debug-clear") as HTMLButtonElement;
@@ -291,6 +292,9 @@ interface Settings {
   /// Debug: skip relay fallback on direct calls — fail if P2P
   /// doesn't connect. Useful for testing NAT traversal.
   directOnly: boolean;
+  /// Enable birthday attack for hard NAT traversal. Adds ~3s to
+  /// call setup when peer has symmetric NAT. Off by default.
+  birthdayAttack: boolean;
 }
 
 function loadSettings(): Settings {
@@ -306,6 +310,7 @@ function loadSettings(): Settings {
     dredDebugLogs: false,
     callDebugLogs: false,
     directOnly: false,
+    birthdayAttack: false,
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
@@ -1181,6 +1186,7 @@ function openSettings() {
   sDredDebug.checked = !!s.dredDebugLogs;
   sCallDebug.checked = !!s.callDebugLogs;
   sDirectOnly.checked = !!s.directOnly;
+  sBirthdayAttack.checked = !!s.birthdayAttack;
   // Show the debug-log panel only when the user has the flag on —
   // keeps the settings panel short in normal use.
   sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
@@ -1344,6 +1350,7 @@ settingsSave.addEventListener("click", () => {
   s.dredDebugLogs = sDredDebug.checked;
   s.callDebugLogs = sCallDebug.checked;
   s.directOnly = sDirectOnly.checked;
+  s.birthdayAttack = sBirthdayAttack.checked;
   saveSettingsObj(s);
   // Push the new flags to the Rust side immediately so the next
   // frame / call already honors them without waiting for a restart.
@@ -1700,6 +1707,7 @@ listen("signal-event", (event: any) => {
             peerLocalAddrs: data.peer_local_addrs ?? [],
             peerMappedAddr: data.peer_mapped_addr ?? null,
             directOnly: loadSettings().directOnly || false,
+            birthdayAttack: loadSettings().birthdayAttack || false,
           });
           showCallScreen();
         } catch (e: any) {

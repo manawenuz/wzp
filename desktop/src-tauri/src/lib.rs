@@ -337,8 +337,12 @@ async fn connect(
     // fails if direct P2P doesn't connect. Useful for testing NAT
     // traversal without the relay masking failures.
     direct_only: Option<bool>,
+    // Enable birthday attack for hard NAT traversal. Adds ~3s to
+    // call setup when peer has symmetric NAT.
+    birthday_attack: Option<bool>,
 ) -> Result<String, String> {
     let force_direct = direct_only.unwrap_or(false);
+    let enable_birthday = birthday_attack.unwrap_or(false);
     emit_call_debug(&app, "connect:start", serde_json::json!({
         "relay": relay,
         "room": room,
@@ -346,6 +350,7 @@ async fn connect(
         "peer_local_addrs": peer_local_addrs,
         "peer_mapped_addr": peer_mapped_addr,
         "direct_only": force_direct,
+        "birthday_attack": enable_birthday,
     }));
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
@@ -450,7 +455,7 @@ async fn connect(
                 // the race immediately — LAN/cone calls shouldn't wait.
                 let mut birthday_addrs: Vec<std::net::SocketAddr> = Vec::new();
                 {
-                    let peer_needs_birthday = {
+                    let peer_needs_birthday = enable_birthday && {
                         let sig = state.signal.lock().await;
                         sig.peer_hard_nat_probe.as_ref()
                             .map(|p| p.allocation != "port-preserving")
