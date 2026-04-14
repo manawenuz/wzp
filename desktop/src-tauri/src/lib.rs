@@ -333,13 +333,19 @@ async fn connect(
     // Phase 8 (Tailscale-inspired): peer's port-mapped external
     // address from NAT-PMP/PCP/UPnP, carried in CallSetup.
     peer_mapped_addr: Option<String>,
+    // Debug: when true, skip relay fallback entirely — the call
+    // fails if direct P2P doesn't connect. Useful for testing NAT
+    // traversal without the relay masking failures.
+    direct_only: Option<bool>,
 ) -> Result<String, String> {
+    let force_direct = direct_only.unwrap_or(false);
     emit_call_debug(&app, "connect:start", serde_json::json!({
         "relay": relay,
         "room": room,
         "peer_direct_addr": peer_direct_addr,
         "peer_local_addrs": peer_local_addrs,
         "peer_mapped_addr": peer_mapped_addr,
+        "direct_only": force_direct,
     }));
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
@@ -572,7 +578,20 @@ async fn connect(
                             "local_direct_ok": local_direct_ok,
                             "peer_direct_ok": peer_direct_ok,
                             "chosen_path": format!("{:?}", chosen_path),
+                            "direct_only": force_direct,
                         }));
+
+                        // direct_only mode: refuse relay fallback
+                        if force_direct && !use_direct {
+                            let reason = format!(
+                                "direct_only: P2P failed (local_ok={local_direct_ok}, peer_ok={peer_direct_ok})"
+                            );
+                            emit_call_debug(&app, "connect:direct_only_failed", serde_json::json!({
+                                "reason": reason,
+                                "candidate_diags": race_result.candidate_diags,
+                            }));
+                            return Err(reason);
+                        }
                         tracing::info!(
                             ?chosen_path,
                             use_direct,

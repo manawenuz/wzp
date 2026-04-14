@@ -208,6 +208,7 @@ const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
 const sDredDebug = document.getElementById("s-dred-debug") as HTMLInputElement;
 const sCallDebug = document.getElementById("s-call-debug") as HTMLInputElement;
+const sDirectOnly = document.getElementById("s-direct-only") as HTMLInputElement;
 const sCallDebugSection = document.getElementById("s-call-debug-section") as HTMLDivElement;
 const sCallDebugLogEl = document.getElementById("s-call-debug-log") as HTMLDivElement;
 const sCallDebugClearBtn = document.getElementById("s-call-debug-clear") as HTMLButtonElement;
@@ -287,6 +288,9 @@ interface Settings {
   /// renders into the rolling Debug Log panel in settings. Off in
   /// normal mode keeps the GUI quiet but logcat always has a copy.
   callDebugLogs: boolean;
+  /// Debug: skip relay fallback on direct calls — fail if P2P
+  /// doesn't connect. Useful for testing NAT traversal.
+  directOnly: boolean;
 }
 
 function loadSettings(): Settings {
@@ -301,6 +305,7 @@ function loadSettings(): Settings {
     osAec: true, agc: true, quality: "auto", recentRooms: [],
     dredDebugLogs: false,
     callDebugLogs: false,
+    directOnly: false,
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
@@ -1175,6 +1180,7 @@ function openSettings() {
   sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
   sDredDebug.checked = !!s.dredDebugLogs;
   sCallDebug.checked = !!s.callDebugLogs;
+  sDirectOnly.checked = !!s.directOnly;
   // Show the debug-log panel only when the user has the flag on —
   // keeps the settings panel short in normal use.
   sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
@@ -1337,6 +1343,7 @@ settingsSave.addEventListener("click", () => {
   s.quality = QUALITY_STEPS[parseInt(sQuality.value)] || "auto";
   s.dredDebugLogs = sDredDebug.checked;
   s.callDebugLogs = sCallDebug.checked;
+  s.directOnly = sDirectOnly.checked;
   saveSettingsObj(s);
   // Push the new flags to the Rust side immediately so the next
   // frame / call already honors them without waiting for a restart.
@@ -1692,6 +1699,7 @@ listen("signal-event", (event: any) => {
             peerDirectAddr: data.peer_direct_addr ?? null,
             peerLocalAddrs: data.peer_local_addrs ?? [],
             peerMappedAddr: data.peer_mapped_addr ?? null,
+            directOnly: loadSettings().directOnly || false,
           });
           showCallScreen();
         } catch (e: any) {
