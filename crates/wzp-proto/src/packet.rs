@@ -967,6 +967,19 @@ pub enum SignalMessage {
         external_ip: String,
     },
 
+    /// Birthday attack coordination — Acceptor tells Dialer which
+    /// ports it has open. The Dialer then sprays QUIC connects to
+    /// these ports (and optionally random ports) on the Acceptor's IP.
+    HardNatBirthdayStart {
+        call_id: String,
+        /// Number of sockets the Acceptor opened.
+        acceptor_port_count: u16,
+        /// External ports discovered via STUN (the "hit list").
+        acceptor_ports: Vec<u16>,
+        /// Acceptor's external IP.
+        external_ip: String,
+    },
+
     // ── Phase 4: cross-relay direct-call signaling ────────────────────
 
     /// Phase 4: relay-to-relay envelope for forwarding direct-call

@@ -34,6 +34,7 @@ pub mod featherchat;
 pub mod handshake;
 pub mod dual_path;
 pub mod metrics;
+pub mod birthday;
 pub mod ice_agent;
 pub mod netcheck;
 pub mod portmap;

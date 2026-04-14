@@ -1350,10 +1350,62 @@ fn do_register_signal(
                         let mut sig = signal_state.lock().await;
                         sig.peer_hard_nat_probe = Some(PeerHardNatInfo {
                             external_ip: ip,
-                            port_sequence,
-                            allocation,
+                            port_sequence: port_sequence.clone(),
+                            allocation: allocation.clone(),
                         });
                     }
+
+                    // If peer has a random/symmetric NAT and WE are the
+                    // Acceptor, open birthday attack ports and send
+                    // BirthdayStart so the peer can spray us.
+                    if allocation == "random" || allocation.starts_with("sequential") {
+                        let state_bg = signal_state.clone();
+                        let app_bg = app_clone.clone();
+                        let call_id_bg = call_id.clone();
+                        tokio::spawn(async move {
+                            let config = wzp_client::birthday::BirthdayConfig::default();
+                            let (result, _sockets) = wzp_client::birthday::open_acceptor_ports(&config).await;
+                            if result.succeeded > 0 {
+                                let ext_ports: Vec<u16> = result.ports.iter().map(|p| p.external_port).collect();
+                                let ext_ip = result.external_ip
+                                    .map(|ip| ip.to_string())
+                                    .unwrap_or_default();
+                                emit_call_debug(&app_bg, "birthday:acceptor_ports_opened", serde_json::json!({
+                                    "succeeded": result.succeeded,
+                                    "external_ip": ext_ip,
+                                    "ports": ext_ports,
+                                }));
+                                let sig = state_bg.lock().await;
+                                if let Some(ref t) = sig.transport {
+                                    let _ = t.send_signal(&wzp_proto::SignalMessage::HardNatBirthdayStart {
+                                        call_id: call_id_bg,
+                                        acceptor_port_count: result.succeeded,
+                                        acceptor_ports: ext_ports,
+                                        external_ip: ext_ip,
+                                    }).await;
+                                }
+                                // Keep _sockets alive for 10s so NAT mappings persist
+                                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            }
+                        });
+                    }
+                }
+                Ok(Some(SignalMessage::HardNatBirthdayStart { call_id, acceptor_port_count, acceptor_ports, external_ip })) => {
+                    tracing::info!(
+                        %call_id,
+                        acceptor_port_count,
+                        port_count = acceptor_ports.len(),
+                        %external_ip,
+                        "signal: HardNatBirthdayStart from peer"
+                    );
+                    emit_call_debug(&app_clone, "recv:HardNatBirthdayStart", serde_json::json!({
+                        "call_id": call_id,
+                        "acceptor_port_count": acceptor_port_count,
+                        "acceptor_ports": acceptor_ports,
+                        "external_ip": external_ip,
+                    }));
+                    // TODO: trigger dialer spray when birthday attack
+                    // is integrated into the race waterfall
                 }
                 Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
                     // "STUN for QUIC" response — the relay told us our

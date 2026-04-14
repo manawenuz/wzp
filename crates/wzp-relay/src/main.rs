@@ -1443,8 +1443,9 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
 
-                                // Hard NAT: forward HardNatProbe to call peer
-                                // (same forwarding pattern as CandidateUpdate).
+                                // Hard NAT: forward HardNatProbe + HardNatBirthdayStart
+                                // to call peer (same pattern as CandidateUpdate).
+                                SignalMessage::HardNatBirthdayStart { ref call_id, .. } |
                                 SignalMessage::HardNatProbe { ref call_id, .. } => {
                                     let (peer_fp, peer_relay_fp) = {
                                         let reg = call_registry.lock().await;
