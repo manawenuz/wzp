@@ -852,6 +852,12 @@ function showCallScreen() {
   connectScreen.classList.add("hidden");
   callScreen.classList.remove("hidden");
 
+  // Clear stale call-debug events from previous call so the P2P
+  // badge doesn't pick up old path_negotiated data. Cleared here
+  // (start of new call) rather than showConnectScreen (end of call)
+  // so the user can still read logs after hanging up.
+  callDebugBuffer.length = 0;
+
   // Direct call → phone-style layout; room call → group layout.
   if (directCallPeer) {
     const fp = directCallPeer.fingerprint || "";
@@ -886,9 +892,6 @@ function showConnectScreen() {
   connectBtn.textContent = "Connect";
   levelBar.style.width = "0%";
   directCallPeer = null;
-  // Clear stale call-debug events so the next call's P2P indicator
-  // doesn't pick up a path_negotiated from a previous call.
-  callDebugBuffer.length = 0;
   // Clear the media-degraded banner if present
   const banner = document.getElementById("media-degraded-banner");
   if (banner) banner.remove();
