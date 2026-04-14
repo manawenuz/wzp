@@ -435,6 +435,20 @@ async function pollStatus() {
 listen("signal-event", (event: any) => {
   const data = event.payload;
   switch (data.type) {
+    case "presence_list":
+      // Relay sent updated user list
+      lobbyUsers.clear();
+      for (const u of data.users || []) {
+        if (u.fingerprint === myFingerprint) continue; // don't show self
+        lobbyUsers.set(u.fingerprint, {
+          fingerprint: u.fingerprint,
+          alias: u.alias || null,
+          inVoice: false,
+          speaking: false,
+        });
+      }
+      renderLobbyUsers();
+      break;
     case "ringing":
       // We placed a call, it's ringing
       break;
