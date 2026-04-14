@@ -1215,8 +1215,11 @@ fn do_register_signal(
     let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
     emit_call_debug(&app, "register_signal:quic_connected", serde_json::json!({ "relay": relay }));
 
+    // Send alias from seed-derived adjective+noun so other
+    // users see a friendly name in the lobby.
+    let alias = derive_alias(&seed);
     transport.send_signal(&SignalMessage::RegisterPresence {
-        identity_pub, signature: vec![], alias: None,
+        identity_pub, signature: vec![], alias: Some(alias),
     }).await.map_err(|e| format!("{e}"))?;
     emit_call_debug(&app, "register_signal:register_presence_sent", serde_json::json!({}));
 

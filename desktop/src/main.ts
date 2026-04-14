@@ -359,16 +359,15 @@ vdSpkBtn.addEventListener("click", async () => {
 interface CallStatusI {
   active: boolean;
   mic_muted: boolean;
-  speaker_muted: boolean;
-  send_rms: number;
-  recv_rms: number;
-  codec_tx: string;
-  codec_rx: string;
-  fec_ratio: number;
-  send_packets: number;
-  recv_packets: number;
+  spk_muted: boolean;
+  participants: any[];
+  encode_fps: number;
+  recv_fps: number;
+  audio_level: number;
   call_duration_secs: number;
   fingerprint: string;
+  tx_codec: string;
+  rx_codec: string;
 }
 
 async function pollStatus() {
@@ -382,12 +381,12 @@ async function pollStatus() {
 
     // Update drawer controls
     vdMicBtn.classList.toggle("muted", st.mic_muted);
-    vdMicIcon.textContent = st.mic_muted ? "&#x1F507;" : "&#x1F3A4;";
-    vdSpkBtn.classList.toggle("muted", st.speaker_muted);
-    vdSpkIcon.textContent = st.speaker_muted ? "&#x1F507;" : "&#x1F50A;";
+    vdMicIcon.textContent = st.mic_muted ? "Muted" : "Mic";
+    vdSpkBtn.classList.toggle("muted", st.spk_muted);
+    vdSpkIcon.textContent = st.spk_muted ? "Off" : "Spk";
 
     // Level meter
-    const pct = Math.min(100, (st.send_rms / 10000) * 100);
+    const pct = Math.min(100, (st.audio_level / 10000) * 100);
     vdLevelBar.style.width = `${pct}%`;
 
     // Duration
@@ -417,7 +416,7 @@ async function pollStatus() {
     }
 
     // Stats
-    vdStats.textContent = `TX: ${st.codec_tx} ${st.send_packets}pkt | RX: ${st.codec_rx} ${st.recv_packets}pkt | FEC: ${(st.fec_ratio * 100).toFixed(0)}%`;
+    vdStats.textContent = `TX: ${st.tx_codec} ${st.encode_fps}fps | RX: ${st.rx_codec} ${st.recv_fps}fps`;
   } catch {}
 }
 
@@ -718,13 +717,13 @@ async function autoConnect() {
     lobbyDot.style.background = "var(--green)";
     lobbyRelayLabel.textContent = `${relay.name} — connected`;
 
-    // Get identity
-    const fp: string = await invoke("get_identity");
-    if (fp) {
-      myFingerprint = fp;
-      lobbyFp.textContent = fp;
+    // Get identity + alias
+    const appInfo: any = await invoke("get_app_info");
+    if (appInfo?.fingerprint) {
+      myFingerprint = appInfo.fingerprint;
+      lobbyFp.textContent = appInfo.alias || appInfo.fingerprint;
       lobbyIdenticon.innerHTML = "";
-      lobbyIdenticon.appendChild(createIdenticonEl(fp, 20, true));
+      lobbyIdenticon.appendChild(createIdenticonEl(appInfo.fingerprint, 20, true));
     }
   } catch (e: any) {
     lobbyDot.style.background = "var(--red)";
