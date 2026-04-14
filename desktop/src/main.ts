@@ -886,6 +886,9 @@ function showConnectScreen() {
   connectBtn.textContent = "Connect";
   levelBar.style.width = "0%";
   directCallPeer = null;
+  // Clear stale call-debug events so the next call's P2P indicator
+  // doesn't pick up a path_negotiated from a previous call.
+  callDebugBuffer.length = 0;
   // Clear the media-degraded banner if present
   const banner = document.getElementById("media-degraded-banner");
   if (banner) banner.remove();
@@ -1052,8 +1055,9 @@ async function pollStatus() {
     if (directCallPeer) {
       // Check the debug buffer for the race result to label
       // the connection type (P2P Direct vs Relay).
-      const pathNeg = callDebugBuffer.find((e) => e.step === "connect:path_negotiated");
-      const engineOk = callDebugBuffer.find((e) => e.step === "connect:call_engine_started");
+      // findLast: use the MOST RECENT event in case buffer has leftovers
+      const pathNeg = callDebugBuffer.findLast((e) => e.step === "connect:path_negotiated");
+      const engineOk = callDebugBuffer.findLast((e) => e.step === "connect:call_engine_started");
       if (engineOk) {
         if (pathNeg?.details?.use_direct === true) {
           dcBadge.textContent = "P2P Direct";
