@@ -54,6 +54,8 @@ pub struct NetcheckReport {
     pub duration_ms: u32,
     /// Individual STUN probe results.
     pub stun_probes: Vec<reflect::NatProbeResult>,
+    /// NAT port allocation pattern (sequential vs random).
+    pub port_allocation: Option<stun::PortAllocation>,
 }
 
 /// Latency to a specific relay.
@@ -108,9 +110,10 @@ pub async fn run_netcheck(config: &NetcheckConfig) -> NetcheckReport {
     let portmap_fut = probe_portmap(config.test_portmap, config.local_port);
     let gateway_fut = portmap::default_gateway();
     let ipv6_fut = test_ipv6(config.test_ipv6, config.timeout);
+    let port_alloc_fut = stun::detect_port_allocation(&config.stun_config);
 
-    let (stun_probes, relay_latencies, portmap_result, gateway_result, ipv6_reachable) =
-        tokio::join!(stun_fut, relay_fut, portmap_fut, gateway_result_fut(gateway_fut), ipv6_fut);
+    let (stun_probes, relay_latencies, portmap_result, gateway_result, ipv6_reachable, port_alloc_result) =
+        tokio::join!(stun_fut, relay_fut, portmap_fut, gateway_result_fut(gateway_fut), ipv6_fut, port_alloc_fut);
 
     // Classify NAT from STUN probes.
     let (nat_type, consensus_addr) = reflect::classify_nat(&stun_probes);
@@ -168,6 +171,7 @@ pub async fn run_netcheck(config: &NetcheckConfig) -> NetcheckReport {
         gateway,
         duration_ms: start.elapsed().as_millis() as u32,
         stun_probes,
+        port_allocation: Some(port_alloc_result.allocation),
     }
 }
 
@@ -293,6 +297,12 @@ pub fn format_report(report: &NetcheckReport) -> String {
         report.gateway.as_deref().unwrap_or("(unknown)")
     ));
 
+    if let Some(ref alloc) = report.port_allocation {
+        out.push_str(&format!(
+            "Port Alloc:     {alloc}\n"
+        ));
+    }
+
     out.push_str(&format!("\n--- Port Mapping ---\n"));
     out.push_str(&format!(
         "NAT-PMP: {}  PCP: {}  UPnP: {}\n",
@@ -372,6 +382,7 @@ mod tests {
             gateway: Some("192.168.1.1".into()),
             duration_ms: 1500,
             stun_probes: vec![],
+            port_allocation: None,
         };
 
         let text = format_report(&report);
@@ -399,6 +410,7 @@ mod tests {
             gateway: Some("192.168.1.1".into()),
             duration_ms: 500,
             stun_probes: vec![],
+            port_allocation: Some(stun::PortAllocation::Sequential { delta: 1 }),
         };
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("Cone"));
@@ -443,6 +455,7 @@ mod tests {
             gateway: None,
             duration_ms: 100,
             stun_probes: vec![],
+            port_allocation: None,
         };
         let text = format_report(&report);
         assert!(text.contains("Unknown"));
@@ -487,6 +500,7 @@ mod tests {
                 latency_ms: Some(20),
                 error: None,
             }],
+            port_allocation: Some(stun::PortAllocation::Random),
         };
         let text = format_report(&report);
         assert!(text.contains("SymmetricPort"));

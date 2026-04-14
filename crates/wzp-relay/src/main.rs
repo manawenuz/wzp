@@ -1443,6 +1443,37 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
 
+                                // Hard NAT: forward HardNatProbe to call peer
+                                // (same forwarding pattern as CandidateUpdate).
+                                SignalMessage::HardNatProbe { ref call_id, .. } => {
+                                    let (peer_fp, peer_relay_fp) = {
+                                        let reg = call_registry.lock().await;
+                                        match reg.get(call_id) {
+                                            Some(c) => (
+                                                reg.peer_fingerprint(call_id, &client_fp)
+                                                    .map(|s| s.to_string()),
+                                                c.peer_relay_fp.clone(),
+                                            ),
+                                            None => (None, None),
+                                        }
+                                    };
+
+                                    if let Some(fp) = peer_fp {
+                                        if let Some(ref origin_fp) = peer_relay_fp {
+                                            if let Some(ref fm) = federation_mgr {
+                                                let forward = SignalMessage::FederatedSignalForward {
+                                                    inner: Box::new(msg.clone()),
+                                                    origin_relay_fp: tls_fp.clone(),
+                                                };
+                                                let _ = fm.send_signal_to_peer(origin_fp, &forward).await;
+                                            }
+                                        } else {
+                                            let hub = signal_hub.lock().await;
+                                            let _ = hub.send_to(&fp, &msg).await;
+                                        }
+                                    }
+                                }
+
                                 SignalMessage::Ping { timestamp_ms } => {
                                     let _ = transport.send_signal(&SignalMessage::Pong { timestamp_ms }).await;
                                 }

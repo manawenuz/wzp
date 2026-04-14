@@ -541,6 +541,213 @@ pub async fn probe_stun_servers(
     results
 }
 
+// ── Port allocation pattern detection ──────────────────────────────
+
+/// NAT port allocation pattern, detected by probing multiple STUN
+/// servers from a single socket and analyzing the observed external
+/// port sequence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum PortAllocation {
+    /// Same external port for all destinations — cone-like NAT.
+    /// Standard hole-punching works; no hard NAT techniques needed.
+    PortPreserving,
+    /// Ports increment by a consistent delta per new flow.
+    /// Port prediction is viable: next_port = last_port + delta.
+    Sequential { delta: i16 },
+    /// No discernible pattern — truly random allocation.
+    /// Only birthday attack or relay can traverse this.
+    Random,
+    /// Not enough data to classify (< 3 successful probes).
+    Unknown,
+}
+
+impl std::fmt::Display for PortAllocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PortPreserving => write!(f, "port-preserving"),
+            Self::Sequential { delta } => write!(f, "sequential(delta={delta})"),
+            Self::Random => write!(f, "random"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Result of port allocation analysis.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortAllocationResult {
+    /// Detected allocation pattern.
+    pub allocation: PortAllocation,
+    /// Observed external ports (one per successful STUN probe),
+    /// in probe order.
+    pub observed_ports: Vec<u16>,
+    /// External IP (consensus from probes, if available).
+    pub external_ip: Option<IpAddr>,
+}
+
+/// Detect the NAT's port allocation pattern by sending STUN probes
+/// to multiple servers from a **single socket**.
+///
+/// Unlike `probe_stun_servers` (which creates one socket per server
+/// for NAT type classification), this uses one socket so we see how
+/// the NAT maps the SAME source port to different destinations.
+///
+/// - Same external port for all → `PortPreserving` (cone-like)
+/// - Consistent delta → `Sequential { delta }`
+/// - No pattern → `Random`
+///
+/// Requires at least 3 servers for reliable classification.
+pub async fn detect_port_allocation(
+    config: &StunConfig,
+) -> PortAllocationResult {
+    if config.servers.len() < 2 {
+        return PortAllocationResult {
+            allocation: PortAllocation::Unknown,
+            observed_ports: vec![],
+            external_ip: None,
+        };
+    }
+
+    // Single socket — all probes share the same source port.
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => {
+            return PortAllocationResult {
+                allocation: PortAllocation::Unknown,
+                observed_ports: vec![],
+                external_ip: None,
+            };
+        }
+    };
+
+    // Probe servers SEQUENTIALLY (not parallel) so the NAT sees
+    // distinct flows in order. Parallel probes could arrive out-of-
+    // order and confuse sequential delta detection.
+    let mut observed: Vec<SocketAddr> = Vec::new();
+    for server_str in &config.servers {
+        let resolved = match resolve_stun_server(server_str).await {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        match stun_reflect(&socket, resolved, config.timeout).await {
+            Ok(addr) => observed.push(addr),
+            Err(_) => continue,
+        }
+    }
+
+    let ports: Vec<u16> = observed.iter().map(|a| a.port()).collect();
+    let external_ip = observed.first().map(|a| a.ip());
+    let allocation = classify_port_allocation(&ports);
+
+    tracing::info!(
+        ?allocation,
+        ?ports,
+        external_ip = ?external_ip,
+        "stun: port allocation detected"
+    );
+
+    PortAllocationResult {
+        allocation,
+        observed_ports: ports,
+        external_ip,
+    }
+}
+
+/// Pure-function classifier — split out for unit testing.
+pub fn classify_port_allocation(ports: &[u16]) -> PortAllocation {
+    if ports.len() < 2 {
+        return PortAllocation::Unknown;
+    }
+
+    // All same port?
+    if ports.iter().all(|&p| p == ports[0]) {
+        return PortAllocation::PortPreserving;
+    }
+
+    if ports.len() < 3 {
+        // With only 2 different ports we can't distinguish
+        // sequential from random reliably.
+        return PortAllocation::Unknown;
+    }
+
+    // Compute deltas between consecutive ports.
+    let deltas: Vec<i16> = ports
+        .windows(2)
+        .map(|w| w[1] as i32 - w[0] as i32)
+        .map(|d| {
+            // Handle wraparound: if delta is huge negative (e.g.,
+            // 65535 -> 2 = -65533), treat as +3. And vice versa.
+            if d > 32768 {
+                (d - 65536) as i16
+            } else if d < -32768 {
+                (d + 65536) as i16
+            } else {
+                d as i16
+            }
+        })
+        .collect();
+
+    // Check if all deltas are the same (sequential pattern).
+    let first_delta = deltas[0];
+    if first_delta == 0 {
+        // All same port was already handled above, this means
+        // mixed same/different — not sequential.
+        return PortAllocation::Random;
+    }
+
+    // Allow small jitter: if all deltas are within ±1 of each other,
+    // consider it sequential with the median delta.
+    let all_close = deltas.iter().all(|&d| (d - first_delta).unsigned_abs() <= 1);
+    if all_close {
+        // Use the most common delta (mode).
+        let median_delta = first_delta;
+        return PortAllocation::Sequential { delta: median_delta };
+    }
+
+    // Check for consistent delta with occasional skip (some NATs
+    // skip a port when another flow grabs it concurrently).
+    // If most deltas (>= 60%) agree on the same value, call it
+    // sequential.
+    let mut delta_counts = std::collections::HashMap::new();
+    for &d in &deltas {
+        *delta_counts.entry(d).or_insert(0u32) += 1;
+    }
+    if let Some((&most_common, &count)) = delta_counts.iter().max_by_key(|(_, v)| *v) {
+        let threshold = (deltas.len() as f64 * 0.6).ceil() as u32;
+        if count >= threshold && most_common != 0 {
+            return PortAllocation::Sequential { delta: most_common };
+        }
+    }
+
+    PortAllocation::Random
+}
+
+/// Predict the next N external ports for a sequential NAT.
+///
+/// Given the last observed port and the delta, returns a range of
+/// predicted ports centered around the most likely next value.
+/// The `offset` parameter accounts for additional flows that may
+/// open between the probe and the actual connection attempt.
+pub fn predict_ports(
+    last_port: u16,
+    delta: i16,
+    offset: u16,
+    spread: u16,
+) -> Vec<u16> {
+    let base = last_port as i32 + (delta as i32 * (offset as i32 + 1));
+    let mut ports = Vec::with_capacity((spread * 2 + 1) as usize);
+    for i in -(spread as i32)..=(spread as i32) {
+        let p = base + (i * delta as i32);
+        // Wrap to valid port range (1..=65535)
+        let p = ((p % 65536) + 65536) % 65536;
+        if p > 0 && p <= 65535 {
+            ports.push(p as u16);
+        }
+    }
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1030,6 +1237,165 @@ mod tests {
         };
         let err = discover_reflexive(&cfg).await.unwrap_err();
         assert!(matches!(err, StunError::Io(_)));
+    }
+
+    // ── Port allocation classification tests ────────────────────
+
+    #[test]
+    fn classify_port_preserving() {
+        let ports = vec![4433, 4433, 4433, 4433, 4433];
+        assert_eq!(classify_port_allocation(&ports), PortAllocation::PortPreserving);
+    }
+
+    #[test]
+    fn classify_sequential_delta_1() {
+        let ports = vec![40001, 40002, 40003, 40004, 40005];
+        assert_eq!(
+            classify_port_allocation(&ports),
+            PortAllocation::Sequential { delta: 1 }
+        );
+    }
+
+    #[test]
+    fn classify_sequential_delta_2() {
+        let ports = vec![50000, 50002, 50004, 50006];
+        assert_eq!(
+            classify_port_allocation(&ports),
+            PortAllocation::Sequential { delta: 2 }
+        );
+    }
+
+    #[test]
+    fn classify_sequential_negative_delta() {
+        // Some NATs decrement
+        let ports = vec![50000, 49999, 49998, 49997];
+        assert_eq!(
+            classify_port_allocation(&ports),
+            PortAllocation::Sequential { delta: -1 }
+        );
+    }
+
+    #[test]
+    fn classify_random() {
+        let ports = vec![40001, 52847, 19432, 61203, 8847];
+        assert_eq!(classify_port_allocation(&ports), PortAllocation::Random);
+    }
+
+    #[test]
+    fn classify_too_few_ports() {
+        assert_eq!(classify_port_allocation(&[]), PortAllocation::Unknown);
+        assert_eq!(classify_port_allocation(&[4433]), PortAllocation::Unknown);
+    }
+
+    #[test]
+    fn classify_two_same_is_preserving() {
+        let ports = vec![4433, 4433];
+        assert_eq!(classify_port_allocation(&ports), PortAllocation::PortPreserving);
+    }
+
+    #[test]
+    fn classify_two_different_is_unknown() {
+        // Can't distinguish sequential from random with only 2 points
+        let ports = vec![4433, 4434];
+        assert_eq!(classify_port_allocation(&ports), PortAllocation::Unknown);
+    }
+
+    #[test]
+    fn classify_sequential_with_jitter() {
+        // Delta is mostly 1 but one jump of 2 (concurrent flow grabbed a port)
+        let ports = vec![40001, 40002, 40004, 40005, 40006];
+        // Deltas: [1, 2, 1, 1] — 3 out of 4 are delta=1, above 60% threshold
+        assert_eq!(
+            classify_port_allocation(&ports),
+            PortAllocation::Sequential { delta: 1 }
+        );
+    }
+
+    #[test]
+    fn classify_sequential_wraparound() {
+        // Port wraps from 65534 -> 65535 -> 1 -> 2
+        let ports = vec![65534, 65535, 1, 2];
+        // Deltas: [1, -65534(→+2), 1] — wraparound handling
+        let alloc = classify_port_allocation(&ports);
+        // Should detect as sequential with delta ~1
+        assert!(
+            matches!(alloc, PortAllocation::Sequential { delta: 1 }),
+            "wraparound should be sequential, got: {alloc:?}"
+        );
+    }
+
+    #[test]
+    fn predict_ports_sequential() {
+        // Last port 40005, delta 1, offset 0, spread 2
+        let predicted = predict_ports(40005, 1, 0, 2);
+        assert!(predicted.contains(&40006)); // most likely next
+        assert!(predicted.contains(&40004)); // spread -2
+        assert!(predicted.contains(&40008)); // spread +2
+    }
+
+    #[test]
+    fn predict_ports_delta_2() {
+        let predicted = predict_ports(50000, 2, 0, 1);
+        assert!(predicted.contains(&50002)); // next
+        assert!(predicted.contains(&50000)); // spread -1*delta
+        assert!(predicted.contains(&50004)); // spread +1*delta
+    }
+
+    #[test]
+    fn predict_ports_with_offset() {
+        // offset=2 means 2 extra flows will open before our dial,
+        // so prediction jumps further: 40005 + 1*(2+1) = 40008
+        let predicted = predict_ports(40005, 1, 2, 1);
+        assert!(predicted.contains(&40008));
+    }
+
+    #[test]
+    fn predict_ports_wraparound() {
+        let predicted = predict_ports(65534, 1, 0, 2);
+        // Should handle the u16 wraparound gracefully
+        assert!(predicted.contains(&65535));
+        assert!(!predicted.is_empty());
+    }
+
+    #[test]
+    fn port_allocation_display() {
+        assert_eq!(PortAllocation::PortPreserving.to_string(), "port-preserving");
+        assert_eq!(PortAllocation::Sequential { delta: 1 }.to_string(), "sequential(delta=1)");
+        assert_eq!(PortAllocation::Random.to_string(), "random");
+        assert_eq!(PortAllocation::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn port_allocation_serde() {
+        let alloc = PortAllocation::Sequential { delta: 3 };
+        let json = serde_json::to_string(&alloc).unwrap();
+        assert!(json.contains("Sequential"));
+        assert!(json.contains("3"));
+    }
+
+    #[test]
+    fn port_allocation_result_serde() {
+        let result = PortAllocationResult {
+            allocation: PortAllocation::Sequential { delta: 1 },
+            observed_ports: vec![40001, 40002, 40003],
+            external_ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("Sequential"));
+        assert!(json.contains("40001"));
+        assert!(json.contains("203.0.113.5"));
+    }
+
+    /// Integration test: detect port allocation on real network.
+    #[tokio::test]
+    #[ignore]
+    async fn integration_detect_port_allocation() {
+        let config = StunConfig::default();
+        let result = detect_port_allocation(&config).await;
+        println!("Port allocation: {:?}", result.allocation);
+        println!("Observed ports: {:?}", result.observed_ports);
+        println!("External IP: {:?}", result.external_ip);
+        assert!(!result.observed_ports.is_empty());
     }
 
     /// Integration test: actually query stun.l.google.com.

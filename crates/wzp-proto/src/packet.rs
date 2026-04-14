@@ -947,6 +947,26 @@ pub enum SignalMessage {
         generation: u32,
     },
 
+    // ── Hard NAT traversal (port prediction) ──────────────────────
+
+    /// Hard NAT probe coordination — exchanged when both peers
+    /// detect symmetric NAT. Carries the port allocation pattern
+    /// and recent port sequence so the peer can predict which port
+    /// to dial.
+    HardNatProbe {
+        call_id: String,
+        /// Last observed external ports (most recent first).
+        /// Typically 3-5 entries from sequential STUN probes.
+        port_sequence: Vec<u16>,
+        /// Detected allocation pattern as string:
+        /// "sequential:N" (N=delta), "random", "preserving"
+        allocation: String,
+        /// Probe timestamp (ms since epoch) for synchronization.
+        probe_time_ms: u64,
+        /// External IP from STUN.
+        external_ip: String,
+    },
+
     // ── Phase 4: cross-relay direct-call signaling ────────────────────
 
     /// Phase 4: relay-to-relay envelope for forwarding direct-call
