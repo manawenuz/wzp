@@ -67,23 +67,23 @@ const incomingCallerName = document.getElementById("incoming-caller-name")!;
 const incomingIdenticon = document.getElementById("incoming-identicon")!;
 const acceptCallBtn = document.getElementById("accept-call-btn")!;
 const rejectCallBtn = document.getElementById("reject-call-btn")!;
-const backToLobbyBtn = document.getElementById("back-to-lobby-btn")!;
-const roomName = document.getElementById("room-name")!;
-const callTimer = document.getElementById("call-timer")!;
-const callStatus = document.getElementById("call-status")!;
-const levelBar = document.getElementById("level-bar")!;
-const participantsDiv = document.getElementById("participants")!;
-const directCallView = document.getElementById("direct-call-view")!;
-const dcIdenticon = document.getElementById("dc-identicon")!;
-const dcName = document.getElementById("dc-name")!;
-const dcFp = document.getElementById("dc-fp")!;
-const dcBadge = document.getElementById("dc-badge")!;
-const micBtn = document.getElementById("mic-btn")!;
-const micIcon = document.getElementById("mic-icon")!;
-const spkBtn = document.getElementById("spk-btn")!;
-const spkIcon = document.getElementById("spk-icon")!;
-const hangupBtn = document.getElementById("hangup-btn")!;
-const statsDiv = document.getElementById("stats")!;
+// Voice drawer elements
+const voiceDrawer = document.getElementById("voice-drawer")!;
+const vdRoom = document.getElementById("vd-room")!;
+const vdTimer = document.getElementById("vd-timer")!;
+const vdStatus = document.getElementById("vd-status")!;
+const vdBadge = document.getElementById("vd-badge")!;
+const vdLevelBar = document.getElementById("vd-level-bar")!;
+const vdMicBtn = document.getElementById("vd-mic-btn")!;
+const vdMicIcon = document.getElementById("vd-mic-icon")!;
+const vdSpkBtn = document.getElementById("vd-spk-btn")!;
+const vdSpkIcon = document.getElementById("vd-spk-icon")!;
+const vdEndBtn = document.getElementById("vd-end-btn")!;
+const vdDirectInfo = document.getElementById("vd-direct-info")!;
+const vdDcIdenticon = document.getElementById("vd-dc-identicon")!;
+const vdDcName = document.getElementById("vd-dc-name")!;
+const vdDcBadge = document.getElementById("vd-dc-badge")!;
+const vdStats = document.getElementById("vd-stats")!;
 const ctxMenu = document.getElementById("user-context-menu")!;
 const ctxIdenticon = document.getElementById("ctx-identicon")!;
 const ctxName = document.getElementById("ctx-name")!;
@@ -287,97 +287,71 @@ ctxCallBtn.addEventListener("click", async () => {
   }
 });
 
-// ── Voice join/leave ──────────────────────────────────────────────
+// ── Voice join/leave (drawer-based) ───────────────────────────────
 joinVoiceBtn.addEventListener("click", async () => {
-  if (inVoice) {
-    // Leave voice
-    try { await invoke("disconnect"); } catch {}
-    inVoice = false;
-    joinVoiceBtn.innerHTML = '<span class="fab-icon">&#x1F3A7;</span><span class="fab-label">Join Voice</span>';
-    joinVoiceBtn.classList.remove("active");
-    if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
-    showLobby();
-  } else {
-    // Join voice
-    const relay = getRelay();
-    const s = loadSettings();
-    if (!relay) return;
-    try {
-      await invoke("connect", {
-        relay: relay.address,
-        room: s.room || "general",
-        alias: s.alias || "",
-        osAec: s.osAec,
-        quality: s.quality || "auto",
-      });
-      inVoice = true;
-      joinVoiceBtn.innerHTML = '<span class="fab-icon">&#x1F3A7;</span><span class="fab-label">Leave Voice</span>';
-      joinVoiceBtn.classList.add("active");
-      showCallScreen(false);
-    } catch (e: any) {
-      console.error("connect failed:", e);
-    }
+  if (inVoice) return;
+  const relay = getRelay();
+  const s = loadSettings();
+  if (!relay) return;
+  try {
+    await invoke("connect", {
+      relay: relay.address,
+      room: s.room || "general",
+      alias: s.alias || "",
+      osAec: s.osAec,
+      quality: s.quality || "auto",
+    });
+    enterVoice(false);
+  } catch (e: any) {
+    console.error("connect failed:", e);
   }
 });
 
-// ── Screen transitions ────────────────────────────────────────────
-function showLobby() {
-  callScreen.classList.add("hidden");
-  lobbyScreen.classList.remove("hidden");
-  directCallPeer = null;
-  levelBar.style.width = "0%";
-}
-
-function showCallScreen(isDirect: boolean) {
-  lobbyScreen.classList.add("hidden");
-  callScreen.classList.remove("hidden");
+function enterVoice(isDirect: boolean) {
+  inVoice = true;
+  const s = loadSettings();
+  joinVoiceBtn.classList.add("hidden");
+  voiceDrawer.classList.remove("hidden");
+  vdRoom.textContent = isDirect && directCallPeer
+    ? (directCallPeer.alias || directCallPeer.fingerprint.substring(0, 16))
+    : (s.room || "general");
+  vdTimer.textContent = "0:00";
+  vdBadge.classList.add("hidden");
+  vdBadge.textContent = "";
 
   if (isDirect && directCallPeer) {
-    roomName.textContent = directCallPeer.alias || directCallPeer.fingerprint.substring(0, 16);
-    dcName.textContent = directCallPeer.alias || "Unknown";
-    dcFp.textContent = directCallPeer.fingerprint;
-    dcIdenticon.innerHTML = "";
-    dcIdenticon.appendChild(createIdenticonEl(directCallPeer.fingerprint, 96, true));
-    dcBadge.textContent = "Connecting...";
-    dcBadge.className = "dc-badge connecting";
-    directCallView.classList.remove("hidden");
-    participantsDiv.classList.add("hidden");
+    vdDirectInfo.classList.remove("hidden");
+    vdDcIdenticon.innerHTML = "";
+    vdDcIdenticon.appendChild(createIdenticonEl(directCallPeer.fingerprint, 32, true));
+    vdDcName.textContent = directCallPeer.alias || directCallPeer.fingerprint.substring(0, 16);
+    vdDcBadge.textContent = "Connecting...";
+    vdDcBadge.className = "vd-dc-badge connecting";
   } else {
-    const s = loadSettings();
-    roomName.textContent = s.room || "general";
-    directCallView.classList.add("hidden");
-    participantsDiv.classList.remove("hidden");
+    vdDirectInfo.classList.add("hidden");
   }
-  callStatus.className = "status-dot";
+
   statusInterval = window.setInterval(pollStatus, 250);
 }
 
-// Back button from call to lobby
-backToLobbyBtn.addEventListener("click", async () => {
-  try { await invoke("disconnect"); } catch {}
+function leaveVoice() {
   inVoice = false;
-  joinVoiceBtn.innerHTML = '<span class="fab-icon">&#x1F3A7;</span><span class="fab-label">Join Voice</span>';
-  joinVoiceBtn.classList.remove("active");
+  directCallPeer = null;
+  voiceDrawer.classList.add("hidden");
+  joinVoiceBtn.classList.remove("hidden");
+  vdLevelBar.style.width = "0%";
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
-  showLobby();
-});
+}
 
-// Hangup
-hangupBtn.addEventListener("click", async () => {
+// Drawer controls
+vdEndBtn.addEventListener("click", async () => {
   try { await invoke("hangup_call"); } catch {}
   try { await invoke("disconnect"); } catch {}
-  inVoice = false;
-  joinVoiceBtn.innerHTML = '<span class="fab-icon">&#x1F3A7;</span><span class="fab-label">Join Voice</span>';
-  joinVoiceBtn.classList.remove("active");
-  if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
-  showLobby();
+  leaveVoice();
 });
-
-// Mic/speaker toggles
-micBtn.addEventListener("click", async () => {
+vdMicBtn.addEventListener("click", async () => {
   try { await invoke("toggle_mic"); } catch {}
 });
-spkBtn.addEventListener("click", async () => {
+vdSpkBtn.addEventListener("click", async () => {
   try { await invoke("toggle_speaker"); } catch {}
 });
 
@@ -401,22 +375,25 @@ async function pollStatus() {
   try {
     const st: CallStatusI = await invoke("get_status");
     if (!st.active) {
-      showLobby();
+      leaveVoice();
       return;
     }
     if (st.fingerprint) myFingerprint = st.fingerprint;
-    micBtn.classList.toggle("muted", st.mic_muted);
-    micIcon.textContent = st.mic_muted ? "Mic Off" : "Mic";
-    spkBtn.classList.toggle("muted", st.speaker_muted);
-    spkIcon.textContent = st.speaker_muted ? "Spk Off" : "Spk";
 
+    // Update drawer controls
+    vdMicBtn.classList.toggle("muted", st.mic_muted);
+    vdMicIcon.textContent = st.mic_muted ? "&#x1F507;" : "&#x1F3A4;";
+    vdSpkBtn.classList.toggle("muted", st.speaker_muted);
+    vdSpkIcon.textContent = st.speaker_muted ? "&#x1F507;" : "&#x1F50A;";
+
+    // Level meter
     const pct = Math.min(100, (st.send_rms / 10000) * 100);
-    levelBar.style.width = `${pct}%`;
+    vdLevelBar.style.width = `${pct}%`;
 
     // Duration
     const m = Math.floor(st.call_duration_secs / 60);
     const s = Math.floor(st.call_duration_secs % 60);
-    callTimer.textContent = `${m}:${s.toString().padStart(2, "0")}`;
+    vdTimer.textContent = `${m}:${s.toString().padStart(2, "0")}`;
 
     // P2P badge for direct calls
     if (directCallPeer) {
@@ -424,16 +401,23 @@ async function pollStatus() {
       const engineOk = [...callDebugBuffer].reverse().find((e) => e.step === "connect:call_engine_started");
       if (engineOk) {
         if (pathNeg?.details?.use_direct === true) {
-          dcBadge.textContent = "P2P Direct";
-          dcBadge.className = "dc-badge";
+          vdDcBadge.textContent = "P2P Direct";
+          vdDcBadge.className = "vd-dc-badge direct";
+          vdBadge.textContent = "P2P";
+          vdBadge.className = "vd-badge direct";
+          vdBadge.classList.remove("hidden");
         } else {
-          dcBadge.textContent = "Via Relay";
-          dcBadge.className = "dc-badge relay";
+          vdDcBadge.textContent = "Via Relay";
+          vdDcBadge.className = "vd-dc-badge relay";
+          vdBadge.textContent = "Relay";
+          vdBadge.className = "vd-badge relay";
+          vdBadge.classList.remove("hidden");
         }
       }
     }
 
-    statsDiv.textContent = `TX: ${st.codec_tx} ${st.send_packets}pkt | RX: ${st.codec_rx} ${st.recv_packets}pkt | FEC: ${(st.fec_ratio * 100).toFixed(0)}%`;
+    // Stats
+    vdStats.textContent = `TX: ${st.codec_tx} ${st.send_packets}pkt | RX: ${st.codec_rx} ${st.recv_packets}pkt | FEC: ${(st.fec_ratio * 100).toFixed(0)}%`;
   } catch {}
 }
 
@@ -490,7 +474,7 @@ listen("signal-event", (event: any) => {
             directOnly: s.directOnly || false,
             birthdayAttack: s.birthdayAttack || false,
           });
-          showCallScreen(true);
+          enterVoice(true);
         } catch (e: any) {
           console.error("connect failed:", e);
         }
@@ -501,7 +485,7 @@ listen("signal-event", (event: any) => {
       incomingBanner.classList.add("hidden");
       (async () => {
         try { await invoke("disconnect"); } catch {}
-        showLobby();
+        leaveVoice();
       })();
       break;
   }
@@ -754,9 +738,9 @@ invoke("set_call_debug_logs", { enabled: !!loadSettings().callDebugLogs }).catch
 // Keyboard shortcuts
 document.addEventListener("keydown", (e) => {
   if ((e.target as HTMLElement).tagName === "INPUT") return;
-  if (e.key === "m") micBtn.click();
-  if (e.key === "q") hangupBtn.click();
-  if (e.key === "s") spkBtn.click();
+  if (e.key === "m") vdMicBtn.click();
+  if (e.key === "q") vdEndBtn.click();
+  if (e.key === "s") vdSpkBtn.click();
   if (e.key === "," && (e.metaKey || e.ctrlKey)) { e.preventDefault(); openSettings(); }
 });
 
