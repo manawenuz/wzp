@@ -134,6 +134,10 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::CandidateUpdate { .. } => CallSignalType::IceCandidate, // mid-call re-gather
         SignalMessage::HardNatProbe { .. } => CallSignalType::IceCandidate, // hard NAT coordination
         SignalMessage::HardNatBirthdayStart { .. } => CallSignalType::IceCandidate, // birthday attack
+        SignalMessage::UpgradeProposal { .. }
+        | SignalMessage::UpgradeResponse { .. }
+        | SignalMessage::UpgradeConfirm { .. }
+        | SignalMessage::QualityCapability { .. } => CallSignalType::Offer, // quality negotiation
         SignalMessage::QualityDirective { .. } => CallSignalType::Offer, // relay-initiated
     }
 }

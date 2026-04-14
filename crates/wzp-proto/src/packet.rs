@@ -1019,6 +1019,61 @@ pub enum SignalMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+
+    // ── Quality upgrade negotiation (#28, #29) ──────────────────
+
+    /// Peer proposes upgrading to a higher quality profile.
+    /// The other side can accept or reject based on its own network
+    /// conditions. Used for consensual upgrades that require both
+    /// sides to agree (e.g., switching from Opus24k to Studio48k).
+    UpgradeProposal {
+        call_id: String,
+        /// Unique ID for this proposal (to match response).
+        proposal_id: String,
+        /// The profile being proposed.
+        proposed_profile: crate::QualityProfile,
+        /// Current local network quality to justify the upgrade.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_loss_pct: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_rtt_ms: Option<u32>,
+    },
+
+    /// Response to an UpgradeProposal.
+    UpgradeResponse {
+        call_id: String,
+        proposal_id: String,
+        /// true = accepted, both sides switch. false = rejected.
+        accepted: bool,
+        /// Reason for rejection (if any).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Confirmation that the upgrade is committed — both sides
+    /// should switch encoder at the next frame boundary.
+    UpgradeConfirm {
+        call_id: String,
+        proposal_id: String,
+        confirmed_profile: crate::QualityProfile,
+    },
+
+    // ── Per-participant quality (#30) ───────────────────────────
+
+    /// Peer reports its own quality capability — allows asymmetric
+    /// encoding where each side uses the best quality its connection
+    /// supports, rather than forcing all to the weakest link.
+    QualityCapability {
+        call_id: String,
+        /// The best profile this peer can sustain based on its
+        /// current network conditions.
+        max_profile: crate::QualityProfile,
+        /// Current loss/RTT for context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loss_pct: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rtt_ms: Option<u32>,
+    },
 }
 
 /// How the callee responds to a direct call.
@@ -1848,6 +1903,80 @@ mod tests {
             let mut frames_since_full: u32 = 0;
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
             assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL when disabled");
+        }
+    }
+
+    // ── Quality negotiation roundtrip tests (#28, #29, #30) ─────
+
+    #[test]
+    fn upgrade_proposal_roundtrip() {
+        let msg = SignalMessage::UpgradeProposal {
+            call_id: "c1".into(),
+            proposal_id: "p1".into(),
+            proposed_profile: crate::QualityProfile::STUDIO_48K,
+            local_loss_pct: Some(0.5),
+            local_rtt_ms: Some(25),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::UpgradeProposal { proposal_id, proposed_profile, .. } => {
+                assert_eq!(proposal_id, "p1");
+                assert_eq!(proposed_profile, crate::QualityProfile::STUDIO_48K);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upgrade_response_roundtrip() {
+        let msg = SignalMessage::UpgradeResponse {
+            call_id: "c1".into(),
+            proposal_id: "p1".into(),
+            accepted: true,
+            reason: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::UpgradeResponse { accepted, .. } => assert!(accepted),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upgrade_confirm_roundtrip() {
+        let msg = SignalMessage::UpgradeConfirm {
+            call_id: "c1".into(),
+            proposal_id: "p1".into(),
+            confirmed_profile: crate::QualityProfile::STUDIO_64K,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::UpgradeConfirm { confirmed_profile, .. } => {
+                assert_eq!(confirmed_profile, crate::QualityProfile::STUDIO_64K);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn quality_capability_roundtrip() {
+        let msg = SignalMessage::QualityCapability {
+            call_id: "c1".into(),
+            max_profile: crate::QualityProfile::GOOD,
+            loss_pct: Some(2.5),
+            rtt_ms: Some(80),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::QualityCapability { max_profile, loss_pct, .. } => {
+                assert_eq!(max_profile, crate::QualityProfile::GOOD);
+                assert!((loss_pct.unwrap() - 2.5).abs() < 0.01);
+            }
+            _ => panic!("wrong variant"),
         }
     }
 

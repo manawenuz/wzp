@@ -1451,6 +1451,42 @@ fn do_register_signal(
                         });
                     }
                 }
+                Ok(Some(SignalMessage::UpgradeProposal { call_id, proposal_id, proposed_profile, local_loss_pct, local_rtt_ms })) => {
+                    tracing::info!(%call_id, %proposal_id, ?proposed_profile, "signal: UpgradeProposal from peer");
+                    emit_call_debug(&app_clone, "recv:UpgradeProposal", serde_json::json!({
+                        "call_id": call_id, "proposal_id": proposal_id,
+                        "proposed_profile": format!("{proposed_profile:?}"),
+                        "peer_loss_pct": local_loss_pct, "peer_rtt_ms": local_rtt_ms,
+                    }));
+                    // TODO: auto-accept if our own quality supports it,
+                    // or surface to UI for manual accept/reject
+                }
+                Ok(Some(SignalMessage::UpgradeResponse { call_id, proposal_id, accepted, reason })) => {
+                    tracing::info!(%call_id, %proposal_id, accepted, ?reason, "signal: UpgradeResponse from peer");
+                    emit_call_debug(&app_clone, "recv:UpgradeResponse", serde_json::json!({
+                        "call_id": call_id, "proposal_id": proposal_id,
+                        "accepted": accepted, "reason": reason,
+                    }));
+                    // TODO: if accepted, send UpgradeConfirm + switch encoder
+                }
+                Ok(Some(SignalMessage::UpgradeConfirm { call_id, proposal_id, confirmed_profile })) => {
+                    tracing::info!(%call_id, %proposal_id, ?confirmed_profile, "signal: UpgradeConfirm");
+                    emit_call_debug(&app_clone, "recv:UpgradeConfirm", serde_json::json!({
+                        "call_id": call_id, "proposal_id": proposal_id,
+                        "confirmed_profile": format!("{confirmed_profile:?}"),
+                    }));
+                    // TODO: switch encoder to confirmed_profile at next frame boundary
+                }
+                Ok(Some(SignalMessage::QualityCapability { call_id, max_profile, loss_pct, rtt_ms })) => {
+                    tracing::info!(%call_id, ?max_profile, "signal: QualityCapability from peer");
+                    emit_call_debug(&app_clone, "recv:QualityCapability", serde_json::json!({
+                        "call_id": call_id,
+                        "peer_max_profile": format!("{max_profile:?}"),
+                        "peer_loss_pct": loss_pct, "peer_rtt_ms": rtt_ms,
+                    }));
+                    // TODO: adjust our encoder to not exceed peer's max_profile
+                    // (asymmetric quality — each side encodes at its own best)
+                }
                 Ok(Some(SignalMessage::HardNatBirthdayStart { call_id, acceptor_port_count, acceptor_ports, external_ip })) => {
                     tracing::info!(
                         %call_id,
