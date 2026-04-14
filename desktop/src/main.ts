@@ -852,12 +852,6 @@ function showCallScreen() {
   connectScreen.classList.add("hidden");
   callScreen.classList.remove("hidden");
 
-  // Clear stale call-debug events from previous call so the P2P
-  // badge doesn't pick up old path_negotiated data. Cleared here
-  // (start of new call) rather than showConnectScreen (end of call)
-  // so the user can still read logs after hanging up.
-  callDebugBuffer.length = 0;
-
   // Direct call → phone-style layout; room call → group layout.
   if (directCallPeer) {
     const fp = directCallPeer.fingerprint || "";
