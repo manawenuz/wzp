@@ -456,7 +456,9 @@ async fn connect(
                 emit_call_debug(&app, "connect:dual_path_race_start", serde_json::json!({
                     "role": format!("{:?}", r),
                     "peer_reflex": peer_addr_parsed.map(|a| a.to_string()),
+                    "peer_mapped": peer_mapped_parsed.map(|a| a.to_string()),
                     "peer_local": peer_local_parsed.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                    "dial_order": candidates.dial_order().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
                     "relay_addr": relay_sockaddr.to_string(),
                     "own_reflex_addr": own_reflex_addr,
                 }));
@@ -498,6 +500,7 @@ async fn connect(
                             "local_winner": format!("{:?}", local_winner),
                             "local_direct_ok": local_direct_ok,
                             "has_relay": race_result.relay_transport.is_some(),
+                            "candidate_diags": race_result.candidate_diags,
                         }));
 
                         // Phase 6: send our report to the peer and

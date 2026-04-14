@@ -38,6 +38,15 @@ pub enum WinningPath {
     Relay,
 }
 
+/// Diagnostic info for a single candidate dial attempt.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CandidateDiag {
+    pub index: usize,
+    pub addr: String,
+    pub result: String,  // "ok", "skipped:ipv6", "error:..."
+    pub elapsed_ms: Option<u32>,
+}
+
 /// Phase 6: the race now returns BOTH transports (when available)
 /// so the connect command can negotiate with the peer before
 /// committing. The negotiation decides which transport to use
@@ -54,6 +63,8 @@ pub struct RaceResult {
     /// Informational — the actual path used is decided by the
     /// Phase 6 negotiation after both sides exchange reports.
     pub local_winner: WinningPath,
+    /// Per-candidate diagnostic info for debugging.
+    pub candidate_diags: Vec<CandidateDiag>,
 }
 
 /// Attempt a direct QUIC connection to the peer in parallel with
@@ -151,6 +162,10 @@ pub async fn race(
     // Rustls provider must be installed before any quinn endpoint
     // is created. Install attempt is idempotent.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Shared diagnostic collector for per-candidate results.
+    let diags_collector: Arc<std::sync::Mutex<Vec<CandidateDiag>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Build the direct-path endpoint + future based on role.
     //
@@ -283,6 +298,7 @@ pub async fn race(
             let _v6_ep_for_dial = ipv6_endpoint.clone();
             let dial_order = peer_candidates.dial_order();
             let sni = call_sni.clone();
+            let diags = diags_collector.clone();
             direct_fut = Box::pin(async move {
                 if dial_order.is_empty() {
                     // No candidates — the race reduces to
@@ -311,17 +327,32 @@ pub async fn race(
                         // Re-enable once IPv6 datagram delivery is
                         // verified on target networks.
                         if candidate.is_ipv6() {
-                            tracing::debug!(
+                            tracing::info!(
                                 %candidate,
                                 candidate_idx = idx,
                                 "dual_path: skipping IPv6 candidate (disabled)"
                             );
+                            if let Ok(mut d) = diags.lock() {
+                                d.push(CandidateDiag {
+                                    index: idx,
+                                    addr: candidate.to_string(),
+                                    result: "skipped:ipv6".into(),
+                                    elapsed_ms: None,
+                                });
+                            }
                             continue;
                         }
                         let ep = ep_for_fut.clone();
                         let client_cfg = wzp_transport::client_config();
                         let sni = sni.clone();
+                        let diags_inner = diags.clone();
                         set.spawn(async move {
+                            let start = std::time::Instant::now();
+                            tracing::info!(
+                                %candidate,
+                                candidate_idx = idx,
+                                "dual_path: dialing candidate"
+                            );
                             let result = wzp_transport::connect(
                                 &ep,
                                 candidate,
@@ -329,6 +360,19 @@ pub async fn race(
                                 client_cfg,
                             )
                             .await;
+                            let elapsed = start.elapsed().as_millis() as u32;
+                            let diag_result = match &result {
+                                Ok(_) => "ok".to_string(),
+                                Err(e) => format!("error:{e}"),
+                            };
+                            if let Ok(mut d) = diags_inner.lock() {
+                                d.push(CandidateDiag {
+                                    index: idx,
+                                    addr: candidate.to_string(),
+                                    result: diag_result,
+                                    elapsed_ms: Some(elapsed),
+                                });
+                            }
                             (idx, candidate, result)
                         });
                     }
@@ -357,7 +401,7 @@ pub async fn race(
                                 return Ok(QuinnTransport::new(conn));
                             }
                             Err(e) => {
-                                tracing::debug!(
+                                tracing::info!(
                                     %candidate,
                                     candidate_idx = idx,
                                     error = %e,
@@ -545,6 +589,10 @@ pub async fn race(
 
     let _ = (direct_ep, relay_ep, ipv6_endpoint);
 
+    let candidate_diags = diags_collector.lock()
+        .map(|d| d.clone())
+        .unwrap_or_default();
+
     Ok(RaceResult {
         direct_transport: direct_result
             .and_then(|r| r.ok())
@@ -553,6 +601,7 @@ pub async fn race(
             .and_then(|r| r.ok())
             .map(|t| Arc::new(t)),
         local_winner,
+        candidate_diags,
     })
 }
 
