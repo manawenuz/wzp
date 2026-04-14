@@ -87,6 +87,14 @@ pub struct RelayConfig {
     /// Unlike [[peers]], no url is needed — the peer connects to us.
     #[serde(default)]
     pub trusted: Vec<TrustedConfig>,
+    /// Phase 8: geographic region identifier (e.g., "us-east", "eu-west").
+    /// Sent to clients in `RegisterPresenceAck.relay_region` so they can
+    /// build a relay map for automatic selection.
+    pub region: Option<String>,
+    /// Phase 8: externally-advertised address for this relay. Used to
+    /// populate `available_relays` in `RegisterPresenceAck`. If not set,
+    /// `listen_addr` is used.
+    pub advertised_addr: Option<SocketAddr>,
     /// Debug tap: log packet headers for matching rooms ("*" = all rooms).
     /// Activated via --debug-tap <room> or debug_tap = "room" in TOML.
     pub debug_tap: Option<String>,
@@ -114,6 +122,8 @@ impl Default for RelayConfig {
             peers: Vec::new(),
             global_rooms: Vec::new(),
             trusted: Vec::new(),
+            region: None,
+            advertised_addr: None,
             debug_tap: None,
             event_log: None,
         }

@@ -82,6 +82,7 @@ fn handle_answer_and_build_setups(
         relay_addr: "203.0.113.5:4433".into(),
         peer_direct_addr: callee_addr,
         peer_local_addrs: Vec::new(),
+        peer_mapped_addr: None,
     };
     let setup_for_callee = SignalMessage::CallSetup {
         call_id,
@@ -89,6 +90,7 @@ fn handle_answer_and_build_setups(
         relay_addr: "203.0.113.5:4433".into(),
         peer_direct_addr: caller_addr,
         peer_local_addrs: Vec::new(),
+        peer_mapped_addr: None,
     };
     (setup_for_caller, setup_for_callee)
 }
@@ -105,6 +107,7 @@ fn mk_offer(call_id: &str, caller_reflexive_addr: Option<&str>) -> SignalMessage
         supported_profiles: vec![],
         caller_reflexive_addr: caller_reflexive_addr.map(String::from),
         caller_local_addrs: Vec::new(),
+        caller_mapped_addr: None,
         caller_build_version: None,
     }
 }
@@ -123,6 +126,7 @@ fn mk_answer(
         chosen_profile: None,
         callee_reflexive_addr: callee_reflexive_addr.map(String::from),
         callee_local_addrs: Vec::new(),
+        callee_mapped_addr: None,
         callee_build_version: None,
     }
 }

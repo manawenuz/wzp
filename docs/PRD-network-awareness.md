@@ -105,15 +105,25 @@ Sentinel value `0xFF` means "no change pending". The recv task polls on every re
 
 ~~The Tauri engine doesn't use `AdaptiveQualityController` — quality is resolved once at call start.~~ **Update (2026-04-13):** Desktop now has `AdaptiveQualityController` wired into the recv task with `pending_profile` AtomicU8 bridge. Network monitoring on desktop is now feasible — the blocker was adaptive quality, which is done. Remaining work: platform-specific network change detection (macOS: `SCNetworkReachability` or `NWPathMonitor`; Linux: `netlink` socket).
 
-### Mid-Call ICE Re-gathering
+### Mid-Call ICE Re-gathering — PARTIALLY IMPLEMENTED (2026-04-14)
 
-When the device's IP address changes, ideally we should:
-1. Re-gather local host candidates (`local_host_candidates()`)
-2. Re-probe STUN (`probe_reflect_addr()`)
-3. Send updated candidates to the peer (`CandidateUpdate` signal message)
-4. Attempt new dual-path race for path upgrade
+When the device's IP address changes, the system now:
+1. Re-gather local host candidates (`local_host_candidates()`) ✅
+2. Re-probe STUN (`stun::discover_reflexive()` + `portmap::acquire_port_mapping()`) ✅
+3. Send updated candidates to the peer (`CandidateUpdate` signal message) ✅
+4. Relay forwards `CandidateUpdate` to peer (same pattern as `MediaPathReport`) ✅
+5. Peer receives and can parse via `IceAgent::apply_peer_update()` ✅
+6. Attempt new dual-path race for path upgrade — **NOT YET WIRED** (transport hot-swap)
 
-`NetworkMonitor.onIpChanged` fires on `onLinkPropertiesChanged` — the hook is ready, but the signaling and re-racing logic is not yet implemented.
+`NetworkMonitor.onIpChanged` fires on `onLinkPropertiesChanged` — the hook is ready.
+The signaling plane is fully implemented via `IceAgent` + `CandidateUpdate`.
+Remaining: wire `onIpChanged` → JNI → `pending_ice_regather` AtomicBool → recv task → `ice_agent.re_gather()` → transport swap.
+
+New modules added in Phase 8 (Tailscale-inspired):
+- `crates/wzp-client/src/ice_agent.rs` — candidate lifecycle management
+- `crates/wzp-client/src/stun.rs` — public STUN server probing (independent of relay)
+- `crates/wzp-client/src/portmap.rs` — NAT-PMP/PCP/UPnP port mapping
+- `crates/wzp-client/src/netcheck.rs` — comprehensive network diagnostic
 
 ## Testing
 

@@ -329,3 +329,46 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - APK signing: added zipalign + apksigner pipeline to `build.sh` (was in `build-tauri-android.sh` only)
 - Keystore persistence: `$BASE_DIR/data/keystore/` cache synced into source tree before build
 - Fixes: 384MB debug APK uploaded instead of 25MB release; unsigned APK on alt server
+
+### Phase 8: Tailscale-Inspired STUN/ICE Enhancements (2026-04-14)
+
+5 new modules in `wzp-client`, 64 new unit tests (363 total across client/proto/relay).
+
+#### Public STUN Client (`stun.rs`)
+- Minimal RFC 5389 STUN Binding Request/Response over raw UDP
+- XOR-MAPPED-ADDRESS (preferred) + MAPPED-ADDRESS (fallback) parsing
+- Default servers: `stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun.cloudflare.com:3478`
+- `discover_reflexive()` — first-success parallel probe across N servers
+- `probe_stun_servers()` — full results for NAT classification
+- Integrated into `detect_nat_type_with_stun()` combining relay + STUN probes
+- Desktop STUN fallback in `try_reflect_own_addr()` when relay reflection fails
+
+#### PCP/PMP/UPnP Port Mapping (`portmap.rs`)
+- **NAT-PMP** (RFC 6886): UDP to gateway:5351, external address + port mapping
+- **PCP** (RFC 6887): PCP MAP opcode, IPv4-mapped IPv6 client address
+- **UPnP IGD**: SSDP M-SEARCH discovery + SOAP `AddPortMapping`/`GetExternalIPAddress`
+- Gateway discovery: macOS (`route -n get default`), Linux (`/proc/net/route`)
+- `acquire_port_mapping()` tries NAT-PMP → PCP → UPnP, first success wins
+- `release_port_mapping()` + `spawn_refresh()` for lifecycle management
+- Signal protocol: `caller_mapped_addr`/`callee_mapped_addr` on offer/answer, `peer_mapped_addr` on CallSetup
+- `PeerCandidates.mapped` — new candidate type in dial order (host → mapped → reflexive)
+
+#### Mid-Call ICE Re-Gathering (`ice_agent.rs`)
+- `IceAgent`: owns candidate lifecycle with `gather()`, `re_gather()`, `apply_peer_update()`
+- Monotonic generation counter prevents stale candidate updates from reordering
+- `SignalMessage::CandidateUpdate` — new signal for mid-call candidate exchange
+- Relay forwards `CandidateUpdate` to call peer (same pattern as `MediaPathReport`)
+- Desktop handles `CandidateUpdate` in signal recv loop, emits to JS frontend
+- Transport hot-swap architecture designed (TODO: wire into live call engine)
+
+#### Netcheck Diagnostic (`netcheck.rs`)
+- `NetcheckReport`: NAT type, reflexive addr, IPv4/v6, port mapping, relay latencies, gateway
+- `run_netcheck()` — parallel probes for STUN + relay + portmap + IPv6
+- `format_report()` — human-readable diagnostic output
+- CLI: `wzp-client --netcheck <relay>` runs diagnostic
+
+#### Region-Based Relay Selection (`relay_map.rs`)
+- `RelayMap` sorted by RTT, `preferred()` returns lowest-latency reachable relay
+- `populate_from_ack()` — parses `RegisterPresenceAck.available_relays`
+- Stale detection (`needs_reprobe()`, `stale_entries()`)
+- `RegisterPresenceAck` extended with `relay_region` and `available_relays`

@@ -113,6 +113,7 @@ async fn dual_path_direct_wins_on_loopback() {
         PeerCandidates {
             reflexive: Some(acceptor_listen_addr),
             local: Vec::new(),
+            mapped: None,
         },
         relay_addr,
         "test-room".into(),
@@ -156,6 +157,7 @@ async fn dual_path_relay_wins_when_direct_is_dead() {
         PeerCandidates {
             reflexive: Some(dead_peer),
             local: Vec::new(),
+            mapped: None,
         },
         relay_addr,
         "test-room".into(),
@@ -195,6 +197,7 @@ async fn dual_path_errors_cleanly_when_both_paths_dead() {
         PeerCandidates {
             reflexive: Some(dead_peer),
             local: Vec::new(),
+            mapped: None,
         },
         dead_relay,
         "test-room".into(),

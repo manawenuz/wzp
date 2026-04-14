@@ -8006,6 +8006,7 @@ dependencies = [
  "crossterm",
  "if-addrs",
  "libc",
+ "rand 0.8.5",
  "ratatui",
  "rustls",
  "serde",

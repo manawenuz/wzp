@@ -738,6 +738,13 @@ pub enum SignalMessage {
         /// Relay's build version (git short hash).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         relay_build: Option<String>,
+        /// Phase 8: relay's geographic region (e.g., "us-east", "eu-west").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_region: Option<String>,
+        /// Phase 8: other relays the client can use, sorted by relay
+        /// mesh proximity. Each entry is "name|addr" (e.g., "eu-west|203.0.113.5:4433").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        available_relays: Vec<String>,
     },
 
     /// Direct call offer routed through the relay to a specific peer.
@@ -777,6 +784,12 @@ pub enum SignalMessage {
         /// the same LAN.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         caller_local_addrs: Vec<String>,
+        /// Phase 8 (Tailscale-inspired): caller's port-mapped external
+        /// address from NAT-PMP/PCP/UPnP. When the router supports
+        /// port mapping, this gives a stable external address even
+        /// behind symmetric NATs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_mapped_addr: Option<String>,
         /// Build version (git short hash) for debugging.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_build_version: Option<String>,
@@ -813,6 +826,10 @@ pub enum SignalMessage {
         /// `callee_reflexive_addr`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         callee_local_addrs: Vec<String>,
+        /// Phase 8 (Tailscale-inspired): callee's port-mapped external
+        /// address from NAT-PMP/PCP/UPnP.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callee_mapped_addr: Option<String>,
         /// Build version (git short hash) for debugging.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         callee_build_version: Option<String>,
@@ -844,6 +861,11 @@ pub enum SignalMessage {
         /// Client-side race tries all of these in parallel.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peer_local_addrs: Vec<String>,
+        /// Phase 8 (Tailscale-inspired): the OTHER party's port-mapped
+        /// external address from NAT-PMP/PCP/UPnP. Added to the
+        /// candidate dial order between host and reflexive addrs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_mapped_addr: Option<String>,
     },
 
     /// Ringing notification (relay → caller, callee received the offer).
@@ -897,6 +919,32 @@ pub enum SignalMessage {
         /// "Direct" or "Relay" — informational for debug logs.
         #[serde(default)]
         race_winner: String,
+    },
+
+    // ── Phase 8: mid-call ICE re-gathering ────────────────────────
+
+    /// Phase 8 (Tailscale-inspired): mid-call candidate update sent
+    /// when a client's network changes (WiFi → cellular, IP change,
+    /// etc.). The relay forwards this to the call peer, who can
+    /// re-race with the new candidates to upgrade or maintain the
+    /// direct path.
+    ///
+    /// The `generation` counter is monotonically increasing per call
+    /// — peers ignore updates with a generation <= their last-seen
+    /// generation to handle reordering.
+    CandidateUpdate {
+        call_id: String,
+        /// New server-reflexive address (STUN-discovered or relay-reflected).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reflexive_addr: Option<String>,
+        /// New LAN host addresses.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        local_addrs: Vec<String>,
+        /// New port-mapped address (NAT-PMP/PCP/UPnP).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mapped_addr: Option<String>,
+        /// Monotonic generation counter.
+        generation: u32,
     },
 
     // ── Phase 4: cross-relay direct-call signaling ────────────────────
@@ -1147,6 +1195,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
             caller_local_addrs: Vec::new(),
+            caller_mapped_addr: None,
             caller_build_version: None,
         };
         let forward = SignalMessage::FederatedSignalForward {
@@ -1190,6 +1239,7 @@ mod tests {
                 chosen_profile: None,
                 callee_reflexive_addr: Some("198.51.100.9:4433".into()),
                 callee_local_addrs: Vec::new(),
+                callee_mapped_addr: None,
                 callee_build_version: None,
             },
             SignalMessage::CallRinging { call_id: "c1".into() },
@@ -1226,6 +1276,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: Some("192.0.2.1:4433".into()),
             caller_local_addrs: Vec::new(),
+            caller_mapped_addr: None,
             caller_build_version: None,
         };
         let json = serde_json::to_string(&offer).unwrap();
@@ -1255,6 +1306,7 @@ mod tests {
             supported_profiles: vec![],
             caller_reflexive_addr: None,
             caller_local_addrs: Vec::new(),
+            caller_mapped_addr: None,
             caller_build_version: None,
         };
         let json_none = serde_json::to_string(&offer_none).unwrap();
@@ -1273,6 +1325,7 @@ mod tests {
             chosen_profile: None,
             callee_reflexive_addr: Some("198.51.100.9:4433".into()),
             callee_local_addrs: Vec::new(),
+            callee_mapped_addr: None,
             callee_build_version: None,
         };
         let decoded: SignalMessage =
@@ -1294,6 +1347,7 @@ mod tests {
             relay_addr: "203.0.113.5:4433".into(),
             peer_direct_addr: Some("192.0.2.1:4433".into()),
             peer_local_addrs: Vec::new(),
+            peer_mapped_addr: None,
         };
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
@@ -1761,6 +1815,273 @@ mod tests {
             let mut frames_since_full: u32 = 0;
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
             assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL when disabled");
+        }
+    }
+
+    // ── Phase 8: Tailscale-inspired signal roundtrip tests ──────
+
+    #[test]
+    fn candidate_update_roundtrip() {
+        let msg = SignalMessage::CandidateUpdate {
+            call_id: "test-123".into(),
+            reflexive_addr: Some("203.0.113.5:4433".into()),
+            local_addrs: vec![
+                "192.168.1.10:4433".into(),
+                "10.0.0.5:4433".into(),
+            ],
+            mapped_addr: Some("198.51.100.42:12345".into()),
+            generation: 7,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::CandidateUpdate {
+                call_id,
+                reflexive_addr,
+                local_addrs,
+                mapped_addr,
+                generation,
+            } => {
+                assert_eq!(call_id, "test-123");
+                assert_eq!(reflexive_addr.as_deref(), Some("203.0.113.5:4433"));
+                assert_eq!(local_addrs.len(), 2);
+                assert_eq!(mapped_addr.as_deref(), Some("198.51.100.42:12345"));
+                assert_eq!(generation, 7);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn candidate_update_minimal_roundtrip() {
+        let msg = SignalMessage::CandidateUpdate {
+            call_id: "c".into(),
+            reflexive_addr: None,
+            local_addrs: vec![],
+            mapped_addr: None,
+            generation: 0,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // skip_serializing_if should omit None/empty fields
+        assert!(!json.contains("reflexive_addr"));
+        assert!(!json.contains("local_addrs"));
+        assert!(!json.contains("mapped_addr"));
+
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::CandidateUpdate { generation, .. } => {
+                assert_eq!(generation, 0);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn offer_with_mapped_addr_roundtrip() {
+        let msg = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: None,
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [0; 32],
+            ephemeral_pub: [0; 32],
+            signature: vec![],
+            supported_profiles: vec![],
+            caller_reflexive_addr: Some("1.2.3.4:5".into()),
+            caller_local_addrs: vec!["10.0.0.1:5".into()],
+            caller_mapped_addr: Some("5.6.7.8:9999".into()),
+            caller_build_version: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("caller_mapped_addr"));
+        assert!(json.contains("5.6.7.8:9999"));
+
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallOffer {
+                caller_mapped_addr, ..
+            } => {
+                assert_eq!(caller_mapped_addr.as_deref(), Some("5.6.7.8:9999"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn offer_without_mapped_addr_omits_field() {
+        let msg = SignalMessage::DirectCallOffer {
+            caller_fingerprint: "alice".into(),
+            caller_alias: None,
+            target_fingerprint: "bob".into(),
+            call_id: "c1".into(),
+            identity_pub: [0; 32],
+            ephemeral_pub: [0; 32],
+            signature: vec![],
+            supported_profiles: vec![],
+            caller_reflexive_addr: None,
+            caller_local_addrs: vec![],
+            caller_mapped_addr: None,
+            caller_build_version: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("caller_mapped_addr"));
+    }
+
+    #[test]
+    fn answer_with_mapped_addr_roundtrip() {
+        let msg = SignalMessage::DirectCallAnswer {
+            call_id: "c1".into(),
+            accept_mode: CallAcceptMode::AcceptTrusted,
+            identity_pub: None,
+            ephemeral_pub: None,
+            signature: None,
+            chosen_profile: None,
+            callee_reflexive_addr: Some("1.2.3.4:5".into()),
+            callee_local_addrs: vec![],
+            callee_mapped_addr: Some("9.8.7.6:1111".into()),
+            callee_build_version: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallAnswer {
+                callee_mapped_addr, ..
+            } => {
+                assert_eq!(callee_mapped_addr.as_deref(), Some("9.8.7.6:1111"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn setup_with_mapped_addr_roundtrip() {
+        let msg = SignalMessage::CallSetup {
+            call_id: "c1".into(),
+            room: "room".into(),
+            relay_addr: "1.2.3.4:5".into(),
+            peer_direct_addr: Some("5.6.7.8:9".into()),
+            peer_local_addrs: vec!["10.0.0.1:9".into()],
+            peer_mapped_addr: Some("11.12.13.14:15".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("peer_mapped_addr"));
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::CallSetup {
+                peer_mapped_addr, ..
+            } => {
+                assert_eq!(peer_mapped_addr.as_deref(), Some("11.12.13.14:15"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn backward_compat_offer_without_mapped_addr_parses() {
+        // Old client JSON that doesn't have caller_mapped_addr at all
+        let json = r#"{
+            "DirectCallOffer": {
+                "caller_fingerprint": "alice",
+                "target_fingerprint": "bob",
+                "call_id": "c1",
+                "identity_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "ephemeral_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "signature": [],
+                "supported_profiles": [],
+                "caller_reflexive_addr": "1.2.3.4:5"
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::DirectCallOffer {
+                caller_mapped_addr,
+                caller_reflexive_addr,
+                ..
+            } => {
+                assert!(caller_mapped_addr.is_none());
+                assert_eq!(caller_reflexive_addr.as_deref(), Some("1.2.3.4:5"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn backward_compat_setup_without_mapped_addr_parses() {
+        let json = r#"{
+            "CallSetup": {
+                "call_id": "c1",
+                "room": "room",
+                "relay_addr": "1.2.3.4:5",
+                "peer_direct_addr": "5.6.7.8:9"
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::CallSetup {
+                peer_mapped_addr,
+                peer_direct_addr,
+                ..
+            } => {
+                assert!(peer_mapped_addr.is_none());
+                assert_eq!(peer_direct_addr.as_deref(), Some("5.6.7.8:9"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn register_presence_ack_with_new_fields_roundtrip() {
+        let msg = SignalMessage::RegisterPresenceAck {
+            success: true,
+            error: None,
+            relay_build: Some("abc123".into()),
+            relay_region: Some("us-east".into()),
+            available_relays: vec![
+                "eu-west|10.0.0.1:4433".into(),
+                "ap-south|10.0.0.2:4433".into(),
+            ],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("relay_region"));
+        assert!(json.contains("us-east"));
+        assert!(json.contains("available_relays"));
+
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::RegisterPresenceAck {
+                relay_region,
+                available_relays,
+                ..
+            } => {
+                assert_eq!(relay_region.as_deref(), Some("us-east"));
+                assert_eq!(available_relays.len(), 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn register_presence_ack_backward_compat() {
+        // Old relay JSON without relay_region or available_relays
+        let json = r#"{
+            "RegisterPresenceAck": {
+                "success": true,
+                "relay_build": "old-build"
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::RegisterPresenceAck {
+                relay_region,
+                available_relays,
+                relay_build,
+                ..
+            } => {
+                assert!(relay_region.is_none());
+                assert!(available_relays.is_empty());
+                assert_eq!(relay_build.as_deref(), Some("old-build"));
+            }
+            _ => panic!("wrong variant"),
         }
     }
 }

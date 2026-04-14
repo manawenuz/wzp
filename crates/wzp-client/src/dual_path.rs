@@ -88,19 +88,30 @@ pub struct PeerCandidates {
     /// same-LAN pairs — direct dials to these bypass the NAT
     /// entirely.
     pub local: Vec<SocketAddr>,
+    /// Phase 8 (Tailscale-inspired): peer's port-mapped external
+    /// address from NAT-PMP/PCP/UPnP. When the router supports
+    /// port mapping, this gives a stable external address even
+    /// behind symmetric NATs.
+    pub mapped: Option<SocketAddr>,
 }
 
 impl PeerCandidates {
     /// Flatten into the list of addrs the D-role should dial.
     /// Order: LAN host candidates first (fastest when they
-    /// work), then reflexive (covers the non-LAN case).
+    /// work), then port-mapped (stable even behind symmetric
+    /// NATs), then reflexive (covers the non-LAN case).
     pub fn dial_order(&self) -> Vec<SocketAddr> {
-        let mut out = Vec::with_capacity(self.local.len() + 1);
+        let mut out = Vec::with_capacity(self.local.len() + 2);
         out.extend(self.local.iter().copied());
+        // Port-mapped address goes before reflexive — it's
+        // more reliable on symmetric NATs where the reflexive
+        // addr might not match what the peer actually sees.
+        if let Some(a) = self.mapped {
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
         if let Some(a) = self.reflexive {
-            // Only add if it's not already in the list (some
-            // edge cases on same-LAN could have the same addr
-            // in both).
             if !out.contains(&a) {
                 out.push(a);
             }
@@ -111,7 +122,7 @@ impl PeerCandidates {
     /// Is there anything for the D-role to dial? If not, the
     /// race reduces to relay-only.
     pub fn is_empty(&self) -> bool {
-        self.reflexive.is_none() && self.local.is_empty()
+        self.reflexive.is_none() && self.local.is_empty() && self.mapped.is_none()
     }
 }
 
@@ -543,4 +554,122 @@ pub async fn race(
             .map(|t| Arc::new(t)),
         local_winner,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_candidates_dial_order_all_types() {
+        let candidates = PeerCandidates {
+            reflexive: Some("203.0.113.5:4433".parse().unwrap()),
+            local: vec![
+                "192.168.1.10:4433".parse().unwrap(),
+                "10.0.0.5:4433".parse().unwrap(),
+            ],
+            mapped: Some("198.51.100.42:12345".parse().unwrap()),
+        };
+
+        let order = candidates.dial_order();
+        // Order: local first, then mapped, then reflexive
+        assert_eq!(order.len(), 4);
+        assert_eq!(order[0], "192.168.1.10:4433".parse::<SocketAddr>().unwrap());
+        assert_eq!(order[1], "10.0.0.5:4433".parse::<SocketAddr>().unwrap());
+        assert_eq!(order[2], "198.51.100.42:12345".parse::<SocketAddr>().unwrap());
+        assert_eq!(order[3], "203.0.113.5:4433".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn peer_candidates_dial_order_no_mapped() {
+        let candidates = PeerCandidates {
+            reflexive: Some("203.0.113.5:4433".parse().unwrap()),
+            local: vec!["192.168.1.10:4433".parse().unwrap()],
+            mapped: None,
+        };
+
+        let order = candidates.dial_order();
+        assert_eq!(order.len(), 2);
+        assert_eq!(order[0], "192.168.1.10:4433".parse::<SocketAddr>().unwrap());
+        assert_eq!(order[1], "203.0.113.5:4433".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn peer_candidates_dial_order_only_mapped() {
+        let candidates = PeerCandidates {
+            reflexive: None,
+            local: vec![],
+            mapped: Some("198.51.100.42:12345".parse().unwrap()),
+        };
+
+        let order = candidates.dial_order();
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0], "198.51.100.42:12345".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn peer_candidates_dial_order_dedup_mapped_equals_reflexive() {
+        let addr: SocketAddr = "203.0.113.5:4433".parse().unwrap();
+        let candidates = PeerCandidates {
+            reflexive: Some(addr),
+            local: vec![],
+            mapped: Some(addr), // same as reflexive
+        };
+
+        let order = candidates.dial_order();
+        // Should be deduped to 1
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0], addr);
+    }
+
+    #[test]
+    fn peer_candidates_dial_order_dedup_mapped_in_local() {
+        let addr: SocketAddr = "192.168.1.10:4433".parse().unwrap();
+        let candidates = PeerCandidates {
+            reflexive: None,
+            local: vec![addr],
+            mapped: Some(addr), // same as a local addr
+        };
+
+        let order = candidates.dial_order();
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0], addr);
+    }
+
+    #[test]
+    fn peer_candidates_is_empty() {
+        let empty = PeerCandidates::default();
+        assert!(empty.is_empty());
+
+        let with_reflexive = PeerCandidates {
+            reflexive: Some("1.2.3.4:5".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(!with_reflexive.is_empty());
+
+        let with_local = PeerCandidates {
+            local: vec!["10.0.0.1:5".parse().unwrap()],
+            ..Default::default()
+        };
+        assert!(!with_local.is_empty());
+
+        let with_mapped = PeerCandidates {
+            mapped: Some("1.2.3.4:5".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(!with_mapped.is_empty());
+    }
+
+    #[test]
+    fn peer_candidates_empty_dial_order() {
+        let empty = PeerCandidates::default();
+        assert!(empty.dial_order().is_empty());
+    }
+
+    #[test]
+    fn winning_path_debug() {
+        // Just verify Debug impl doesn't panic
+        let _ = format!("{:?}", WinningPath::Direct);
+        let _ = format!("{:?}", WinningPath::Relay);
+    }
 }

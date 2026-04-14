@@ -61,6 +61,13 @@ pub struct DirectCall {
     /// interface addresses from the `DirectCallAnswer`. Cross-
     /// wired into the caller's `CallSetup.peer_local_addrs`.
     pub callee_local_addrs: Vec<String>,
+    /// Phase 8 (Tailscale-inspired): caller's port-mapped
+    /// external address from NAT-PMP/PCP/UPnP. Cross-wired
+    /// into callee's `CallSetup.peer_mapped_addr`.
+    pub caller_mapped_addr: Option<String>,
+    /// Phase 8: callee's port-mapped external address.
+    /// Cross-wired into caller's `CallSetup.peer_mapped_addr`.
+    pub callee_mapped_addr: Option<String>,
 }
 
 /// Registry of active direct calls.
@@ -92,6 +99,8 @@ impl CallRegistry {
             peer_relay_fp: None,
             caller_local_addrs: Vec::new(),
             callee_local_addrs: Vec::new(),
+            caller_mapped_addr: None,
+            callee_mapped_addr: None,
         };
         self.calls.insert(call_id.clone(), call);
         self.calls.get(&call_id).unwrap()
@@ -139,6 +148,22 @@ impl CallRegistry {
     pub fn set_callee_reflexive_addr(&mut self, call_id: &str, addr: Option<String>) {
         if let Some(call) = self.calls.get_mut(call_id) {
             call.callee_reflexive_addr = addr;
+        }
+    }
+
+    /// Phase 8: stash the caller's port-mapped address from
+    /// the `DirectCallOffer`.
+    pub fn set_caller_mapped_addr(&mut self, call_id: &str, addr: Option<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.caller_mapped_addr = addr;
+        }
+    }
+
+    /// Phase 8: stash the callee's port-mapped address from
+    /// the `DirectCallAnswer`.
+    pub fn set_callee_mapped_addr(&mut self, call_id: &str, addr: Option<String>) {
+        if let Some(call) = self.calls.get_mut(call_id) {
+            call.callee_mapped_addr = addr;
         }
     }
 
@@ -338,6 +363,49 @@ mod tests {
 
         // Unknown call is a no-op, not a panic.
         reg.set_peer_relay_fp("does-not-exist", Some("x".into()));
+    }
+
+    #[test]
+    fn call_registry_stores_mapped_addrs() {
+        let mut reg = CallRegistry::new();
+        reg.create_call("c1".into(), "alice".into(), "bob".into());
+
+        // Default: both mapped addrs are None.
+        let c = reg.get("c1").unwrap();
+        assert!(c.caller_mapped_addr.is_none());
+        assert!(c.callee_mapped_addr.is_none());
+
+        // Caller advertises its port-mapped addr via DirectCallOffer.
+        reg.set_caller_mapped_addr("c1", Some("203.0.113.5:12345".into()));
+        assert_eq!(
+            reg.get("c1").unwrap().caller_mapped_addr.as_deref(),
+            Some("203.0.113.5:12345")
+        );
+
+        // Callee responds with its mapped addr.
+        reg.set_callee_mapped_addr("c1", Some("198.51.100.9:54321".into()));
+        assert_eq!(
+            reg.get("c1").unwrap().callee_mapped_addr.as_deref(),
+            Some("198.51.100.9:54321")
+        );
+
+        // Both addrs readable — relay uses them to cross-wire
+        // peer_mapped_addr in CallSetup.
+        let c = reg.get("c1").unwrap();
+        assert_eq!(c.caller_mapped_addr.as_deref(), Some("203.0.113.5:12345"));
+        assert_eq!(c.callee_mapped_addr.as_deref(), Some("198.51.100.9:54321"));
+
+        // Setter on unknown call is a no-op.
+        reg.set_caller_mapped_addr("nope", Some("x".into()));
+    }
+
+    #[test]
+    fn call_registry_clearing_mapped_addr_works() {
+        let mut reg = CallRegistry::new();
+        reg.create_call("c1".into(), "alice".into(), "bob".into());
+        reg.set_caller_mapped_addr("c1", Some("1.2.3.4:5".into()));
+        reg.set_caller_mapped_addr("c1", None);
+        assert!(reg.get("c1").unwrap().caller_mapped_addr.is_none());
     }
 
     #[test]

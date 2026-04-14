@@ -52,6 +52,8 @@ struct CliArgs {
     signal: bool,
     /// Place a direct call to a fingerprint (requires --signal).
     call_target: Option<String>,
+    /// Run network diagnostic (STUN, port mapping, relay latencies).
+    netcheck: bool,
 }
 
 impl CliArgs {
@@ -97,6 +99,7 @@ fn parse_args() -> CliArgs {
     let mut relay_str = None;
     let mut signal = false;
     let mut call_target = None;
+    let mut netcheck = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -182,6 +185,7 @@ fn parse_args() -> CliArgs {
                 );
             }
             "--sweep" => sweep = true,
+            "--netcheck" => { netcheck = true; }
             "--version-check" => { version_check = true; }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
@@ -238,6 +242,7 @@ fn parse_args() -> CliArgs {
         version_check,
         signal,
         call_target,
+        netcheck,
     }
 }
 
@@ -253,6 +258,23 @@ async fn main() -> anyhow::Result<()> {
     // --sweep runs locally (no network), so handle it before connecting.
     if cli.sweep {
         wzp_client::sweep::run_and_print_default_sweep();
+        return Ok(());
+    }
+
+    // --netcheck: run network diagnostic and exit
+    if cli.netcheck {
+        let config = wzp_client::netcheck::NetcheckConfig {
+            stun_config: wzp_client::stun::StunConfig::default(),
+            relays: vec![
+                ("relay".into(), cli.relay_addr),
+            ],
+            timeout: std::time::Duration::from_secs(5),
+            test_portmap: true,
+            test_ipv6: true,
+            local_port: 0,
+        };
+        let report = wzp_client::netcheck::run_netcheck(&config).await;
+        print!("{}", wzp_client::netcheck::format_report(&report));
         return Ok(());
     }
 
@@ -776,6 +798,7 @@ async fn run_signal_mode(
             // relay-path.
             caller_reflexive_addr: None,
             caller_local_addrs: Vec::new(),
+            caller_mapped_addr: None,
             caller_build_version: None,
         }).await?;
     }
@@ -810,13 +833,14 @@ async fn run_signal_mode(
                         // so callee addr stays hidden from the caller.
                         callee_reflexive_addr: None,
                         callee_local_addrs: Vec::new(),
+                        callee_mapped_addr: None,
                         callee_build_version: None,
                     }).await;
                 }
                 SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
                     info!(call_id = %call_id, mode = ?accept_mode, "call answered");
                 }
-                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _, peer_local_addrs: _ } => {
+                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _, peer_local_addrs: _, peer_mapped_addr: _ } => {
                     info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
 
                     // Connect to the media room

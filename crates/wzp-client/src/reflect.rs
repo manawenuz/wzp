@@ -473,6 +473,40 @@ pub fn classify_nat(probes: &[NatProbeResult]) -> (NatType, Option<String>) {
     }
 }
 
+/// Enhanced NAT detection that combines relay-based reflection with
+/// public STUN server probes for more robust classification.
+///
+/// Runs both probe sets concurrently:
+/// 1. Relay probes via `detect_nat_type` (existing behavior)
+/// 2. Public STUN probes via `probe_stun_servers`
+///
+/// Merges all results and classifies. More probes = higher confidence
+/// in the NAT type classification. Falls back gracefully: if STUN
+/// servers are unreachable, relay probes still work (and vice versa).
+pub async fn detect_nat_type_with_stun(
+    relays: Vec<(String, SocketAddr)>,
+    timeout_ms: u64,
+    shared_endpoint: Option<wzp_transport::Endpoint>,
+    stun_config: &crate::stun::StunConfig,
+) -> NatDetection {
+    // Run relay probes and STUN probes concurrently.
+    let relay_fut = detect_nat_type(relays, timeout_ms, shared_endpoint);
+    let stun_fut = crate::stun::probe_stun_servers(stun_config);
+
+    let (relay_detection, stun_probes) = tokio::join!(relay_fut, stun_fut);
+
+    // Merge all probes and re-classify.
+    let mut all_probes = relay_detection.probes;
+    all_probes.extend(stun_probes);
+
+    let (nat_type, consensus_addr) = classify_nat(&all_probes);
+    NatDetection {
+        probes: all_probes,
+        nat_type,
+        consensus_addr,
+    }
+}
+
 // ── Unit tests for the pure classifier ───────────────────────────
 
 #[cfg(test)]

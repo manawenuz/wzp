@@ -1100,3 +1100,82 @@ BT SCO only supports 8/16kHz. When `bt_active=1`, Oboe capture skips `setSampleR
 ### Hangup Signal Fix
 
 `SignalMessage::Hangup` now carries an optional `call_id` field. The relay uses it to end only the specific call instead of broadcasting to all active calls for the user — preventing a race where a hangup for call 1 kills a newly-placed call 2.
+
+## Phase 8: Tailscale-Inspired NAT Traversal (2026-04-14)
+
+Five new modules in `wzp-client` bring NAT traversal capability close to Tailscale's approach:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  wzp-client NAT Traversal Stack                                      │
+│                                                                      │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐    │
+│  │  stun.rs    │  │  portmap.rs  │  │  reflect.rs (existing)   │    │
+│  │  RFC 5389   │  │  NAT-PMP     │  │  Relay-based STUN        │    │
+│  │  Public     │  │  PCP         │  │  Multi-relay NAT detect  │    │
+│  │  STUN       │  │  UPnP IGD   │  │                          │    │
+│  └──────┬──────┘  └──────┬───────┘  └────────────┬─────────────┘    │
+│         │                │                        │                  │
+│         └────────────────┼────────────────────────┘                  │
+│                          │                                           │
+│                  ┌───────▼────────┐                                  │
+│                  │  ice_agent.rs  │                                  │
+│                  │  Gather / Re-  │                                  │
+│                  │  gather / Apply│                                  │
+│                  └───────┬────────┘                                  │
+│                          │                                           │
+│              ┌───────────┼───────────┐                               │
+│              │           │           │                               │
+│      ┌───────▼───┐  ┌───▼───┐  ┌───▼──────────┐                    │
+│      │ netcheck  │  │ dual_ │  │ relay_map.rs │                    │
+│      │ .rs       │  │ path  │  │ RTT-sorted   │                    │
+│      │ Diagnostic│  │ .rs   │  │ relay list   │                    │
+│      └───────────┘  │ Race  │  └──────────────┘                    │
+│                     └───────┘                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Candidate Types
+
+| Type | Source | Priority | When Used |
+|------|--------|----------|-----------|
+| Host | `local_host_candidates()` | 1 (highest) | Same-LAN peers |
+| Port-mapped | `portmap::acquire_port_mapping()` | 2 | Router supports NAT-PMP/PCP/UPnP |
+| Server-reflexive | `stun::discover_reflexive()` or relay Reflect | 3 | Cone NAT |
+| Relay | Relay address (fallback) | 4 (lowest) | Always available |
+
+### Signal Flow for Mid-Call Re-Gathering
+
+```
+Network change (WiFi → cellular)
+    │
+    ▼
+IceAgent::re_gather()
+    ├── stun::discover_reflexive()
+    ├── portmap::acquire_port_mapping()
+    └── local_host_candidates()
+    │
+    ▼
+SignalMessage::CandidateUpdate { generation: N+1, ... }
+    │
+    ▼ (via relay)
+Peer's IceAgent::apply_peer_update()
+    │
+    ▼
+PeerCandidates { reflexive, local, mapped }
+    │
+    ▼
+dual_path::race() with new candidates (TODO: transport hot-swap)
+```
+
+### New SignalMessage Variants & Fields
+
+| Signal | New Fields | Purpose |
+|--------|-----------|---------|
+| `DirectCallOffer` | `caller_mapped_addr` | Port-mapped address from NAT-PMP/PCP/UPnP |
+| `DirectCallAnswer` | `callee_mapped_addr` | Same, callee side |
+| `CallSetup` | `peer_mapped_addr` | Relay cross-wires mapped addr to peer |
+| `CandidateUpdate` | (new variant) | Mid-call candidate re-gathering |
+| `RegisterPresenceAck` | `relay_region`, `available_relays` | Relay mesh metadata for auto-selection |
+
+All new fields use `#[serde(default, skip_serializing_if)]` for backward compatibility with older clients/relays.

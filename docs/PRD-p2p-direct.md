@@ -142,11 +142,17 @@ The existing relay connection carries `IceCandidate` signals. No new infrastruct
 |-------|-------|--------|--------|
 | 1 | STUN client + candidate gathering | 2 days | Done |
 | 2 | QUIC hole punching + identity verification | 3 days | Done |
-| 3 | Adaptive quality on P2P connection | 2 days | Pending (needs 5-tier classification, task #9) |
+| 3 | Adaptive quality on P2P connection | 2 days | Done (#23) |
 | 4 | Hybrid mode (relay + P2P, seamless migration) | 3 days | Done |
 | 5 | Single-socket Nebula (shared signal+direct endpoint) | 2 days | Done |
 | 6 | ICE path negotiation + dual-path race | 3 days | Done |
 | 7 | IPv6 dual-socket | 2 days | Done (but `dual_path.rs` integration tests broken — missing `ipv6_endpoint` arg) |
+| 8.1 | Public STUN client (RFC 5389) | 1 day | Done |
+| 8.2 | PCP/PMP/UPnP port mapping | 2 days | Done |
+| 8.3 | Mid-call ICE re-gathering + CandidateUpdate signal | 2 days | Done (signal plane; transport hot-swap TODO) |
+| 8.4 | Netcheck diagnostic | 1 day | Done |
+| 8.5 | Region-based relay selection (data model) | 1 day | Done |
+| 8.6 | Hard NAT traversal (birthday attack) | — | Deferred |
 
 ## Implementation Status (2026-04-13)
 
@@ -162,3 +168,38 @@ P2P adaptive quality (#23) now implemented:
 - Both peers self-observe network quality from QUIC path stats
 - Quality reports generated every ~1s and attached to outgoing packets
 - AdaptiveQualityController drives codec switching on both P2P and relay calls
+
+## Update (2026-04-14): Phase 8 — Tailscale-Inspired Enhancements
+
+Added 5 new modules to bring NAT traversal capability close to Tailscale's:
+
+### Phase 8.1: Public STUN Client (Done)
+- `stun.rs`: RFC 5389 Binding Request/Response over raw UDP
+- Independent reflexive discovery via public STUN servers (Google, Cloudflare)
+- `detect_nat_type_with_stun()` combines relay + STUN probes for higher confidence
+- STUN fallback in desktop's `try_reflect_own_addr()` when relay reflection fails
+
+### Phase 8.2: PCP/PMP/UPnP Port Mapping (Done)
+- `portmap.rs`: NAT-PMP (RFC 6886), PCP (RFC 6887), UPnP IGD
+- Gateway discovery (macOS + Linux), try NAT-PMP → PCP → UPnP in sequence
+- New candidate type: `PeerCandidates.mapped` + signal fields `caller_mapped_addr`/`callee_mapped_addr`/`peer_mapped_addr`
+- Dial order: host → mapped → reflexive (mapped helps on symmetric NATs)
+
+### Phase 8.3: Mid-Call ICE Re-Gathering (Done — signal plane)
+- `ice_agent.rs`: `IceAgent` with `gather()`, `re_gather()`, `apply_peer_update()`
+- `SignalMessage::CandidateUpdate` with monotonic generation counter
+- Relay forwards `CandidateUpdate` like `MediaPathReport`
+- Desktop handles and emits to JS frontend
+- Transport hot-swap: designed but not yet wired into live call engine
+
+### Phase 8.4: Netcheck Diagnostic (Done)
+- `netcheck.rs`: comprehensive network diagnostic (NAT type, reflexive addr, IPv4/v6, port mapping, relay latencies)
+- CLI: `wzp-client --netcheck <relay>`
+
+### Phase 8.5: Region-Based Relay Selection (Done — data model)
+- `relay_map.rs`: `RelayMap` sorted by RTT with `preferred()` selection
+- `RegisterPresenceAck` extended with `relay_region` + `available_relays`
+
+### Phase 8.6: Hard NAT Traversal (Deferred)
+- Birthday-attack port prediction deferred — 2-5s probing latency is excessive for VoIP call setup
+- Phases 8.1-8.2 cover the vast majority of NAT configurations

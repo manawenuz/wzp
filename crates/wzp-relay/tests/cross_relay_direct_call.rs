@@ -52,6 +52,7 @@ fn alice_offer(call_id: &str) -> SignalMessage {
         supported_profiles: vec![],
         caller_reflexive_addr: Some(ALICE_ADDR.into()),
         caller_local_addrs: Vec::new(),
+        caller_mapped_addr: None,
         caller_build_version: None,
     }
 }
@@ -133,6 +134,7 @@ fn bob_answer(call_id: &str) -> SignalMessage {
         chosen_profile: None,
         callee_reflexive_addr: Some(BOB_ADDR.into()),
         callee_local_addrs: Vec::new(),
+        callee_mapped_addr: None,
         callee_build_version: None,
     }
 }
@@ -178,6 +180,7 @@ fn relay_b_handle_local_answer(
         relay_addr: RELAY_B_ADDR.into(),
         peer_direct_addr: caller_addr,
         peer_local_addrs: Vec::new(),
+        peer_mapped_addr: None,
     };
     let _ = callee_addr;
     (forward, setup_for_bob)
@@ -219,6 +222,7 @@ fn relay_a_handle_forwarded_answer(
         relay_addr: RELAY_A_ADDR.into(),
         peer_direct_addr: callee_reflexive_addr,
         peer_local_addrs: Vec::new(),
+        peer_mapped_addr: None,
     }
 }
 

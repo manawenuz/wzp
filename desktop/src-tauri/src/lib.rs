@@ -330,12 +330,16 @@ async fn connect(
     // Optional so the room-join path (which has no peer addrs)
     // can omit it entirely — it's only populated on direct calls.
     peer_local_addrs: Option<Vec<String>>,
+    // Phase 8 (Tailscale-inspired): peer's port-mapped external
+    // address from NAT-PMP/PCP/UPnP, carried in CallSetup.
+    peer_mapped_addr: Option<String>,
 ) -> Result<String, String> {
     emit_call_debug(&app, "connect:start", serde_json::json!({
         "relay": relay,
         "room": room,
         "peer_direct_addr": peer_direct_addr,
         "peer_local_addrs": peer_local_addrs,
+        "peer_mapped_addr": peer_mapped_addr,
     }));
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
@@ -396,9 +400,14 @@ async fn connect(
             (Some(r), Some(relay_sockaddr))
                 if peer_addr_parsed.is_some() || !peer_local_parsed.is_empty() =>
             {
+                // Phase 8: parse peer_mapped_addr from CallSetup
+                let peer_mapped_parsed: Option<std::net::SocketAddr> = peer_mapped_addr
+                    .as_deref()
+                    .and_then(|s| s.parse().ok());
                 let candidates = wzp_client::dual_path::PeerCandidates {
                     reflexive: peer_addr_parsed,
                     local: peer_local_parsed.clone(),
+                    mapped: peer_mapped_parsed,
                 };
                 tracing::info!(
                     role = ?r,
@@ -1149,7 +1158,7 @@ fn do_register_signal(
                         "peer_build": callee_build_version,
                     }));
                 }
-                Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr, peer_local_addrs })) => {
+                Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr, peer_local_addrs, peer_mapped_addr })) => {
                     // Phase 3: peer_direct_addr carries the OTHER party's
                     // reflex addr. Phase 5.5: peer_local_addrs carries
                     // their LAN host candidates (usable for same-LAN
@@ -1168,6 +1177,7 @@ fn do_register_signal(
                         "relay_addr": relay_addr,
                         "peer_direct_addr": peer_direct_addr,
                         "peer_local_addrs": peer_local_addrs,
+                        "peer_mapped_addr": peer_mapped_addr,
                     }));
                     let mut sig = signal_state.lock().await;
                     sig.signal_status = "setup".into();
@@ -1180,6 +1190,7 @@ fn do_register_signal(
                             "relay_addr": relay_addr,
                             "peer_direct_addr": peer_direct_addr,
                             "peer_local_addrs": peer_local_addrs,
+                            "peer_mapped_addr": peer_mapped_addr,
                         }),
                     );
                 }
@@ -1213,6 +1224,36 @@ fn do_register_signal(
                     if let Some(tx) = sig.pending_path_report.take() {
                         let _ = tx.send(direct_ok);
                     }
+                }
+                Ok(Some(SignalMessage::CandidateUpdate { call_id, reflexive_addr, local_addrs, mapped_addr, generation })) => {
+                    // Phase 8: peer re-gathered candidates after a
+                    // network change. Emit to JS for UI notification
+                    // and potential transport re-race.
+                    tracing::info!(
+                        %call_id,
+                        generation,
+                        reflexive = ?reflexive_addr,
+                        mapped = ?mapped_addr,
+                        local_count = local_addrs.len(),
+                        "signal: CandidateUpdate from peer"
+                    );
+                    emit_call_debug(&app_clone, "recv:CandidateUpdate", serde_json::json!({
+                        "call_id": call_id,
+                        "generation": generation,
+                        "reflexive_addr": reflexive_addr,
+                        "local_addrs": local_addrs,
+                        "mapped_addr": mapped_addr,
+                    }));
+                    let _ = app_clone.emit("signal-event", serde_json::json!({
+                        "type": "candidate_update",
+                        "call_id": call_id,
+                        "generation": generation,
+                        "reflexive_addr": reflexive_addr,
+                        "local_addrs": local_addrs,
+                        "mapped_addr": mapped_addr,
+                    }));
+                    // TODO Phase 8: use IceAgent.apply_peer_update() +
+                    // race_upgrade() to attempt transport hot-swap
                 }
                 Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
                     // "STUN for QUIC" response — the relay told us our
@@ -1501,6 +1542,35 @@ async fn place_call(
         "local_addrs": caller_local_addrs,
     }));
 
+    // Phase 8: attempt port mapping for symmetric NAT traversal.
+    // This is best-effort — if the router doesn't support NAT-PMP/PCP/UPnP,
+    // we fall back to reflexive + host candidates only.
+    let caller_mapped_addr: Option<String> = {
+        let v4_port = state.signal.lock().await.endpoint
+            .as_ref()
+            .and_then(|ep| ep.local_addr().ok())
+            .map(|la| la.port())
+            .unwrap_or(0);
+        if v4_port > 0 {
+            match wzp_client::portmap::acquire_port_mapping(v4_port, None).await {
+                Ok(mapping) => {
+                    let addr = mapping.external_addr.to_string();
+                    tracing::info!(%addr, protocol = ?mapping.protocol, "place_call: port mapping acquired");
+                    emit_call_debug(&app, "place_call:portmap_ok", serde_json::json!({
+                        "addr": addr, "protocol": format!("{:?}", mapping.protocol),
+                    }));
+                    Some(addr)
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "place_call: port mapping unavailable (normal on most networks)");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or("not registered")?;
     let call_id = format!(
@@ -1510,7 +1580,7 @@ async fn place_call(
             .unwrap()
             .as_nanos()
     );
-    tracing::info!(%call_id, %target_fp, reflex = ?own_reflex, "place_call: sending DirectCallOffer");
+    tracing::info!(%call_id, %target_fp, reflex = ?own_reflex, mapped = ?caller_mapped_addr, "place_call: sending DirectCallOffer");
     transport
         .send_signal(&SignalMessage::DirectCallOffer {
             caller_fingerprint: sig.fingerprint.clone(),
@@ -1523,6 +1593,7 @@ async fn place_call(
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
             caller_reflexive_addr: own_reflex.clone(),
             caller_local_addrs: caller_local_addrs.clone(),
+            caller_mapped_addr: caller_mapped_addr.clone(),
             caller_build_version: Some(GIT_HASH.to_string()),
         })
         .await
@@ -1625,12 +1696,43 @@ async fn answer_call(
         "local_addrs": callee_local_addrs,
     }));
 
+    // Phase 8: attempt port mapping (AcceptTrusted only — privacy mode
+    // keeps the mapped addr hidden too).
+    let callee_mapped_addr: Option<String> =
+        if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
+            let v4_port = state.signal.lock().await.endpoint
+                .as_ref()
+                .and_then(|ep| ep.local_addr().ok())
+                .map(|la| la.port())
+                .unwrap_or(0);
+            if v4_port > 0 {
+                match wzp_client::portmap::acquire_port_mapping(v4_port, None).await {
+                    Ok(mapping) => {
+                        tracing::info!(
+                            addr = %mapping.external_addr,
+                            protocol = ?mapping.protocol,
+                            "answer_call: port mapping acquired"
+                        );
+                        Some(mapping.external_addr.to_string())
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "answer_call: port mapping unavailable");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     let sig = state.signal.lock().await;
     let transport = sig.transport.as_ref().ok_or_else(|| {
         tracing::warn!("answer_call: not registered (no transport)");
         "not registered".to_string()
     })?;
-    tracing::info!(%call_id, ?accept_mode, reflex = ?own_reflex, "answer_call: sending DirectCallAnswer");
+    tracing::info!(%call_id, ?accept_mode, reflex = ?own_reflex, mapped = ?callee_mapped_addr, "answer_call: sending DirectCallAnswer");
     transport
         .send_signal(&SignalMessage::DirectCallAnswer {
             call_id: call_id.clone(),
@@ -1641,6 +1743,7 @@ async fn answer_call(
             chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
             callee_reflexive_addr: own_reflex.clone(),
             callee_local_addrs: callee_local_addrs.clone(),
+            callee_mapped_addr,
             callee_build_version: Some(GIT_HASH.to_string()),
         })
         .await
@@ -1674,6 +1777,12 @@ async fn answer_call(
 /// unsupported / timed out / transport failed (caller should
 /// gracefully continue with a relay-only path), or `Err` on
 /// "not registered" which is a hard precondition failure.
+///
+/// Phase 8 (Tailscale-inspired): if relay-based reflection fails,
+/// falls back to public STUN servers for independent reflexive
+/// discovery. This handles the case where the relay is overloaded
+/// or temporarily unreachable for reflect but the call can still
+/// proceed with STUN-discovered addresses.
 async fn try_reflect_own_addr(
     state: &Arc<AppState>,
 ) -> Result<Option<String>, String> {
@@ -1690,8 +1799,8 @@ async fn try_reflect_own_addr(
     if let Err(e) = transport.send_signal(&SignalMessage::Reflect).await {
         let mut sig = state.signal.lock().await;
         sig.pending_reflect = None;
-        tracing::warn!(error = %e, "try_reflect_own_addr: send_signal failed, continuing without reflex addr");
-        return Ok(None);
+        tracing::warn!(error = %e, "try_reflect_own_addr: send_signal failed, falling back to STUN");
+        return try_stun_fallback(state).await;
     }
     match tokio::time::timeout(std::time::Duration::from_millis(1000), rx).await {
         Ok(Ok(addr)) => {
@@ -1706,13 +1815,42 @@ async fn try_reflect_own_addr(
             Ok(Some(s))
         }
         Ok(Err(_canceled)) => {
-            tracing::warn!("try_reflect_own_addr: oneshot canceled");
-            Ok(None)
+            tracing::warn!("try_reflect_own_addr: oneshot canceled, falling back to STUN");
+            try_stun_fallback(state).await
         }
         Err(_elapsed) => {
             let mut sig = state.signal.lock().await;
             sig.pending_reflect = None;
-            tracing::warn!("try_reflect_own_addr: 1s timeout (pre-Phase-1 relay?)");
+            tracing::warn!("try_reflect_own_addr: 1s timeout, falling back to STUN");
+            try_stun_fallback(state).await
+        }
+    }
+}
+
+/// STUN fallback for reflexive address discovery when relay-based
+/// reflection fails. Queries public STUN servers independently.
+async fn try_stun_fallback(
+    state: &Arc<AppState>,
+) -> Result<Option<String>, String> {
+    let stun_config = wzp_client::stun::StunConfig {
+        servers: vec![
+            "stun.l.google.com:19302".into(),
+            "stun1.l.google.com:19302".into(),
+        ],
+        timeout: std::time::Duration::from_secs(2),
+    };
+    match wzp_client::stun::discover_reflexive(&stun_config).await {
+        Ok(addr) => {
+            let s = addr.to_string();
+            tracing::info!(addr = %s, "STUN fallback: discovered reflexive address");
+            {
+                let mut sig = state.signal.lock().await;
+                sig.own_reflex_addr = Some(s.clone());
+            }
+            Ok(Some(s))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "STUN fallback also failed, continuing without reflex addr");
             Ok(None)
         }
     }
@@ -1823,7 +1961,15 @@ async fn detect_nat_type(
     // 1500ms per probe is generous: a same-host probe is < 10ms,
     // a cross-continent probe is typically < 300ms, and we want
     // to tolerate a one-off packet loss during connect.
-    let detection = wzp_client::reflect::detect_nat_type(parsed, 1500, shared_endpoint).await;
+    //
+    // Phase 8 (Tailscale-inspired): also probe public STUN servers
+    // in parallel with relay-based reflection. More probes = higher
+    // confidence in NAT classification. Falls back gracefully if
+    // STUN servers are unreachable.
+    let stun_config = wzp_client::stun::StunConfig::default();
+    let detection = wzp_client::reflect::detect_nat_type_with_stun(
+        parsed, 1500, shared_endpoint, &stun_config,
+    ).await;
     serde_json::to_value(&detection).map_err(|e| format!("serialize: {e}"))
 }
 

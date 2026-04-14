@@ -34,7 +34,12 @@ pub mod featherchat;
 pub mod handshake;
 pub mod dual_path;
 pub mod metrics;
+pub mod ice_agent;
+pub mod netcheck;
+pub mod portmap;
 pub mod reflect;
+pub mod relay_map;
+pub mod stun;
 pub mod sweep;
 
 // AudioPlayback: three possible backends depending on feature flags.

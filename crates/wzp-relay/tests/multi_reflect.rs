@@ -66,6 +66,8 @@ async fn spawn_mock_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
                                     success: true,
                                     error: None,
                                     relay_build: None,
+                                    relay_region: None,
+                                    available_relays: Vec::new(),
                                 })
                                 .await;
                         }
