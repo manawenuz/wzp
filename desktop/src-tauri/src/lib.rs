@@ -443,8 +443,55 @@ async fn connect(
                     }
                 }
 
+                // Phase 8.6: if peer sent birthday attack ports, add
+                // them as extra candidates the Dialer can target.
+                // Only wait for birthday ports if we know the peer has
+                // a non-cone NAT (from HardNatProbe). Otherwise start
+                // the race immediately — LAN/cone calls shouldn't wait.
+                let mut birthday_addrs: Vec<std::net::SocketAddr> = Vec::new();
+                {
+                    let peer_needs_birthday = {
+                        let sig = state.signal.lock().await;
+                        sig.peer_hard_nat_probe.as_ref()
+                            .map(|p| p.allocation != "port-preserving")
+                            .unwrap_or(false)
+                    };
+                    if peer_needs_birthday {
+                        // Wait up to 3s for BirthdayStart (Acceptor needs
+                        // time to open ports + STUN-probe them).
+                        for _ in 0..6 {
+                            let sig = state.signal.lock().await;
+                            if sig.peer_birthday_ports.is_some() { break; }
+                            drop(sig);
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                    }
+                    let sig = state.signal.lock().await;
+                    if let Some(ref bday) = sig.peer_birthday_ports {
+                        let targets = wzp_client::birthday::generate_dialer_targets(
+                            match bday.external_ip {
+                                std::net::IpAddr::V4(ip) => ip,
+                                _ => std::net::Ipv4Addr::UNSPECIFIED,
+                            },
+                            &bday.ports,
+                            64, // spray up to 64 targets
+                        );
+                        birthday_addrs = targets;
+                        tracing::info!(
+                            birthday_targets = birthday_addrs.len(),
+                            known_ports = bday.ports.len(),
+                            "connect: adding birthday attack targets"
+                        );
+                        emit_call_debug(&app, "connect:birthday_targets", serde_json::json!({
+                            "known_ports": bday.ports,
+                            "total_targets": birthday_addrs.len(),
+                        }));
+                    }
+                }
+
                 let mut all_local = peer_local_parsed.clone();
                 all_local.extend(predicted_addrs);
+                all_local.extend(birthday_addrs);
 
                 let candidates = wzp_client::dual_path::PeerCandidates {
                     reflexive: peer_addr_parsed,
@@ -1012,6 +1059,15 @@ struct SignalState {
     /// command reads this to generate predicted port candidates for
     /// sequential NATs.
     peer_hard_nat_probe: Option<PeerHardNatInfo>,
+    /// Phase 8.6: peer's birthday attack ports, if received.
+    peer_birthday_ports: Option<PeerBirthdayInfo>,
+}
+
+/// Parsed data from a peer's HardNatBirthdayStart signal.
+#[derive(Debug, Clone)]
+struct PeerBirthdayInfo {
+    external_ip: std::net::IpAddr,
+    ports: Vec<u16>,
 }
 
 /// Parsed data from a peer's HardNatProbe signal.
@@ -1404,8 +1460,15 @@ fn do_register_signal(
                         "acceptor_ports": acceptor_ports,
                         "external_ip": external_ip,
                     }));
-                    // TODO: trigger dialer spray when birthday attack
-                    // is integrated into the race waterfall
+                    // Stash for the connect command (if still running)
+                    // or for a background spray after relay fallback.
+                    if let Ok(ip) = external_ip.parse::<std::net::IpAddr>() {
+                        let mut sig = signal_state.lock().await;
+                        sig.peer_birthday_ports = Some(PeerBirthdayInfo {
+                            external_ip: ip,
+                            ports: acceptor_ports,
+                        });
+                    }
                 }
                 Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
                     // "STUN for QUIC" response — the relay told us our
@@ -2364,6 +2427,7 @@ pub fn run() {
             reconnect_in_progress: false,
             pending_path_report: None,
             peer_hard_nat_probe: None,
+            peer_birthday_ports: None,
         })),
     });
 
