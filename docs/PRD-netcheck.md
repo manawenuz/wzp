@@ -34,6 +34,7 @@ pub struct NetcheckReport {
     pub gateway: Option<String>,
     pub duration_ms: u32,
     pub stun_probes: Vec<NatProbeResult>,
+    pub port_allocation: Option<PortAllocation>,
 }
 ```
 
@@ -43,6 +44,7 @@ pub struct NetcheckReport {
 3. **Port mapping** — `acquire_port_mapping()` to detect NAT-PMP/PCP/UPnP
 4. **Gateway** — `default_gateway()` for the router address
 5. **IPv6** — attempt to bind `[::]:0` and send to an IPv6 STUN server
+6. **Port allocation** — `detect_port_allocation()` probes STUN servers from single socket to classify NAT pattern as PortPreserving/Sequential/Random (feeds into hard NAT prediction)
 
 **Derived fields**:
 - `nat_type` / `reflexive_addr` — from `classify_nat()` on STUN probes

@@ -152,7 +152,10 @@ The existing relay connection carries `IceCandidate` signals. No new infrastruct
 | 8.3 | Mid-call ICE re-gathering + CandidateUpdate signal | 2 days | Done (signal plane; transport hot-swap TODO) |
 | 8.4 | Netcheck diagnostic | 1 day | Done |
 | 8.5 | Region-based relay selection (data model) | 1 day | Done |
-| 8.6 | Hard NAT traversal (birthday attack) | — | Deferred |
+| 8.6a | Hard NAT: port allocation detection | 1 day | Done |
+| 8.6b | Hard NAT: sequential port prediction signal | 1 day | Done (signal + prediction fn; dial integration pending) |
+| 8.6c | Hard NAT: birthday attack (256×1024 probes) | 3 days | Not started |
+| 8.6d | Hard NAT: hybrid waterfall + background upgrade | 2 days | Not started |
 
 ## Implementation Status (2026-04-13)
 
@@ -200,6 +203,10 @@ Added 5 new modules to bring NAT traversal capability close to Tailscale's:
 - `relay_map.rs`: `RelayMap` sorted by RTT with `preferred()` selection
 - `RegisterPresenceAck` extended with `relay_region` + `available_relays`
 
-### Phase 8.6: Hard NAT Traversal (Deferred)
-- Birthday-attack port prediction deferred — 2-5s probing latency is excessive for VoIP call setup
-- Phases 8.1-8.2 cover the vast majority of NAT configurations
+### Phase 8.6: Hard NAT Traversal (Phase A done, B-D pending)
+- **Phase A (Done)**: Port allocation pattern detection — `PortAllocation` enum (`PortPreserving`/`Sequential{delta}`/`Random`/`Unknown`), `detect_port_allocation()` probes N STUN servers from single socket, `classify_port_allocation()` with wraparound + jitter tolerance, `predict_ports()` for sequential NATs
+- **Phase B (signal ready)**: `HardNatProbe` signal message carries `port_sequence`, `allocation`, `external_ip` — relay forwarding implemented. Actual dial-to-predicted-ports integration into `dual_path::race()` pending.
+- **Phase C (not started)**: Birthday attack (256 sockets × 1024 probes) for random NATs
+- **Phase D (not started)**: Hybrid waterfall with background relay-to-direct upgrade
+- `NetcheckReport.port_allocation` populated automatically from `detect_port_allocation()`
+- See `docs/PRD-hard-nat.md` for full design

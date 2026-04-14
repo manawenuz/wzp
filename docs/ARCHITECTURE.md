@@ -1179,3 +1179,39 @@ dual_path::race() with new candidates (TODO: transport hot-swap)
 | `RegisterPresenceAck` | `relay_region`, `available_relays` | Relay mesh metadata for auto-selection |
 
 All new fields use `#[serde(default, skip_serializing_if)]` for backward compatibility with older clients/relays.
+
+### Hard NAT Port Prediction
+
+For symmetric NATs that don't support port mapping, the system detects the NAT's port allocation pattern:
+
+```
+Single socket → 5 STUN servers (sequential probes)
+    │
+    ▼
+Observed ports: [40001, 40002, 40003, 40004, 40005]
+    │
+    ▼
+classify_port_allocation() → Sequential { delta: 1 }
+    │
+    ▼
+predict_ports(last=40005, delta=1, offset=0, spread=2)
+    → [40004, 40005, 40006, 40007, 40008]
+    │
+    ▼
+HardNatProbe signal → peer
+    │
+    ▼
+Peer dials predicted port range in parallel
+```
+
+| Pattern | Detection | Traversal Strategy |
+|---------|-----------|-------------------|
+| Port-preserving | All probes return same port | Standard hole-punch |
+| Sequential (delta=N) | Consistent N-increment | Predict next port, dial range |
+| Random | No pattern | Birthday attack or relay |
+| Unknown | < 3 probes succeeded | Relay fallback |
+
+The classifier tolerates:
+- **Jitter**: ±1 from dominant delta (concurrent flow grabbed a port)
+- **Wraparound**: 65535 → 1 treated as delta=+2, not -65534
+- **Noise**: 60% threshold — if most deltas agree, call it sequential

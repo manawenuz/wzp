@@ -332,7 +332,7 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 
 ### Phase 8: Tailscale-Inspired STUN/ICE Enhancements (2026-04-14)
 
-5 new modules in `wzp-client`, 64 new unit tests (363 total across client/proto/relay).
+5 new modules in `wzp-client`, 83 new unit tests (588 total across workspace).
 
 #### Public STUN Client (`stun.rs`)
 - Minimal RFC 5389 STUN Binding Request/Response over raw UDP
@@ -372,3 +372,20 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - `populate_from_ack()` — parses `RegisterPresenceAck.available_relays`
 - Stale detection (`needs_reprobe()`, `stale_entries()`)
 - `RegisterPresenceAck` extended with `relay_region` and `available_relays`
+
+#### Hard NAT Port Allocation Detection (`stun.rs` Phase A)
+- `PortAllocation` enum: `PortPreserving` / `Sequential { delta }` / `Random` / `Unknown`
+- `detect_port_allocation()` — sequential STUN probes from single socket, analyzes external port sequence
+- `classify_port_allocation()` — pure classifier with wraparound handling, jitter tolerance (±1), 60% threshold for noisy sequences
+- `predict_ports(last_port, delta, offset, spread)` — generates target port range for sequential NATs
+- `HardNatProbe` signal message for peer coordination (carries port_sequence, allocation, external_ip)
+- Relay forwards `HardNatProbe` to call peer
+- `NetcheckReport.port_allocation` field populated automatically
+- 17 new tests for classification, prediction, serde, Display
+
+#### Relay End-to-End Wiring (2026-04-14)
+- `CallRegistry` stores + cross-wires `caller_mapped_addr`/`callee_mapped_addr` into `CallSetup.peer_mapped_addr`
+- `RelayConfig` extended with `region` + `advertised_addr` fields
+- `RegisterPresenceAck` populates `relay_region` from config, `available_relays` from federation peers
+- Desktop `place_call`/`answer_call` call `acquire_port_mapping()` and fill mapped addr fields
+- Legacy `build-android-docker.sh` renamed to `build-android-docker-LEGACY.sh` to prevent accidental use

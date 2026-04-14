@@ -1,8 +1,8 @@
 # PRD: Hard NAT Traversal (Port Prediction + Birthday Attack)
 
-> Phase: Design
-> Status: Not started
-> Crate: wzp-client, wzp-proto
+> Phase: Partial implementation
+> Status: Phase A done, Phase B signal ready, C-D not started (2026-04-14)
+> Crate: wzp-client, wzp-proto, wzp-relay
 
 ## Problem
 
@@ -193,14 +193,14 @@ HardNatBirthdayStart {
 
 ## Effort Estimate
 
-| Phase | Scope | Effort |
-|-------|-------|--------|
-| A | Port allocation pattern detection | 1 day |
-| B | Sequential port prediction + coordination | 2 days |
-| C | Birthday attack (256 sockets + 1024 probes) | 3 days |
-| D | Hybrid waterfall + background upgrade | 2 days |
+| Phase | Scope | Effort | Status |
+|-------|-------|--------|--------|
+| A | Port allocation pattern detection | 1 day | **Done** — `PortAllocation` enum, `detect_port_allocation()`, `classify_port_allocation()`, `predict_ports()`, 17 tests |
+| B | Sequential port prediction + coordination | 2 days | **Signal ready** — `HardNatProbe` signal + relay forwarding done. `dual_path::race()` integration pending |
+| C | Birthday attack (256 sockets + 1024 probes) | 3 days | Not started |
+| D | Hybrid waterfall + background upgrade | 2 days | Not started |
 
-**Total**: ~8 days. Recommend starting with Phase A (detection) which is useful for netcheck even without the attack. Phase B (sequential prediction) covers ~40% of hard NATs with minimal complexity. Phase C (birthday) is the most complex and lowest ROI.
+**Total**: ~8 days. Phase A is done and feeds into netcheck. Phase B has signal plumbing complete — needs `dual_path::race()` integration to actually dial predicted ports. Phase C (birthday) is the most complex and lowest ROI.
 
 ## Success Criteria
 
