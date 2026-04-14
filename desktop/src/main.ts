@@ -284,8 +284,12 @@ ctxMenu.addEventListener("click", (e) => { if (e.target === ctxMenu) ctxMenu.cla
 let callInProgress = false;
 ctxCallBtn.addEventListener("click", async () => {
   if (!contextUser || callInProgress) return;
-  // Don't allow calling self
   if (contextUser.fingerprint === myFingerprint) {
+    ctxMenu.classList.add("hidden");
+    return;
+  }
+  // Don't place a call if there's already a pending incoming call
+  if (pendingCallId) {
     ctxMenu.classList.add("hidden");
     return;
   }
@@ -294,10 +298,11 @@ ctxCallBtn.addEventListener("click", async () => {
   directCallPeer = { fingerprint: contextUser.fingerprint, alias: contextUser.alias };
   try {
     await invoke("place_call", { targetFp: contextUser.fingerprint });
+    // Keep callInProgress true until the call resolves (setup/hangup)
+    // — it's cleared in leaveVoice() or when the call connects
   } catch (e: any) {
     console.error("place_call failed:", e);
     directCallPeer = null;
-  } finally {
     callInProgress = false;
   }
 });
@@ -350,7 +355,9 @@ function enterVoice(isDirect: boolean) {
 
 function leaveVoice() {
   inVoice = false;
+  callInProgress = false;
   directCallPeer = null;
+  pendingCallId = null;
   voiceDrawer.classList.add("hidden");
   joinVoiceBtn.classList.remove("hidden");
   vdLevelBar.style.width = "0%";
@@ -674,11 +681,17 @@ sCallDebugClearBtn?.addEventListener("click", () => {
   sCallDebugLogEl.textContent = "";
 });
 sCallDebugCopyBtn?.addEventListener("click", () => {
-  const text = callDebugBuffer.map((e) => `${e.step} ${JSON.stringify(e.details)}`).join("\n");
+  const text = callDebugBuffer.map((e) => {
+    const t = new Date(e.ts_ms).toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return `${t} ${e.step} ${JSON.stringify(e.details)}`;
+  }).join("\n");
   navigator.clipboard?.writeText(text).catch(() => {});
 });
 sCallDebugShareBtn?.addEventListener("click", async () => {
-  const text = callDebugBuffer.map((e) => `${e.step} ${JSON.stringify(e.details)}`).join("\n");
+  const text = callDebugBuffer.map((e) => {
+    const t = new Date(e.ts_ms).toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return `${t} ${e.step} ${JSON.stringify(e.details)}`;
+  }).join("\n");
   try { await (navigator as any).share({ text }); } catch {}
 });
 
