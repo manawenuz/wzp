@@ -1055,9 +1055,11 @@ async function pollStatus() {
     if (directCallPeer) {
       // Check the debug buffer for the race result to label
       // the connection type (P2P Direct vs Relay).
-      // findLast: use the MOST RECENT event in case buffer has leftovers
-      const pathNeg = callDebugBuffer.findLast((e) => e.step === "connect:path_negotiated");
-      const engineOk = callDebugBuffer.findLast((e) => e.step === "connect:call_engine_started");
+      // Use reverse search for MOST RECENT event (avoid stale data
+      // from previous calls). Spread+reverse instead of findLast for
+      // WebView compatibility (findLast requires Chrome 97+).
+      const pathNeg = [...callDebugBuffer].reverse().find((e) => e.step === "connect:path_negotiated");
+      const engineOk = [...callDebugBuffer].reverse().find((e) => e.step === "connect:call_engine_started");
       if (engineOk) {
         if (pathNeg?.details?.use_direct === true) {
           dcBadge.textContent = "P2P Direct";
@@ -1692,6 +1694,7 @@ listen("signal-event", (event: any) => {
             quality: loadSettings().quality || "auto",
             peerDirectAddr: data.peer_direct_addr ?? null,
             peerLocalAddrs: data.peer_local_addrs ?? [],
+            peerMappedAddr: data.peer_mapped_addr ?? null,
           });
           showCallScreen();
         } catch (e: any) {
