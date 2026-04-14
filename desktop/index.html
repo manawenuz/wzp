@@ -11,97 +11,71 @@
   </head>
   <body>
     <div id="app">
-      <!-- Connect screen -->
-      <div id="connect-screen">
-        <h1>WarzonePhone</h1>
-        <p class="subtitle">Encrypted Voice</p>
-        <div class="form">
-          <label>Relay
-            <button id="relay-selected" class="relay-selected" type="button">
-              <span id="relay-dot" class="dot"></span>
-              <span id="relay-label">Select relay...</span>
-              <span class="arrow">&#9881;</span>
-            </button>
-          </label>
-          <label>Room
-            <input id="room" type="text" value="general" />
-          </label>
-          <label>Alias
-            <input id="alias" type="text" placeholder="your name" />
-          </label>
-          <div class="form-row">
-            <label class="checkbox">
-              <input id="os-aec" type="checkbox" checked />
-              OS Echo Cancel
-            </label>
-            <button id="settings-btn-home" class="icon-btn" title="Settings (Cmd+,)">&#9881;</button>
+
+      <!-- ═══════════════════════════════════════════════════════
+           LOBBY — default view, auto-connects signal on launch
+           ═══════════════════════════════════════════════════════ -->
+      <div id="lobby-screen">
+        <header class="lobby-header">
+          <div class="lobby-title-row">
+            <h1>WarzonePhone</h1>
+            <button id="settings-btn" class="icon-btn" title="Settings">&#9881;</button>
           </div>
-          <!-- Mode toggle -->
-          <div class="mode-toggle" style="display:flex;gap:8px;margin-bottom:8px;">
-            <button id="mode-room" class="mode-btn active" style="flex:1">Room</button>
-            <button id="mode-direct" class="mode-btn" style="flex:1">Direct Call</button>
+          <div class="lobby-status-row">
+            <span id="lobby-dot" class="dot"></span>
+            <span id="lobby-relay-label" class="lobby-relay">Connecting...</span>
+            <span id="lobby-room-label" class="lobby-room">general</span>
           </div>
-
-          <!-- Room mode (default) -->
-          <div id="room-mode">
-            <button id="connect-btn" class="primary">Connect</button>
+          <div class="lobby-identity">
+            <span id="lobby-identicon"></span>
+            <span id="lobby-fp" class="fp-display"></span>
           </div>
+        </header>
 
-          <!-- Direct call mode -->
-          <div id="direct-mode" class="hidden">
-            <button id="register-btn" class="primary" style="background:#2196F3">Register on Relay</button>
-            <div id="direct-registered" class="hidden" style="margin-top:12px">
-              <div class="direct-registered-header">
-                <p id="registered-status" style="color:var(--green);font-size:13px;margin:0">&#x2705; Registered — waiting for calls</p>
-                <button id="deregister-btn" class="secondary-btn small">Deregister</button>
-              </div>
-              <div id="incoming-call-panel" class="hidden" style="background:#1B5E20;padding:12px;border-radius:8px;margin:8px 0">
-                <p style="font-weight:bold;margin:0 0 4px 0">Incoming Call</p>
-                <p id="incoming-caller" style="font-size:12px;opacity:0.8;margin:0 0 8px 0">From: unknown</p>
-                <div style="display:flex;gap:8px">
-                  <button id="accept-call-btn" style="flex:1;background:var(--green);color:white;border:none;padding:8px;border-radius:6px;cursor:pointer">Accept</button>
-                  <button id="reject-call-btn" style="flex:1;background:var(--red);color:white;border:none;padding:8px;border-radius:6px;cursor:pointer">Reject</button>
-                </div>
-              </div>
+        <!-- User list -->
+        <div class="lobby-users-section">
+          <div class="lobby-users-header">
+            <span>Online</span>
+            <span id="lobby-user-count" class="badge">0</span>
+          </div>
+          <div id="lobby-user-list" class="lobby-user-list">
+            <div class="lobby-empty">No one else is here yet</div>
+          </div>
+        </div>
 
-              <!-- Recent contacts -->
-              <div id="recent-contacts-section" class="hidden">
-                <div class="history-header">Recent contacts</div>
-                <div id="recent-contacts-list" class="history-list"></div>
-              </div>
+        <!-- Voice join FAB -->
+        <div class="lobby-fab-row">
+          <button id="join-voice-btn" class="fab" title="Join Voice Chat">
+            <span class="fab-icon">&#x1F3A7;</span>
+            <span class="fab-label">Join Voice</span>
+          </button>
+        </div>
 
-              <!-- Call history -->
-              <div id="call-history-section" class="hidden">
-                <div class="history-header">
-                  History
-                  <button id="clear-history-btn" class="link-btn">clear</button>
-                </div>
-                <div id="call-history-list" class="history-list"></div>
-              </div>
-
-              <label style="margin-top:8px">Call by fingerprint
-                <input id="target-fp" type="text" placeholder="xxxx:xxxx:xxxx:..." />
-              </label>
-              <button id="call-btn" class="primary" style="margin-top:8px">Call</button>
-              <p id="call-status-text" style="color:var(--yellow);font-size:13px;margin-top:4px"></p>
+        <!-- Incoming call banner -->
+        <div id="incoming-call-banner" class="incoming-banner hidden">
+          <div class="incoming-info">
+            <span id="incoming-identicon" class="incoming-identicon"></span>
+            <div>
+              <div id="incoming-caller-name" class="incoming-name">Unknown</div>
+              <div class="incoming-subtitle">Incoming call...</div>
             </div>
           </div>
-
-          <p id="connect-error" class="error"></p>
+          <div class="incoming-actions">
+            <button id="accept-call-btn" class="btn-accept">Accept</button>
+            <button id="reject-call-btn" class="btn-reject">Reject</button>
+          </div>
         </div>
-        <div class="identity-info">
-          <span id="my-identicon"></span>
-          <span id="my-fingerprint" class="fp-display"></span>
-        </div>
-        <div class="recent-rooms" id="recent-rooms"></div>
       </div>
 
-      <!-- In-call screen -->
+      <!-- ═══════════════════════════════════════════════════════
+           IN-CALL — voice active (room or direct)
+           ═══════════════════════════════════════════════════════ -->
       <div id="call-screen" class="hidden">
         <div class="call-header">
           <div class="call-header-row">
+            <button id="back-to-lobby-btn" class="icon-btn small" title="Back to lobby">&#x2190;</button>
             <div id="room-name" class="room-name"></div>
-            <button id="settings-btn-call" class="icon-btn small" title="Settings (Cmd+,)">&#9881;</button>
+            <button id="settings-btn-call" class="icon-btn small" title="Settings">&#9881;</button>
           </div>
           <div class="call-meta">
             <span id="call-status" class="status-dot"></span>
@@ -111,16 +85,14 @@
         <div class="level-meter">
           <div id="level-bar" class="level-bar-fill"></div>
         </div>
-        <!-- Direct-call phone layout — shown instead of the group
-             participant list when directCallPeer is set. Centered
-             identicon, name, fp, connection badge. Hidden for
-             room calls (directCallPeer == null). -->
+        <!-- Direct-call phone layout -->
         <div id="direct-call-view" class="direct-call-view hidden">
           <div id="dc-identicon" class="dc-identicon"></div>
           <div id="dc-name" class="dc-name">Unknown</div>
           <div id="dc-fp" class="dc-fp"></div>
           <div id="dc-badge" class="dc-badge">Connecting...</div>
         </div>
+        <!-- Room participants -->
         <div id="participants" class="participants"></div>
         <div class="controls">
           <button id="mic-btn" class="control-btn" title="Toggle Mic (m)">
@@ -136,7 +108,29 @@
         <div id="stats" class="stats"></div>
       </div>
 
-      <!-- Settings panel -->
+      <!-- ═══════════════════════════════════════════════════════
+           USER CONTEXT MENU (tap on user in lobby)
+           ═══════════════════════════════════════════════════════ -->
+      <div id="user-context-menu" class="context-menu hidden">
+        <div class="context-header">
+          <span id="ctx-identicon" class="ctx-identicon"></span>
+          <div>
+            <div id="ctx-name" class="ctx-name">User</div>
+            <div id="ctx-fp" class="ctx-fp"></div>
+          </div>
+        </div>
+        <button id="ctx-call-btn" class="context-action">
+          <span>&#x1F4DE;</span> Direct Call
+        </button>
+        <button id="ctx-message-btn" class="context-action" disabled>
+          <span>&#x1F4AC;</span> Message (coming soon)
+        </button>
+        <button id="ctx-close-btn" class="context-action dim">Close</button>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════
+           SETTINGS PANEL (overlay)
+           ═══════════════════════════════════════════════════════ -->
       <div id="settings-panel" class="hidden">
         <div class="settings-card">
           <div class="settings-header">
@@ -157,28 +151,53 @@
             <div class="quality-control">
               <div class="quality-header">
                 <span class="setting-label">QUALITY</span>
-                <span id="s-quality-label" class="quality-label">Auto</span>
+                <span id="s-quality-label" class="quality-value">Auto</span>
               </div>
-              <input id="s-quality" type="range" min="0" max="7" step="1" value="3" class="quality-slider" />
-              <div class="quality-ticks">
-                <span>64k</span>
-                <span>48k</span>
-                <span>32k</span>
+              <input id="s-quality" type="range" min="0" max="6" step="1" value="6" />
+              <div class="quality-labels">
+                <span>Codec2 1.2k</span>
                 <span>Auto</span>
-                <span>24k</span>
-                <span>6k</span>
-                <span>C2</span>
-                <span>1.2k</span>
               </div>
             </div>
             <label class="checkbox">
-              <input id="s-os-aec" type="checkbox" />
-              OS Echo Cancellation (macOS VoiceProcessingIO)
+              <input id="s-os-aec" type="checkbox" checked />
+              OS Echo Cancellation
             </label>
-            <label class="checkbox">
-              <input id="s-agc" type="checkbox" checked />
-              Automatic Gain Control
-            </label>
+          </div>
+          <div class="settings-section">
+            <h3>Relays</h3>
+            <div id="s-relay-list"></div>
+            <div class="relay-add">
+              <input id="s-relay-name" type="text" placeholder="Name" style="flex:1" />
+              <input id="s-relay-addr" type="text" placeholder="host:port" style="flex:2" />
+              <button id="s-relay-add" class="secondary-btn small">Add</button>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>Identity</h3>
+            <div>
+              <span class="setting-label">FINGERPRINT</span>
+              <div id="s-fingerprint" class="fp-display" style="margin-top:4px"></div>
+            </div>
+            <div style="margin-top:8px">
+              <span class="setting-label">IDENTITY FILE</span>
+              <div style="font-size:12px;opacity:0.6;margin-top:2px">~/.wzp/identity</div>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>Network</h3>
+            <div>
+              <span class="setting-label">PUBLIC ADDRESS</span>
+              <span id="s-public-addr" style="color:var(--green);font-size:13px;margin-left:8px"></span>
+              <button id="s-reflect-btn" class="secondary-btn small" style="margin-left:8px">Detect</button>
+            </div>
+            <div style="margin-top:8px">
+              <button id="s-nat-detect-btn" class="secondary-btn" style="width:100%">Detect NAT</button>
+              <div id="s-nat-result" style="font-size:11px;margin-top:4px;opacity:0.7;white-space:pre-wrap"></div>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>Debug</h3>
             <label class="checkbox">
               <input id="s-dred-debug" type="checkbox" />
               DRED debug logs (verbose, dev only)
@@ -189,11 +208,11 @@
             </label>
             <label class="checkbox">
               <input id="s-direct-only" type="checkbox" />
-              Direct-only mode (no relay fallback — fails if P2P can't connect)
+              Direct-only mode (no relay fallback)
             </label>
             <label class="checkbox">
               <input id="s-birthday-attack" type="checkbox" />
-              Birthday attack (opens extra ports for hard NAT — adds ~3s to setup)
+              Birthday attack (extra ports for hard NAT — adds ~3s)
             </label>
           </div>
           <div class="settings-section" id="s-call-debug-section" style="display:none">
@@ -205,92 +224,8 @@
               <button id="s-call-debug-clear" class="secondary-btn" style="flex:1">Clear log</button>
             </div>
             <small id="s-call-debug-copy-status" style="display:block;margin-top:4px;color:var(--text-dim);font-size:10px"></small>
-            <small style="color:var(--text-dim);display:block;margin-top:4px">
-              Rolling buffer of the last 200 call-flow events. Turned off by
-              default — the GUI overlay only populates when the checkbox above
-              is on, but logcat (adb) always keeps a copy regardless.
-            </small>
           </div>
-          <div class="settings-section">
-            <h3>Identity</h3>
-            <div class="setting-row">
-              <span class="setting-label">Fingerprint</span>
-              <span id="s-fingerprint" class="fp-display-large"></span>
-            </div>
-            <div class="setting-row">
-              <span class="setting-label">Identity file</span>
-              <span class="fp-display">~/.wzp/identity</span>
-            </div>
-          </div>
-          <div class="settings-section">
-            <h3>Network</h3>
-            <div class="setting-row">
-              <span class="setting-label">Public address</span>
-              <span id="s-reflected-addr" class="fp-display">(not queried)</span>
-              <button id="s-reflect-btn" class="secondary-btn">Detect</button>
-            </div>
-            <small style="color:var(--text-dim);display:block;margin-top:4px">
-              Asks the registered relay to echo back the IP:port it sees for this
-              connection (QUIC-native NAT reflection, replaces STUN).
-            </small>
-            <div class="setting-row" style="margin-top:10px">
-              <span class="setting-label">NAT type</span>
-              <span id="s-nat-type" class="fp-display">(not detected)</span>
-              <button id="s-nat-detect-btn" class="secondary-btn">Detect NAT</button>
-            </div>
-            <div id="s-nat-probes" style="margin-top:6px;font-size:11px;color:var(--text-dim)"></div>
-            <small style="color:var(--text-dim);display:block;margin-top:4px">
-              Probes every configured relay in parallel and compares the results
-              to classify the NAT: cone (P2P viable), symmetric (must relay),
-              multiple, or unknown.
-            </small>
-          </div>
-          <div class="settings-section">
-            <h3>Recent Rooms</h3>
-            <div id="s-recent-rooms" class="recent-rooms-list"></div>
-            <button id="s-clear-recent" class="secondary-btn">Clear History</button>
-          </div>
-          <button id="settings-save" class="primary">Save</button>
-        </div>
-      </div>
-
-      <!-- Manage Relays dialog -->
-      <div id="relay-dialog" class="hidden">
-        <div class="settings-card relay-dialog-card">
-          <div class="settings-header">
-            <h2>Manage Relays</h2>
-            <button id="relay-dialog-close" class="icon-btn">&times;</button>
-          </div>
-          <div id="relay-dialog-list" class="relay-dialog-list"></div>
-          <div class="relay-add-row">
-            <div class="relay-add-inputs">
-              <input id="relay-add-name" type="text" placeholder="Name" />
-              <input id="relay-add-addr" type="text" placeholder="host:port" />
-            </div>
-            <button id="relay-add-btn" class="primary">Add Relay</button>
-          </div>
-        </div>
-      </div>
-      <!-- Key changed warning dialog -->
-      <div id="key-warning" class="hidden">
-        <div class="settings-card key-warning-card">
-          <div class="key-warning-icon">&#9888;</div>
-          <h2>Server Key Changed</h2>
-          <p class="key-warning-text">The relay's identity has changed since you last connected. This usually happens when the server was restarted, but could also indicate a security issue.</p>
-          <div class="key-warning-fps">
-            <div class="key-fp-row">
-              <span class="key-fp-label">Previously known</span>
-              <code id="kw-old-fp" class="key-fp"></code>
-            </div>
-            <div class="key-fp-row">
-              <span class="key-fp-label">New key</span>
-              <code id="kw-new-fp" class="key-fp"></code>
-            </div>
-          </div>
-          <div class="key-warning-actions">
-            <button id="kw-accept" class="primary">Accept New Key</button>
-            <button id="kw-cancel" class="secondary-btn">Cancel</button>
-          </div>
+          <button id="settings-save" class="primary" style="margin-top:12px">Save</button>
         </div>
       </div>
     </div>
