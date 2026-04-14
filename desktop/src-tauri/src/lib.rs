@@ -2092,17 +2092,18 @@ async fn get_reflected_address(
 /// would make a symmetric NAT look like a cone NAT, which is
 /// exactly the failure mode we're trying to detect.
 ///
-/// Takes the relay list from JS because the GUI owns the relay
-/// config (localStorage `wzp-settings.relays`). Frontend passes it
-/// in; Rust side just does the network work.
+/// NAT detection with selectable mode.
+///
+/// `mode`:
+///   - `"relay"` — relay-based Reflect only (original Phase 1-2 behavior)
+///   - `"stun"` — public STUN servers only (no relay needed)
+///   - `"both"` (default) — relay + STUN in parallel (highest confidence)
 #[tauri::command]
 async fn detect_nat_type(
     state: tauri::State<'_, Arc<AppState>>,
     relays: Vec<RelayArg>,
+    mode: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    // Parse relay args up front so a single malformed entry fails
-    // the whole call cleanly instead of surfacing as a probe error
-    // at the end.
     let mut parsed = Vec::with_capacity(relays.len());
     for r in relays {
         let addr: std::net::SocketAddr = r
@@ -2112,27 +2113,69 @@ async fn detect_nat_type(
         parsed.push((r.name, addr));
     }
 
-    // Phase 5: share the signal endpoint across all probes so
-    // they emit from the same source port. Port-preserving NATs
-    // (MikroTik, most consumer routers) give a stable external
-    // port → classifier correctly sees cone instead of falsely
-    // labeling SymmetricPort. Falls back to None (per-probe fresh
-    // endpoint) when not registered.
     let shared_endpoint = state.signal.lock().await.endpoint.clone();
-
-    // 1500ms per probe is generous: a same-host probe is < 10ms,
-    // a cross-continent probe is typically < 300ms, and we want
-    // to tolerate a one-off packet loss during connect.
-    //
-    // Phase 8 (Tailscale-inspired): also probe public STUN servers
-    // in parallel with relay-based reflection. More probes = higher
-    // confidence in NAT classification. Falls back gracefully if
-    // STUN servers are unreachable.
     let stun_config = wzp_client::stun::StunConfig::default();
-    let detection = wzp_client::reflect::detect_nat_type_with_stun(
-        parsed, 1500, shared_endpoint, &stun_config,
-    ).await;
+
+    let mode_str = mode.as_deref().unwrap_or("both");
+    tracing::info!(mode = mode_str, relay_count = parsed.len(), "detect_nat_type: starting");
+
+    let detection = match mode_str {
+        "relay" => {
+            // Original behavior: relay-based Reflect only
+            wzp_client::reflect::detect_nat_type(parsed, 1500, shared_endpoint).await
+        }
+        "stun" => {
+            // Public STUN servers only — no relay connection needed
+            let probes = wzp_client::stun::probe_stun_servers(&stun_config).await;
+            let (nat_type, consensus_addr) = wzp_client::reflect::classify_nat(&probes);
+            wzp_client::reflect::NatDetection {
+                probes,
+                nat_type,
+                consensus_addr,
+            }
+        }
+        _ => {
+            // "both" — relay + STUN in parallel (default, highest confidence)
+            wzp_client::reflect::detect_nat_type_with_stun(
+                parsed, 1500, shared_endpoint, &stun_config,
+            ).await
+        }
+    };
     serde_json::to_value(&detection).map_err(|e| format!("serialize: {e}"))
+}
+
+/// Run comprehensive network diagnostic (STUN + relay + portmap + IPv6).
+#[tauri::command]
+async fn run_netcheck(
+    state: tauri::State<'_, Arc<AppState>>,
+    relays: Vec<RelayArg>,
+) -> Result<serde_json::Value, String> {
+    let mut relay_addrs = Vec::with_capacity(relays.len());
+    for r in relays {
+        let addr: std::net::SocketAddr = r
+            .address
+            .parse()
+            .map_err(|e| format!("bad relay address {:?}: {e}", r.address))?;
+        relay_addrs.push((r.name, addr));
+    }
+
+    let local_port = state.signal.lock().await.endpoint
+        .as_ref()
+        .and_then(|ep| ep.local_addr().ok())
+        .map(|la| la.port())
+        .unwrap_or(0);
+
+    let config = wzp_client::netcheck::NetcheckConfig {
+        stun_config: wzp_client::stun::StunConfig::default(),
+        relays: relay_addrs,
+        timeout: std::time::Duration::from_secs(5),
+        test_portmap: true,
+        test_ipv6: true,
+        local_port,
+    };
+
+    let report = wzp_client::netcheck::run_netcheck(&config).await;
+    serde_json::to_value(&report).map_err(|e| format!("serialize: {e}"))
 }
 
 /// Deserialization shim for the relay list coming from JS. The
@@ -2299,7 +2342,7 @@ pub fn run() {
             ping_relay, get_identity, get_app_info,
             connect, disconnect, toggle_mic, toggle_speaker, get_status,
             register_signal, place_call, answer_call, get_signal_status,
-            get_reflected_address, detect_nat_type,
+            get_reflected_address, detect_nat_type, run_netcheck,
             hangup_call,
             deregister,
             set_speakerphone, is_speakerphone_on,
