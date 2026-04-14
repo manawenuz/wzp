@@ -156,6 +156,14 @@ impl MediaHeader {
     }
 }
 
+/// A user visible in the signal presence list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresenceUser {
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
 /// Quality report appended to a media packet when Q flag is set (4 bytes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityReport {
@@ -1018,6 +1026,16 @@ pub enum SignalMessage {
         recommended_profile: crate::QualityProfile,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+    },
+
+    // ── Signal presence ───────────────────────────────────────────
+
+    /// Relay broadcasts the list of currently registered signal
+    /// users to all connected clients. Sent on every register/
+    /// deregister so clients can maintain a live lobby user list.
+    PresenceList {
+        /// List of online users. Each entry is { fingerprint, alias }.
+        users: Vec<PresenceUser>,
     },
 
     // ── Quality upgrade negotiation (#28, #29) ──────────────────

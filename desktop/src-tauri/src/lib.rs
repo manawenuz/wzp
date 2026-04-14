@@ -1451,6 +1451,20 @@ fn do_register_signal(
                         });
                     }
                 }
+                Ok(Some(SignalMessage::PresenceList { users })) => {
+                    tracing::info!(count = users.len(), "signal: PresenceList received");
+                    // Emit to JS frontend for lobby user list
+                    let user_list: Vec<serde_json::Value> = users.iter().map(|u| {
+                        serde_json::json!({
+                            "fingerprint": u.fingerprint,
+                            "alias": u.alias,
+                        })
+                    }).collect();
+                    let _ = app_clone.emit("signal-event", serde_json::json!({
+                        "type": "presence_list",
+                        "users": user_list,
+                    }));
+                }
                 Ok(Some(SignalMessage::UpgradeProposal { call_id, proposal_id, proposed_profile, local_loss_pct, local_rtt_ms })) => {
                     tracing::info!(%call_id, %proposal_id, ?proposed_profile, "signal: UpgradeProposal from peer");
                     emit_call_debug(&app_clone, "recv:UpgradeProposal", serde_json::json!({
