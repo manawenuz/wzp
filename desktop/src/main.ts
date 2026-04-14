@@ -90,6 +90,12 @@ const ctxName = document.getElementById("ctx-name")!;
 const ctxFp = document.getElementById("ctx-fp")!;
 const ctxCallBtn = document.getElementById("ctx-call-btn")!;
 const ctxCloseBtn = document.getElementById("ctx-close-btn")!;
+// Relay management
+const sRelayList = document.getElementById("s-relay-list")!;
+const sRelayName = document.getElementById("s-relay-name") as HTMLInputElement;
+const sRelayAddr = document.getElementById("s-relay-addr") as HTMLInputElement;
+const sRelayAdd = document.getElementById("s-relay-add")!;
+
 // Settings
 const settingsPanel = document.getElementById("settings-panel")!;
 const settingsBtn = document.getElementById("settings-btn")!;
@@ -547,6 +553,80 @@ listen("call-event", (event: any) => {
 });
 
 // ── Settings ──────────────────────────────────────────────────────
+// ── Relay list management ──────────────────────────────────────
+function renderRelayList() {
+  const s = loadSettings();
+  sRelayList.innerHTML = "";
+  for (let i = 0; i < s.relays.length; i++) {
+    const r = s.relays[i];
+    const isActive = i === s.selectedRelay;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;padding:8px;border-radius:6px;margin-bottom:4px;cursor:pointer;" +
+      (isActive ? "background:rgba(74,222,128,0.12);border:1px solid var(--green);" : "background:var(--surface);border:1px solid transparent;");
+    row.innerHTML = `
+      <span style="flex:1;font-size:13px;font-weight:${isActive ? '600' : '400'}">
+        <span style="color:${isActive ? 'var(--green)' : 'var(--text)'}">${r.name}</span>
+        <span style="color:var(--text-dim);font-size:11px;margin-left:4px">${r.address}</span>
+      </span>
+      ${isActive ? '<span style="color:var(--green);font-size:11px">ACTIVE</span>' : ''}
+      <button class="relay-rm-btn" data-idx="${i}" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:16px;padding:2px 6px">&times;</button>
+    `;
+    // Click to select (not on the X button)
+    row.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).classList.contains("relay-rm-btn")) return;
+      const settings = loadSettings();
+      if (i !== settings.selectedRelay) {
+        settings.selectedRelay = i;
+        saveSettings(settings);
+        renderRelayList();
+        // Reconnect to new relay
+        reconnectSignal();
+      }
+    });
+    sRelayList.appendChild(row);
+  }
+  // Wire remove buttons
+  sRelayList.querySelectorAll(".relay-rm-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt((btn as HTMLElement).dataset.idx || "0");
+      const settings = loadSettings();
+      if (settings.relays.length <= 1) return; // keep at least one
+      settings.relays.splice(idx, 1);
+      if (settings.selectedRelay >= settings.relays.length) {
+        settings.selectedRelay = 0;
+      }
+      saveSettings(settings);
+      renderRelayList();
+      reconnectSignal();
+    });
+  });
+}
+
+sRelayAdd.addEventListener("click", () => {
+  const name = sRelayName.value.trim();
+  const addr = sRelayAddr.value.trim();
+  if (!name || !addr) return;
+  if (!addr.includes(":")) return; // must be host:port
+  const s = loadSettings();
+  s.relays.push({ name, address: addr });
+  saveSettings(s);
+  sRelayName.value = "";
+  sRelayAddr.value = "";
+  renderRelayList();
+});
+
+async function reconnectSignal() {
+  // Deregister from current relay, then auto-connect to new one
+  try { await invoke("deregister"); } catch {}
+  lobbyUsers.clear();
+  renderLobbyUsers();
+  lobbyDot.style.background = "var(--yellow)";
+  lobbyRelayLabel.textContent = "Reconnecting...";
+  // Short delay to let deregister complete
+  setTimeout(() => autoConnect(), 500);
+}
+
 function openSettings() {
   const s = loadSettings();
   sRoom.value = s.room;
@@ -562,6 +642,7 @@ function openSettings() {
   sQuality.value = String(qi);
   updateQualityUI(qi);
   sFingerprint.textContent = myFingerprint || "(loading...)";
+  renderRelayList();
   settingsPanel.classList.remove("hidden");
 }
 
@@ -584,6 +665,8 @@ settingsSave.addEventListener("click", () => {
   invoke("set_dred_verbose_logs", { enabled: s.dredDebugLogs }).catch(() => {});
   invoke("set_call_debug_logs", { enabled: s.callDebugLogs }).catch(() => {});
   sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
+  // Update lobby room label
+  lobbyRoomLabel.textContent = s.room || "general";
   settingsPanel.classList.add("hidden");
 });
 
