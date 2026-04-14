@@ -332,11 +332,52 @@ async fn run_replay(path: &str, args: &Args) -> anyhow::Result<()> {
     let start = Instant::now();
     let mut timeline: Vec<TimelineEntry> = Vec::new();
 
+    // Decrypt session from --key (optional)
+    let mut decrypt_session: Option<wzp_crypto::ChaChaSession> = args.key.as_ref().and_then(|hex| {
+        if hex.len() != 64 { return None; }
+        let mut key = [0u8; 32];
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let s = std::str::from_utf8(chunk).unwrap_or("00");
+            key[i] = u8::from_str_radix(s, 16).unwrap_or(0);
+        }
+        Some(wzp_crypto::ChaChaSession::new(key))
+    });
+    let mut decrypt_ok: u64 = 0;
+    let mut decrypt_fail: u64 = 0;
+
     while let Some((ts_us, pkt)) = reader.next_packet()? {
         let now = Instant::now();
         let idx = find_or_create_participant(&mut participants, pkt.header.seq, pkt.header.codec_id);
         participants[idx].ingest(&pkt, now);
         total_packets += 1;
+
+        // Attempt decryption if key provided
+        if let Some(ref mut session) = decrypt_session {
+            use wzp_proto::CryptoSession;
+            let header_bytes = pkt.header.to_bytes();
+            let mut plaintext = Vec::new();
+            match session.decrypt(&header_bytes, &pkt.payload, &mut plaintext) {
+                Ok(()) => {
+                    decrypt_ok += 1;
+                    if decrypt_ok <= 5 || decrypt_ok % 100 == 0 {
+                        eprintln!(
+                            "  decrypt ok: seq={} codec={:?} payload={}B → plaintext={}B",
+                            pkt.header.seq, pkt.header.codec_id,
+                            pkt.payload.len(), plaintext.len()
+                        );
+                    }
+                }
+                Err(_) => {
+                    decrypt_fail += 1;
+                    if decrypt_fail <= 3 {
+                        eprintln!(
+                            "  decrypt FAIL: seq={} (key mismatch, wrong direction, or rekey boundary)",
+                            pkt.header.seq
+                        );
+                    }
+                }
+            }
+        }
 
         // Record for HTML timeline
         timeline.push(TimelineEntry {
@@ -348,6 +389,13 @@ async fn run_replay(path: &str, args: &Args) -> anyhow::Result<()> {
             loss_pct: participants[idx].loss_percent(),
             jitter_ms: participants[idx].jitter_ms,
         });
+    }
+
+    if decrypt_session.is_some() {
+        eprintln!(
+            "Decrypt stats: {} ok, {} failed (total {})",
+            decrypt_ok, decrypt_fail, total_packets
+        );
     }
 
     print_summary(&participants, total_packets, start.elapsed());
@@ -781,13 +829,24 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt().init();
     }
 
-    if let Some(ref key) = args.key {
-        eprintln!(
-            "Note: --key provided ({} chars) but audio decode is not yet implemented.",
-            key.len()
-        );
-        eprintln!("  Header-only analysis (loss%, jitter, codec stats) will proceed.");
-    }
+    let _crypto_session: Option<std::sync::Mutex<wzp_crypto::ChaChaSession>> =
+        if let Some(ref key_hex) = args.key {
+            if key_hex.len() != 64 {
+                eprintln!("Error: --key must be 64 hex characters (32 bytes). Got {} chars.", key_hex.len());
+                std::process::exit(1);
+            }
+            let mut key_bytes = [0u8; 32];
+            for (i, chunk) in key_hex.as_bytes().chunks(2).enumerate() {
+                let hex_str = std::str::from_utf8(chunk).unwrap_or("00");
+                key_bytes[i] = u8::from_str_radix(hex_str, 16).unwrap_or(0);
+            }
+            eprintln!("Encrypted payload decoding enabled (key loaded).");
+            Some(std::sync::Mutex::new(
+                wzp_crypto::ChaChaSession::new(key_bytes),
+            ))
+        } else {
+            None
+        };
 
     // Replay mode: offline analysis of a .wzp capture file
     if let Some(ref replay_path) = args.replay {
