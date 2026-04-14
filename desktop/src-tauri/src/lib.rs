@@ -453,21 +453,18 @@ async fn connect(
                     own = ?own_reflex_addr,
                     "connect: starting dual-path race"
                 );
+                let own_reflex_parsed: Option<std::net::SocketAddr> =
+                    own_reflex_addr.as_deref().and_then(|s| s.parse().ok());
                 emit_call_debug(&app, "connect:dual_path_race_start", serde_json::json!({
                     "role": format!("{:?}", r),
                     "peer_reflex": peer_addr_parsed.map(|a| a.to_string()),
                     "peer_mapped": peer_mapped_parsed.map(|a| a.to_string()),
                     "peer_local": peer_local_parsed.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
-                    "dial_order": candidates.dial_order().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                    "dial_order_raw": candidates.dial_order().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                    "dial_order_smart": candidates.smart_dial_order(own_reflex_parsed.as_ref()).iter().map(|a| a.to_string()).collect::<Vec<_>>(),
                     "relay_addr": relay_sockaddr.to_string(),
                     "own_reflex_addr": own_reflex_addr,
                 }));
-                // Phase 6 fix: install the oneshot BEFORE the race
-                // starts. The peer's MediaPathReport can arrive
-                // while our race is still running — if we set up
-                // the oneshot after the race, the recv loop has
-                // nowhere to send the report and it gets dropped,
-                // causing a 3s timeout and false relay fallback.
                 let (path_report_tx, path_report_rx) = tokio::sync::oneshot::channel::<bool>();
                 {
                     let mut sig = state.signal.lock().await;
@@ -476,8 +473,6 @@ async fn connect(
 
                 let room_sni = room.clone();
                 let call_sni = format!("call-{room}");
-                let own_reflex_parsed: Option<std::net::SocketAddr> =
-                    own_reflex_addr.as_deref().and_then(|s| s.parse().ok());
                 match wzp_client::dual_path::race(
                     r,
                     candidates,

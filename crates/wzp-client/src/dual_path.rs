@@ -285,29 +285,56 @@ pub async fn race(
                 // gets dropped by our NAT.
                 if !tickle_addrs.is_empty() {
                     if let Ok(local_addr) = ep_for_fut.local_addr() {
-                        // We can't send raw UDP on the quinn endpoint,
-                        // so we use a fresh socket on the SAME port
-                        // (SO_REUSEADDR). This makes the NAT see
-                        // outbound traffic from our port to the peer,
-                        // opening the pinhole.
-                        let bind = SocketAddr::new(
-                            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                            local_addr.port(),
-                        );
-                        if let Ok(tickle_sock) = tokio::net::UdpSocket::bind(bind).await {
+                        // Send a tickle to each peer candidate address
+                        // to open our NAT for return traffic from that IP.
+                        //
+                        // We use a socket2 socket with SO_REUSEADDR +
+                        // SO_REUSEPORT on the SAME port as the quinn
+                        // endpoint. This is necessary because quinn
+                        // already holds the port — a plain bind() would
+                        // fail with EADDRINUSE.
+                        let tickle_result: Result<(), String> = (|| {
+                            use std::net::UdpSocket as StdUdpSocket;
+                            let sock = socket2::Socket::new(
+                                socket2::Domain::IPV4,
+                                socket2::Type::DGRAM,
+                                Some(socket2::Protocol::UDP),
+                            ).map_err(|e| format!("socket: {e}"))?;
+                            sock.set_reuse_address(true).map_err(|e| format!("reuseaddr: {e}"))?;
+                            // macOS/BSD/Linux also need SO_REUSEPORT
+                            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+                            {
+                                // socket2 exposes set_reuse_port on unix
+                                unsafe {
+                                    let optval: libc::c_int = 1;
+                                    libc::setsockopt(
+                                        std::os::unix::io::AsRawFd::as_raw_fd(&sock),
+                                        libc::SOL_SOCKET,
+                                        libc::SO_REUSEPORT,
+                                        &optval as *const _ as *const libc::c_void,
+                                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                                    );
+                                }
+                            }
+                            sock.set_nonblocking(true).map_err(|e| format!("nonblock: {e}"))?;
+                            let bind_addr: SocketAddr = SocketAddr::new(
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                                local_addr.port(),
+                            );
+                            sock.bind(&bind_addr.into()).map_err(|e| format!("bind :{}: {e}", local_addr.port()))?;
+                            let std_sock: StdUdpSocket = sock.into();
                             for addr in &tickle_addrs {
-                                // Send a minimal QUIC-like packet (version
-                                // negotiation bait). The content doesn't
-                                // matter — we just need the NAT to see
-                                // outbound traffic from our port to this IP.
-                                let tickle_bytes = [0u8; 1];
-                                let _ = tickle_sock.send_to(&tickle_bytes, addr).await;
+                                let _ = std_sock.send_to(&[0u8; 1], addr);
                                 tracing::info!(
                                     %addr,
                                     local_port = local_addr.port(),
                                     "dual_path: A-role sent NAT tickle"
                                 );
                             }
+                            Ok(())
+                        })();
+                        if let Err(e) = tickle_result {
+                            tracing::warn!(error = %e, "dual_path: A-role NAT tickle failed");
                         }
                     }
                 }
@@ -670,7 +697,24 @@ pub async fn race(
         match tokio::time::timeout(Duration::from_secs(1), direct_task).await {
             Ok(Ok(Ok(Ok(t)))) => { direct_result = Some(Ok(t)); }
             Ok(Ok(Ok(Err(e)))) => { direct_result = Some(Err(anyhow::anyhow!("{e}"))); }
-            _ => { direct_result = Some(Err(anyhow::anyhow!("direct: no result in grace period"))); }
+            _ => {
+                direct_result = Some(Err(anyhow::anyhow!("direct: no result in grace period")));
+                // Fill timeout diags for candidates that never reported.
+                if let Ok(mut d) = diags_collector.lock() {
+                    let recorded: std::collections::HashSet<usize> =
+                        d.iter().map(|diag| diag.index).collect();
+                    for (idx, addr) in smart_order.iter().enumerate() {
+                        if !recorded.contains(&idx) {
+                            d.push(CandidateDiag {
+                                index: idx,
+                                addr: addr.to_string(),
+                                result: "timeout:grace".into(),
+                                elapsed_ms: None,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
     if relay_result.is_none() {

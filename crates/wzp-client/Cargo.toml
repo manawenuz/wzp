@@ -34,6 +34,7 @@ libc = "0.2"
 # MikroTik's default masquerade, don't support).
 if-addrs = "0.13"
 rand = { workspace = true }
+socket2 = "0.5"
 
 # coreaudio-rs is Apple-framework-only; gate it to macOS so enabling
 # the `vpio` feature from a non-macOS target builds cleanly instead of
