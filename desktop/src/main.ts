@@ -216,7 +216,9 @@ sQuality?.addEventListener("input", () => updateQualityUI(parseInt(sQuality.valu
 // ── Lobby rendering ───────────────────────────────────────────────
 function renderLobbyUsers() {
   lobbyUserList.innerHTML = "";
-  const users = Array.from(lobbyUsers.values()).sort((a, b) => {
+  const users = Array.from(lobbyUsers.values())
+    .filter((u) => u.fingerprint !== myFingerprint) // always exclude self
+    .sort((a, b) => {
     // Voice users first, then alphabetical
     if (a.inVoice !== b.inVoice) return a.inVoice ? -1 : 1;
     return (a.alias || a.fingerprint).localeCompare(b.alias || b.fingerprint);
@@ -269,14 +271,25 @@ function openContextMenu(user: LobbyUser) {
   ctxIdenticon.appendChild(createIdenticonEl(user.fingerprint, 40, true));
   ctxName.textContent = user.alias || user.fingerprint.substring(0, 16);
   ctxFp.textContent = user.fingerprint;
+  // Hide call button for self
+  const isSelf = user.fingerprint === myFingerprint;
+  (ctxCallBtn as HTMLButtonElement).disabled = isSelf;
+  (ctxCallBtn as HTMLElement).style.opacity = isSelf ? "0.3" : "1";
   ctxMenu.classList.remove("hidden");
 }
 
 ctxCloseBtn.addEventListener("click", () => ctxMenu.classList.add("hidden"));
 ctxMenu.addEventListener("click", (e) => { if (e.target === ctxMenu) ctxMenu.classList.add("hidden"); });
 
+let callInProgress = false;
 ctxCallBtn.addEventListener("click", async () => {
-  if (!contextUser) return;
+  if (!contextUser || callInProgress) return;
+  // Don't allow calling self
+  if (contextUser.fingerprint === myFingerprint) {
+    ctxMenu.classList.add("hidden");
+    return;
+  }
+  callInProgress = true;
   ctxMenu.classList.add("hidden");
   directCallPeer = { fingerprint: contextUser.fingerprint, alias: contextUser.alias };
   try {
@@ -284,6 +297,8 @@ ctxCallBtn.addEventListener("click", async () => {
   } catch (e: any) {
     console.error("place_call failed:", e);
     directCallPeer = null;
+  } finally {
+    callInProgress = false;
   }
 });
 
@@ -415,8 +430,8 @@ async function pollStatus() {
       }
     }
 
-    // Stats
-    vdStats.textContent = `TX: ${st.tx_codec} ${st.encode_fps}fps | RX: ${st.rx_codec} ${st.recv_fps}fps`;
+    // Stats with codec
+    vdStats.textContent = `TX: ${st.tx_codec || "?"} ${st.encode_fps || 0}fps | RX: ${st.rx_codec || "?"} ${st.recv_fps || 0}fps | Level: ${st.audio_level || 0}`;
   } catch {}
 }
 
