@@ -476,12 +476,15 @@ async fn connect(
 
                 let room_sni = room.clone();
                 let call_sni = format!("call-{room}");
+                let own_reflex_parsed: Option<std::net::SocketAddr> =
+                    own_reflex_addr.as_deref().and_then(|s| s.parse().ok());
                 match wzp_client::dual_path::race(
                     r,
                     candidates,
                     relay_sockaddr,
                     room_sni,
                     call_sni,
+                    own_reflex_parsed,
                     signal_endpoint_for_race.clone(),
                     ipv6_endpoint_for_race.clone(),
                 )
