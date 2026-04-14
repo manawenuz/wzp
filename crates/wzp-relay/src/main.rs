@@ -1016,10 +1016,16 @@ async fn main() -> anyhow::Result<()> {
 
                 info!(%addr, fingerprint = %client_fp, alias = ?client_alias, "signal client registered");
 
-                // Broadcast updated presence to all signal clients
+                // Send the full presence list directly to the new
+                // client (guaranteed delivery — their recv loop is
+                // about to start). Then broadcast to all OTHER
+                // clients so they learn about the new user.
                 {
                     let hub = signal_hub.lock().await;
                     let presence = hub.presence_list();
+                    // Direct send to new client (arrives right after ack)
+                    let _ = transport.send_signal(&presence).await;
+                    // Broadcast to everyone else
                     hub.broadcast(&presence).await;
                 }
 
