@@ -724,7 +724,7 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
         loop {
             match recv_transport.recv_media().await {
                 Ok(Some(pkt)) => {
-                    let is_repair = pkt.header.is_repair;
+                    let is_repair = pkt.header.is_repair();
                     decoder.ingest(pkt);
                     // Only decode for source packets (1 source = 1 audio frame).
                     // Repair packets feed the FEC decoder but don't produce audio.

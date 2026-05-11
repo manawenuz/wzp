@@ -41,6 +41,7 @@ pub async fn accept_handshake(
         caller_signature,
         supported_profiles,
         caller_alias,
+        protocol_version,
     ) = match offer {
         SignalMessage::CallOffer {
             identity_pub,
@@ -48,12 +49,15 @@ pub async fn accept_handshake(
             signature,
             supported_profiles,
             alias,
+            protocol_version,
+            supported_versions: _,
         } => (
             identity_pub,
             ephemeral_pub,
             signature,
             supported_profiles,
             alias,
+            protocol_version,
         ),
         other => {
             return Err(anyhow::anyhow!(
@@ -62,6 +66,20 @@ pub async fn accept_handshake(
             ));
         }
     };
+
+    // 1a. Protocol version check — we only speak v2.
+    if protocol_version != 2 {
+        let mismatch = SignalMessage::Hangup {
+            reason: wzp_proto::HangupReason::ProtocolVersionMismatch {
+                server_supported: vec![2],
+            },
+            call_id: None,
+        };
+        let _ = transport.send_signal(&mismatch).await;
+        return Err(anyhow::anyhow!(
+            "protocol version mismatch: client requested {protocol_version}, server supports [2]"
+        ));
+    }
 
     // 2. Verify caller's signature over (ephemeral_pub || "call-offer")
     let mut verify_data = Vec::with_capacity(32 + 10);

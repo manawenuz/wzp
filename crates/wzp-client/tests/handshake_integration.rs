@@ -156,6 +156,8 @@ async fn handshake_rejects_tampered_signature() {
             signature: bad_signature,
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
             alias: None,
+            protocol_version: 2,
+            supported_versions: vec![2],
         };
         client_transport_clone
             .send_signal(&offer)
@@ -177,5 +179,43 @@ async fn handshake_rejects_tampered_signature() {
             );
         }
         Ok(_) => panic!("relay should reject tampered signature"),
+    }
+}
+
+#[tokio::test]
+async fn client_receives_protocol_version_mismatch() {
+    let (client_transport, relay_transport) = MockTransport::pair();
+
+    let client_seed = [0xAA_u8; 32];
+
+    // Spawn a fake relay that sends ProtocolVersionMismatch.
+    let relay_clone = Arc::clone(&relay_transport);
+    tokio::spawn(async move {
+        // Wait for the client's CallOffer.
+        let offer = relay_clone.recv_signal().await.unwrap().unwrap();
+        assert!(matches!(offer, SignalMessage::CallOffer { .. }));
+
+        // Respond with ProtocolVersionMismatch.
+        let mismatch = SignalMessage::Hangup {
+            reason: wzp_proto::HangupReason::ProtocolVersionMismatch {
+                server_supported: vec![3],
+            },
+            call_id: None,
+        };
+        relay_clone.send_signal(&mismatch).await.unwrap();
+    });
+
+    let result =
+        wzp_client::handshake::perform_handshake(client_transport.as_ref(), &client_seed, None)
+            .await;
+
+    match result {
+        Err(wzp_client::handshake::HandshakeError::ProtocolVersionMismatch {
+            server_supported,
+        }) => {
+            assert_eq!(server_supported, vec![3]);
+        }
+        Err(other) => panic!("expected ProtocolVersionMismatch, got: {other:?}"),
+        Ok(_) => panic!("expected handshake to fail with ProtocolVersionMismatch"),
     }
 }

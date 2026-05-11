@@ -156,6 +156,8 @@ mod tests {
             signature: vec![3u8; 64],
             supported_profiles: vec![QualityProfile::GOOD],
             alias: None,
+            protocol_version: 2,
+            supported_versions: vec![2],
         };
 
         let encoded = encode_call_payload(&signal, Some("relay.example.com:4433"), Some("myroom"));
@@ -174,6 +176,8 @@ mod tests {
             signature: vec![],
             supported_profiles: vec![],
             alias: None,
+            protocol_version: 2,
+            supported_versions: vec![2],
         };
         assert!(matches!(signal_to_call_type(&offer), CallSignalType::Offer));
 

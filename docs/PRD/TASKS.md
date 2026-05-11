@@ -1308,9 +1308,9 @@ Statuses (in order of progression):
 | T1.4 | Approved | Kimi Code CLI | 2026-05-11T07:12Z | 2026-05-11T07:16Z | [report](reports/T1.4-report.md) | Approved 2026-05-11. Spawned T1.4.1 (rustdoc on v2 mini types). The two-step expand test catches the W4 desync scenario nicely. |
 | T1.4.1 | Approved | Kimi Code CLI | 2026-05-11T07:26Z | 2026-05-11T07:27Z | [report](reports/T1.4.1-report.md) | Approved. Closes rustdoc trilogy (T1.1.1/T1.2.1/T1.4.1). |
 | T1.5 | Approved | Kimi Code CLI | 2026-05-11T07:28Z | 2026-05-11T10:09Z | [report](reports/T1.5-report.md) | Approved with follow-ups. Migration correct; scope creep (120 files) and workspace clippy skipped — spawned T1.5.1 (encode_compact unwrap) and T1.5.2 (clippy hygiene). |
-| T1.5.1 | Pending Review | Kimi Code CLI | 2026-05-11T10:09Z | 2026-05-11T10:15Z | [report](reports/T1.5.1-report.md) | — |
-| T1.5.2 | Pending Review | Kimi Code CLI | 2026-05-11T10:15Z | 2026-05-11T10:20Z | [report](reports/T1.5.2-report.md) | — |
-| T1.6 | Open | — | — | — | — | — |
+| T1.5.1 | Approved | Kimi Code CLI | 2026-05-11T10:09Z | 2026-05-11T10:15Z | [report](reports/T1.5.1-report.md) | Approved. unwrap replaced with `if let Some(base)`; fallback test passes. Cargo.lock churn is legit dep updates. |
+| T1.5.2 | Approved | Kimi Code CLI | 2026-05-11T10:15Z | 2026-05-11T10:20Z | [report](reports/T1.5.2-report.md) | Approved. PROTOCOL-AUDIT.md known-debt section present; standard #3 amended; report template updated. |
+| T1.6 | Pending Review | Kimi Code CLI | 2026-05-11T10:20Z | 2026-05-11T11:05Z | [report](reports/T1.6-report.md) | — |
 | T1.7 | Open | — | — | — | — | — |
 | T1.8 | Open | — | — | — | — | — |
 | T2.1 | Open | — | — | — | — | — |
@@ -1347,7 +1347,6 @@ Statuses (in order of progression):
 
 Items currently waiting on the reviewer:
 
-- T1.5.1 — Remove unwrap() from encode_compact — report: reports/T1.5.1-report.md
-- T1.5.2 — Workspace clippy hygiene + document pre-existing debt — report: reports/T1.5.2-report.md
+- T1.6 — Protocol version negotiation in handshake — report: reports/T1.6-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).

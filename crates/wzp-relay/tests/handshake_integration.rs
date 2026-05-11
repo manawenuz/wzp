@@ -104,6 +104,79 @@ async fn handshake_succeeds() {
 }
 
 // -----------------------------------------------------------------------
+// Test 5: handshake_rejects_v1_protocol_version
+// -----------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_rejects_v1_protocol_version() {
+    let (client_transport, server_transport, _endpoints) = connected_pair().await;
+
+    let caller_seed: [u8; 32] = [0xCC; 32];
+    let callee_seed: [u8; 32] = [0xDD; 32];
+
+    let server_t = Arc::clone(&server_transport);
+    let callee_handle =
+        tokio::spawn(async move { accept_handshake(server_t.as_ref(), &callee_seed).await });
+
+    // Build a v1 CallOffer (protocol_version = 1).
+    let mut kx = WarzoneKeyExchange::from_identity_seed(&caller_seed);
+    let identity_pub = kx.identity_public_key();
+    let ephemeral_pub = kx.generate_ephemeral();
+
+    let mut sign_data = Vec::with_capacity(32 + 10);
+    sign_data.extend_from_slice(&ephemeral_pub);
+    sign_data.extend_from_slice(b"call-offer");
+    let signature = kx.sign(&sign_data);
+
+    let v1_offer = SignalMessage::CallOffer {
+        identity_pub,
+        ephemeral_pub,
+        signature,
+        supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+        alias: None,
+        protocol_version: 1,
+        supported_versions: vec![1, 2],
+    };
+
+    client_transport
+        .send_signal(&v1_offer)
+        .await
+        .expect("send v1 CallOffer");
+
+    // The callee should return an error about protocol version mismatch.
+    let result = callee_handle.await.expect("join callee task");
+    match result {
+        Ok(_) => panic!("accept_handshake must reject a v1 offer"),
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("protocol version mismatch"),
+                "error should mention protocol version mismatch, got: {err_msg}"
+            );
+        }
+    }
+
+    // Verify the client received a Hangup with ProtocolVersionMismatch.
+    let response = client_transport
+        .recv_signal()
+        .await
+        .expect("recv response")
+        .expect("response should exist");
+    match response {
+        SignalMessage::Hangup {
+            reason: wzp_proto::HangupReason::ProtocolVersionMismatch { server_supported },
+            ..
+        } => {
+            assert_eq!(server_supported, vec![2]);
+        }
+        other => panic!("expected ProtocolVersionMismatch hangup, got: {other:?}"),
+    }
+
+    drop(server_transport);
+    drop(client_transport);
+}
+
+// -----------------------------------------------------------------------
 // Test 2: handshake_verifies_identity
 // -----------------------------------------------------------------------
 
@@ -276,6 +349,8 @@ async fn handshake_rejects_bad_signature() {
         signature,
         supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
         alias: None,
+        protocol_version: 2,
+        supported_versions: vec![2],
     };
 
     client_transport

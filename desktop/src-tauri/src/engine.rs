@@ -244,8 +244,8 @@ struct DredRecvState {
     dred_decoder: wzp_codec::dred_ffi::DredDecoderHandle,
     scratch: wzp_codec::dred_ffi::DredState,
     last_good: wzp_codec::dred_ffi::DredState,
-    last_good_seq: Option<u16>,
-    expected_seq: Option<u16>,
+    last_good_seq: Option<u32>,
+    expected_seq: Option<u32>,
     pub dred_reconstructions: u64,
     pub classical_plc_invocations: u64,
     /// Number of arriving Opus packets we have parsed for DRED so far —
@@ -280,7 +280,7 @@ impl DredRecvState {
     ///
     /// Call this BEFORE `fill_gap_to` so the anchor reflects the freshest
     /// DRED source available for gap reconstruction.
-    fn ingest_opus(&mut self, seq: u16, payload: &[u8]) {
+    fn ingest_opus(&mut self, seq: u32, payload: &[u8]) {
         self.parses_total += 1;
         match self.dred_decoder.parse_into(&mut self.scratch, payload) {
             Ok(available) if available > 0 => {
@@ -323,14 +323,14 @@ impl DredRecvState {
     fn fill_gap_to<F>(
         &mut self,
         decoder: &mut wzp_codec::AdaptiveDecoder,
-        current_seq: u16,
+        current_seq: u32,
         frame_samples: usize,
         pcm_scratch: &mut [i16],
         mut emit: F,
     ) where
         F: FnMut(&mut [i16]),
     {
-        const MAX_GAP_FRAMES: u16 = 16;
+        const MAX_GAP_FRAMES: u32 = 16;
         if let Some(expected) = self.expected_seq {
             let gap = current_seq.wrapping_sub(expected);
             if gap > 0 && gap <= MAX_GAP_FRAMES {
@@ -950,7 +950,7 @@ impl CallEngine {
                                 t_ms = recv_t0.elapsed().as_millis(),
                                 codec_id = ?pkt.header.codec_id,
                                 payload_bytes = pkt.payload.len(),
-                                is_repair = pkt.header.is_repair,
+                                is_repair = pkt.header.is_repair(),
                                 "first-join diag: recv first media packet"
                             );
                             first_packet_logged = true;
@@ -967,11 +967,11 @@ impl CallEngine {
                                     "t_ms": recv_t0.elapsed().as_millis() as u64,
                                     "codec": format!("{:?}", pkt.header.codec_id),
                                     "payload_bytes": pkt.payload.len(),
-                                    "is_repair": pkt.header.is_repair,
+                                    "is_repair": pkt.header.is_repair(),
                                 }),
                             );
                         }
-                        if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
+                        if !pkt.header.is_repair() && pkt.header.codec_id != CodecId::ComfortNoise {
                             {
                                 let mut rx = recv_rx_codec.lock().await;
                                 let codec_name = format!("{:?}", pkt.header.codec_id);
@@ -1592,7 +1592,7 @@ impl CallEngine {
                 .await
                 {
                     Ok(Ok(Some(pkt))) => {
-                        if !pkt.header.is_repair && pkt.header.codec_id != CodecId::ComfortNoise {
+                        if !pkt.header.is_repair() && pkt.header.codec_id != CodecId::ComfortNoise {
                             // Track RX codec
                             {
                                 let mut rx = recv_rx_codec.lock().await;

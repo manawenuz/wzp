@@ -554,6 +554,12 @@ pub enum SignalMessage {
         /// Optional display name set by the caller.
         #[serde(default)]
         alias: Option<String>,
+        /// Protocol version requested by the caller (default 2 = v2 wire format).
+        #[serde(default = "default_proto_version")]
+        protocol_version: u8,
+        /// Protocol versions this client supports (default [2]).
+        #[serde(default = "default_supported_versions")]
+        supported_versions: Vec<u8>,
     },
 
     /// Call acceptance (analogous to Warzone's WireMessage::CallAnswer).
@@ -1097,14 +1103,29 @@ pub struct RoomParticipant {
     pub relay_label: Option<String>,
 }
 
+/// Default protocol version for `CallOffer` (v2 wire format).
+pub fn default_proto_version() -> u8 {
+    2
+}
+
+/// Default supported versions for `CallOffer` (only v2).
+pub fn default_supported_versions() -> Vec<u8> {
+    vec![2]
+}
+
 /// Reasons for ending a call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HangupReason {
     Normal,
     Busy,
     Declined,
     Timeout,
     Error,
+    /// Server does not support any of the client's requested protocol versions.
+    ProtocolVersionMismatch {
+        /// Versions the server is willing to speak.
+        server_supported: Vec<u8>,
+    },
 }
 
 #[cfg(test)]
@@ -2024,7 +2045,10 @@ mod tests {
         let pkt = make_media_packet(0, 0, b"audio");
         let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
 
-        assert_eq!(wire[0], FRAME_TYPE_FULL, "must fall back to FULL when no baseline");
+        assert_eq!(
+            wire[0], FRAME_TYPE_FULL,
+            "must fall back to FULL when no baseline"
+        );
         // After the fallback the baseline is established.
         assert!(ctx.last_header().is_some());
     }

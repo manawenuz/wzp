@@ -22,7 +22,8 @@ use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::{
     AdaptiveQualityController, AudioDecoder, AudioEncoder, CodecId, FecDecoder, FecEncoder,
-    MediaHeader, MediaPacket, MediaTransport, QualityController, QualityProfile, SignalMessage,
+    MediaHeader, MediaPacket, MediaTransport, MediaType, QualityController, QualityProfile,
+    SignalMessage,
 };
 
 use crate::audio_ring::AudioRing;
@@ -533,6 +534,8 @@ async fn run_call(
             QualityProfile::CATASTROPHIC,
         ],
         alias: alias.map(|s| s.to_string()),
+        protocol_version: 2,
+        supported_versions: vec![2],
     };
     transport.send_signal(&offer).await?;
     info!("CallOffer sent, waiting for CallAnswer...");
@@ -603,7 +606,7 @@ async fn run_call(
         stats.auto_mode = auto_profile;
     }
 
-    let seq = AtomicU16::new(0);
+    let seq = AtomicU32::new(0);
     let ts = AtomicU32::new(0);
     let transport_recv = transport.clone();
 
@@ -729,17 +732,15 @@ async fn run_call(
 
             let source_pkt = MediaPacket {
                 header: MediaHeader {
-                    version: 0,
-                    is_repair: false,
+                    version: MediaHeader::VERSION,
+                    flags: 0,
+                    media_type: MediaType::Audio,
                     codec_id: current_profile.codec,
-                    has_quality_report: false,
-                    fec_ratio_encoded: hdr_fec_ratio,
+                    stream_id: 0,
+                    fec_ratio: hdr_fec_ratio,
                     seq: s,
                     timestamp: t,
-                    fec_block: hdr_fec_block,
-                    fec_symbol: hdr_fec_symbol,
-                    reserved: 0,
-                    csrc_count: 0,
+                    fec_block: ((hdr_fec_symbol as u16) << 8) | (hdr_fec_block as u16),
                 },
                 payload: Bytes::copy_from_slice(encoded),
                 quality_report: None,
@@ -783,19 +784,17 @@ async fn run_call(
                                 let rs = seq.fetch_add(1, Ordering::Relaxed);
                                 let repair_pkt = MediaPacket {
                                     header: MediaHeader {
-                                        version: 0,
-                                        is_repair: true,
+                                        version: MediaHeader::VERSION,
+                                        flags: MediaHeader::FLAG_REPAIR,
+                                        media_type: MediaType::Audio,
                                         codec_id: current_profile.codec,
-                                        has_quality_report: false,
-                                        fec_ratio_encoded: MediaHeader::encode_fec_ratio(
+                                        stream_id: 0,
+                                        fec_ratio: MediaHeader::encode_fec_ratio(
                                             current_profile.fec_ratio,
                                         ),
                                         seq: rs,
                                         timestamp: t,
-                                        fec_block: block_id,
-                                        fec_symbol: sym_idx,
-                                        reserved: 0,
-                                        csrc_count: 0,
+                                        fec_block: ((sym_idx as u16) << 8) | (block_id as u16),
                                     },
                                     payload: Bytes::from(repair_data),
                                     quality_report: None,
@@ -883,8 +882,8 @@ async fn run_call(
         let mut dred_decoder = DredDecoderHandle::new().expect("opus_dred_decoder_create failed");
         let mut dred_parse_scratch = DredState::new().expect("opus_dred_alloc failed (scratch)");
         let mut last_good_dred = DredState::new().expect("opus_dred_alloc failed (good state)");
-        let mut last_good_dred_seq: Option<u16> = None;
-        let mut expected_seq: Option<u16> = None;
+        let mut last_good_dred_seq: Option<u32> = None;
+        let mut expected_seq: Option<u32> = None;
         let mut dred_reconstructions: u64 = 0;
         let mut classical_plc_invocations: u64 = 0;
 
@@ -905,7 +904,7 @@ async fn run_call(
                         warn!(
                             recv_gap_ms,
                             seq = pkt.header.seq,
-                            is_repair = pkt.header.is_repair,
+                            is_repair = pkt.header.is_repair(),
                             "large recv gap — possible network stall"
                         );
                     }
@@ -946,9 +945,9 @@ async fn run_call(
                         }
                     }
 
-                    let is_repair = pkt.header.is_repair;
-                    let pkt_block = pkt.header.fec_block;
-                    let pkt_symbol = pkt.header.fec_symbol;
+                    let is_repair = pkt.header.is_repair();
+                    let pkt_block = pkt.header.fec_block as u8;
+                    let pkt_symbol = (pkt.header.fec_block >> 8) as u8;
                     let pkt_is_opus = pkt.header.codec_id.is_opus();
 
                     // Phase 2: Opus packets bypass RaptorQ entirely — DRED
@@ -1024,7 +1023,7 @@ async fn run_call(
                             }
 
                             // Detect and fill gap from last-expected to this packet.
-                            const MAX_GAP_FRAMES: u16 = 16;
+                            const MAX_GAP_FRAMES: u32 = 16;
                             if let Some(expected) = expected_seq {
                                 let gap = pkt.header.seq.wrapping_sub(expected);
                                 if gap > 0 && gap <= MAX_GAP_FRAMES {

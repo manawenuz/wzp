@@ -134,11 +134,11 @@ impl Pipeline {
     pub fn feed_packet(&mut self, packet: MediaPacket) {
         // Feed FEC symbols if present
         let header = &packet.header;
-        if header.fec_block != 0 || header.fec_symbol != 0 {
-            let is_repair = header.is_repair;
+        if header.fec_block != 0 {
+            let is_repair = header.is_repair();
             if let Err(e) = self.fec_decoder.add_symbol(
-                header.fec_block,
-                header.fec_symbol,
+                header.fec_block as u8,
+                (header.fec_block >> 8) as u8,
                 is_repair,
                 &packet.payload,
             ) {

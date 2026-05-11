@@ -4,7 +4,51 @@
 //! send `CallOffer` → recv `CallAnswer` → derive shared `CryptoSession`.
 
 use wzp_crypto::{CryptoSession, KeyExchange, WarzoneKeyExchange};
-use wzp_proto::{MediaTransport, QualityProfile, SignalMessage};
+use wzp_proto::{HangupReason, MediaTransport, QualityProfile, SignalMessage};
+
+/// Errors that can occur during the client-side cryptographic handshake.
+#[derive(Debug)]
+pub enum HandshakeError {
+    ConnectionClosed,
+    ProtocolVersionMismatch { server_supported: Vec<u8> },
+    UnexpectedSignal(&'static str),
+    SignatureVerificationFailed,
+    KeyDerivation(String),
+    Transport(wzp_proto::TransportError),
+}
+
+impl std::fmt::Display for HandshakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectionClosed => write!(f, "connection closed before receiving CallAnswer"),
+            Self::ProtocolVersionMismatch { server_supported } => {
+                write!(
+                    f,
+                    "protocol version mismatch: server supports {server_supported:?}"
+                )
+            }
+            Self::UnexpectedSignal(expected) => write!(f, "expected CallAnswer, got {expected}"),
+            Self::SignatureVerificationFailed => write!(f, "callee signature verification failed"),
+            Self::KeyDerivation(msg) => write!(f, "key derivation failed: {msg}"),
+            Self::Transport(e) => write!(f, "transport error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for HandshakeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<wzp_proto::TransportError> for HandshakeError {
+    fn from(e: wzp_proto::TransportError) -> Self {
+        Self::Transport(e)
+    }
+}
 
 /// Perform the client (caller) side of the cryptographic handshake.
 ///
@@ -18,7 +62,7 @@ pub async fn perform_handshake(
     transport: &dyn MediaTransport,
     seed: &[u8; 32],
     alias: Option<&str>,
-) -> Result<Box<dyn CryptoSession>, anyhow::Error> {
+) -> Result<Box<dyn CryptoSession>, HandshakeError> {
     // 1. Create key exchange from identity seed
     let mut kx = WarzoneKeyExchange::from_identity_seed(seed);
     let identity_pub = kx.identity_public_key();
@@ -46,14 +90,20 @@ pub async fn perform_handshake(
             QualityProfile::CATASTROPHIC,
         ],
         alias: alias.map(|s| s.to_string()),
+        protocol_version: 2,
+        supported_versions: vec![2],
     };
-    transport.send_signal(&offer).await?;
+    transport
+        .send_signal(&offer)
+        .await
+        .map_err(HandshakeError::Transport)?;
 
     // 5. Wait for CallAnswer
     let answer = transport
         .recv_signal()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("connection closed before receiving CallAnswer"))?;
+        .await
+        .map_err(HandshakeError::Transport)?
+        .ok_or(HandshakeError::ConnectionClosed)?;
 
     let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile) =
         match answer {
@@ -63,11 +113,14 @@ pub async fn perform_handshake(
                 signature,
                 chosen_profile,
             } => (identity_pub, ephemeral_pub, signature, chosen_profile),
-            other => {
-                return Err(anyhow::anyhow!(
-                    "expected CallAnswer, got {:?}",
-                    std::mem::discriminant(&other)
-                ));
+            SignalMessage::Hangup {
+                reason: HangupReason::ProtocolVersionMismatch { server_supported },
+                ..
+            } => {
+                return Err(HandshakeError::ProtocolVersionMismatch { server_supported });
+            }
+            _ => {
+                return Err(HandshakeError::UnexpectedSignal("CallAnswer"));
             }
         };
 
@@ -76,11 +129,13 @@ pub async fn perform_handshake(
     verify_data.extend_from_slice(&callee_ephemeral_pub);
     verify_data.extend_from_slice(b"call-answer");
     if !WarzoneKeyExchange::verify(&callee_identity_pub, &verify_data, &callee_signature) {
-        return Err(anyhow::anyhow!("callee signature verification failed"));
+        return Err(HandshakeError::SignatureVerificationFailed);
     }
 
     // 7. Derive session
-    let session = kx.derive_session(&callee_ephemeral_pub)?;
+    let session = kx
+        .derive_session(&callee_ephemeral_pub)
+        .map_err(|e| HandshakeError::KeyDerivation(e.to_string()))?;
 
     Ok(session)
 }
