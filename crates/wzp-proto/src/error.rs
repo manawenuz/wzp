@@ -37,7 +37,7 @@ pub enum CryptoError {
     #[error("rekey failed: {0}")]
     RekeyFailed(String),
     #[error("anti-replay: duplicate or old packet (seq={seq})")]
-    ReplayDetected { seq: u16 },
+    ReplayDetected { seq: u32 },
     #[error("internal crypto error: {0}")]
     Internal(String),
 }

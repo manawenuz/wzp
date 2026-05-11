@@ -3,12 +3,15 @@
 //! Implements the `CryptoSession` trait for per-call media encryption.
 //! Nonces are derived deterministically from session_id + sequence counter + direction.
 
+use std::collections::HashMap;
+
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use rand::rngs::OsRng;
-use wzp_proto::{CryptoError, CryptoSession};
+use wzp_proto::{CryptoError, CryptoSession, MediaHeader, MediaType};
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use crate::anti_replay::AntiReplayWindow;
 use crate::nonce::{self, Direction};
 use crate::rekey::RekeyManager;
 
@@ -28,6 +31,8 @@ pub struct ChaChaSession {
     pending_rekey_secret: Option<StaticSecret>,
     /// Short Authentication String (4-digit code for verbal verification).
     sas_code: Option<u32>,
+    /// Per-stream anti-replay windows, keyed by (stream_id, media_type).
+    anti_replay: HashMap<(u8, MediaType), AntiReplayWindow>,
 }
 
 impl ChaChaSession {
@@ -49,6 +54,7 @@ impl ChaChaSession {
             rekey_mgr: RekeyManager::new(shared_secret),
             pending_rekey_secret: None,
             sas_code: None,
+            anti_replay: HashMap::new(),
         }
     }
 
@@ -65,6 +71,27 @@ impl ChaChaSession {
         self.cipher = ChaCha20Poly1305::new_from_slice(&new_key)
             .expect("32-byte key is valid for ChaCha20Poly1305");
     }
+}
+
+/// Parse a v2 `MediaHeader` from raw bytes.
+/// Returns `None` if the buffer is too short or not a valid v2 header.
+fn parse_header(header_bytes: &[u8]) -> Option<MediaHeader> {
+    if header_bytes.len() < MediaHeader::WIRE_SIZE {
+        return None;
+    }
+    let mut cursor = std::io::Cursor::new(header_bytes);
+    MediaHeader::read_from(&mut cursor)
+}
+
+/// Return the default anti-replay window size for a given media type.
+fn default_window_for_media_type(media_type: MediaType) -> AntiReplayWindow {
+    let size = match media_type {
+        MediaType::Audio => 64,
+        MediaType::Video => 1024,
+        MediaType::Data => 256,
+        MediaType::Control => 32,
+    };
+    AntiReplayWindow::with_window(size)
 }
 
 impl CryptoSession for ChaChaSession {
@@ -116,8 +143,24 @@ impl CryptoSession for ChaChaSession {
             .decrypt(nonce, payload)
             .map_err(|_| CryptoError::DecryptionFailed)?;
 
+        let plaintext_len = plaintext.len();
         out.extend_from_slice(&plaintext);
         self.recv_seq = self.recv_seq.wrapping_add(1);
+
+        // Anti-replay check: if header parses as a v2 MediaHeader, verify seq
+        // is not a replay for this (stream_id, media_type).
+        if let Some(header) = parse_header(header_bytes) {
+            let window = self
+                .anti_replay
+                .entry((header.stream_id, header.media_type))
+                .or_insert_with(|| default_window_for_media_type(header.media_type));
+            if let Err(e) = window.check_and_update(header.seq) {
+                // Roll back the plaintext we just appended.
+                out.truncate(out.len() - plaintext_len);
+                return Err(e);
+            }
+        }
+
         Ok(())
     }
 
@@ -236,5 +279,90 @@ mod tests {
         alice.complete_rekey(&peer_pub).unwrap();
         // Session is now rekeyed - counters reset
         assert_eq!(alice.send_seq, 0);
+    }
+
+    #[test]
+    fn per_stream_anti_replay_rejects_duplicate() {
+        use wzp_proto::{CodecId, MediaType};
+
+        let (mut alice, mut bob) = make_session_pair();
+        let header = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 10,
+            seq: 42,
+            timestamp: 1000,
+            fec_block: 0,
+        };
+        let mut header_bytes = Vec::new();
+        header.write_to(&mut header_bytes);
+
+        let plaintext = b"audio frame";
+
+        // First packet decrypts successfully
+        let mut ct = Vec::new();
+        alice.encrypt(&header_bytes, plaintext, &mut ct).unwrap();
+        let mut pt = Vec::new();
+        bob.decrypt(&header_bytes, &ct, &mut pt).unwrap();
+        assert_eq!(&pt, plaintext);
+
+        // Exact duplicate is rejected by anti-replay
+        let mut pt2 = Vec::new();
+        let result = bob.decrypt(&header_bytes, &ct, &mut pt2);
+        assert!(
+            result.is_err(),
+            "duplicate packet with same seq must be rejected"
+        );
+        assert!(pt2.is_empty(), "plaintext must be rolled back on replay");
+    }
+
+    #[test]
+    fn per_stream_anti_replay_video_burst_200_with_reorder() {
+        use wzp_proto::{CodecId, MediaType};
+
+        let (mut alice, mut bob) = make_session_pair();
+        let header = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Video,
+            codec_id: CodecId::Opus24k,
+            stream_id: 1,
+            fec_ratio: 10,
+            seq: 0,
+            timestamp: 0,
+            fec_block: 0,
+        };
+
+        let plaintext = b"video frame";
+
+        // Send 200 packets in order
+        for i in 0..200 {
+            let mut h = header;
+            h.seq = i;
+            let mut header_bytes = Vec::new();
+            h.write_to(&mut header_bytes);
+
+            let mut ct = Vec::new();
+            alice.encrypt(&header_bytes, plaintext, &mut ct).unwrap();
+
+            let mut pt = Vec::new();
+            bob.decrypt(&header_bytes, &ct, &mut pt).unwrap();
+        }
+
+        // Re-send packet 50 — should be rejected as replay
+        let mut h = header;
+        h.seq = 50;
+        let mut header_bytes = Vec::new();
+        h.write_to(&mut header_bytes);
+
+        let mut ct = Vec::new();
+        alice.encrypt(&header_bytes, plaintext, &mut ct).unwrap();
+
+        let mut pt = Vec::new();
+        let result = bob.decrypt(&header_bytes, &ct, &mut pt);
+        assert!(result.is_err(), "reordered duplicate must be rejected");
     }
 }

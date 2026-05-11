@@ -1311,8 +1311,8 @@ Statuses (in order of progression):
 | T1.5.1 | Approved | Kimi Code CLI | 2026-05-11T10:09Z | 2026-05-11T10:15Z | [report](reports/T1.5.1-report.md) | Approved. unwrap replaced with `if let Some(base)`; fallback test passes. Cargo.lock churn is legit dep updates. |
 | T1.5.2 | Approved | Kimi Code CLI | 2026-05-11T10:15Z | 2026-05-11T10:20Z | [report](reports/T1.5.2-report.md) | Approved. PROTOCOL-AUDIT.md known-debt section present; standard #3 amended; report template updated. |
 | T1.6 | Approved | Kimi Code CLI | 2026-05-11T10:20Z | 2026-05-11T11:05Z | [report](reports/T1.6-report.md) | Approved. Clean impl, both sides tested, T1.5 gap-fixes folded in with explicit disclosure — good course-correction from the T1.5 scope-creep review. |
-| T1.7 | Pending Review | Kimi Code CLI | 2026-05-11T11:05Z | 2026-05-11T16:29Z | [report](reports/T1.7-report.md) | — |
-| T1.8 | Open | — | — | — | — | — |
+| T1.7 | Approved | Kimi Code CLI | 2026-05-11T11:05Z | 2026-05-11T16:29Z | [report](reports/T1.7-report.md) | Approved. W5 invariant already encoded in `to_bytes()` order; regression test pins it. Guards future encryption wiring. |
+| T1.8 | Pending Review | Kimi Code CLI | 2026-05-11T16:41Z | 2026-05-11T16:59Z | [report](reports/T1.8-report.md) | — |
 | T2.1 | Open | — | — | — | — | — |
 | T2.2 | Open | — | — | — | — | — |
 | T2.3 | Open | — | — | — | — | — |
@@ -1347,6 +1347,6 @@ Statuses (in order of progression):
 
 Items currently waiting on the reviewer:
 
-- T1.7 — Move `QualityReport` trailer inside AEAD payload — report: reports/T1.7-report.md
+- T1.8 — Per-stream anti-replay window with configurable size — report: reports/T1.8-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
