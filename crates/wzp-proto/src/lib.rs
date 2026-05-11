@@ -17,6 +17,7 @@ pub mod codec_id;
 pub mod dred_tuner;
 pub mod error;
 pub mod jitter;
+pub mod media_type;
 pub mod packet;
 pub mod quality;
 pub mod session;
@@ -27,6 +28,7 @@ pub use bandwidth::{BandwidthEstimator, CongestionState};
 pub use codec_id::{CodecId, QualityProfile};
 pub use dred_tuner::{DredTuner, DredTuning};
 pub use error::*;
+pub use media_type::MediaType;
 pub use packet::{
     CallAcceptMode, FRAME_TYPE_FULL, FRAME_TYPE_MINI, HangupReason, MediaHeader, MediaHeaderV1,
     MediaHeaderV2, MediaPacket, MiniFrameContext, MiniHeader, PresenceUser, QualityReport,

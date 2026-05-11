@@ -18,6 +18,20 @@ You are an implementing agent. The human is the reviewer. **Your job is not done
 6. **Move to review.** Update the [Status board](#status-board): `In Progress` → `Pending Review`. Add a link to the report path.
 7. **Stop.** Do NOT start the next task until the reviewer marks the previous one `Approved`. If they mark it `Changes Requested`, address the feedback in a follow-up commit, update the report, and move back to `Pending Review`.
 
+### Follow-up tasks (`T<id>.<n>`)
+
+When the reviewer approves a task but finds small non-blocking issues (missing docs, stale comments, minor cleanups), they **spawn new follow-up tasks** instead of carrying the work forward into an unrelated task. The parent task stays `Approved` and closed.
+
+Follow-up IDs extend the parent: `T1.1.1`, `T1.1.2`, etc. They are first-class tasks — full block in this file with `Files`, `Steps`, `Verify`, `Done when` — and they show up in the status board between the parent and the next sibling (`T1.1.1` sits between `T1.1` and `T1.2`).
+
+Agents pick up follow-ups in the same order they pick up wave tasks. A follow-up never blocks the next wave task: e.g. `T1.2` is claimable even if `T1.1.1` is still `Open`, unless the follow-up's body explicitly says otherwise (it usually doesn't).
+
+Reviewers, when spawning a follow-up:
+
+1. Add a numbered task block in the right section of this file (just below the parent).
+2. Add a status-board row between the parent and the next sibling.
+3. Reference the follow-up in the parent report's reviewer notes (e.g. "Spawned T1.1.1, T1.1.2 to track follow-ups.").
+
 ### Report template
 
 Every report lives at `docs/PRD/reports/T<id>-report.md` and uses this template:
@@ -279,6 +293,98 @@ cargo build --workspace
 
 ### Done when
 - New test passes. Workspace still builds. `MediaHeaderV1` still exists (we delete it later in T1.5).
+
+---
+
+## T1.1.1 — Add rustdoc on `MediaHeaderV2` public fields
+
+- **Parent:** T1.1 (Approved)
+- **PRD:** `PRD-wire-format-v2.md`
+- **Effort:** 15 min
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+
+### Context
+T1.1 added `MediaHeaderV2` with inline `//` comments on the public fields. The pre-existing `MediaHeaderV1` uses `///` rustdoc on every public field (coding standard #9 — public items need rustdoc). Match the existing pattern.
+
+### Steps
+
+1. Open `crates/wzp-proto/src/packet.rs`. Find `pub struct MediaHeaderV2`.
+2. For each public field, replace the trailing `//` comment with a leading `///` doc comment. Example transformation:
+
+   Before:
+   ```rust
+   pub struct MediaHeaderV2 {
+       pub version: u8,    // always 2
+       pub flags: u8,      // bit 7 T, bit 6 Q, bit 5 KeyFrame, bit 4 FrameEnd
+       ...
+   }
+   ```
+
+   After:
+   ```rust
+   pub struct MediaHeaderV2 {
+       /// Protocol version. Always `2` on the wire; `read_from` rejects anything else.
+       pub version: u8,
+       /// Bit-packed flags. See `FLAG_REPAIR`, `FLAG_QUALITY`, `FLAG_KEYFRAME`, `FLAG_FRAME_END`.
+       pub flags: u8,
+       ...
+   }
+   ```
+
+3. Document the four `FLAG_*` constants with `///` too. One line each is fine.
+4. Document the four `is_*` / `has_*` accessor methods with `///`. One line each.
+5. The `media_type: u8` field gets a doc comment that mentions the `TODO(T1.2)` — keep that TODO inline.
+
+### Verify
+
+```bash
+cargo doc -p wzp-proto --no-deps 2>&1 | grep -i "missing"   # should be empty
+cargo clippy -p wzp-proto --all-targets -- -D warnings -W missing_docs   # should pass
+```
+
+### Done when
+- All public items on `MediaHeaderV2` carry `///` doc comments.
+- `cargo doc -p wzp-proto --no-deps` emits no "missing documentation" warnings for `MediaHeaderV2`.
+
+---
+
+## T1.1.2 — Refresh stale test-count figures in docs
+
+- **Parent:** T1.1 (Approved)
+- **PRD:** `PRD-wire-format-v2.md` (housekeeping)
+- **Effort:** 30 min
+- **Files:**
+  - `docs/ARCHITECTURE.md`
+  - `docs/PRD/TASKS.md` (the Environment setup block)
+  - Any other doc referencing "272 tests"
+
+### Context
+The original audit and the TASKS environment-setup block reference a workspace test count of **272**. The actual non-Android workspace baseline measured during T1.1 is **564** (with 1 added test → 565 after T1.1). The 272 figure is stale.
+
+### Steps
+
+1. Grep for the stale figure across the docs:
+   ```bash
+   grep -rn "272 tests\|272 pass\|272 total" docs/
+   ```
+2. For each hit, replace with the current count. **Re-measure before writing the number.**
+   ```bash
+   cargo test --workspace --no-fail-fast 2>&1 | grep "test result:" | awk '{s+=$4} END {print s}'
+   # ... this gives a rough total; sanity-check against per-crate output
+   ```
+3. If `wzp-android` cannot build on the dev machine (no NDK), note that the count excludes `wzp-android` and is the "non-Android subset".
+4. Update the per-crate Test Coverage table in `docs/ARCHITECTURE.md` (search for "## Test Coverage") with the new per-crate counts.
+
+### Verify
+
+```bash
+grep -rn "272 tests\|272 pass" docs/   # should be empty
+```
+
+### Done when
+- No doc references the stale 272 figure.
+- ARCHITECTURE.md test coverage table reflects current per-crate counts.
 
 ---
 
@@ -1054,8 +1160,10 @@ Statuses (in order of progression):
 
 | Task | Status | Agent | Started (UTC) | Completed (UTC) | Report | Reviewer notes |
 |---|---|---|---|---|---|---|
-| T1.1 | Pending Review | Kimi Code CLI | 2026-05-11T06:09Z | 2026-05-11T06:54Z | reports/T1.1-report.md | — |
-| T1.2 | Open | — | — | — | — | — |
+| T1.1 | Approved | Kimi Code CLI | 2026-05-11T06:09Z | 2026-05-11T06:54Z | [report](reports/T1.1-report.md) | Approved 2026-05-11. Spawned T1.1.1 (field rustdoc) and T1.1.2 (refresh stale test-count). |
+| T1.1.1 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
+| T1.1.2 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
+| T1.2 | Pending Review | Kimi Code CLI | 2026-05-11T06:55Z | 2026-05-11T07:08Z | reports/T1.2-report.md | — |
 | T1.3 | Open | — | — | — | — | — |
 | T1.4 | Open | — | — | — | — | — |
 | T1.5 | Open | — | — | — | — | — |
@@ -1096,6 +1204,6 @@ Statuses (in order of progression):
 
 Items currently waiting on the reviewer:
 
-- T1.1 — Add v2 MediaHeader type — report: reports/T1.1-report.md
+- T1.2 — Add MediaType enum — report: reports/T1.2-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).

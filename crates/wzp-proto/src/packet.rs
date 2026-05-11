@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
-use crate::CodecId;
+use crate::{CodecId, MediaType};
 
 /// 12-byte v1 media packet header for the lossy link.
 ///
@@ -163,9 +163,9 @@ pub type MediaHeader = MediaHeaderV1;
 /// 16-byte v2 media header. See docs/PRD/PRD-wire-format-v2.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaHeaderV2 {
-    pub version: u8,    // always 2
-    pub flags: u8,      // bit 7 T, bit 6 Q, bit 5 KeyFrame, bit 4 FrameEnd
-    pub media_type: u8, // TODO(T1.2): replace with MediaType
+    pub version: u8, // always 2
+    pub flags: u8,   // bit 7 T, bit 6 Q, bit 5 KeyFrame, bit 4 FrameEnd
+    pub media_type: MediaType,
     pub codec_id: CodecId,
     pub stream_id: u8,
     pub fec_ratio: u8, // 0..200 -> 0.0..2.0
@@ -181,7 +181,7 @@ impl MediaHeaderV2 {
     pub fn write_to(&self, buf: &mut impl BufMut) {
         buf.put_u8(self.version);
         buf.put_u8(self.flags);
-        buf.put_u8(self.media_type);
+        buf.put_u8(self.media_type.to_wire());
         buf.put_u8(self.codec_id.to_wire());
         buf.put_u8(self.stream_id);
         buf.put_u8(self.fec_ratio);
@@ -199,7 +199,7 @@ impl MediaHeaderV2 {
             return None;
         }
         let flags = buf.get_u8();
-        let media_type = buf.get_u8();
+        let media_type = MediaType::from_wire(buf.get_u8())?;
         let codec_id = CodecId::from_wire(buf.get_u8())?;
         let stream_id = buf.get_u8();
         let fec_ratio = buf.get_u8();
@@ -1289,7 +1289,7 @@ mod tests {
         let h = MediaHeaderV2 {
             version: 2,
             flags: MediaHeaderV2::FLAG_QUALITY,
-            media_type: 0, // TODO(T1.2): MediaType::Audio
+            media_type: MediaType::Audio,
             codec_id: CodecId::Opus24k,
             stream_id: 0,
             fec_ratio: 50,
