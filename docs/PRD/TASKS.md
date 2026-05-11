@@ -1,0 +1,1101 @@
+# Haiku-Ready Task Breakdown
+
+> Companion to `docs/PRD/README.md`. Every task here is sized for an agent with limited context to pick up cold: it names exact files, exact symbols, and exact verification commands. Do tasks in order within a wave; waves are dependency-ordered.
+
+---
+
+## Agent operating instructions — read first
+
+You are an implementing agent. The human is the reviewer. **Your job is not done when the code compiles; it is done when the reviewer has approved your report.** Read this section before touching any task.
+
+### Workflow per task
+
+1. **Claim the task.** Move its status in the [Status board](#status-board) at the bottom of this file from `Open` → `In Progress`. Add your handle / model name and a UTC timestamp.
+2. **Implement.** Follow the steps in the task block exactly. If the steps don't fit reality (e.g. line numbers shifted, a referenced symbol doesn't exist, the API has evolved), **stop and surface the mismatch in your report** — do not improvise silently.
+3. **Verify.** Run the exact commands in the task's `Verify` block. Capture their output verbatim — the reviewer will read it.
+4. **Write the report.** Create `docs/PRD/reports/T<id>-report.md` using the template below. One report per task. No exceptions.
+5. **Commit.** One commit per task. Message: `T<id>: <one-line summary>`. The report file is part of the same commit.
+6. **Move to review.** Update the [Status board](#status-board): `In Progress` → `Pending Review`. Add a link to the report path.
+7. **Stop.** Do NOT start the next task until the reviewer marks the previous one `Approved`. If they mark it `Changes Requested`, address the feedback in a follow-up commit, update the report, and move back to `Pending Review`.
+
+### Report template
+
+Every report lives at `docs/PRD/reports/T<id>-report.md` and uses this template:
+
+```markdown
+# T<id> — <task title>
+
+**Status:** Pending Review
+**Agent:** <model/handle>
+**Started:** <UTC ISO-8601>
+**Completed:** <UTC ISO-8601>
+**Commit:** <git sha>
+**PRD:** ../<prd-filename>.md
+
+## What I changed
+
+- `<file path>:<line range>` — <one-line description of the change>
+- `<file path>:<line range>` — <one-line description>
+- (etc.)
+
+## Why these choices
+
+<2-6 sentences explaining any non-obvious decision: why this signature, why
+this default, why this error type, why a deviation from the task steps if any.
+If you followed the steps verbatim, say "Followed steps T<id>.1 through T<id>.N
+without deviation." and that's enough.>
+
+## Deviations from the task spec
+
+<If you deviated from a numbered step, list each deviation with: which step,
+what you did instead, why. If none, write "None.">
+
+## Verification output
+
+For each `Verify` command in the task block, paste the actual output. Trim
+benign noise (warnings already present on main) but never trim test failure
+output.
+
+```
+$ cargo test -p wzp-proto media_header_v2_roundtrip
+running 1 test
+test packet::tests::media_header_v2_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; ...
+```
+
+## Test summary
+
+- Tests added: <count + names>
+- Tests modified: <count + names>
+- Workspace test count before: <N> / after: <M>
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass / fail
+- `cargo fmt --all -- --check`: pass / fail
+
+## Risks / follow-ups
+
+<Anything the reviewer should know that isn't a bug: a TODO I left, a test I
+couldn't write because of a missing fixture, a downstream task this enables
+or blocks, an assumption I made that should be confirmed. If there are none,
+write "None.">
+
+## Reviewer checklist (filled in by reviewer)
+
+- [ ] Code matches PRD intent
+- [ ] Verification output is real (re-run if suspicious)
+- [ ] No backward-incompat surprises
+- [ ] Tests cover the new behavior
+- [ ] Approved
+```
+
+### Coding standards — non-negotiable
+
+These apply to every task. They are NOT repeated in each task block. Violating them is grounds for `Changes Requested` even if the code works.
+
+1. **Rust edition 2024** (set in workspace root). No exceptions.
+2. **`cargo fmt --all`** must produce a clean diff before commit. CI will reject otherwise.
+3. **`cargo clippy --workspace --all-targets -- -D warnings`** must pass. Do not `#[allow(...)]` to silence — fix the root cause. If a lint is genuinely wrong, justify the allow in the report.
+4. **No `unwrap()` / `expect()` in production code paths.** Tests are fine. Production: return a typed error.
+5. **No `println!` / `eprintln!`.** Use `tracing::{debug,info,warn,error}!`. The crates are already wired for tracing.
+6. **No new dependencies without justification.** If a task forces a new crate, list it under "Risks / follow-ups" in the report so the reviewer can sanity-check the supply chain.
+7. **One commit per task** — see workflow. Don't squash multiple tasks. Don't split a task across commits unless the task itself instructs you to.
+8. **Never modify `Cargo.lock` by hand.** Run a real build; commit the resulting lockfile delta.
+9. **Public API changes need rustdoc.** Every new `pub fn`, `pub struct`, `pub enum`, or `pub trait` gets a `///` doc comment. Private items: doc only when non-obvious.
+10. **Tests live with code.** `#[cfg(test)] mod tests { ... }` next to the code under test. Integration tests in `crates/<x>/tests/<name>.rs` only when they exercise multiple modules end-to-end.
+11. **Async: tokio only.** Do not introduce `async-std` or `smol`. Spawn via `tokio::spawn`, not raw futures.
+12. **Wire format types live in `wzp-proto`.** Do not redefine `MediaHeader`, `SignalMessage`, or codec/quality types in another crate. Re-export if needed.
+13. **No emoji in code or commit messages** unless the surrounding context already uses them.
+14. **No AI-attribution lines in commit messages.** Plain `T<id>: <summary>` body, that's it.
+15. **Comments:** comment WHY, never WHAT. If the code needs a WHAT comment, rename the symbol instead. See repo-root CLAUDE.md (if present) for global guidance.
+16. **Don't take destructive actions.** Specifically: never `git reset --hard`, `git push --force`, drop database tables, delete branches, or touch CI configs without the reviewer asking. If you think you need to, stop and ask in your report.
+17. **Auto mode is not a license to skip these.** Even when the harness is set to autonomous execution, the workflow (report → Pending Review → wait for Approved) is mandatory.
+
+### When to stop and ask
+
+Stop and write a report with status `Blocked` (not `Pending Review`) if any of these happen:
+
+- A task step references code that doesn't exist.
+- A test fails for reasons unrelated to your change.
+- The workspace doesn't build at HEAD before you started (the baseline is dirty).
+- You need to make a meaningful design decision the task didn't anticipate.
+- A "Verify" command produces output you don't understand.
+
+A `Blocked` report is not a failure — it is the correct outcome when the task spec is wrong or incomplete.
+
+---
+
+## How to read a task
+
+Each task block has:
+
+- **ID & title** — `T<wave>.<n>` like `T1.1`.
+- **PRD** — link to the parent PRD for the "why".
+- **Effort** — rough hours for a junior dev with this doc + the repo.
+- **Files** — exact paths you will edit.
+- **Context** — 2-4 lines on what's there today.
+- **Steps** — numbered, do them in order.
+- **Verify** — exact commands; output must match.
+- **Done when** — single-line acceptance.
+
+---
+
+## Environment setup (do this once)
+
+```bash
+# All commands assume CWD = /Users/manwe/CascadeProjects/warzonePhone
+cargo build --workspace                 # baseline: must succeed
+cargo test --workspace --no-fail-fast   # baseline: should be 272 pass / 0 fail
+```
+
+If either fails before you start a task, stop and report — the tree is dirty.
+
+### Conventions
+
+- Format on save: `cargo fmt --all` after any code change.
+- Lints: `cargo clippy --workspace --all-targets -- -D warnings` must pass before commit.
+- Tests live next to code under `#[cfg(test)]` modules, or in `crates/<x>/tests/`.
+- Wire format types: `crates/wzp-proto/src/packet.rs` is authoritative. Do not duplicate field semantics elsewhere.
+- Commit one task per commit. Reference task ID in commit message: `T1.1: widen MediaHeader to v2`.
+
+### Useful greps
+
+```bash
+grep -rn "MediaHeader::" --include="*.rs"    # 6 files outside tests
+grep -rn "MiniHeader::" --include="*.rs"
+grep -rn "SignalMessage::" --include="*.rs"
+grep -rn "CodecId::" --include="*.rs"
+```
+
+---
+
+# Wave 1 — Foundation (target: 1 week)
+
+Goal: v2 wire format lands cleanly. Audio works under v2. Old clients are politely rejected.
+
+---
+
+## T1.1 — Add v2 `MediaHeader` type
+
+- **PRD:** `PRD-wire-format-v2.md`
+- **Effort:** 3 h
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+
+### Context
+Today `MediaHeader` is defined at line 20 of `packet.rs` with `WIRE_SIZE = 12` (line 47). Fields are bit-packed across the first two bytes. It is constructed in tests starting around line 1229.
+
+### Steps
+
+1. Open `crates/wzp-proto/src/packet.rs`.
+2. **Do not delete** the existing `MediaHeader`. Rename it in-place to `MediaHeaderV1` (also rename `WIRE_SIZE` consts only on that struct). Keep all impls.
+3. Below the `MediaHeaderV1` block, add a new `MediaHeader` struct (16 bytes, byte-aligned):
+
+   ```rust
+   /// 16-byte v2 media header. See docs/PRD/PRD-wire-format-v2.md.
+   #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+   pub struct MediaHeader {
+       pub version: u8,           // always 2
+       pub flags: u8,             // bit 7 T, bit 6 Q, bit 5 KeyFrame, bit 4 FrameEnd
+       pub media_type: MediaType, // u8 wire repr
+       pub codec_id: CodecId,
+       pub stream_id: u8,
+       pub fec_ratio: u8,         // 0..200 → 0.0..2.0
+       pub seq: u32,
+       pub timestamp: u32,
+       pub fec_block: u16,
+   }
+
+   impl MediaHeader {
+       pub const WIRE_SIZE: usize = 16;
+       pub const VERSION: u8 = 2;
+
+       pub fn write_to(&self, buf: &mut impl BufMut) {
+           buf.put_u8(self.version);
+           buf.put_u8(self.flags);
+           buf.put_u8(self.media_type.to_wire());
+           buf.put_u8(self.codec_id.to_wire());
+           buf.put_u8(self.stream_id);
+           buf.put_u8(self.fec_ratio);
+           buf.put_u32(self.seq);
+           buf.put_u32(self.timestamp);
+           buf.put_u16(self.fec_block);
+       }
+
+       pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
+           if buf.remaining() < Self::WIRE_SIZE { return None; }
+           let version = buf.get_u8();
+           if version != Self::VERSION { return None; }
+           let flags = buf.get_u8();
+           let media_type = MediaType::from_wire(buf.get_u8())?;
+           let codec_id = CodecId::from_wire(buf.get_u8())?;
+           let stream_id = buf.get_u8();
+           let fec_ratio = buf.get_u8();
+           let seq = buf.get_u32();
+           let timestamp = buf.get_u32();
+           let fec_block = buf.get_u16();
+           Some(Self { version, flags, media_type, codec_id, stream_id, fec_ratio, seq, timestamp, fec_block })
+       }
+
+       pub const FLAG_REPAIR: u8     = 0b1000_0000;
+       pub const FLAG_QUALITY: u8    = 0b0100_0000;
+       pub const FLAG_KEYFRAME: u8   = 0b0010_0000;
+       pub const FLAG_FRAME_END: u8  = 0b0001_0000;
+
+       pub fn is_repair(&self) -> bool  { self.flags & Self::FLAG_REPAIR != 0 }
+       pub fn has_quality(&self) -> bool { self.flags & Self::FLAG_QUALITY != 0 }
+       pub fn is_keyframe(&self) -> bool { self.flags & Self::FLAG_KEYFRAME != 0 }
+       pub fn is_frame_end(&self) -> bool { self.flags & Self::FLAG_FRAME_END != 0 }
+   }
+   ```
+
+4. `MediaType` and `CodecId::to_wire` (8-bit) come from T1.2 and T1.3 — add a `// TODO(T1.2)` placeholder if those aren't merged yet (use `u8` directly).
+5. Add a round-trip test next to the existing tests:
+
+   ```rust
+   #[test]
+   fn media_header_v2_roundtrip() {
+       let h = MediaHeader {
+           version: 2, flags: MediaHeader::FLAG_QUALITY,
+           media_type: MediaType::Audio, codec_id: CodecId::Opus24k,
+           stream_id: 0, fec_ratio: 50,
+           seq: 0xDEAD_BEEF, timestamp: 0x1234_5678,
+           fec_block: 0xABCD,
+       };
+       let mut buf = BytesMut::with_capacity(MediaHeader::WIRE_SIZE);
+       h.write_to(&mut buf);
+       assert_eq!(buf.len(), 16);
+       let mut cursor = std::io::Cursor::new(&buf[..]);
+       let parsed = MediaHeader::read_from(&mut cursor).unwrap();
+       assert_eq!(h, parsed);
+   }
+   ```
+
+### Verify
+
+```bash
+cargo test -p wzp-proto media_header_v2_roundtrip
+cargo build --workspace
+```
+
+### Done when
+- New test passes. Workspace still builds. `MediaHeaderV1` still exists (we delete it later in T1.5).
+
+---
+
+## T1.2 — Add `MediaType` enum
+
+- **PRD:** `PRD-wire-format-v2.md`
+- **Effort:** 1 h
+- **Files:**
+  - `crates/wzp-proto/src/codec_id.rs` (or new sibling file `media_type.rs`)
+  - `crates/wzp-proto/src/lib.rs` (re-export)
+
+### Steps
+
+1. Create `crates/wzp-proto/src/media_type.rs`:
+   ```rust
+   use serde::{Deserialize, Serialize};
+
+   #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   #[repr(u8)]
+   pub enum MediaType {
+       Audio = 0,
+       Video = 1,
+       Data = 2,
+       Control = 3,
+   }
+
+   impl MediaType {
+       pub const fn to_wire(self) -> u8 { self as u8 }
+       pub const fn from_wire(v: u8) -> Option<Self> {
+           match v {
+               0 => Some(Self::Audio),
+               1 => Some(Self::Video),
+               2 => Some(Self::Data),
+               3 => Some(Self::Control),
+               _ => None,
+           }
+       }
+   }
+   ```
+2. In `crates/wzp-proto/src/lib.rs`, add `pub mod media_type;` and `pub use media_type::MediaType;`.
+
+### Verify
+```bash
+cargo build -p wzp-proto
+cargo test -p wzp-proto
+```
+
+### Done when
+`MediaType` is importable as `wzp_proto::MediaType`.
+
+---
+
+## T1.3 — Widen `CodecId` wire representation to u8
+
+- **PRD:** `PRD-wire-format-v2.md` (resolves audit W9)
+- **Effort:** 1 h
+- **Files:**
+  - `crates/wzp-proto/src/codec_id.rs`
+
+### Context
+`CodecId::to_wire` returns `self as u8` (already u8 in memory). The "4 bits on wire" is enforced by how `MediaHeaderV1` packs it. With v2 the wire byte is full 8-bit — so reserve more IDs without touching `to_wire`/`from_wire` for the existing variants.
+
+### Steps
+
+1. In `codec_id.rs`, **reserve** (but do not implement) future codec IDs by adding doc comments after `Opus64k = 8`:
+   ```rust
+   // Reserved for video codecs; implementations land in PRD-video-multicodec.
+   // 9  => H264 baseline
+   // 10 => H264 main
+   // 11 => H265 main
+   // 12 => AV1
+   // 13 => VP9
+   ```
+2. **Do not** add new variants yet — that happens in T4.x once `wzp-video` exists.
+3. Add a regression test confirming `from_wire(9..=255)` returns `None`:
+   ```rust
+   #[test] fn codec_id_unknown_values_rejected() {
+       for v in 9u8..=255 { assert!(CodecId::from_wire(v).is_none(), "v={v}"); }
+   }
+   ```
+
+### Verify
+```bash
+cargo test -p wzp-proto codec_id_unknown_values_rejected
+```
+
+### Done when
+Test passes. Existing audio tests still pass.
+
+---
+
+## T1.4 — Add v2 `MiniHeader` with `seq_delta`
+
+- **PRD:** `PRD-wire-format-v2.md` (resolves audit W4)
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+
+### Context
+Existing `MiniHeader` is 4 bytes at line 501. `MiniFrameContext::expand` infers `seq` by `wrapping_add(1)` (line ~553) — a missed full header desyncs. v2 carries explicit `seq_delta`.
+
+### Steps
+
+1. Rename existing `MiniHeader` → `MiniHeaderV1` and `MiniFrameContext` → `MiniFrameContextV1`. Keep impls intact.
+2. Add new `MiniHeader` (5 bytes):
+   ```rust
+   #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+   pub struct MiniHeader {
+       pub seq_delta: u8,            // packets since baseline; 1 in steady state
+       pub timestamp_delta_ms: u16,
+       pub payload_len: u16,
+   }
+
+   impl MiniHeader {
+       pub const WIRE_SIZE: usize = 5;
+
+       pub fn write_to(&self, buf: &mut impl BufMut) {
+           buf.put_u8(self.seq_delta);
+           buf.put_u16(self.timestamp_delta_ms);
+           buf.put_u16(self.payload_len);
+       }
+
+       pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
+           if buf.remaining() < Self::WIRE_SIZE { return None; }
+           Some(Self {
+               seq_delta: buf.get_u8(),
+               timestamp_delta_ms: buf.get_u16(),
+               payload_len: buf.get_u16(),
+           })
+       }
+   }
+   ```
+3. Add `MiniFrameContext` (no `V1` suffix) tracking v2 `MediaHeader`:
+   ```rust
+   #[derive(Clone, Debug, Default)]
+   pub struct MiniFrameContext {
+       last: Option<MediaHeader>,
+   }
+   impl MiniFrameContext {
+       pub fn update(&mut self, h: &MediaHeader) { self.last = Some(*h); }
+       pub fn expand(&mut self, m: &MiniHeader) -> Option<MediaHeader> {
+           let base = self.last.as_ref()?;
+           let mut e = *base;
+           e.seq = base.seq.wrapping_add(m.seq_delta as u32);
+           e.timestamp = base.timestamp.wrapping_add(m.timestamp_delta_ms as u32);
+           self.last = Some(e);
+           Some(e)
+       }
+   }
+   ```
+4. Add round-trip test mirroring `T1.1`.
+
+### Verify
+```bash
+cargo test -p wzp-proto mini
+```
+
+### Done when
+v2 mini header round-trips. v1 type still compiles.
+
+---
+
+## T1.5 — Migrate emit/parse sites to v2
+
+- **PRD:** `PRD-wire-format-v2.md`
+- **Effort:** 4 h
+- **Files (touch all that use `MediaHeader::`):**
+  - `crates/wzp-proto/src/packet.rs`
+  - `crates/wzp-client/src/call.rs`
+  - `crates/wzp-relay/src/room.rs`
+  - `crates/wzp-relay/src/pipeline.rs`
+  - `crates/wzp-android/src/engine.rs`
+
+### Context
+Only 6 production files outside `packet.rs` reference `MediaHeader::`. Confirm with:
+```bash
+grep -rln "MediaHeader::" crates/ | grep -v target
+```
+
+### Steps
+
+1. For each file in the list above, replace v1 construction patterns with v2. The audio fields are unchanged in semantics; new fields default as follows:
+   - `version: 2`
+   - `flags: 0` (set `FLAG_QUALITY` where the v1 code set `has_quality_report = true`, etc.)
+   - `media_type: MediaType::Audio`
+   - `stream_id: 0`
+   - `fec_ratio: <old fec_ratio_encoded * 200 / 127>` (convert range)
+   - `seq: old_seq as u32`
+   - `timestamp` unchanged
+   - `fec_block: u16::from(old_fec_block) | (u16::from(old_fec_symbol) << 8)` for audio (low byte block_id, high byte symbol_idx)
+2. Update `MediaHeaderV1`-using parse code identically — convert from u16 seq/u8 block_id to v2 layout at parse boundary.
+3. Search for `WIRE_SIZE` arithmetic and update buffer sizes (12 → 16, 4 → 5).
+4. Delete `MediaHeaderV1`, `MiniHeaderV1`, `MiniFrameContextV1` once everything builds.
+
+### Verify
+```bash
+cargo build --workspace
+cargo test --workspace --no-fail-fast
+# Expected: all 272 tests still pass
+```
+
+### Done when
+- Workspace builds clean.
+- All audio tests pass.
+- No reference to `MediaHeaderV1` / `MiniHeaderV1` anywhere.
+
+---
+
+## T1.6 — Protocol version negotiation in handshake
+
+- **PRD:** `PRD-wire-format-v2.md` + `PRD-protocol-hardening.md` (W12)
+- **Effort:** 3 h
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs` (extend `SignalMessage`)
+  - `crates/wzp-client/src/handshake.rs`
+  - `crates/wzp-relay/src/handshake.rs`
+
+### Steps
+
+1. In `packet.rs`, add to `CallOffer`:
+   ```rust
+   #[serde(default = "default_proto_version")]
+   pub protocol_version: u8,
+   #[serde(default = "default_supported_versions")]
+   pub supported_versions: Vec<u8>,
+   ```
+   Helpers:
+   ```rust
+   fn default_proto_version() -> u8 { 2 }
+   fn default_supported_versions() -> Vec<u8> { vec![2] }
+   ```
+2. Add a new `Hangup` reason variant. Find `SignalMessage::Hangup` (look for the `Hangup` variant in the enum near the bottom) and add to the reason enum / fields:
+   ```rust
+   ProtocolVersionMismatch { server_supported: Vec<u8> },
+   ```
+   If `reason` is a `String`, instead add a structured variant `SignalMessage::ProtocolVersionMismatch { server_supported: Vec<u8> }` and use that.
+3. In `crates/wzp-relay/src/handshake.rs`, after parsing `CallOffer`, check `protocol_version == 2`. If not, send `ProtocolVersionMismatch` and close.
+4. In `crates/wzp-client/src/handshake.rs`, set the field on outgoing `CallOffer`; on receiving the mismatch variant, return a typed error.
+
+### Verify
+```bash
+cargo test -p wzp-relay handshake
+cargo test -p wzp-client handshake
+```
+
+### Done when
+A v1-style offer (missing `protocol_version` field — serde default makes it 2 in this codebase, so explicitly test with `protocol_version: 1`) is rejected with the typed signal.
+
+---
+
+## T1.7 — Move `QualityReport` trailer inside AEAD payload
+
+- **PRD:** `PRD-protocol-hardening.md` (W5)
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-client/src/call.rs` (encode/decode paths)
+  - `crates/wzp-crypto/src/session.rs` (verify AEAD boundary)
+
+### Context
+A `QualityReport` (4 bytes) is appended to media packets when the `Q` flag is set. The flag is in the (plaintext, AAD-bound) header; the trailer must sit **inside** the AEAD payload so stripping it corrupts decryption.
+
+### Steps
+
+1. Grep for the encode site:
+   ```bash
+   grep -rn "has_quality_report\|FLAG_QUALITY\|QualityReport" crates/wzp-client/src/call.rs
+   ```
+2. Find where `QualityReport::write_to` (or `put_*` calls) writes the 4 bytes. Confirm it writes into the buffer that is **then** passed to `encrypt_in_place` / `seal` — not after.
+3. If currently appended *after* AEAD seal: refactor so the order is:
+   - Write `MediaHeader` (becomes AAD).
+   - Write payload.
+   - Write `QualityReport` trailer if Q flag set.
+   - AEAD-seal the (payload + trailer) bytes with header as AAD.
+4. Mirror on decode side.
+5. Add a test that tampers with the trailer post-encrypt and asserts decrypt fails.
+
+### Verify
+```bash
+cargo test -p wzp-client quality_report_aead
+cargo test -p wzp-crypto
+```
+
+### Done when
+- Tamper test passes (decryption fails on trailer tamper).
+- Round-trip with quality flag set still works.
+
+---
+
+## T1.8 — Per-stream anti-replay window with configurable size
+
+- **PRD:** `PRD-protocol-hardening.md` (W11)
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-crypto/src/anti_replay.rs`
+  - `crates/wzp-crypto/src/session.rs` (or wherever the window is owned)
+
+### Steps
+
+1. Today the window is fixed 64 packets. Make it constructible with size:
+   ```rust
+   impl AntiReplay { pub fn with_window(size: usize) -> Self { ... } }
+   ```
+2. The session owner (search `AntiReplay::new`) is updated to allocate per `(stream_id, MediaType)`. Use a `HashMap<(u8, MediaType), AntiReplay>` keyed on the v2 header fields.
+3. Default sizes:
+   - `Audio`: 64
+   - `Video`: 1024
+   - `Data`: 256
+   - `Control`: 32
+
+### Verify
+```bash
+cargo test -p wzp-crypto anti_replay
+```
+
+### Done when
+- A new test confirms a 200-packet video burst with one reorder doesn't drop any.
+- Existing audio anti-replay tests pass.
+
+---
+
+# Wave 2 — Feedback + abuse mitigation (target: 1 week)
+
+Goal: BWE drives adaptation. Tier A/B/C conformance running in observe-only mode at the relay.
+
+---
+
+## T2.1 — Add `SignalMessage::TransportFeedback`
+
+- **PRD:** `PRD-transport-feedback-bwe.md`
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+
+### Steps
+
+1. Add to the `SignalMessage` enum:
+   ```rust
+   TransportFeedback {
+       #[serde(default)] version: u8,        // = 1
+       stream_id: u8,
+       acked_seqs: Vec<u32>,
+       nacked_seqs: Vec<u32>,
+       remb_bps: u32,
+       recv_time_us: u64,
+   },
+   ```
+2. Add a unit test serializing/deserializing with `bincode` to ensure forward/backward compat.
+
+### Verify
+```bash
+cargo test -p wzp-proto transport_feedback
+```
+
+### Done when
+Variant round-trips. No other code consumes it yet — that's T2.2/T2.3.
+
+---
+
+## T2.2 — `BandwidthEstimator` in `wzp-proto::bandwidth`
+
+- **PRD:** `PRD-transport-feedback-bwe.md`
+- **Effort:** 4 h
+- **Files:**
+  - `crates/wzp-proto/src/bandwidth.rs` (already exists — extend, don't replace)
+  - `crates/wzp-transport/src/path_monitor.rs` (read existing cwnd/RTT exposure)
+
+### Context
+`bandwidth.rs` already exists (14 KB). Read it first. The `QuinnPathSnapshot` type exposes `loss_pct`, `rtt_ms` today; add `cwnd_bps`, `bytes_in_flight` if missing.
+
+### Steps
+
+1. Read `crates/wzp-transport/src/path_monitor.rs` to find how Quinn `PathStats` are exposed.
+2. Add to `QuinnPathSnapshot`:
+   ```rust
+   pub cwnd_bytes: u64,
+   pub bytes_in_flight: u64,
+   ```
+   Populate from `quinn::Connection::stats().path`.
+3. In `wzp-proto/src/bandwidth.rs`, add:
+   ```rust
+   pub struct BandwidthEstimator {
+       cwnd_bps: AtomicU64,
+       peer_remb_bps: AtomicU64,
+       smoothed_bps: AtomicU64,
+   }
+   impl BandwidthEstimator {
+       pub fn new() -> Self { ... default ... }
+       pub fn update_from_quinn(&self, snap: &QuinnPathSnapshot) { /* compute cwnd_bps = cwnd_bytes * 8 / rtt_s */ }
+       pub fn update_from_peer(&self, fb_remb_bps: u32) { ... }
+       pub fn target_send_bps(&self) -> u64 {
+           let m = self.cwnd_bps.load(Relaxed).min(self.peer_remb_bps.load(Relaxed));
+           (m as f64 * 0.9) as u64
+       }
+   }
+   ```
+4. EWMA smoothing: half-life 2 s. Update `smoothed_bps` from input on each tick.
+
+### Verify
+```bash
+cargo test -p wzp-proto bandwidth
+cargo test -p wzp-transport
+```
+
+### Done when
+- Unit test: feed scripted cwnd + remb values, assert `target_send_bps` smooths correctly.
+
+---
+
+## T2.3 — Plumb BWE into adaptive controller
+
+- **PRD:** `PRD-transport-feedback-bwe.md`
+- **Effort:** 3 h
+- **Files:**
+  - `crates/wzp-proto/src/quality.rs` (`AdaptiveQualityController`)
+  - `crates/wzp-client/src/call.rs` (instantiate + feed)
+
+### Steps
+
+1. Add a setter to `AdaptiveQualityController`:
+   ```rust
+   pub fn set_bandwidth_estimator(&mut self, bwe: Arc<BandwidthEstimator>) { self.bwe = Some(bwe); }
+   ```
+2. In the controller's upgrade decision (search for "consecutive_good_reports" or similar threshold logic), add a guard:
+   ```rust
+   if let Some(bwe) = &self.bwe {
+       if bwe.target_send_bps() < self.current_tier_ceiling_bps() * 130 / 100 { return; }
+   }
+   ```
+3. In `call.rs`, instantiate one `Arc<BandwidthEstimator>` per session, feed it from both send loop (`update_from_quinn` from path snapshot) and recv loop (`update_from_peer` from incoming TransportFeedback), pass to the controller.
+
+### Verify
+```bash
+cargo test -p wzp-proto quality
+```
+
+### Done when
+Existing quality tests pass with BWE attached. New test: scripted "loss = 0, cwnd = 50 kbps" never upgrades past Opus 24k.
+
+---
+
+## T2.4 — Relay conformance: Tier A (bitrate ceiling)
+
+- **PRD:** `PRD-relay-conformance.md`
+- **Effort:** 3 h
+- **Files:**
+  - `crates/wzp-relay/src/conformance.rs` (new)
+  - `crates/wzp-relay/src/room.rs` (call site)
+
+### Steps
+
+1. Create `crates/wzp-relay/src/conformance.rs`:
+   ```rust
+   use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+   use std::time::Instant;
+   use wzp_proto::{CodecId, MediaHeader, MediaType};
+
+   pub struct ConformanceMeter {
+       window_start: parking_lot::Mutex<Instant>,
+       bytes_in_window: AtomicU64,
+       packets_in_window: AtomicU64,
+       last_seq: AtomicU64,
+       last_ts: AtomicU64,
+   }
+
+   #[derive(Debug)]
+   pub enum Violation { BitrateExceeded, PacketRateExceeded, TimestampDrift }
+
+   impl ConformanceMeter {
+       pub fn new() -> Self { ... }
+       pub fn observe(&self, h: &MediaHeader, payload_len: usize, now: Instant) -> Result<(), Violation> {
+           // Tier A
+           let window_bytes = self.bytes_in_window.fetch_add((MediaHeader::WIRE_SIZE + payload_len) as u64, Relaxed);
+           // ... compare against ceiling_bps_for(h.codec_id, h.media_type)
+       }
+   }
+
+   pub fn ceiling_bps(codec: CodecId) -> u64 {
+       let nominal = codec.bitrate_bps() as u64;
+       (nominal * 3 * 115 / 100).max(2_000)   // FEC 2.0 + 15% overhead, floor 2 kbps
+   }
+   ```
+2. In `room.rs`, attach one `ConformanceMeter` per participant. Call `observe` on each incoming media packet.
+3. **Observe-only mode for now.** Log violations to `tracing::warn!` and bump a Prometheus counter. Do not close session.
+
+### Verify
+```bash
+cargo test -p wzp-relay conformance
+```
+
+### Done when
+Unit test: synthetic 1 MB/s declared as Opus 24k logs `Violation::BitrateExceeded`.
+
+---
+
+## T2.5 — Tier B (packet-rate) + Tier C (timestamp drift)
+
+- **PRD:** `PRD-relay-conformance.md`
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-relay/src/conformance.rs`
+
+### Steps
+
+1. Add packet-rate enforcement: `packets_in_window > max_pps(codec) * 1.5` over a 1 s window → `PacketRateExceeded`.
+2. `max_pps(codec) = 1000 / codec.frame_duration_ms() * 3` (×3 for FEC).
+3. Timestamp drift: track `Δtimestamp / Δseq` over rolling 200-packet window. If outside `frame_duration_ms × [0.5, 2.0]`, log `TimestampDrift`.
+
+### Verify
+```bash
+cargo test -p wzp-relay conformance
+```
+
+### Done when
+Both new tests pass alongside Tier A test.
+
+---
+
+## T2.6 — Prometheus metrics for conformance
+
+- **PRD:** `PRD-relay-conformance.md`
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-relay/src/metrics.rs`
+
+### Steps
+
+1. Add counters / histograms:
+   ```rust
+   wzp_relay_conformance_violations_total{tier, codec_id, media_type, verdict}
+   wzp_relay_conformance_bytes_per_session{media_type}      histogram
+   wzp_relay_conformance_iat_ms{media_type}                  histogram
+   ```
+2. Wire `ConformanceMeter` to bump these on `observe`.
+
+### Verify
+```bash
+curl localhost:9090/metrics | grep wzp_relay_conformance
+```
+(after `cargo run -p wzp-relay -- --listen 127.0.0.1:4433 --no-auth` with a synthetic client)
+
+### Done when
+Counters increment under abusive traffic; quiet on legitimate audio.
+
+---
+
+# Wave 3 — Protocol hardening (target: 3-4 days)
+
+---
+
+## T3.1 — Confirm `RoomManager` concurrency (W13)
+
+- **PRD:** `PRD-protocol-hardening.md`
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-relay/src/room.rs`
+
+### Context
+`RoomManager` already uses `DashMap<String, Room>` (verified at line 352). The audit (W13) was based on the older ARCHITECTURE doc which mentioned a single Mutex. The actual remaining contention point is whatever's *inside* `Room` — confirm.
+
+### Steps
+
+1. Read the `Room` struct definition.
+2. If `Room` itself uses fine-grained locks or is `Arc<RwLock<Room>>` already, document this in `PROTOCOL-AUDIT.md` and mark W13 resolved.
+3. If `Room` has a single per-room `Mutex` held during fan-out, identify the hot path and either:
+   - Split fan-out list into `RwLock<Vec<Participant>>` (read-mostly).
+   - Use `ArcSwap<Vec<Participant>>` for lock-free reads.
+4. Run the 40+4 relay integration tests.
+
+### Verify
+```bash
+cargo test -p wzp-relay
+cargo test -p wzp-relay --test federation
+cargo test -p wzp-relay --test handshake_integration
+```
+
+### Done when
+Tests pass + a one-line update in `PROTOCOL-AUDIT.md` noting actual state.
+
+---
+
+## T3.2 — Document `timestamp_ms` rebase across rekey (W3)
+
+- **PRD:** `PRD-protocol-hardening.md`
+- **Effort:** 1 h
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs` (doc comment on `MediaHeader::timestamp`)
+  - `crates/wzp-crypto/src/rekey.rs` (add comment)
+  - `docs/WZP-SPEC.md`
+  - Add test in `crates/wzp-client/tests/long_session.rs`
+
+### Steps
+
+1. Decision (already made): `timestamp_ms` is monotonic across rekeys. Document inline:
+   ```rust
+   /// Milliseconds since session start. Monotonic for the full session lifetime;
+   /// NOT reset by rekey (rekey changes only key material, not framing state).
+   pub timestamp: u32,
+   ```
+2. In `rekey.rs`, add a comment near the rekey handler confirming sequence + timestamp are untouched.
+3. Add a test that performs 2 rekeys mid-session and asserts `timestamp` continues monotonically.
+
+### Verify
+```bash
+cargo test -p wzp-client --test long_session rekey_timestamp_monotonic
+```
+
+### Done when
+Test passes.
+
+---
+
+## T3.3 — `SignalMessage` version field (W12)
+
+- **PRD:** `PRD-protocol-hardening.md`
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+
+### Steps
+
+1. For each variant of `SignalMessage`, add `#[serde(default)] version: u8` as the first field, with helper `fn default_signal_version() -> u8 { 1 }`.
+2. Add fallback variant for unknown future signals:
+   ```rust
+   #[serde(other)]
+   Unknown,
+   ```
+   (Note: bincode + serde `other` may need a wrapper — research before implementing. If not feasible, document the limitation and skip the `Unknown` arm.)
+3. Decode path: on `Unknown`, log `tracing::warn!("unknown signal variant")` and **do not** close session.
+
+### Verify
+```bash
+cargo test -p wzp-proto signal_message
+```
+
+### Done when
+Existing signal tests pass. Old payloads (without `version` field) still deserialize.
+
+---
+
+## T3.4 — Tier D (per-codec packet size sanity)
+
+- **PRD:** `PRD-relay-conformance.md`
+- **Effort:** 2 h
+- **Files:**
+  - `crates/wzp-relay/src/conformance.rs`
+
+### Steps
+
+1. Add per-codec typical / max payload table:
+   ```rust
+   pub fn payload_size_bound(codec: CodecId) -> usize {
+       match codec {
+           CodecId::Opus64k => 320, CodecId::Opus48k => 240,
+           CodecId::Opus32k => 200, CodecId::Opus24k => 160,
+           CodecId::Opus16k => 100, CodecId::Opus6k => 90,
+           CodecId::Codec2_3200 => 30, CodecId::Codec2_1200 => 30,
+           CodecId::ComfortNoise => 16,
+       }
+   }
+   ```
+2. Maintain EWMA of payload size per meter. Reject if EWMA exceeds 2× typical for declared codec.
+
+### Verify
+```bash
+cargo test -p wzp-relay conformance_tier_d
+```
+
+### Done when
+Synthetic stream of 1400-byte payloads declared as Codec2_1200 flagged within 5 s.
+
+---
+
+## T3.5 — Tier E (per-fingerprint token bucket)
+
+- **PRD:** `PRD-relay-conformance.md`
+- **Effort:** 4 h
+- **Files:**
+  - `crates/wzp-relay/src/conformance.rs` (or sibling `quota.rs`)
+  - `crates/wzp-relay/src/auth.rs` (for authed/anon split)
+
+### Steps
+
+1. Implement a simple token bucket per `(fingerprint, src_ip)`:
+   ```rust
+   pub struct TokenBucket {
+       capacity: u64,
+       tokens: AtomicU64,
+       refill_per_sec: u64,
+       last_refill: AtomicU64,
+   }
+   ```
+2. Wire into per-participant forward loop. Refill on each `observe`.
+3. Authed/anon split: authenticated quota = 50 GB/month; anon = 1 GB/month. Per-session cap = 256 kbps audio (5 Mbps video reserved for later).
+4. **Observe-only:** log + counter; do not throttle yet.
+
+### Verify
+```bash
+cargo test -p wzp-relay token_bucket
+```
+
+### Done when
+Unit test: 100 KB at 256 kbps cap consumes no tokens; 1 MB exceeds.
+
+---
+
+# Wave 4 — Video v1 (3 weeks)
+
+Detailed task breakdown deferred until Wave 1-3 land. Skeleton:
+
+| Task | Summary | Effort |
+|---|---|---|
+| T4.1 | `wzp-video` crate scaffold + H.264 NAL framer + depacketizer (no encoder yet) | 3 d |
+| T4.2 | VideoToolbox H.264 encoder + decoder (macOS) — minimum viable | 3 d |
+| T4.3 | MediaCodec H.264 encoder + decoder via JNI (Android) | 5 d |
+| T4.4 | `SignalMessage::Nack` variant + RTT-gated NACK loop | 2 d |
+| T4.5 | I-frame FEC ratio boost (encoder hint → FEC layer) | 1 d |
+| T4.6 | SFU keyframe cache per `(room, sender, stream_id)` | 2 d |
+| T4.7 | PLI suppression at SFU | 1 d |
+
+Each of these will be expanded into the same step-by-step format as T1.x once Wave 3 is in progress. See `PRD-video-v1.md` for design.
+
+---
+
+# Wave 5 — Quality, codecs, simulcast (3 weeks)
+
+Detailed task breakdown deferred. Skeleton:
+
+| Task | Summary |
+|---|---|
+| T5.1 | `PriorityMode` enum + `SignalMessage::SetPriorityMode` |
+| T5.2 | `VideoQualityController` with per-mode allocation gates |
+| T5.3 | `EncoderMode::SlideFallback` for ScreenShare |
+| T5.4 | H.265 encoder/decoder (reuse framer from T4.1) |
+| T5.5 | 3-layer simulcast at sender |
+| T5.6 | Per-receiver layer selection at SFU |
+| T5.7 | Tier F audio scorer (entropy/IAT/silence-fraction) |
+| T5.8 | Tier G response policy (typed Hangup + audit log) |
+
+---
+
+# Wave 6 — AV1 + Tier F video (2-3 weeks)
+
+| Task | Summary |
+|---|---|
+| T6.1 | AV1 encoder/decoder with HW probe + SVT-AV1 SW fallback |
+| T6.2 | Tier F video scorer (keyframe periodicity, I/P ratio, BWE responsiveness) |
+| T6.3 | Federated reputation gossip (optional) |
+
+---
+
+# Working agreements
+
+- **One commit per task.** Message: `T<id>: <one-line summary>`.
+- **Update PRD on deviation.** If you implement something differently than the PRD specifies, edit the PRD in the same commit explaining why.
+- **Don't merge waves out of order** — dependencies are real.
+- **Ask before destroying.** Any task that would delete data, drop tables, or force-push: stop and report.
+- **Auto-mode caveat.** Even in auto mode, if a task description doesn't fit what you find in the code, stop and surface the mismatch before guessing.
+
+---
+
+# Status board
+
+Edit this table directly when you claim, complete, or get blocked on a task. Keep it sorted by task ID. The reviewer (human) is the only one who flips `Pending Review` → `Approved` or `Changes Requested`.
+
+Statuses (in order of progression):
+- `Open` — not yet picked up
+- `In Progress` — an agent is working on it
+- `Blocked` — agent has hit something it can't resolve; see report
+- `Pending Review` — agent has finished, report filed, awaiting human
+- `Changes Requested` — reviewer pushed back; back to agent
+- `Approved` — reviewer signed off; task is closed
+- `Skipped` — explicitly deferred or made redundant by another task
+
+| Task | Status | Agent | Started (UTC) | Completed (UTC) | Report | Reviewer notes |
+|---|---|---|---|---|---|---|
+| T1.1 | Pending Review | Kimi Code CLI | 2026-05-11T06:09Z | 2026-05-11T06:54Z | reports/T1.1-report.md | — |
+| T1.2 | Open | — | — | — | — | — |
+| T1.3 | Open | — | — | — | — | — |
+| T1.4 | Open | — | — | — | — | — |
+| T1.5 | Open | — | — | — | — | — |
+| T1.6 | Open | — | — | — | — | — |
+| T1.7 | Open | — | — | — | — | — |
+| T1.8 | Open | — | — | — | — | — |
+| T2.1 | Open | — | — | — | — | — |
+| T2.2 | Open | — | — | — | — | — |
+| T2.3 | Open | — | — | — | — | — |
+| T2.4 | Open | — | — | — | — | — |
+| T2.5 | Open | — | — | — | — | — |
+| T2.6 | Open | — | — | — | — | — |
+| T3.1 | Open | — | — | — | — | — |
+| T3.2 | Open | — | — | — | — | — |
+| T3.3 | Open | — | — | — | — | — |
+| T3.4 | Open | — | — | — | — | — |
+| T3.5 | Open | — | — | — | — | — |
+| T4.1 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.2 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.4 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.5 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.6 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.7 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.1 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.2 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.3 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.4 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.5 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.6 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.7 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.8 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T6.1 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T6.2 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T6.3 | Open | — | — | — | — | Skeleton — expand before claiming |
+
+## Review queue (human)
+
+Items currently waiting on the reviewer:
+
+- T1.1 — Add v2 MediaHeader type — report: reports/T1.1-report.md
+
+Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).

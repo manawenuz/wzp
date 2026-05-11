@@ -23,15 +23,15 @@ pub mod session;
 pub mod traits;
 
 // Re-export key types at crate root for convenience.
+pub use bandwidth::{BandwidthEstimator, CongestionState};
 pub use codec_id::{CodecId, QualityProfile};
+pub use dred_tuner::{DredTuner, DredTuning};
 pub use error::*;
 pub use packet::{
-    CallAcceptMode, HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader,
-    PresenceUser, QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL,
-    FRAME_TYPE_MINI,
+    CallAcceptMode, FRAME_TYPE_FULL, FRAME_TYPE_MINI, HangupReason, MediaHeader, MediaHeaderV1,
+    MediaHeaderV2, MediaPacket, MiniFrameContext, MiniHeader, PresenceUser, QualityReport,
+    RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame,
 };
-pub use bandwidth::{BandwidthEstimator, CongestionState};
-pub use dred_tuner::{DredTuner, DredTuning};
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;

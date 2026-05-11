@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CodecId;
 
-/// 12-byte media packet header for the lossy link.
+/// 12-byte v1 media packet header for the lossy link.
 ///
 /// Wire layout:
 /// ```text
@@ -17,7 +17,7 @@ use crate::CodecId;
 /// Byte 11:  CSRC count
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MediaHeader {
+pub struct MediaHeaderV1 {
     /// Protocol version (0 = v1).
     pub version: u8,
     /// true = FEC repair packet, false = source media.
@@ -42,7 +42,7 @@ pub struct MediaHeader {
     pub csrc_count: u8,
 }
 
-impl MediaHeader {
+impl MediaHeaderV1 {
     /// Header size in bytes on the wire.
     pub const WIRE_SIZE: usize = 12;
 
@@ -153,6 +153,88 @@ impl MediaHeader {
         let mut buf = BytesMut::with_capacity(Self::WIRE_SIZE);
         self.write_to(&mut buf);
         buf.freeze()
+    }
+}
+
+/// Temporary alias so existing code continues to compile.
+/// Removed in T1.5 once all emit/parse sites migrate to v2.
+pub type MediaHeader = MediaHeaderV1;
+
+/// 16-byte v2 media header. See docs/PRD/PRD-wire-format-v2.md.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaHeaderV2 {
+    pub version: u8,    // always 2
+    pub flags: u8,      // bit 7 T, bit 6 Q, bit 5 KeyFrame, bit 4 FrameEnd
+    pub media_type: u8, // TODO(T1.2): replace with MediaType
+    pub codec_id: CodecId,
+    pub stream_id: u8,
+    pub fec_ratio: u8, // 0..200 -> 0.0..2.0
+    pub seq: u32,
+    pub timestamp: u32,
+    pub fec_block: u16,
+}
+
+impl MediaHeaderV2 {
+    pub const WIRE_SIZE: usize = 16;
+    pub const VERSION: u8 = 2;
+
+    pub fn write_to(&self, buf: &mut impl BufMut) {
+        buf.put_u8(self.version);
+        buf.put_u8(self.flags);
+        buf.put_u8(self.media_type);
+        buf.put_u8(self.codec_id.to_wire());
+        buf.put_u8(self.stream_id);
+        buf.put_u8(self.fec_ratio);
+        buf.put_u32(self.seq);
+        buf.put_u32(self.timestamp);
+        buf.put_u16(self.fec_block);
+    }
+
+    pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
+        if buf.remaining() < Self::WIRE_SIZE {
+            return None;
+        }
+        let version = buf.get_u8();
+        if version != Self::VERSION {
+            return None;
+        }
+        let flags = buf.get_u8();
+        let media_type = buf.get_u8();
+        let codec_id = CodecId::from_wire(buf.get_u8())?;
+        let stream_id = buf.get_u8();
+        let fec_ratio = buf.get_u8();
+        let seq = buf.get_u32();
+        let timestamp = buf.get_u32();
+        let fec_block = buf.get_u16();
+        Some(Self {
+            version,
+            flags,
+            media_type,
+            codec_id,
+            stream_id,
+            fec_ratio,
+            seq,
+            timestamp,
+            fec_block,
+        })
+    }
+
+    pub const FLAG_REPAIR: u8 = 0b1000_0000;
+    pub const FLAG_QUALITY: u8 = 0b0100_0000;
+    pub const FLAG_KEYFRAME: u8 = 0b0010_0000;
+    pub const FLAG_FRAME_END: u8 = 0b0001_0000;
+
+    pub fn is_repair(&self) -> bool {
+        self.flags & Self::FLAG_REPAIR != 0
+    }
+    pub fn has_quality(&self) -> bool {
+        self.flags & Self::FLAG_QUALITY != 0
+    }
+    pub fn is_keyframe(&self) -> bool {
+        self.flags & Self::FLAG_KEYFRAME != 0
+    }
+    pub fn is_frame_end(&self) -> bool {
+        self.flags & Self::FLAG_FRAME_END != 0
     }
 }
 
@@ -286,18 +368,13 @@ impl MediaPacket {
     /// Uses the `MiniFrameContext` to decide whether to emit a compact 4-byte
     /// mini-header or a full 12-byte header.  A full header is forced on the
     /// first frame and every `MINI_FRAME_FULL_INTERVAL` frames thereafter.
-    pub fn encode_compact(
-        &self,
-        ctx: &mut MiniFrameContext,
-        frames_since_full: &mut u32,
-    ) -> Bytes {
+    pub fn encode_compact(&self, ctx: &mut MiniFrameContext, frames_since_full: &mut u32) -> Bytes {
         if *frames_since_full > 0 && *frames_since_full < MINI_FRAME_FULL_INTERVAL {
             // --- mini frame ---
             let ts_delta = self
                 .header
                 .timestamp
-                .wrapping_sub(ctx.last_header.unwrap().timestamp)
-                as u16;
+                .wrapping_sub(ctx.last_header.unwrap().timestamp) as u16;
             let mini = MiniHeader {
                 timestamp_delta_ms: ts_delta,
                 payload_len: self.payload.len() as u16,
@@ -407,6 +484,12 @@ pub struct TrunkFrame {
     pub packets: Vec<TrunkEntry>,
 }
 
+impl Default for TrunkFrame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrunkFrame {
     /// Create an empty trunk frame.
     pub fn new() -> Self {
@@ -460,7 +543,7 @@ impl TrunkFrame {
         if buf.len() < 2 {
             return None;
         }
-        let mut cursor = &buf[..];
+        let mut cursor = buf;
         let count = cursor.get_u16() as usize;
         let mut packets = Vec::with_capacity(count);
         for _ in 0..count {
@@ -626,8 +709,12 @@ pub enum SignalMessage {
     },
 
     /// Connection keepalive / RTT measurement.
-    Ping { timestamp_ms: u64 },
-    Pong { timestamp_ms: u64 },
+    Ping {
+        timestamp_ms: u64,
+    },
+    Pong {
+        timestamp_ms: u64,
+    },
 
     /// End the call. `call_id` is optional for backwards compatibility
     /// with older clients that send Hangup without it — the relay falls
@@ -640,7 +727,9 @@ pub enum SignalMessage {
 
     /// featherChat bearer token for relay authentication.
     /// Sent as the first signal message when --auth-url is configured.
-    AuthToken { token: String },
+    AuthToken {
+        token: String,
+    },
 
     /// Put the call on hold (stop sending media, keep session alive).
     Hold,
@@ -705,7 +794,6 @@ pub enum SignalMessage {
     },
 
     // ── Federation signals (relay-to-relay) ──
-
     /// Federation: initial handshake — the connecting relay identifies itself.
     FederationHello {
         /// TLS certificate fingerprint of the connecting relay.
@@ -726,7 +814,6 @@ pub enum SignalMessage {
     },
 
     // ── Direct calling signals (client ↔ relay signaling) ──
-
     /// Register on relay for direct calls. Sent on `_signal` connections
     /// after optional AuthToken.
     RegisterPresence {
@@ -882,7 +969,6 @@ pub enum SignalMessage {
     },
 
     // ── NAT reflection ("STUN for QUIC") ──────────────────────────────
-
     /// Client → relay: "please tell me the source IP:port you see on
     /// this connection". A QUIC-native replacement for classic STUN
     /// that reuses the TLS-authenticated signal channel to the relay
@@ -905,7 +991,6 @@ pub enum SignalMessage {
     },
 
     // ── Phase 6: ICE-style path negotiation ─────────────────────
-
     /// Phase 6: each side reports the result of its local dual-
     /// path race to the other side through the relay. Both peers
     /// send this after their race completes; both wait for the
@@ -930,7 +1015,6 @@ pub enum SignalMessage {
     },
 
     // ── Phase 8: mid-call ICE re-gathering ────────────────────────
-
     /// Phase 8 (Tailscale-inspired): mid-call candidate update sent
     /// when a client's network changes (WiFi → cellular, IP change,
     /// etc.). The relay forwards this to the call peer, who can
@@ -956,7 +1040,6 @@ pub enum SignalMessage {
     },
 
     // ── Hard NAT traversal (port prediction) ──────────────────────
-
     /// Hard NAT probe coordination — exchanged when both peers
     /// detect symmetric NAT. Carries the port allocation pattern
     /// and recent port sequence so the peer can predict which port
@@ -989,7 +1072,6 @@ pub enum SignalMessage {
     },
 
     // ── Phase 4: cross-relay direct-call signaling ────────────────────
-
     /// Phase 4: relay-to-relay envelope for forwarding direct-call
     /// signaling across a federation link. When Alice on Relay A
     /// sends a `DirectCallOffer` for Bob whose fingerprint isn't
@@ -1029,7 +1111,6 @@ pub enum SignalMessage {
     },
 
     // ── Signal presence ───────────────────────────────────────────
-
     /// Relay broadcasts the list of currently registered signal
     /// users to all connected clients. Sent on every register/
     /// deregister so clients can maintain a live lobby user list.
@@ -1039,7 +1120,6 @@ pub enum SignalMessage {
     },
 
     // ── Quality upgrade negotiation (#28, #29) ──────────────────
-
     /// Peer proposes upgrading to a higher quality profile.
     /// The other side can accept or reject based on its own network
     /// conditions. Used for consensual upgrades that require both
@@ -1077,7 +1157,6 @@ pub enum SignalMessage {
     },
 
     // ── Per-participant quality (#30) ───────────────────────────
-
     /// Peer reports its own quality capability — allows asymmetric
     /// encoding where each side uses the best quality its connection
     /// supports, rather than forcing all to the weakest link.
@@ -1206,6 +1285,27 @@ mod tests {
     }
 
     #[test]
+    fn media_header_v2_roundtrip() {
+        let h = MediaHeaderV2 {
+            version: 2,
+            flags: MediaHeaderV2::FLAG_QUALITY,
+            media_type: 0, // TODO(T1.2): MediaType::Audio
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 50,
+            seq: 0xDEAD_BEEF,
+            timestamp: 0x1234_5678,
+            fec_block: 0xABCD,
+        };
+        let mut buf = BytesMut::with_capacity(MediaHeaderV2::WIRE_SIZE);
+        h.write_to(&mut buf);
+        assert_eq!(buf.len(), 16);
+        let mut cursor = std::io::Cursor::new(&buf[..]);
+        let parsed = MediaHeaderV2::read_from(&mut cursor).unwrap();
+        assert_eq!(h, parsed);
+    }
+
+    #[test]
     fn quality_report_roundtrip() {
         let qr = QualityReport {
             loss_pct: 128,
@@ -1278,7 +1378,8 @@ mod tests {
                 SignalMessage::ReflectResponse { observed_addr } => {
                     assert_eq!(observed_addr, addr);
                     // Must parse back to a SocketAddr cleanly.
-                    let _parsed: std::net::SocketAddr = observed_addr.parse()
+                    let _parsed: std::net::SocketAddr = observed_addr
+                        .parse()
                         .expect("observed_addr must parse as SocketAddr");
                 }
                 _ => panic!("wrong variant after roundtrip"),
@@ -1311,7 +1412,10 @@ mod tests {
         let json = serde_json::to_string(&forward).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
+            SignalMessage::FederatedSignalForward {
+                inner,
+                origin_relay_fp,
+            } => {
                 assert_eq!(origin_relay_fp, "relay-a-tls-fp");
                 match *inner {
                     SignalMessage::DirectCallOffer {
@@ -1348,8 +1452,13 @@ mod tests {
                 callee_mapped_addr: None,
                 callee_build_version: None,
             },
-            SignalMessage::CallRinging { call_id: "c1".into() },
-            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
+            SignalMessage::CallRinging {
+                call_id: "c1".into(),
+            },
+            SignalMessage::Hangup {
+                reason: HangupReason::Normal,
+                call_id: None,
+            },
         ];
         for inner in cases {
             let inner_disc = std::mem::discriminant(&inner);
@@ -1392,7 +1501,10 @@ mod tests {
         );
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+            SignalMessage::DirectCallOffer {
+                caller_reflexive_addr,
+                ..
+            } => {
                 assert_eq!(caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
             }
             _ => panic!("wrong variant"),
@@ -1437,11 +1549,11 @@ mod tests {
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
         match decoded {
-            SignalMessage::DirectCallAnswer { callee_reflexive_addr, .. } => {
-                assert_eq!(
-                    callee_reflexive_addr.as_deref(),
-                    Some("198.51.100.9:4433")
-                );
+            SignalMessage::DirectCallAnswer {
+                callee_reflexive_addr,
+                ..
+            } => {
+                assert_eq!(callee_reflexive_addr.as_deref(), Some("198.51.100.9:4433"));
             }
             _ => panic!("wrong variant"),
         }
@@ -1458,7 +1570,9 @@ mod tests {
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
         match decoded {
-            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+            SignalMessage::CallSetup {
+                peer_direct_addr, ..
+            } => {
                 assert_eq!(peer_direct_addr.as_deref(), Some("192.0.2.1:4433"));
             }
             _ => panic!("wrong variant"),
@@ -1484,7 +1598,10 @@ mod tests {
         }"#;
         let decoded: SignalMessage = serde_json::from_str(old_offer_json).unwrap();
         match decoded {
-            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+            SignalMessage::DirectCallOffer {
+                caller_reflexive_addr,
+                ..
+            } => {
                 assert!(caller_reflexive_addr.is_none());
             }
             _ => panic!("wrong variant"),
@@ -1499,7 +1616,9 @@ mod tests {
         }"#;
         let decoded: SignalMessage = serde_json::from_str(old_setup_json).unwrap();
         match decoded {
-            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+            SignalMessage::CallSetup {
+                peer_direct_addr, ..
+            } => {
                 assert!(peer_direct_addr.is_none());
             }
             _ => panic!("wrong variant"),
@@ -1512,19 +1631,23 @@ mod tests {
         // not break JSON round-tripping of existing variants. Smoke-
         // test a sample of the pre-existing ones.
         let cases = vec![
-            SignalMessage::Ping { timestamp_ms: 12345 },
+            SignalMessage::Ping {
+                timestamp_ms: 12345,
+            },
             SignalMessage::Hold,
-            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
-            SignalMessage::CallRinging { call_id: "abcd".into() },
+            SignalMessage::Hangup {
+                reason: HangupReason::Normal,
+                call_id: None,
+            },
+            SignalMessage::CallRinging {
+                call_id: "abcd".into(),
+            },
         ];
         for m in cases {
             let json = serde_json::to_string(&m).unwrap();
             let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
             // Discriminant equality proves variant tag survived.
-            assert_eq!(
-                std::mem::discriminant(&m),
-                std::mem::discriminant(&decoded)
-            );
+            assert_eq!(std::mem::discriminant(&m), std::mem::discriminant(&decoded));
         }
     }
 
@@ -1609,7 +1732,10 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::PresenceUpdate { fingerprints, relay_addr } => {
+            SignalMessage::PresenceUpdate {
+                fingerprints,
+                relay_addr,
+            } => {
                 assert_eq!(fingerprints.len(), 2);
                 assert!(fingerprints.contains(&"aabb".to_string()));
                 assert!(fingerprints.contains(&"ccdd".to_string()));
@@ -1626,7 +1752,10 @@ mod tests {
         let json = serde_json::to_string(&msg_empty).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::PresenceUpdate { fingerprints, relay_addr } => {
+            SignalMessage::PresenceUpdate {
+                fingerprints,
+                relay_addr,
+            } => {
                 assert!(fingerprints.is_empty());
                 assert_eq!(relay_addr, "10.0.0.2:4433");
             }
@@ -1859,15 +1988,9 @@ mod tests {
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
 
             if i == 0 || i == MINI_FRAME_FULL_INTERVAL {
-                assert_eq!(
-                    wire[0], FRAME_TYPE_FULL,
-                    "frame {i} should be FULL"
-                );
+                assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL");
             } else {
-                assert_eq!(
-                    wire[0], FRAME_TYPE_MINI,
-                    "frame {i} should be MINI"
-                );
+                assert_eq!(wire[0], FRAME_TYPE_MINI, "frame {i} should be MINI");
             }
         }
     }
@@ -1881,7 +2004,10 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::QualityDirective { recommended_profile, reason } => {
+            SignalMessage::QualityDirective {
+                recommended_profile,
+                reason,
+            } => {
                 assert_eq!(recommended_profile.codec, CodecId::Opus6k);
                 assert_eq!(reason.as_deref(), Some("weakest link degraded"));
             }
@@ -1920,7 +2046,10 @@ mod tests {
             // We test the raw path: frames_since_full forced to 0 every time.
             let mut frames_since_full: u32 = 0;
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
-            assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL when disabled");
+            assert_eq!(
+                wire[0], FRAME_TYPE_FULL,
+                "frame {i} should be FULL when disabled"
+            );
         }
     }
 
@@ -1938,7 +2067,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::UpgradeProposal { proposal_id, proposed_profile, .. } => {
+            SignalMessage::UpgradeProposal {
+                proposal_id,
+                proposed_profile,
+                ..
+            } => {
                 assert_eq!(proposal_id, "p1");
                 assert_eq!(proposed_profile, crate::QualityProfile::STUDIO_48K);
             }
@@ -1972,7 +2105,9 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::UpgradeConfirm { confirmed_profile, .. } => {
+            SignalMessage::UpgradeConfirm {
+                confirmed_profile, ..
+            } => {
                 assert_eq!(confirmed_profile, crate::QualityProfile::STUDIO_64K);
             }
             _ => panic!("wrong variant"),
@@ -1990,7 +2125,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::QualityCapability { max_profile, loss_pct, .. } => {
+            SignalMessage::QualityCapability {
+                max_profile,
+                loss_pct,
+                ..
+            } => {
                 assert_eq!(max_profile, crate::QualityProfile::GOOD);
                 assert!((loss_pct.unwrap() - 2.5).abs() < 0.01);
             }
@@ -2005,10 +2144,7 @@ mod tests {
         let msg = SignalMessage::CandidateUpdate {
             call_id: "test-123".into(),
             reflexive_addr: Some("203.0.113.5:4433".into()),
-            local_addrs: vec![
-                "192.168.1.10:4433".into(),
-                "10.0.0.5:4433".into(),
-            ],
+            local_addrs: vec!["192.168.1.10:4433".into(), "10.0.0.5:4433".into()],
             mapped_addr: Some("198.51.100.42:12345".into()),
             generation: 7,
         };

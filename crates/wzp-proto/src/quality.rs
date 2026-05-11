@@ -3,9 +3,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::QualityProfile;
 use crate::packet::QualityReport;
 use crate::traits::QualityController;
-use crate::QualityProfile;
 
 /// Network quality tier — drives codec and FEC selection.
 ///
@@ -99,19 +99,14 @@ impl Tier {
 }
 
 /// Describes the network transport type for context-aware quality decisions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NetworkContext {
     WiFi,
     CellularLte,
     Cellular5g,
     Cellular3g,
+    #[default]
     Unknown,
-}
-
-impl Default for NetworkContext {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// Adaptive quality controller with hysteresis to prevent tier flapping.
@@ -340,8 +335,7 @@ impl AdaptiveQualityController {
             if probe.bad_reports > PROBE_MAX_BAD {
                 let _failed_probe = self.probe.take();
                 // Reset stable_since to trigger cooldown
-                self.stable_since =
-                    Some(Instant::now() + Duration::from_secs(PROBE_COOLDOWN_SECS));
+                self.stable_since = Some(Instant::now() + Duration::from_secs(PROBE_COOLDOWN_SECS));
                 return None; // stay at current tier
             }
 
@@ -746,7 +740,10 @@ mod tests {
         ctrl.observe(&degraded); // second bad — exceeds PROBE_MAX_BAD (1)
 
         // Probe should be cancelled
-        assert!(ctrl.probe.is_none(), "probe should be cancelled after bad reports");
+        assert!(
+            ctrl.probe.is_none(),
+            "probe should be cancelled after bad reports"
+        );
         // Should still be at Studio32k (not upgraded)
         assert_eq!(ctrl.current_tier, Tier::Studio32k);
     }
@@ -775,6 +772,9 @@ mod tests {
 
         let excellent = make_report(0.1, 10);
         let result = ctrl.observe(&excellent);
-        assert!(result.is_none(), "should not probe when already at Studio64k");
+        assert!(
+            result.is_none(),
+            "should not probe when already at Studio64k"
+        );
     }
 }
