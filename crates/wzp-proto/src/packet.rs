@@ -639,20 +639,27 @@ pub type MiniHeader = MiniHeaderV1;
 /// Compact 5-byte v2 mini header with explicit `seq_delta`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiniHeaderV2 {
+    /// Packets since the baseline full header (typically 1 in steady state).
+    /// Explicit deltas resolve audit W4: one missed full header no longer desyncs.
     pub seq_delta: u8,
+    /// Milliseconds elapsed since the last baseline header's timestamp.
     pub timestamp_delta_ms: u16,
+    /// Length of the payload that follows this mini header.
     pub payload_len: u16,
 }
 
 impl MiniHeaderV2 {
+    /// Header size in bytes on the wire (5 for v2).
     pub const WIRE_SIZE: usize = 5;
 
+    /// Serialize the mini header to a buffer in big-endian wire format.
     pub fn write_to(&self, buf: &mut impl BufMut) {
         buf.put_u8(self.seq_delta);
         buf.put_u16(self.timestamp_delta_ms);
         buf.put_u16(self.payload_len);
     }
 
+    /// Deserialize from a buffer. Returns `None` if the buffer is too short.
     pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
         if buf.remaining() < Self::WIRE_SIZE {
             return None;
@@ -702,10 +709,13 @@ pub struct MiniFrameContextV2 {
 }
 
 impl MiniFrameContextV2 {
+    /// Record a full v2 header as the new baseline for subsequent mini-frames.
     pub fn update(&mut self, h: &MediaHeaderV2) {
         self.last = Some(*h);
     }
 
+    /// Expand a mini-header into a full [`MediaHeaderV2`] using the stored
+    /// baseline. Returns `None` if no baseline has been set yet.
     pub fn expand(&mut self, m: &MiniHeaderV2) -> Option<MediaHeaderV2> {
         let base = self.last.as_ref()?;
         let mut e = *base;
