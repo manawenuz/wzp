@@ -1164,7 +1164,7 @@ Statuses (in order of progression):
 | T1.1.1 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
 | T1.1.2 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
 | T1.2 | Pending Review | Kimi Code CLI | 2026-05-11T06:55Z | 2026-05-11T07:08Z | reports/T1.2-report.md | — |
-| T1.3 | Open | — | — | — | — | — |
+| T1.3 | In Progress | Kimi Code CLI | 2026-05-11T07:10Z | — | — | — |
 | T1.4 | Open | — | — | — | — | — |
 | T1.5 | Open | — | — | — | — | — |
 | T1.6 | Open | — | — | — | — | — |

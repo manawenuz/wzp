@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 /// Identifies the audio codec and bitrate configuration.
 ///
-/// Encoded as 4 bits in the media packet header.
+/// Encoded as 4 bits in the v1 media packet header, and as a full 8-bit
+/// value in the v2 [`MediaHeaderV2`](crate::MediaHeaderV2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum CodecId {
@@ -24,6 +25,12 @@ pub enum CodecId {
     Opus48k = 7,
     /// Opus at 64kbps (studio high)
     Opus64k = 8,
+    // Reserved for video codecs; implementations land in PRD-video-multicodec.
+    // 9  => H264 baseline
+    // 10 => H264 main
+    // 11 => H265 main
+    // 12 => AV1
+    // 13 => VP9
 }
 
 impl CodecId {
@@ -56,8 +63,12 @@ impl CodecId {
     /// Sample rate expected by this codec.
     pub const fn sample_rate_hz(self) -> u32 {
         match self {
-            Self::Opus24k | Self::Opus16k | Self::Opus6k
-            | Self::Opus32k | Self::Opus48k | Self::Opus64k => 48_000,
+            Self::Opus24k
+            | Self::Opus16k
+            | Self::Opus6k
+            | Self::Opus32k
+            | Self::Opus48k
+            | Self::Opus64k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
             Self::ComfortNoise => 48_000,
         }
@@ -86,8 +97,15 @@ impl CodecId {
 
     /// Returns true if this is an Opus variant.
     pub const fn is_opus(self) -> bool {
-        matches!(self, Self::Opus6k | Self::Opus16k | Self::Opus24k
-            | Self::Opus32k | Self::Opus48k | Self::Opus64k)
+        matches!(
+            self,
+            Self::Opus6k
+                | Self::Opus16k
+                | Self::Opus24k
+                | Self::Opus32k
+                | Self::Opus48k
+                | Self::Opus64k
+        )
     }
 }
 
@@ -157,5 +175,17 @@ impl QualityProfile {
     pub fn total_bitrate_kbps(&self) -> f32 {
         let base = self.codec.bitrate_bps() as f32 / 1000.0;
         base * (1.0 + self.fec_ratio)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodecId;
+
+    #[test]
+    fn codec_id_unknown_values_rejected() {
+        for v in 9u8..=255 {
+            assert!(CodecId::from_wire(v).is_none(), "v={v}");
+        }
     }
 }
