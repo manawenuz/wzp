@@ -23,7 +23,8 @@ pub struct MediaHeaderV2 {
     pub fec_ratio: u8,
     /// Wrapping packet sequence number (32-bit in v2).
     pub seq: u32,
-    /// Milliseconds since session start.
+    /// Milliseconds since session start. Monotonic for the full session lifetime;
+    /// NOT reset by rekey (rekey changes only key material, not framing state).
     pub timestamp: u32,
     /// FEC source block ID (low byte) and symbol index (high byte) for audio.
     pub fec_block: u16,

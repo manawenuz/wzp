@@ -49,7 +49,7 @@ Byte 11:    csrc_count
 | Q | 1 | QualityReport trailer present |
 | FecRatio | 7 | 0–127 → 0.0–2.0 |
 | sequence | 16 | Wrapping packet seq |
-| timestamp_ms | 32 | ms since session start |
+| timestamp_ms | 32 | ms since session start. Monotonic across the full session; **not reset by rekey** |
 | fec_block_id | 8 | FEC source block ID |
 | fec_symbol_idx | 8 | Symbol index in block |
 

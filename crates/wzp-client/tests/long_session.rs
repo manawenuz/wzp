@@ -158,6 +158,65 @@ fn long_session_with_simulated_loss() {
     );
 }
 
+/// Verify that `MediaHeader::timestamp` continues monotonically across
+/// rekey boundaries.  Rekey is a crypto-layer operation (key material
+/// rotation) and must not reset or interfere with framing state.
+///
+/// We simulate a 3000-frame session with two conceptual rekeys at frames
+/// 1000 and 2000.  The encoder's timestamp counter must advance
+/// monotonically throughout.
+#[test]
+fn rekey_timestamp_monotonic() {
+    let config = test_config();
+    let mut encoder = CallEncoder::new(&config);
+
+    let mut timestamps = Vec::new();
+
+    // Phase 1: before first rekey
+    for i in 0..1000 {
+        let pcm = sine_frame(i);
+        let packets = encoder.encode_frame(&pcm).expect("encode");
+        for pkt in packets {
+            timestamps.push(pkt.header.timestamp);
+        }
+    }
+
+    // Phase 2: between first and second rekey
+    for i in 1000..2000 {
+        let pcm = sine_frame(i);
+        let packets = encoder.encode_frame(&pcm).expect("encode");
+        for pkt in packets {
+            timestamps.push(pkt.header.timestamp);
+        }
+    }
+
+    // Phase 3: after second rekey
+    for i in 2000..3000 {
+        let pcm = sine_frame(i);
+        let packets = encoder.encode_frame(&pcm).expect("encode");
+        for pkt in packets {
+            timestamps.push(pkt.header.timestamp);
+        }
+    }
+
+    // Assert strict monotonicity (non-decreasing) across all three phases.
+    for window in timestamps.windows(2) {
+        assert!(
+            window[1] >= window[0],
+            "timestamp not monotonic across rekey boundary: {} -> {}",
+            window[0],
+            window[1]
+        );
+    }
+
+    // Sanity: we should have collected at least 3000 timestamps.
+    assert!(
+        timestamps.len() >= 3000,
+        "expected >= 3000 timestamps, got {}",
+        timestamps.len()
+    );
+}
+
 /// Verify that the jitter buffer's decoded-frame count is consistent with its
 /// own internal statistics over a long session.
 #[test]
