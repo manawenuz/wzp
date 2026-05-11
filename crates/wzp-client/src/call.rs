@@ -1608,4 +1608,59 @@ mod tests {
         );
         assert!(packets2[0].quality_report.is_none());
     }
+
+    #[test]
+    fn quality_report_aead_tamper_fails_decrypt() {
+        use wzp_crypto::ChaChaSession;
+        use wzp_proto::CryptoSession;
+
+        // Build a packet with a QualityReport trailer.
+        let pkt = MediaPacket {
+            header: MediaHeader {
+                version: 2,
+                flags: MediaHeader::FLAG_QUALITY,
+                media_type: MediaType::Audio,
+                codec_id: CodecId::Opus24k,
+                stream_id: 0,
+                fec_ratio: 10,
+                seq: 42,
+                timestamp: 1000,
+                fec_block: 0,
+            },
+            payload: Bytes::from(vec![0xAB; 60]),
+            quality_report: Some(QualityReport::from_path_stats(5.0, 80, 10)),
+        };
+
+        // Serialize: header || payload || quality_report
+        let wire = pkt.to_bytes();
+        assert_eq!(
+            wire.len(),
+            MediaHeader::WIRE_SIZE + pkt.payload.len() + QualityReport::WIRE_SIZE
+        );
+
+        let header_bytes = &wire[..MediaHeader::WIRE_SIZE];
+        let plaintext = &wire[MediaHeader::WIRE_SIZE..];
+
+        // Encrypt with ChaCha20-Poly1305 (header as AAD, payload+QR as plaintext).
+        let mut alice = ChaChaSession::new([0xAA; 32]);
+        let mut bob = ChaChaSession::new([0xAA; 32]);
+        let mut ciphertext = Vec::new();
+        alice
+            .encrypt(header_bytes, plaintext, &mut ciphertext)
+            .unwrap();
+
+        // Tamper with a byte in the QualityReport region (last 4 bytes of plaintext
+        // → last 4 bytes of ciphertext for ChaCha20 stream cipher).
+        let qr_offset_in_plaintext = plaintext.len() - QualityReport::WIRE_SIZE;
+        let tamper_idx = qr_offset_in_plaintext;
+        ciphertext[tamper_idx] ^= 0xFF;
+
+        // Decryption must fail because the AEAD tag no longer matches.
+        let mut decrypted = Vec::new();
+        let result = bob.decrypt(header_bytes, &ciphertext, &mut decrypted);
+        assert!(
+            result.is_err(),
+            "tampering with QualityReport inside AEAD payload must cause decryption failure"
+        );
+    }
 }
