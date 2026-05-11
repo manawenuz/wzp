@@ -184,9 +184,12 @@ pub struct MediaHeaderV2 {
 }
 
 impl MediaHeaderV2 {
+    /// Header size in bytes on the wire (16 for v2).
     pub const WIRE_SIZE: usize = 16;
+    /// Protocol version byte (always 2).
     pub const VERSION: u8 = 2;
 
+    /// Serialize the header to a buffer in big-endian wire format.
     pub fn write_to(&self, buf: &mut impl BufMut) {
         buf.put_u8(self.version);
         buf.put_u8(self.flags);
@@ -199,6 +202,8 @@ impl MediaHeaderV2 {
         buf.put_u16(self.fec_block);
     }
 
+    /// Deserialize from a buffer. Returns `None` if the buffer is too short
+    /// or the version byte is not 2.
     pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
         if buf.remaining() < Self::WIRE_SIZE {
             return None;
@@ -228,20 +233,28 @@ impl MediaHeaderV2 {
         })
     }
 
+    /// Bit 7: set when this packet is an FEC repair packet, not source media.
     pub const FLAG_REPAIR: u8 = 0b1000_0000;
+    /// Bit 6: set when a [`QualityReport`] trailer is appended to the payload.
     pub const FLAG_QUALITY: u8 = 0b0100_0000;
+    /// Bit 5: set for video keyframes (reserved for future video use).
     pub const FLAG_KEYFRAME: u8 = 0b0010_0000;
+    /// Bit 4: set when this packet is the final fragment of a frame.
     pub const FLAG_FRAME_END: u8 = 0b0001_0000;
 
+    /// Returns true if the repair flag is set.
     pub fn is_repair(&self) -> bool {
         self.flags & Self::FLAG_REPAIR != 0
     }
+    /// Returns true if the quality-report flag is set.
     pub fn has_quality(&self) -> bool {
         self.flags & Self::FLAG_QUALITY != 0
     }
+    /// Returns true if the keyframe flag is set.
     pub fn is_keyframe(&self) -> bool {
         self.flags & Self::FLAG_KEYFRAME != 0
     }
+    /// Returns true if the frame-end flag is set.
     pub fn is_frame_end(&self) -> bool {
         self.flags & Self::FLAG_FRAME_END != 0
     }
