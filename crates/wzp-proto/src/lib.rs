@@ -31,8 +31,9 @@ pub use error::*;
 pub use media_type::MediaType;
 pub use packet::{
     CallAcceptMode, FRAME_TYPE_FULL, FRAME_TYPE_MINI, HangupReason, MediaHeader, MediaHeaderV1,
-    MediaHeaderV2, MediaPacket, MiniFrameContext, MiniHeader, PresenceUser, QualityReport,
-    RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame,
+    MediaHeaderV2, MediaPacket, MiniFrameContext, MiniFrameContextV1, MiniFrameContextV2,
+    MiniHeader, MiniHeaderV1, MiniHeaderV2, PresenceUser, QualityReport, RoomParticipant,
+    SignalMessage, TrunkEntry, TrunkFrame,
 };
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};

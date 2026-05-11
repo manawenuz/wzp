@@ -577,18 +577,18 @@ pub const FRAME_TYPE_FULL: u8 = 0x00;
 /// Frame type tag: MiniHeader follows (requires prior baseline).
 pub const FRAME_TYPE_MINI: u8 = 0x01;
 
-/// Compact 4-byte header used after a full MediaHeader baseline has been
+/// Compact 4-byte v1 header used after a full MediaHeader baseline has been
 /// established. Only the timestamp delta and payload length are transmitted;
 /// all other fields are inherited from the last full header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MiniHeader {
+pub struct MiniHeaderV1 {
     /// Milliseconds elapsed since the last header's timestamp.
     pub timestamp_delta_ms: u16,
     /// Length of the payload that follows this header.
     pub payload_len: u16,
 }
 
-impl MiniHeader {
+impl MiniHeaderV1 {
     /// Header size in bytes on the wire.
     pub const WIRE_SIZE: usize = 4;
 
@@ -610,14 +610,47 @@ impl MiniHeader {
     }
 }
 
-/// Stateful context that expands [`MiniHeader`]s back into full
+/// Temporary alias so existing code continues to compile.
+/// Removed in T1.5 once all emit/parse sites migrate to v2.
+pub type MiniHeader = MiniHeaderV1;
+
+/// Compact 5-byte v2 mini header with explicit `seq_delta`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MiniHeaderV2 {
+    pub seq_delta: u8,
+    pub timestamp_delta_ms: u16,
+    pub payload_len: u16,
+}
+
+impl MiniHeaderV2 {
+    pub const WIRE_SIZE: usize = 5;
+
+    pub fn write_to(&self, buf: &mut impl BufMut) {
+        buf.put_u8(self.seq_delta);
+        buf.put_u16(self.timestamp_delta_ms);
+        buf.put_u16(self.payload_len);
+    }
+
+    pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
+        if buf.remaining() < Self::WIRE_SIZE {
+            return None;
+        }
+        Some(Self {
+            seq_delta: buf.get_u8(),
+            timestamp_delta_ms: buf.get_u16(),
+            payload_len: buf.get_u16(),
+        })
+    }
+}
+
+/// Stateful v1 context that expands [`MiniHeaderV1`]s back into full
 /// [`MediaHeader`]s by tracking the last baseline header.
 #[derive(Clone, Debug, Default)]
-pub struct MiniFrameContext {
+pub struct MiniFrameContextV1 {
     last_header: Option<MediaHeader>,
 }
 
-impl MiniFrameContext {
+impl MiniFrameContextV1 {
     /// Record a full header as the new baseline for subsequent mini-frames.
     pub fn update(&mut self, header: &MediaHeader) {
         self.last_header = Some(*header);
@@ -632,6 +665,32 @@ impl MiniFrameContext {
         expanded.timestamp = base.timestamp.wrapping_add(mini.timestamp_delta_ms as u32);
         self.last_header = Some(expanded);
         Some(expanded)
+    }
+}
+
+/// Temporary alias so existing code continues to compile.
+/// Removed in T1.5 once all emit/parse sites migrate to v2.
+pub type MiniFrameContext = MiniFrameContextV1;
+
+/// Stateful v2 context that expands [`MiniHeaderV2`]s back into full
+/// [`MediaHeaderV2`]s by tracking the last baseline header.
+#[derive(Clone, Debug, Default)]
+pub struct MiniFrameContextV2 {
+    last: Option<MediaHeaderV2>,
+}
+
+impl MiniFrameContextV2 {
+    pub fn update(&mut self, h: &MediaHeaderV2) {
+        self.last = Some(*h);
+    }
+
+    pub fn expand(&mut self, m: &MiniHeaderV2) -> Option<MediaHeaderV2> {
+        let base = self.last.as_ref()?;
+        let mut e = *base;
+        e.seq = base.seq.wrapping_add(m.seq_delta as u32);
+        e.timestamp = base.timestamp.wrapping_add(m.timestamp_delta_ms as u32);
+        self.last = Some(e);
+        Some(e)
     }
 }
 
@@ -1900,6 +1959,72 @@ mod tests {
     fn mini_frame_context_no_baseline() {
         let mut ctx = MiniFrameContext::default();
         let mini = MiniHeader {
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        assert!(ctx.expand(&mini).is_none());
+    }
+
+    #[test]
+    fn mini_header_v2_roundtrip() {
+        let mini = MiniHeaderV2 {
+            seq_delta: 3,
+            timestamp_delta_ms: 20,
+            payload_len: 160,
+        };
+        let mut buf = BytesMut::new();
+        mini.write_to(&mut buf);
+        assert_eq!(buf.len(), 5);
+
+        let mut cursor = &buf[..];
+        let decoded = MiniHeaderV2::read_from(&mut cursor).unwrap();
+        assert_eq!(mini, decoded);
+    }
+
+    #[test]
+    fn mini_frame_context_v2_expand() {
+        let baseline = MediaHeaderV2 {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 50,
+            seq: 100,
+            timestamp: 1000,
+            fec_block: 5,
+        };
+
+        let mut ctx = MiniFrameContextV2::default();
+        ctx.update(&baseline);
+
+        let mini = MiniHeaderV2 {
+            seq_delta: 3,
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        let h1 = ctx.expand(&mini).unwrap();
+        assert_eq!(h1.seq, 103);
+        assert_eq!(h1.timestamp, 1020);
+        assert_eq!(h1.codec_id, CodecId::Opus24k);
+        assert_eq!(h1.fec_block, 5);
+
+        // Second expansion — builds on expanded h1
+        let mini2 = MiniHeaderV2 {
+            seq_delta: 1,
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        let h2 = ctx.expand(&mini2).unwrap();
+        assert_eq!(h2.seq, 104);
+        assert_eq!(h2.timestamp, 1040);
+    }
+
+    #[test]
+    fn mini_frame_context_v2_no_baseline() {
+        let mut ctx = MiniFrameContextV2::default();
+        let mini = MiniHeaderV2 {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };

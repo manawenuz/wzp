@@ -437,6 +437,47 @@ cargo test -p wzp-proto
 
 ---
 
+## T1.2.1 — Add rustdoc on `MediaType` variants and methods
+
+- **Parent:** T1.2 (Approved)
+- **PRD:** `PRD-wire-format-v2.md`
+- **Effort:** 10 min
+- **Files:**
+  - `crates/wzp-proto/src/media_type.rs`
+
+### Context
+T1.2 created `MediaType` with a one-line top-level doc comment but no `///` rustdoc on the variants (`Audio`, `Video`, `Data`, `Control`) or methods (`to_wire`, `from_wire`). Coding standard #9 — public items need rustdoc. Same shape of follow-up as T1.1.1.
+
+### Steps
+
+1. Open `crates/wzp-proto/src/media_type.rs`.
+2. Add a `///` doc comment to each variant. Examples (do not just copy — pick what's accurate):
+   ```rust
+   pub enum MediaType {
+       /// Encoded speech / music (Opus, Codec2, ComfortNoise).
+       Audio = 0,
+       /// Encoded video access unit (H.264, H.265, AV1; PRD-video-multicodec).
+       Video = 1,
+       /// Opaque payload not interpreted by the relay (reserved).
+       Data = 2,
+       /// In-band control message carried on the media plane (reserved).
+       Control = 3,
+   }
+   ```
+3. Add a `///` doc on `to_wire` and `from_wire`. One line each is fine — explain the wire byte mapping and the `None` case.
+
+### Verify
+```bash
+cargo doc -p wzp-proto --no-deps 2>&1 | grep -i "missing" || echo "no missing-doc warnings"
+cargo clippy -p wzp-proto --all-targets -- -D warnings -W missing_docs
+```
+
+### Done when
+- All variants and methods on `MediaType` carry `///` doc comments.
+- `cargo doc -p wzp-proto --no-deps` emits no "missing documentation" warnings for `MediaType`.
+
+---
+
 ## T1.3 — Widen `CodecId` wire representation to u8
 
 - **PRD:** `PRD-wire-format-v2.md` (resolves audit W9)
@@ -1163,9 +1204,10 @@ Statuses (in order of progression):
 | T1.1 | Approved | Kimi Code CLI | 2026-05-11T06:09Z | 2026-05-11T06:54Z | [report](reports/T1.1-report.md) | Approved 2026-05-11. Spawned T1.1.1 (field rustdoc) and T1.1.2 (refresh stale test-count). |
 | T1.1.1 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
 | T1.1.2 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
-| T1.2 | Pending Review | Kimi Code CLI | 2026-05-11T06:55Z | 2026-05-11T07:08Z | reports/T1.2-report.md | — |
-| T1.3 | In Progress | Kimi Code CLI | 2026-05-11T07:10Z | — | — | — |
-| T1.4 | Open | — | — | — | — | — |
+| T1.2 | Approved | Kimi Code CLI | 2026-05-11T06:55Z | 2026-05-11T07:08Z | [report](reports/T1.2-report.md) | Approved 2026-05-11. Spawned T1.2.1 (rustdoc on MediaType variants/methods). Agent also resolved the T1.2 TODO inside MediaHeaderV2 — good call. |
+| T1.2.1 | Open | — | — | — | — | Spawned from T1.2 review; non-blocking |
+| T1.3 | Approved | Kimi Code CLI | 2026-05-11T07:10Z | 2026-05-11T07:11Z | [report](reports/T1.3-report.md) | Approved 2026-05-11. No follow-ups; docs-and-test-only change. |
+| T1.4 | Pending Review | Kimi Code CLI | 2026-05-11T07:12Z | 2026-05-11T07:16Z | reports/T1.4-report.md | — |
 | T1.5 | Open | — | — | — | — | — |
 | T1.6 | Open | — | — | — | — | — |
 | T1.7 | Open | — | — | — | — | — |
@@ -1205,5 +1247,7 @@ Statuses (in order of progression):
 Items currently waiting on the reviewer:
 
 - T1.2 — Add MediaType enum — report: reports/T1.2-report.md
+- T1.3 — Widen CodecId wire representation to u8 — report: reports/T1.3-report.md
+- T1.4 — Add v2 MiniHeader with seq_delta — report: reports/T1.4-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
