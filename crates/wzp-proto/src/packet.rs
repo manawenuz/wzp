@@ -1076,6 +1076,25 @@ pub enum SignalMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rtt_ms: Option<u32>,
     },
+
+    /// Transport-layer feedback for bandwidth estimation.
+    /// Sent periodically from receiver to sender (or relay to sender)
+    /// carrying ACK/NACK vectors and a REMB-style bandwidth estimate.
+    TransportFeedback {
+        /// Feedback format version (default 1).
+        #[serde(default)]
+        version: u8,
+        /// Which media stream this feedback applies to.
+        stream_id: u8,
+        /// Sequence numbers the receiver has successfully received.
+        acked_seqs: Vec<u32>,
+        /// Sequence numbers the receiver is missing.
+        nacked_seqs: Vec<u32>,
+        /// Receiver Estimated Maximum Bitrate in bits per second (REMB).
+        remb_bps: u32,
+        /// Receiver-side arrival time of the latest packet (microseconds since epoch).
+        recv_time_us: u64,
+    },
 }
 
 /// How the callee responds to a direct call.
@@ -2396,6 +2415,66 @@ mod tests {
                 assert!(relay_region.is_none());
                 assert!(available_relays.is_empty());
                 assert_eq!(relay_build.as_deref(), Some("old-build"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn transport_feedback_roundtrip() {
+        let original = SignalMessage::TransportFeedback {
+            version: 1,
+            stream_id: 0,
+            acked_seqs: vec![10, 11, 12, 15, 16],
+            nacked_seqs: vec![13, 14],
+            remb_bps: 256_000,
+            recv_time_us: 1_234_567_890,
+        };
+
+        // Test JSON serialization (used for signal channel).
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::TransportFeedback {
+                version,
+                stream_id,
+                acked_seqs,
+                nacked_seqs,
+                remb_bps,
+                recv_time_us,
+            } => {
+                assert_eq!(version, 1);
+                assert_eq!(stream_id, 0);
+                assert_eq!(acked_seqs, vec![10, 11, 12, 15, 16]);
+                assert_eq!(nacked_seqs, vec![13, 14]);
+                assert_eq!(remb_bps, 256_000);
+                assert_eq!(recv_time_us, 1_234_567_890);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Test bincode serialization (used for federation forward compat).
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(decoded, SignalMessage::TransportFeedback { .. }));
+    }
+
+    #[test]
+    fn transport_feedback_default_version() {
+        // Simulate an old sender that omits the version field.
+        let json = r#"{
+            "TransportFeedback": {
+                "stream_id": 1,
+                "acked_seqs": [1, 2, 3],
+                "nacked_seqs": [],
+                "remb_bps": 128000,
+                "recv_time_us": 0
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::TransportFeedback { version, .. } => {
+                assert_eq!(version, 0, "serde default makes omitted version 0");
             }
             _ => panic!("wrong variant"),
         }

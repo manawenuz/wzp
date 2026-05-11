@@ -7849,6 +7849,7 @@ name = "wzp-proto"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "bytes",
  "serde",
  "serde_json",
