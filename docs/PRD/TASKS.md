@@ -158,7 +158,7 @@ Each task block has:
 ```bash
 # All commands assume CWD = /Users/manwe/CascadeProjects/warzonePhone
 cargo build --workspace                 # baseline: must succeed
-cargo test --workspace --no-fail-fast   # baseline: should be 272 pass / 0 fail
+cargo test --workspace --no-fail-fast   # baseline: should be 571 pass / 0 fail (non-Android subset)
 ```
 
 If either fails before you start a task, stop and report — the tree is dirty.
@@ -657,7 +657,7 @@ grep -rln "MediaHeader::" crates/ | grep -v target
 ```bash
 cargo build --workspace
 cargo test --workspace --no-fail-fast
-# Expected: all 272 tests still pass
+# Expected: all 571 tests still pass
 ```
 
 ### Done when
@@ -1235,8 +1235,8 @@ Statuses (in order of progression):
 | Task | Status | Agent | Started (UTC) | Completed (UTC) | Report | Reviewer notes |
 |---|---|---|---|---|---|---|
 | T1.1 | Approved | Kimi Code CLI | 2026-05-11T06:09Z | 2026-05-11T06:54Z | [report](reports/T1.1-report.md) | Approved 2026-05-11. Spawned T1.1.1 (field rustdoc) and T1.1.2 (refresh stale test-count). |
-| T1.1.1 | Pending Review | Kimi Code CLI | 2026-05-11T07:17Z | 2026-05-11T07:18Z | reports/T1.1.1-report.md | — |
-| T1.1.2 | Open | — | — | — | — | Spawned from T1.1 review; non-blocking, claim after current in-flight |
+| T1.1.1 | Changes Requested | Kimi Code CLI | 2026-05-11T07:17Z | — | [report](reports/T1.1.1-report.md) | Field docs OK; missing on 6 consts (WIRE_SIZE/VERSION + 4 FLAG_*) and 6 methods (write_to/read_from + 4 accessors). Skipped second Verify command (`clippy -W missing_docs`). See report for rework instructions. |
+| T1.1.2 | In Progress | Kimi Code CLI | 2026-05-11T07:19Z | — | — | — |
 | T1.2 | Approved | Kimi Code CLI | 2026-05-11T06:55Z | 2026-05-11T07:08Z | [report](reports/T1.2-report.md) | Approved 2026-05-11. Spawned T1.2.1 (rustdoc on MediaType variants/methods). Agent also resolved the T1.2 TODO inside MediaHeaderV2 — good call. |
 | T1.2.1 | Open | — | — | — | — | Spawned from T1.2 review; non-blocking |
 | T1.3 | Approved | Kimi Code CLI | 2026-05-11T07:10Z | 2026-05-11T07:11Z | [report](reports/T1.3-report.md) | Approved 2026-05-11. No follow-ups; docs-and-test-only change. |

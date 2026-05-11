@@ -956,18 +956,19 @@ warzonePhone/
 
 ## Test Coverage
 
-272 tests across all crates, 0 failures:
+571 tests across all crates, 0 failures:
 
 | Crate | Tests | Key Coverage |
 |-------|-------|-------------|
-| wzp-proto | 41 | Wire format, jitter buffer, quality tiers, mini-frames, trunking |
-| wzp-codec | 31 | Opus/Codec2 roundtrip, silence detection, noise suppression |
-| wzp-fec | 22 | RaptorQ encode/decode, loss recovery, interleaving |
-| wzp-crypto | 34 + 28 compat | Encrypt/decrypt, handshake, anti-replay, featherChat identity |
-| wzp-transport | 2 | QUIC connection setup |
-| wzp-relay | 40 + 4 integration | Room ACL, session mgmt, metrics, probes, mesh, trunking |
-| wzp-client | 30 + 2 integration | Encoder/decoder, quality adapter, silence, drift, sweep |
+| wzp-proto | 112 | Wire format, jitter buffer, quality tiers, mini-frames, trunking |
+| wzp-codec | 69 | Opus/Codec2 roundtrip, silence detection, noise suppression |
+| wzp-fec | 21 | RaptorQ encode/decode, loss recovery, interleaving |
+| wzp-crypto | 64 | Encrypt/decrypt, handshake, anti-replay, featherChat identity |
+| wzp-transport | 11 | QUIC connection setup, path monitoring |
+| wzp-relay | 122 | Room ACL, session mgmt, metrics, probes, mesh, trunking |
+| wzp-client | 170 | Encoder/decoder, quality adapter, silence, drift, sweep |
 | wzp-web | 2 | Metrics |
+| wzp-native | 0 | Native platform bindings (no unit tests) |
 
 ## Audio Backend Architecture (Platform Matrix)
 
