@@ -19,7 +19,7 @@ Fixing these post-deployment is a multi-client coordinated break. Fix once, befo
 
 - One wire-format change resolves W1, W4, W9, W10 and reserves headroom for the next decade.
 - v1 and v2 can co-exist briefly during rollout via explicit version handshake (typed rejection, not silent corruption).
-- All 272 audio tests pass under v2.
+- All 571 audio tests pass under v2.
 
 ## Non-goals
 
@@ -99,7 +99,7 @@ No silent fallback. No mixed-version session.
 
 ## Acceptance criteria
 
-- All 272 audio tests pass with v2 headers.
+- All 571 audio tests pass with v2 headers.
 - A v1 client connecting to a v2 relay receives `Hangup::ProtocolVersionMismatch` within 1 RTT.
 - Wire-level capture confirms 16 B `MediaHeader` and 5 B `MiniHeader` on real audio calls.
 - `media_type` byte readable by relay without parsing `codec_id` (enables PRD #2 Tier A separation).

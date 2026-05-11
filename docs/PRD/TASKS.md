@@ -1238,7 +1238,7 @@ Statuses (in order of progression):
 | T1.1.1 | Approved | Kimi Code CLI | 2026-05-11T07:17Z | 2026-05-11T07:22Z | [report](reports/T1.1.1-report.md) | Approved after rework. Both Verify commands clean. |
 | T1.1.2 | Changes Requested | Kimi Code CLI | 2026-05-11T07:19Z | — | [report](reports/T1.1.2-report.md) | 3 stale "272 audio tests" refs still live in PRD-wire-format-v2.md (×2) and ROAD-TO-VIDEO.md. Grep was too narrow. See report. |
 | T1.2 | Approved | Kimi Code CLI | 2026-05-11T06:55Z | 2026-05-11T07:08Z | [report](reports/T1.2-report.md) | Approved 2026-05-11. Spawned T1.2.1 (rustdoc on MediaType variants/methods). Agent also resolved the T1.2 TODO inside MediaHeaderV2 — good call. |
-| T1.2.1 | Pending Review | Kimi Code CLI | 2026-05-11T07:23Z | 2026-05-11T07:24Z | reports/T1.2.1-report.md | — |
+| T1.2.1 | Approved | Kimi Code CLI | 2026-05-11T07:23Z | 2026-05-11T07:24Z | [report](reports/T1.2.1-report.md) | Approved. Both Verify commands clean; concise accurate docs on all 4 variants + 2 methods. |
 | T1.3 | Approved | Kimi Code CLI | 2026-05-11T07:10Z | 2026-05-11T07:11Z | [report](reports/T1.3-report.md) | Approved 2026-05-11. No follow-ups; docs-and-test-only change. |
 | T1.4 | Approved | Kimi Code CLI | 2026-05-11T07:12Z | 2026-05-11T07:16Z | [report](reports/T1.4-report.md) | Approved 2026-05-11. Spawned T1.4.1 (rustdoc on v2 mini types). The two-step expand test catches the W4 desync scenario nicely. |
 | T1.4.1 | Open | — | — | — | — | Spawned from T1.4 review; non-blocking |
