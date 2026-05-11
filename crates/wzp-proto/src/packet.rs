@@ -255,45 +255,44 @@ impl MediaPacket {
     /// first frame and every `MINI_FRAME_FULL_INTERVAL` frames thereafter.
     pub fn encode_compact(&self, ctx: &mut MiniFrameContext, frames_since_full: &mut u32) -> Bytes {
         if *frames_since_full > 0 && *frames_since_full < MINI_FRAME_FULL_INTERVAL {
-            // --- mini frame ---
-            let ts_delta =
-                self.header
-                    .timestamp
-                    .wrapping_sub(ctx.last_header().unwrap().timestamp) as u16;
-            let mini = MiniHeader {
-                seq_delta: 1,
-                timestamp_delta_ms: ts_delta,
-                payload_len: self.payload.len() as u16,
-            };
-            let total = 1 + MiniHeader::WIRE_SIZE + self.payload.len();
-            let mut buf = BytesMut::with_capacity(total);
-            buf.put_u8(FRAME_TYPE_MINI);
-            mini.write_to(&mut buf);
-            buf.put(self.payload.clone());
-            // Advance the context so the next mini-frame delta is relative
-            // to this frame, mirroring what expand() does on the decoder side.
-            ctx.update(&self.header);
-            *frames_since_full += 1;
-            buf.freeze()
-        } else {
-            // --- full frame ---
-            let qr_size = if self.quality_report.is_some() {
-                QualityReport::WIRE_SIZE
-            } else {
-                0
-            };
-            let total = 1 + MediaHeader::WIRE_SIZE + self.payload.len() + qr_size;
-            let mut buf = BytesMut::with_capacity(total);
-            buf.put_u8(FRAME_TYPE_FULL);
-            self.header.write_to(&mut buf);
-            buf.put(self.payload.clone());
-            if let Some(ref qr) = self.quality_report {
-                qr.write_to(&mut buf);
+            if let Some(base) = ctx.last_header() {
+                // --- mini frame ---
+                let ts_delta = self.header.timestamp.wrapping_sub(base.timestamp) as u16;
+                let mini = MiniHeader {
+                    seq_delta: 1,
+                    timestamp_delta_ms: ts_delta,
+                    payload_len: self.payload.len() as u16,
+                };
+                let total = 1 + MiniHeader::WIRE_SIZE + self.payload.len();
+                let mut buf = BytesMut::with_capacity(total);
+                buf.put_u8(FRAME_TYPE_MINI);
+                mini.write_to(&mut buf);
+                buf.put(self.payload.clone());
+                // Advance the context so the next mini-frame delta is relative
+                // to this frame, mirroring what expand() does on the decoder side.
+                ctx.update(&self.header);
+                *frames_since_full += 1;
+                return buf.freeze();
             }
-            ctx.update(&self.header);
-            *frames_since_full = 1; // next frame will be the 1st after full
-            buf.freeze()
         }
+
+        // --- full frame ---
+        let qr_size = if self.quality_report.is_some() {
+            QualityReport::WIRE_SIZE
+        } else {
+            0
+        };
+        let total = 1 + MediaHeader::WIRE_SIZE + self.payload.len() + qr_size;
+        let mut buf = BytesMut::with_capacity(total);
+        buf.put_u8(FRAME_TYPE_FULL);
+        self.header.write_to(&mut buf);
+        buf.put(self.payload.clone());
+        if let Some(ref qr) = self.quality_report {
+            qr.write_to(&mut buf);
+        }
+        ctx.update(&self.header);
+        *frames_since_full = 1; // next frame will be the 1st after full
+        buf.freeze()
     }
 
     /// Decode from compact wire format (auto-detects full vs mini).
@@ -2012,6 +2011,22 @@ mod tests {
                 "frame {i} should be FULL when disabled"
             );
         }
+    }
+
+    #[test]
+    fn encode_compact_fallback_to_full_without_baseline() {
+        // A fresh MiniFrameContext has no baseline header.  If the caller
+        // somehow passes frames_since_full > 0 we must not panic; instead
+        // fall back to a full frame and establish the baseline.
+        let mut ctx = MiniFrameContext::default();
+        let mut frames_since_full: u32 = 1; // claims we've seen a full frame
+
+        let pkt = make_media_packet(0, 0, b"audio");
+        let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
+
+        assert_eq!(wire[0], FRAME_TYPE_FULL, "must fall back to FULL when no baseline");
+        // After the fallback the baseline is established.
+        assert!(ctx.last_header().is_some());
     }
 
     // ── Quality negotiation roundtrip tests (#28, #29, #30) ─────
