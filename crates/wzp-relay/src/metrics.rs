@@ -1,11 +1,14 @@
 //! Prometheus metrics for the WZP relay daemon.
 
 use prometheus::{
-    Encoder, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    Opts, Registry, TextEncoder,
+    Encoder, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::sync::Arc;
+use wzp_proto::MediaHeader;
 use wzp_proto::packet::QualityReport;
+
+use crate::conformance::Violation;
 
 /// All relay-level Prometheus metrics.
 #[derive(Clone)]
@@ -32,6 +35,9 @@ pub struct RelayMetrics {
     // Phase 4: loss-recovery breakdown per session.
     pub session_dred_reconstructions: IntCounterVec,
     pub session_classical_plc: IntCounterVec,
+    pub conformance_violations: IntCounterVec,
+    pub conformance_bytes: HistogramVec,
+    pub conformance_iat_ms: HistogramVec,
     registry: Registry,
 }
 
@@ -168,6 +174,37 @@ impl RelayMetrics {
             &["session_id"],
         )
         .expect("metric");
+        let conformance_violations = IntCounterVec::new(
+            Opts::new(
+                "wzp_relay_conformance_violations_total",
+                "Conformance violations by tier, codec, media type and verdict",
+            ),
+            &["tier", "codec_id", "media_type", "verdict"],
+        )
+        .expect("metric");
+        let conformance_bytes = HistogramVec::new(
+            HistogramOpts::new(
+                "wzp_relay_conformance_bytes_per_session",
+                "Packet size distribution observed by the conformance meter",
+            )
+            .buckets(vec![
+                16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0,
+                32768.0, 65536.0,
+            ]),
+            &["media_type"],
+        )
+        .expect("metric");
+        let conformance_iat_ms = HistogramVec::new(
+            HistogramOpts::new(
+                "wzp_relay_conformance_iat_ms",
+                "Inter-arrival time distribution in milliseconds",
+            )
+            .buckets(vec![
+                1.0, 5.0, 10.0, 20.0, 30.0, 40.0, 60.0, 80.0, 100.0, 150.0, 200.0, 300.0, 500.0,
+            ]),
+            &["media_type"],
+        )
+        .expect("metric");
 
         registry
             .register(Box::new(active_sessions.clone()))
@@ -226,6 +263,15 @@ impl RelayMetrics {
         registry
             .register(Box::new(session_classical_plc.clone()))
             .expect("register");
+        registry
+            .register(Box::new(conformance_violations.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(conformance_bytes.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(conformance_iat_ms.clone()))
+            .expect("register");
 
         Self {
             active_sessions,
@@ -247,6 +293,9 @@ impl RelayMetrics {
             session_overruns,
             session_dred_reconstructions,
             session_classical_plc,
+            conformance_violations,
+            conformance_bytes,
+            conformance_iat_ms,
             registry,
         }
     }
@@ -325,6 +374,43 @@ impl RelayMetrics {
             self.session_classical_plc
                 .with_label_values(&[session_id])
                 .inc_by(classical_plc - cur_plc);
+        }
+    }
+
+    /// Record conformance-related metrics for a single received packet.
+    ///
+    /// * `header` — the media header (provides codec_id and media_type).
+    /// * `payload_len` — payload length in bytes.
+    /// * `iat_ms` — inter-arrival time since the previous packet.
+    /// * `violation` — `Some(Violation)` if the packet triggered a conformance
+    ///   limit; `None` for clean packets.
+    pub fn record_conformance(
+        &self,
+        header: &MediaHeader,
+        payload_len: usize,
+        iat_ms: u64,
+        violation: Option<Violation>,
+    ) {
+        let media_type = format!("{:?}", header.media_type);
+        let bytes = (MediaHeader::WIRE_SIZE + payload_len) as f64;
+        self.conformance_bytes
+            .with_label_values(&[&media_type])
+            .observe(bytes);
+        self.conformance_iat_ms
+            .with_label_values(&[&media_type])
+            .observe(iat_ms as f64);
+
+        if let Some(v) = violation {
+            let tier = match v {
+                Violation::BitrateExceeded => "A",
+                Violation::PacketRateExceeded => "B",
+                Violation::TimestampDrift => "C",
+            };
+            let codec_id = format!("{:?}", header.codec_id);
+            let verdict = format!("{:?}", v);
+            self.conformance_violations
+                .with_label_values(&[tier, &codec_id, &media_type, &verdict])
+                .inc();
         }
     }
 

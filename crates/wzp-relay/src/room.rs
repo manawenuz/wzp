@@ -17,6 +17,7 @@ use wzp_proto::packet::TrunkFrame;
 use wzp_proto::quality::{AdaptiveQualityController, Tier};
 use wzp_proto::traits::QualityController;
 
+use crate::conformance::ConformanceMeter;
 use crate::metrics::RelayMetrics;
 use crate::trunk::TrunkBatcher;
 
@@ -780,6 +781,7 @@ async fn run_participant_plain(
     let mut max_forward_ms = 0u64;
     let mut send_errors = 0u64;
     let mut last_log_instant = std::time::Instant::now();
+    let mut conformance = ConformanceMeter::new();
 
     let mut tap_stats = if debug_tap.as_ref().map_or(false, |t| t.matches(&room_name)) {
         Some(TapStats::new())
@@ -826,6 +828,22 @@ async fn run_participant_plain(
                 recv_gap_ms,
                 seq = pkt.header.seq,
                 "large recv gap"
+            );
+        }
+
+        // Conformance check (Tier A/B/C — observe-only)
+        let violation = conformance
+            .observe(&pkt.header, pkt.payload.len(), std::time::Instant::now())
+            .err();
+        metrics.record_conformance(&pkt.header, pkt.payload.len(), recv_gap_ms, violation);
+        if let Some(v) = violation {
+            warn!(
+                room = %room_name,
+                participant = participant_id,
+                codec = ?pkt.header.codec_id,
+                seq = pkt.header.seq,
+                violation = ?v,
+                "conformance violation"
             );
         }
 
@@ -998,6 +1016,7 @@ async fn run_participant_trunked(
     let mut max_forward_ms = 0u64;
     let mut send_errors = 0u64;
     let mut last_log_instant = std::time::Instant::now();
+    let mut conformance = ConformanceMeter::new();
 
     info!(
         room = %room_name,
@@ -1048,6 +1067,22 @@ async fn run_participant_trunked(
                         recv_gap_ms,
                         seq = pkt.header.seq,
                         "large recv gap (trunked)"
+                    );
+                }
+
+                // Conformance check (Tier A/B/C — observe-only)
+                let violation = conformance
+                    .observe(&pkt.header, pkt.payload.len(), std::time::Instant::now())
+                    .err();
+                metrics.record_conformance(&pkt.header, pkt.payload.len(), recv_gap_ms, violation);
+                if let Some(v) = violation {
+                    warn!(
+                        room = %room_name,
+                        participant = participant_id,
+                        codec = ?pkt.header.codec_id,
+                        seq = pkt.header.seq,
+                        violation = ?v,
+                        "conformance violation (trunked)"
                     );
                 }
 

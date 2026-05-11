@@ -107,6 +107,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::TransferAck => CallSignalType::Offer, // reuse
         SignalMessage::PresenceUpdate { .. } => CallSignalType::Offer, // reuse
         SignalMessage::RouteQuery { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::TransportFeedback { .. } => CallSignalType::Offer, // reuse (BWE)
         SignalMessage::RouteResponse { .. } => CallSignalType::Offer, // reuse
         SignalMessage::SessionForward { .. } => CallSignalType::Offer, // reuse
         SignalMessage::SessionForwardAck { .. } => CallSignalType::Offer, // reuse

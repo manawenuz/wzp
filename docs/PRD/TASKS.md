@@ -1313,12 +1313,12 @@ Statuses (in order of progression):
 | T1.6 | Approved | Kimi Code CLI | 2026-05-11T10:20Z | 2026-05-11T11:05Z | [report](reports/T1.6-report.md) | Approved. Clean impl, both sides tested, T1.5 gap-fixes folded in with explicit disclosure — good course-correction from the T1.5 scope-creep review. |
 | T1.7 | Approved | Kimi Code CLI | 2026-05-11T11:05Z | 2026-05-11T16:29Z | [report](reports/T1.7-report.md) | Approved. W5 invariant already encoded in `to_bytes()` order; regression test pins it. Guards future encryption wiring. |
 | T1.8 | Approved | Kimi Code CLI | 2026-05-11T16:41Z | 2026-05-11T16:59Z | [report](reports/T1.8-report.md) | Approved. Per-stream/per-MediaType windows; AEAD-first then anti-replay; plaintext rollback on detection. W11 resolved. |
-| T2.1 | Changes Requested | Kimi Code CLI | 2026-05-11T17:00Z | — | [report](reports/T2.1-report.md) | Substance OK; never committed (only staged). Rule #5 violation. See report. |
-| T2.2 | Pending Review | Kimi Code CLI | 2026-05-11T17:05Z | 2026-05-11T17:12Z | [report](reports/T2.2-report.md) | — |
-| T2.3 | Open | — | — | — | — | — |
-| T2.4 | Open | — | — | — | — | — |
-| T2.5 | Open | — | — | — | — | — |
-| T2.6 | Open | — | — | — | — | — |
+| T2.1 | Approved | Kimi Code CLI | 2026-05-11T17:00Z | 2026-05-11T17:06Z | [report](reports/T2.1-report.md) | Approved retroactively. Commit fe1f948 landed; closed by reviewer. |
+| T2.2 | Approved | Kimi Code CLI | 2026-05-11T17:05Z | 2026-05-11T17:16Z | [report](reports/T2.2-report.md) | Approved. Substance solid; rule #7 violated. Last lenient pass. |
+| T2.3 | Committed | Kimi Code CLI | 2026-05-11T17:13Z | 2026-05-11T17:20Z | [report](reports/T2.3-report.md) | BWE guard in AdaptiveQualityController::try_transition(). |
+| T2.4 | Committed | Kimi Code CLI | 2026-05-11T17:20Z | 2026-05-11T17:35Z | [report](reports/T2.4-report.md) | Relay conformance Tier A (bitrate ceiling). |
+| T2.5 | Committed | Kimi Code CLI | 2026-05-11T17:35Z | 2026-05-11T17:45Z | [report](reports/T2.5-report.md) | Tier B (packet-rate) + Tier C (timestamp drift). |
+| T2.6 | Committed | Kimi Code CLI | 2026-05-11T17:45Z | 2026-05-11T17:55Z | [report](reports/T2.6-report.md) | Prometheus metrics for conformance. |
 | T3.1 | Open | — | — | — | — | — |
 | T3.2 | Open | — | — | — | — | — |
 | T3.3 | Open | — | — | — | — | — |

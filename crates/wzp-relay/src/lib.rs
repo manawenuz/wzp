@@ -10,6 +10,7 @@
 pub mod auth;
 pub mod call_registry;
 pub mod config;
+pub mod conformance;
 pub mod event_log;
 pub mod federation;
 pub mod handshake;

@@ -1,8 +1,10 @@
 //! See also: [`crate::dred_tuner`] for continuous DRED tuning within a tier.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::BandwidthEstimator;
 use crate::QualityProfile;
 use crate::packet::QualityReport;
 use crate::traits::QualityController;
@@ -134,6 +136,8 @@ pub struct AdaptiveQualityController {
     probe: Option<ProbeState>,
     /// Time spent stable at the current tier (for probe trigger).
     stable_since: Option<Instant>,
+    /// Optional bandwidth estimator for BWE-guarded upgrades.
+    bwe: Option<Arc<BandwidthEstimator>>,
 }
 
 /// Threshold for downgrading (fast reaction to degradation).
@@ -187,6 +191,7 @@ impl AdaptiveQualityController {
             fec_boost_amount: DEFAULT_FEC_BOOST,
             probe: None,
             stable_since: None,
+            bwe: None,
         }
     }
 
@@ -254,6 +259,17 @@ impl AdaptiveQualityController {
         self.stable_since = None;
     }
 
+    /// Attach a bandwidth estimator for BWE-guarded tier transitions.
+    pub fn set_bandwidth_estimator(&mut self, bwe: Arc<BandwidthEstimator>) {
+        self.bwe = Some(bwe);
+    }
+
+    /// Return the bitrate ceiling (in bps) for a given tier, including FEC overhead.
+    fn tier_ceiling_bps(tier: Tier) -> u64 {
+        let kbps = tier.profile().total_bitrate_kbps();
+        (kbps * 1000.0) as u64
+    }
+
     /// Get the effective downgrade threshold based on network context.
     fn downgrade_threshold(&self) -> u32 {
         match self.network_context {
@@ -296,6 +312,15 @@ impl AdaptiveQualityController {
             if self.consecutive_up >= threshold {
                 // Only upgrade one step at a time
                 if let Some(next_tier) = self.upgrade_one_step() {
+                    // BWE guard: require 130% headroom over target tier bitrate
+                    if let Some(ref bwe) = self.bwe {
+                        let required = (Self::tier_ceiling_bps(next_tier) * 130) / 100;
+                        if bwe.target_send_bps() < required {
+                            // Insufficient bandwidth — reset counter to prevent flapping
+                            self.consecutive_up = 0;
+                            return None;
+                        }
+                    }
                     self.current_tier = next_tier;
                     self.current_profile = next_tier.profile();
                     self.consecutive_up = 0;
@@ -527,6 +552,53 @@ mod tests {
         for _ in 0..10 {
             assert!(ctrl.observe(&bad).is_none());
         }
+    }
+
+    #[test]
+    fn bwe_guard_blocks_upgrade_when_bandwidth_insufficient() {
+        let mut ctrl = AdaptiveQualityController::new();
+
+        // Force to catastrophic
+        let bad = make_report(50.0, 300);
+        for _ in 0..3 {
+            ctrl.observe(&bad);
+        }
+        assert_eq!(ctrl.tier(), Tier::Catastrophic);
+
+        // Attach a BWE with very low headroom.
+        // Degraded tier needs 6kbps * 1.5 FEC = 9kbps → 130% = 11.7kbps.
+        // Set target_send_bps ≈ 9_000 (below 11_700 threshold).
+        let bwe = Arc::new(BandwidthEstimator::new(1000.0, 1.0, 100_000.0));
+        bwe.update_from_path(1_000_000, 0, 10); // high cwnd
+        bwe.update_from_peer(10_000); // low remb → target = 9_000
+        ctrl.set_bandwidth_estimator(bwe.clone());
+
+        let good = make_report(0.5, 20);
+        for _ in 0..5 {
+            assert!(
+                ctrl.observe(&good).is_none(),
+                "upgrade should be blocked by low BWE"
+            );
+        }
+        assert_eq!(
+            ctrl.tier(),
+            Tier::Catastrophic,
+            "should remain at Catastrophic"
+        );
+
+        // Raise BWE well above the 130% threshold
+        bwe.update_from_peer(100_000); // target ≈ 90_000 bps
+
+        // Counter was reset, need another 5 good reports
+        for _ in 0..4 {
+            assert!(ctrl.observe(&good).is_none());
+        }
+        let result = ctrl.observe(&good);
+        assert!(
+            result.is_some(),
+            "upgrade should proceed with sufficient BWE"
+        );
+        assert_eq!(ctrl.tier(), Tier::Degraded);
     }
 
     #[test]
