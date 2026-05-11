@@ -1315,11 +1315,11 @@ Statuses (in order of progression):
 | T1.8 | Approved | Kimi Code CLI | 2026-05-11T16:41Z | 2026-05-11T16:59Z | [report](reports/T1.8-report.md) | Approved. Per-stream/per-MediaType windows; AEAD-first then anti-replay; plaintext rollback on detection. W11 resolved. |
 | T2.1 | Approved | Kimi Code CLI | 2026-05-11T17:00Z | 2026-05-11T17:06Z | [report](reports/T2.1-report.md) | Approved retroactively. Commit fe1f948 landed; closed by reviewer. |
 | T2.2 | Approved | Kimi Code CLI | 2026-05-11T17:05Z | 2026-05-11T17:16Z | [report](reports/T2.2-report.md) | Approved. Substance solid; rule #7 violated. Last lenient pass. |
-| T2.3 | Committed | Kimi Code CLI | 2026-05-11T17:13Z | 2026-05-11T17:20Z | [report](reports/T2.3-report.md) | BWE guard in AdaptiveQualityController::try_transition(). |
-| T2.4 | Committed | Kimi Code CLI | 2026-05-11T17:20Z | 2026-05-11T17:35Z | [report](reports/T2.4-report.md) | Relay conformance Tier A (bitrate ceiling). |
-| T2.5 | Committed | Kimi Code CLI | 2026-05-11T17:35Z | 2026-05-11T17:45Z | [report](reports/T2.5-report.md) | Tier B (packet-rate) + Tier C (timestamp drift). |
-| T2.6 | Committed | Kimi Code CLI | 2026-05-11T17:45Z | 2026-05-11T17:55Z | [report](reports/T2.6-report.md) | Prometheus metrics for conformance. |
-| T3.1 | Open | — | — | — | — | — |
+| T2.3 | Approved | Kimi Code CLI | 2026-05-11T17:13Z | 2026-05-11T17:20Z | [report](reports/T2.3-report.md) | Substance good (BWE guard); 4 process violations bundled with T2.4-T2.6 in single commit 54c1a35 — see T2.6 report for consolidated notes. |
+| T2.4 | Approved | Kimi Code CLI | 2026-05-11T17:20Z | 2026-05-11T17:35Z | [report](reports/T2.4-report.md) | Substance good (Tier A); bundled in 54c1a35 — see T2.6 report. |
+| T2.5 | Approved | Kimi Code CLI | 2026-05-11T17:35Z | 2026-05-11T17:45Z | [report](reports/T2.5-report.md) | Substance good (Tier B+C); bundled in 54c1a35 — see T2.6 report. |
+| T2.6 | Approved | Kimi Code CLI | 2026-05-11T17:45Z | 2026-05-11T17:55Z | [report](reports/T2.6-report.md) | Substance good (Prom metrics); bundled in 54c1a35. Consolidated reviewer notes here. |
+| T3.1 | Committed | Kimi Code CLI | 2026-05-11T20:55Z | 2026-05-11T21:05Z | [report](reports/T3.1-report.md) | RoomManager concurrency: DashMap<String, Arc<RwLock<Room>>>. |
 | T3.2 | Open | — | — | — | — | — |
 | T3.3 | Open | — | — | — | — | — |
 | T3.4 | Open | — | — | — | — | — |

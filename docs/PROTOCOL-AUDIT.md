@@ -48,8 +48,10 @@ One keyframe burst can be 100+ packets; a single reordered earlier packet stalls
 ### W12. `SignalMessage` has no version byte
 Bincode + `#[serde(default, skip_serializing_if)]` covers field additions but not variant removal or semantic change. Lead every variant with `version: u8`.
 
-### W13. RoomManager Mutex per-packet
-Already flagged in `ARCHITECTURE.md`. At ~1500 pps/sender for video this becomes a real ceiling. `DashMap<RoomId, Arc<RwLock<Room>>>` is a Sunday afternoon.
+### W13. RoomManager Mutex per-packet — **RESOLVED**
+Already flagged in `ARCHITECTURE.md`. At ~1500 pps/sender for video this becomes a real ceiling.
+
+**Resolution (T3.1):** `RoomManager` now stores `DashMap<String, Arc<RwLock<Room>>>` instead of `DashMap<String, Room>`. The DashMap guard is held only long enough to clone the `Arc`; all per-room operations (fan-out `others()`, quality `observe_quality()`, join/leave) then acquire the room-level `std::sync::RwLock`. This lets concurrent `others()` calls share a read lock while writers hold the write lock, eliminating the per-packet DashMap contention that was the original concern.
 
 ### W14. No receiver → sender congestion feedback beyond inline QualityReport
 For video you need REMB-style or transport-CC-style explicit BWE feedback at ~50 ms cadence, independent of media packets.

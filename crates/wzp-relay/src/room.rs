@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -384,8 +385,15 @@ impl Room {
 ///
 /// Uses `DashMap` for per-room sharded locking -- rooms are independently
 /// lockable so the media hot-path never contends on a single mutex.
+///
+/// Each `Room` is further wrapped in `Arc<RwLock<Room>>` so that the
+/// DashMap guard is held only long enough to retrieve the Arc; all
+/// per-room operations (fan-out, quality updates, join/leave) then
+/// acquire the room-level RwLock.  This lets concurrent `others()`
+/// calls share a read lock while `observe_quality()` or join/leave
+/// hold the write lock.
 pub struct RoomManager {
-    rooms: DashMap<String, Room>,
+    rooms: DashMap<String, Arc<RwLock<Room>>>,
     /// Room access control list. Maps hashed room name -> allowed fingerprints.
     /// When `None`, rooms are open (no auth mode). When `Some`, only listed
     /// fingerprints can join the corresponding room. Protected by std Mutex
@@ -468,11 +476,15 @@ impl RoomManager {
             warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
             return Err("not authorized for this room".to_string());
         }
-        let was_empty = self.rooms.get(room_name).map_or(true, |r| r.is_empty());
-        let mut room = self
+        let was_empty = self
+            .rooms
+            .get(room_name)
+            .map_or(true, |arc| arc.read().unwrap().is_empty());
+        let arc = self
             .rooms
             .entry(room_name.to_string())
-            .or_insert_with(Room::new);
+            .or_insert_with(|| Arc::new(RwLock::new(Room::new())));
+        let mut room = arc.write().unwrap();
         let id = room.add(
             addr,
             sender,
@@ -485,7 +497,7 @@ impl RoomManager {
             participants: room.participant_list(),
         };
         let senders = room.all_senders();
-        drop(room); // release DashMap guard before event_tx send (not async, but good practice)
+        drop(room); // release room lock before event_tx send
         if was_empty {
             let _ = self.event_tx.send(RoomEvent::LocalJoin {
                 room: room_name.to_string(),
@@ -524,7 +536,7 @@ impl RoomManager {
     ) -> Vec<wzp_proto::packet::RoomParticipant> {
         self.rooms
             .get(room_name)
-            .map(|room| room.participant_list())
+            .map(|arc| arc.read().unwrap().participant_list())
             .unwrap_or_default()
     }
 
@@ -532,7 +544,7 @@ impl RoomManager {
     pub fn local_senders(&self, room_name: &str) -> Vec<ParticipantSender> {
         self.rooms
             .get(room_name)
-            .map(|room| room.participants.iter().map(|p| p.sender.clone()).collect())
+            .map(|arc| arc.read().unwrap().all_senders())
             .unwrap_or_default()
     }
 
@@ -543,11 +555,13 @@ impl RoomManager {
         participant_id: ParticipantId,
     ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
         let result = {
-            if let Some(mut room) = self.rooms.get_mut(room_name) {
+            if let Some(arc) = self.rooms.get(room_name) {
+                let mut room = arc.write().unwrap();
                 room.qualities.remove(&participant_id);
                 room.remove(participant_id);
                 if room.is_empty() {
-                    drop(room); // release write guard before remove
+                    drop(room); // release room lock
+                    drop(arc); // release DashMap guard
                     self.rooms.remove(room_name);
                     let _ = self.event_tx.send(RoomEvent::LocalLeave {
                         room: room_name.to_string(),
@@ -572,13 +586,16 @@ impl RoomManager {
     pub fn others(&self, room_name: &str, participant_id: ParticipantId) -> Vec<ParticipantSender> {
         self.rooms
             .get(room_name)
-            .map(|r| r.others(participant_id))
+            .map(|arc| arc.read().unwrap().others(participant_id))
             .unwrap_or_default()
     }
 
     /// Get room size.
     pub fn room_size(&self, room_name: &str) -> usize {
-        self.rooms.get(room_name).map(|r| r.len()).unwrap_or(0)
+        self.rooms
+            .get(room_name)
+            .map(|arc| arc.read().unwrap().len())
+            .unwrap_or(0)
     }
 
     /// Check if a room exists and has participants.
@@ -590,7 +607,7 @@ impl RoomManager {
     pub fn list(&self) -> Vec<(String, usize)> {
         self.rooms
             .iter()
-            .map(|r| (r.key().clone(), r.len()))
+            .map(|r| (r.key().clone(), r.value().read().unwrap().len()))
             .collect()
     }
 
@@ -603,7 +620,8 @@ impl RoomManager {
         participant_id: ParticipantId,
         report: &wzp_proto::packet::QualityReport,
     ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
-        let mut room = self.rooms.get_mut(room_name)?;
+        let arc = self.rooms.get(room_name)?;
+        let mut room = arc.write().unwrap();
 
         let tier_changed = room
             .qualities
