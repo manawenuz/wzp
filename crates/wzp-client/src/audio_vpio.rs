@@ -5,8 +5,8 @@
 //! to the speaker, so it can cancel the echo from the mic signal internally.
 //! This is the same engine FaceTime and other Apple apps use.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
@@ -146,7 +146,8 @@ impl VpioAudio {
         )
         .context("failed to set render callback")?;
 
-        au.initialize().context("failed to initialize VoiceProcessingIO")?;
+        au.initialize()
+            .context("failed to initialize VoiceProcessingIO")?;
         au.start().context("failed to start VoiceProcessingIO")?;
 
         info!("VoiceProcessingIO started (OS-level AEC enabled)");

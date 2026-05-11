@@ -156,7 +156,11 @@ mod tests {
     fn sequential_accepted() {
         let mut w = AntiReplayWindow::new();
         for i in 0..200 {
-            assert!(w.check_and_update(i).is_ok(), "seq {} should be accepted", i);
+            assert!(
+                w.check_and_update(i).is_ok(),
+                "seq {} should be accepted",
+                i
+            );
         }
     }
 

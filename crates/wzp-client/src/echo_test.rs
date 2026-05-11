@@ -166,7 +166,7 @@ pub async fn run_echo_test(
             match tokio::time::timeout(Duration::from_millis(2), transport.recv_media()).await {
                 Ok(Ok(Some(pkt))) => {
                     total_packets_received += 1;
-                    let is_repair = pkt.header.is_repair;
+                    let is_repair = pkt.header.is_repair();
                     decoder.ingest(pkt);
                     if !is_repair {
                         if let Some(n) = decoder.decode_next(&mut pcm_buf) {
@@ -184,7 +184,8 @@ pub async fn run_echo_test(
             let time_offset = start.elapsed().as_secs_f64();
 
             // Compare sent vs received for this window
-            let sent_start = (window_idx as u64 * frames_per_window * FRAME_SAMPLES as u64) as usize;
+            let sent_start =
+                (window_idx as u64 * frames_per_window * FRAME_SAMPLES as u64) as usize;
             let sent_end = sent_start + (window_frames_sent as usize * FRAME_SAMPLES);
             let sent_window = if sent_end <= sent_pcm.len() {
                 &sent_pcm[sent_start..sent_end]
@@ -192,7 +193,9 @@ pub async fn run_echo_test(
                 &sent_pcm[sent_start..]
             };
 
-            let recv_start = recv_pcm.len().saturating_sub(window_frames_received as usize * FRAME_SAMPLES);
+            let recv_start = recv_pcm
+                .len()
+                .saturating_sub(window_frames_received as usize * FRAME_SAMPLES);
             let recv_window = &recv_pcm[recv_start..];
 
             let peak = recv_window.iter().map(|s| s.abs()).max().unwrap_or(0);
@@ -256,7 +259,7 @@ pub async fn run_echo_test(
         match tokio::time::timeout(Duration::from_millis(100), transport.recv_media()).await {
             Ok(Ok(Some(pkt))) => {
                 total_packets_received += 1;
-                let is_repair = pkt.header.is_repair;
+                let is_repair = pkt.header.is_repair();
                 decoder.ingest(pkt);
                 if !is_repair {
                     decoder.decode_next(&mut pcm_buf);
@@ -310,8 +313,14 @@ pub fn print_report(result: &EchoTestResult) {
         let status = if w.is_silent { " !" } else { "  " };
         println!(
             "│ {:>3}{} │ {:>5.1}s  │ {:>4} │ {:>4} │ {:>5.1}%  │ {:>5.1} │ {:.3} │",
-            w.index, status, w.time_offset_secs, w.frames_sent, w.frames_received,
-            w.loss_pct, w.snr_db, w.correlation
+            w.index,
+            status,
+            w.time_offset_secs,
+            w.frames_sent,
+            w.frames_received,
+            w.loss_pct,
+            w.snr_db,
+            w.correlation
         );
     }
     println!("└───────┴─────────┴──────┴──────┴─────────┴───────┴───────┘");
@@ -321,18 +330,28 @@ pub fn print_report(result: &EchoTestResult) {
         let first_half: Vec<_> = result.windows[..result.windows.len() / 2].to_vec();
         let second_half: Vec<_> = result.windows[result.windows.len() / 2..].to_vec();
 
-        let avg_loss_first = first_half.iter().map(|w| w.loss_pct).sum::<f32>() / first_half.len() as f32;
-        let avg_loss_second = second_half.iter().map(|w| w.loss_pct).sum::<f32>() / second_half.len() as f32;
-        let avg_corr_first = first_half.iter().map(|w| w.correlation).sum::<f32>() / first_half.len() as f32;
-        let avg_corr_second = second_half.iter().map(|w| w.correlation).sum::<f32>() / second_half.len() as f32;
+        let avg_loss_first =
+            first_half.iter().map(|w| w.loss_pct).sum::<f32>() / first_half.len() as f32;
+        let avg_loss_second =
+            second_half.iter().map(|w| w.loss_pct).sum::<f32>() / second_half.len() as f32;
+        let avg_corr_first =
+            first_half.iter().map(|w| w.correlation).sum::<f32>() / first_half.len() as f32;
+        let avg_corr_second =
+            second_half.iter().map(|w| w.correlation).sum::<f32>() / second_half.len() as f32;
 
         println!();
         if avg_loss_second > avg_loss_first + 5.0 {
             println!("WARNING: Quality degradation detected!");
-            println!("  Loss increased from {:.1}% to {:.1}% over time", avg_loss_first, avg_loss_second);
+            println!(
+                "  Loss increased from {:.1}% to {:.1}% over time",
+                avg_loss_first, avg_loss_second
+            );
         }
         if avg_corr_second < avg_corr_first - 0.1 {
-            println!("WARNING: Signal correlation dropped from {:.3} to {:.3}", avg_corr_first, avg_corr_second);
+            println!(
+                "WARNING: Signal correlation dropped from {:.3} to {:.3}",
+                avg_corr_first, avg_corr_second
+            );
         }
         if avg_loss_second <= avg_loss_first + 5.0 && avg_corr_second >= avg_corr_first - 0.1 {
             println!("Quality is STABLE over the test duration.");

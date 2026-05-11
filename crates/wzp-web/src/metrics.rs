@@ -20,9 +20,10 @@ impl WebMetrics {
     pub fn new() -> Self {
         let registry = Registry::new();
 
-        let active_connections = IntGauge::with_opts(
-            Opts::new("wzp_web_active_connections", "Current WebSocket connections"),
-        )
+        let active_connections = IntGauge::with_opts(Opts::new(
+            "wzp_web_active_connections",
+            "Current WebSocket connections",
+        ))
         .expect("metric");
         registry
             .register(Box::new(active_connections.clone()))
@@ -37,20 +38,18 @@ impl WebMetrics {
             .register(Box::new(frames_bridged.clone()))
             .expect("register");
 
-        let auth_failures = IntCounter::with_opts(
-            Opts::new("wzp_web_auth_failures_total", "Browser auth failures"),
-        )
+        let auth_failures = IntCounter::with_opts(Opts::new(
+            "wzp_web_auth_failures_total",
+            "Browser auth failures",
+        ))
         .expect("metric");
         registry
             .register(Box::new(auth_failures.clone()))
             .expect("register");
 
         let handshake_latency = Histogram::with_opts(
-            HistogramOpts::new(
-                "wzp_web_handshake_latency_seconds",
-                "Relay handshake time",
-            )
-            .buckets(vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]),
+            HistogramOpts::new("wzp_web_handshake_latency_seconds", "Relay handshake time")
+                .buckets(vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]),
         )
         .expect("metric");
         registry

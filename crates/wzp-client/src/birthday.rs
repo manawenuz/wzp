@@ -165,10 +165,7 @@ pub fn generate_dialer_targets(
 
     // First: all known ports (guaranteed targets)
     for &port in known_ports {
-        targets.push(SocketAddr::new(
-            std::net::IpAddr::V4(acceptor_ip),
-            port,
-        ));
+        targets.push(SocketAddr::new(std::net::IpAddr::V4(acceptor_ip), port));
     }
 
     // Fill remaining with random ports (birthday attack)
@@ -178,10 +175,7 @@ pub fn generate_dialer_targets(
         let mut rng = rand::thread_rng();
         for _ in 0..remaining {
             let port = rng.gen_range(1024..=65535u16);
-            let addr = SocketAddr::new(
-                std::net::IpAddr::V4(acceptor_ip),
-                port,
-            );
+            let addr = SocketAddr::new(std::net::IpAddr::V4(acceptor_ip), port);
             if !targets.contains(&addr) {
                 targets.push(addr);
             }
@@ -339,7 +333,10 @@ mod tests {
     fn acceptor_ports_serializes() {
         let result = AcceptorPorts {
             external_ip: Some(Ipv4Addr::new(203, 0, 113, 5)),
-            ports: vec![PortMapping { local_port: 12345, external_port: 54321 }],
+            ports: vec![PortMapping {
+                local_port: 12345,
+                external_port: 54321,
+            }],
             attempted: 32,
             succeeded: 1,
         };

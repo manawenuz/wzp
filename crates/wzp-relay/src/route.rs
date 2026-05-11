@@ -97,14 +97,13 @@ impl RouteResolver {
     }
 
     /// Build a JSON-serializable route response for the HTTP API.
-    pub fn route_json(
-        &self,
-        fingerprint: &str,
-        route: &Route,
-    ) -> serde_json::Value {
+    pub fn route_json(&self, fingerprint: &str, route: &Route) -> serde_json::Value {
         let (route_type, relay_chain) = match route {
             Route::Local => ("local", vec![self.local_addr.to_string()]),
-            Route::DirectPeer(addr) => ("direct_peer", vec![self.local_addr.to_string(), addr.to_string()]),
+            Route::DirectPeer(addr) => (
+                "direct_peer",
+                vec![self.local_addr.to_string(), addr.to_string()],
+            ),
             Route::Chain(chain) => {
                 let mut addrs = vec![self.local_addr.to_string()];
                 addrs.extend(chain.iter().map(|a| a.to_string()));
@@ -184,7 +183,10 @@ mod tests {
         reg.update_peer(peer, fps);
 
         // Local lookup works via multi-hop
-        assert_eq!(resolver.resolve_multi_hop(&reg, "local_fp", 3), Route::Local);
+        assert_eq!(
+            resolver.resolve_multi_hop(&reg, "local_fp", 3),
+            Route::Local
+        );
         // Remote lookup works via multi-hop
         assert_eq!(
             resolver.resolve_multi_hop(&reg, "remote_fp", 3),

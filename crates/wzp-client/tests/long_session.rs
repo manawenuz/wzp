@@ -83,8 +83,12 @@ fn long_session_no_drift() {
     println!(
         "long_session_no_drift: decoded={frames_decoded}/{TOTAL_FRAMES}, \
          underruns={}, overruns={}, depth={}, max_depth={}, late={}, lost={}",
-        stats.underruns, stats.overruns, stats.current_depth, stats.max_depth_seen,
-        stats.packets_late, stats.packets_lost,
+        stats.underruns,
+        stats.overruns,
+        stats.current_depth,
+        stats.max_depth_seen,
+        stats.packets_late,
+        stats.packets_lost,
     );
 
     // With 1 decode per tick over 3000 ticks, we expect ~3000 decoded frames
@@ -123,7 +127,7 @@ fn long_session_with_simulated_loss() {
 
         for (j, pkt) in batch.into_iter().enumerate() {
             // Drop every 20th *source* (non-repair) packet to simulate ~5% loss.
-            if !pkt.header.is_repair && i % 20 == 0 && j == 0 {
+            if !pkt.header.is_repair() && i % 20 == 0 && j == 0 {
                 continue; // drop this packet
             }
             decoder.ingest(pkt);
@@ -139,8 +143,12 @@ fn long_session_with_simulated_loss() {
     println!(
         "long_session_with_simulated_loss: decoded={frames_decoded}/{TOTAL_FRAMES}, \
          underruns={}, overruns={}, depth={}, max_depth={}, late={}, lost={}",
-        stats.underruns, stats.overruns, stats.current_depth, stats.max_depth_seen,
-        stats.packets_late, stats.packets_lost,
+        stats.underruns,
+        stats.overruns,
+        stats.current_depth,
+        stats.max_depth_seen,
+        stats.packets_late,
+        stats.packets_lost,
     );
 
     // With 5% artificial loss + FEC recovery + PLC, we should still get >90% decoded.

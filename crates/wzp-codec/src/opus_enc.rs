@@ -332,7 +332,11 @@ impl AudioEncoder for OpusEncoder {
             );
             return;
         }
-        let mode = if enabled { InbandFec::Mode1 } else { InbandFec::Off };
+        let mode = if enabled {
+            InbandFec::Mode1
+        } else {
+            InbandFec::Off
+        };
         let _ = self.inner.set_inband_fec(mode);
     }
 

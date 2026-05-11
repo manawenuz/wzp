@@ -72,8 +72,7 @@ fn sine_frame(freq_hz: f32, frame_offset: u64) -> Vec<i16> {
 /// decoder, pushes frames through the pipeline, and collects statistics.
 /// Combinations where `target_depth > max_depth` are skipped.
 pub fn run_local_sweep(config: &SweepConfig) -> Vec<SweepResult> {
-    let frames_per_config =
-        (config.test_duration_secs as u64) * (1000 / FRAME_DURATION_MS as u64);
+    let frames_per_config = (config.test_duration_secs as u64) * (1000 / FRAME_DURATION_MS as u64);
 
     let mut results = Vec::new();
 

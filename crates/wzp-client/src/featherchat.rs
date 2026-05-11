@@ -118,14 +118,14 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::DirectCallAnswer { .. } => CallSignalType::Answer,
         SignalMessage::CallSetup { .. } => CallSignalType::Offer, // relay-only
         SignalMessage::CallRinging { .. } => CallSignalType::Ringing,
-        SignalMessage::RegisterPresence { .. }
-        | SignalMessage::RegisterPresenceAck { .. } => CallSignalType::Offer, // relay-only
+        SignalMessage::RegisterPresence { .. } | SignalMessage::RegisterPresenceAck { .. } => {
+            CallSignalType::Offer
+        } // relay-only
         // NAT reflection is a client↔relay control exchange that
         // never crosses the featherChat bridge — if it ever reaches
         // this mapper something is wrong, but we still have to give
         // an answer. "Offer" is the generic catch-all.
-        SignalMessage::Reflect
-        | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
+        SignalMessage::Reflect | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
         // Phase 4 cross-relay forwarding envelope — strictly a
         // relay-to-relay message, never rides the featherChat
         // bridge. Catch-all mapping for completeness.
@@ -181,17 +181,35 @@ mod tests {
             reason: wzp_proto::HangupReason::Normal,
             call_id: None,
         };
-        assert!(matches!(signal_to_call_type(&hangup), CallSignalType::Hangup));
+        assert!(matches!(
+            signal_to_call_type(&hangup),
+            CallSignalType::Hangup
+        ));
 
-        assert!(matches!(signal_to_call_type(&SignalMessage::Hold), CallSignalType::Hold));
-        assert!(matches!(signal_to_call_type(&SignalMessage::Unhold), CallSignalType::Unhold));
-        assert!(matches!(signal_to_call_type(&SignalMessage::Mute), CallSignalType::Mute));
-        assert!(matches!(signal_to_call_type(&SignalMessage::Unmute), CallSignalType::Unmute));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Hold),
+            CallSignalType::Hold
+        ));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Unhold),
+            CallSignalType::Unhold
+        ));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Mute),
+            CallSignalType::Mute
+        ));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Unmute),
+            CallSignalType::Unmute
+        ));
 
         let transfer = SignalMessage::Transfer {
             target_fingerprint: "abc".to_string(),
             relay_addr: None,
         };
-        assert!(matches!(signal_to_call_type(&transfer), CallSignalType::Transfer));
+        assert!(matches!(
+            signal_to_call_type(&transfer),
+            CallSignalType::Transfer
+        ));
     }
 }

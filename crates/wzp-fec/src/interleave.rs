@@ -146,7 +146,10 @@ mod tests {
 
         // Each block should lose exactly 2 (6 losses / 3 blocks)
         for &loss in &losses_per_block {
-            assert_eq!(loss, 2, "Each block should lose at most 2 symbols from a burst of 6");
+            assert_eq!(
+                loss, 2,
+                "Each block should lose at most 2 symbols from a burst of 6"
+            );
         }
     }
 }

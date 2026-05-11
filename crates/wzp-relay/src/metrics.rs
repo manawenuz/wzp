@@ -4,8 +4,8 @@ use prometheus::{
     Encoder, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
     Opts, Registry, TextEncoder,
 };
-use wzp_proto::packet::QualityReport;
 use std::sync::Arc;
+use wzp_proto::packet::QualityReport;
 
 /// All relay-level Prometheus metrics.
 #[derive(Clone)]
@@ -40,21 +40,23 @@ impl RelayMetrics {
     pub fn new() -> Self {
         let registry = Registry::new();
 
-        let active_sessions = IntGauge::with_opts(
-            Opts::new("wzp_relay_active_sessions", "Current active sessions"),
-        )
+        let active_sessions = IntGauge::with_opts(Opts::new(
+            "wzp_relay_active_sessions",
+            "Current active sessions",
+        ))
         .expect("metric");
-        let active_rooms = IntGauge::with_opts(
-            Opts::new("wzp_relay_active_rooms", "Current active rooms"),
-        )
+        let active_rooms =
+            IntGauge::with_opts(Opts::new("wzp_relay_active_rooms", "Current active rooms"))
+                .expect("metric");
+        let packets_forwarded = IntCounter::with_opts(Opts::new(
+            "wzp_relay_packets_forwarded_total",
+            "Total packets forwarded",
+        ))
         .expect("metric");
-        let packets_forwarded = IntCounter::with_opts(
-            Opts::new("wzp_relay_packets_forwarded_total", "Total packets forwarded"),
-        )
-        .expect("metric");
-        let bytes_forwarded = IntCounter::with_opts(
-            Opts::new("wzp_relay_bytes_forwarded_total", "Total bytes forwarded"),
-        )
+        let bytes_forwarded = IntCounter::with_opts(Opts::new(
+            "wzp_relay_bytes_forwarded_total",
+            "Total bytes forwarded",
+        ))
         .expect("metric");
         let auth_attempts = IntCounterVec::new(
             Opts::new("wzp_relay_auth_attempts_total", "Auth validation attempts"),
@@ -66,31 +68,51 @@ impl RelayMetrics {
                 "wzp_relay_handshake_duration_seconds",
                 "Crypto handshake time",
             )
-            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]),
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+            ]),
         )
         .expect("metric");
 
         let federation_peer_status = IntGaugeVec::new(
-            Opts::new("wzp_federation_peer_status", "Peer connection status (0=disconnected, 1=connected)"),
+            Opts::new(
+                "wzp_federation_peer_status",
+                "Peer connection status (0=disconnected, 1=connected)",
+            ),
             &["peer"],
-        ).expect("metric");
+        )
+        .expect("metric");
         let federation_peer_rtt_ms = GaugeVec::new(
-            Opts::new("wzp_federation_peer_rtt_ms", "QUIC RTT to federated peer in milliseconds"),
+            Opts::new(
+                "wzp_federation_peer_rtt_ms",
+                "QUIC RTT to federated peer in milliseconds",
+            ),
             &["peer"],
-        ).expect("metric");
+        )
+        .expect("metric");
         let federation_packets_forwarded = IntCounterVec::new(
-            Opts::new("wzp_federation_packets_forwarded_total", "Packets forwarded to/from federated peers"),
+            Opts::new(
+                "wzp_federation_packets_forwarded_total",
+                "Packets forwarded to/from federated peers",
+            ),
             &["peer", "direction"],
-        ).expect("metric");
-        let federation_packets_deduped = IntCounter::with_opts(
-            Opts::new("wzp_federation_packets_deduped_total", "Duplicate federation packets dropped"),
-        ).expect("metric");
-        let federation_packets_rate_limited = IntCounter::with_opts(
-            Opts::new("wzp_federation_packets_rate_limited_total", "Federation packets dropped by rate limiter"),
-        ).expect("metric");
-        let federation_active_rooms = IntGauge::with_opts(
-            Opts::new("wzp_federation_active_rooms", "Number of federated rooms currently active"),
-        ).expect("metric");
+        )
+        .expect("metric");
+        let federation_packets_deduped = IntCounter::with_opts(Opts::new(
+            "wzp_federation_packets_deduped_total",
+            "Duplicate federation packets dropped",
+        ))
+        .expect("metric");
+        let federation_packets_rate_limited = IntCounter::with_opts(Opts::new(
+            "wzp_federation_packets_rate_limited_total",
+            "Federation packets dropped by rate limiter",
+        ))
+        .expect("metric");
+        let federation_active_rooms = IntGauge::with_opts(Opts::new(
+            "wzp_federation_active_rooms",
+            "Number of federated rooms currently active",
+        ))
+        .expect("metric");
 
         let session_buffer_depth = IntGaugeVec::new(
             Opts::new(
@@ -109,10 +131,7 @@ impl RelayMetrics {
         )
         .expect("metric");
         let session_rtt_ms = GaugeVec::new(
-            Opts::new(
-                "wzp_relay_session_rtt_ms",
-                "Round-trip time per session",
-            ),
+            Opts::new("wzp_relay_session_rtt_ms", "Round-trip time per session"),
             &["session_id"],
         )
         .expect("metric");
@@ -150,25 +169,63 @@ impl RelayMetrics {
         )
         .expect("metric");
 
-        registry.register(Box::new(active_sessions.clone())).expect("register");
-        registry.register(Box::new(active_rooms.clone())).expect("register");
-        registry.register(Box::new(packets_forwarded.clone())).expect("register");
-        registry.register(Box::new(bytes_forwarded.clone())).expect("register");
-        registry.register(Box::new(auth_attempts.clone())).expect("register");
-        registry.register(Box::new(handshake_duration.clone())).expect("register");
-        registry.register(Box::new(federation_peer_status.clone())).expect("register");
-        registry.register(Box::new(federation_peer_rtt_ms.clone())).expect("register");
-        registry.register(Box::new(federation_packets_forwarded.clone())).expect("register");
-        registry.register(Box::new(federation_packets_deduped.clone())).expect("register");
-        registry.register(Box::new(federation_packets_rate_limited.clone())).expect("register");
-        registry.register(Box::new(federation_active_rooms.clone())).expect("register");
-        registry.register(Box::new(session_buffer_depth.clone())).expect("register");
-        registry.register(Box::new(session_loss_pct.clone())).expect("register");
-        registry.register(Box::new(session_rtt_ms.clone())).expect("register");
-        registry.register(Box::new(session_underruns.clone())).expect("register");
-        registry.register(Box::new(session_overruns.clone())).expect("register");
-        registry.register(Box::new(session_dred_reconstructions.clone())).expect("register");
-        registry.register(Box::new(session_classical_plc.clone())).expect("register");
+        registry
+            .register(Box::new(active_sessions.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(active_rooms.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(packets_forwarded.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(bytes_forwarded.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(auth_attempts.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(handshake_duration.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(federation_peer_status.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(federation_peer_rtt_ms.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(federation_packets_forwarded.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(federation_packets_deduped.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(federation_packets_rate_limited.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(federation_active_rooms.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_buffer_depth.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_loss_pct.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_rtt_ms.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_underruns.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_overruns.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_dred_reconstructions.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(session_classical_plc.clone()))
+            .expect("register");
 
         Self {
             active_sessions,
@@ -230,10 +287,7 @@ impl RelayMetrics {
                 .with_label_values(&[session_id])
                 .inc_by(underruns - cur_underruns as u64);
         }
-        let cur_overruns = self
-            .session_overruns
-            .with_label_values(&[session_id])
-            .get();
+        let cur_overruns = self.session_overruns.with_label_values(&[session_id]).get();
         if overruns > cur_overruns as u64 {
             self.session_overruns
                 .with_label_values(&[session_id])
@@ -284,7 +338,9 @@ impl RelayMetrics {
         let _ = self
             .session_dred_reconstructions
             .remove_label_values(&[session_id]);
-        let _ = self.session_classical_plc.remove_label_values(&[session_id]);
+        let _ = self
+            .session_classical_plc
+            .remove_label_values(&[session_id]);
     }
 
     /// Get a reference to the underlying Prometheus registry.
@@ -298,7 +354,9 @@ impl RelayMetrics {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).expect("encode");
+        encoder
+            .encode(&metric_families, &mut buffer)
+            .expect("encode");
         String::from_utf8(buffer).expect("utf8")
     }
 }
@@ -310,7 +368,7 @@ pub async fn serve_metrics(
     presence: Option<Arc<tokio::sync::Mutex<crate::presence::PresenceRegistry>>>,
     route_resolver: Option<Arc<crate::route::RouteResolver>>,
 ) {
-    use axum::{extract::Path, routing::get, Router};
+    use axum::{Router, extract::Path, routing::get};
 
     let metrics_clone = metrics.clone();
     let presence_all = presence.clone();
@@ -454,8 +512,8 @@ mod tests {
     fn session_quality_update() {
         let m = RelayMetrics::new();
         let report = QualityReport {
-            loss_pct: 128,   // ~50%
-            rtt_4ms: 25,     // 100ms
+            loss_pct: 128, // ~50%
+            rtt_4ms: 25,   // 100ms
             jitter_ms: 10,
             bitrate_cap_kbps: 200,
         };

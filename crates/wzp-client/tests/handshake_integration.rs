@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 use wzp_proto::packet::MediaPacket;
 use wzp_proto::traits::{MediaTransport, PathQuality};
@@ -83,7 +83,11 @@ async fn full_handshake_both_sides_derive_same_session() {
 
     // Run client and relay handshakes concurrently.
     let (client_result, relay_result) = tokio::join!(
-        wzp_client::handshake::perform_handshake(client_transport_clone.as_ref(), &client_seed, None),
+        wzp_client::handshake::perform_handshake(
+            client_transport_clone.as_ref(),
+            &client_seed,
+            None
+        ),
         wzp_relay::handshake::accept_handshake(relay_transport_clone.as_ref(), &relay_seed),
     );
 

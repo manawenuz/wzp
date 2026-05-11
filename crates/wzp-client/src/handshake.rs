@@ -55,21 +55,21 @@ pub async fn perform_handshake(
         .await?
         .ok_or_else(|| anyhow::anyhow!("connection closed before receiving CallAnswer"))?;
 
-    let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile) = match answer
-    {
-        SignalMessage::CallAnswer {
-            identity_pub,
-            ephemeral_pub,
-            signature,
-            chosen_profile,
-        } => (identity_pub, ephemeral_pub, signature, chosen_profile),
-        other => {
-            return Err(anyhow::anyhow!(
-                "expected CallAnswer, got {:?}",
-                std::mem::discriminant(&other)
-            ))
-        }
-    };
+    let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile) =
+        match answer {
+            SignalMessage::CallAnswer {
+                identity_pub,
+                ephemeral_pub,
+                signature,
+                chosen_profile,
+            } => (identity_pub, ephemeral_pub, signature, chosen_profile),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "expected CallAnswer, got {:?}",
+                    std::mem::discriminant(&other)
+                ));
+            }
+        };
 
     // 6. Verify callee's signature over (ephemeral_pub || "call-answer")
     let mut verify_data = Vec::with_capacity(32 + 11);

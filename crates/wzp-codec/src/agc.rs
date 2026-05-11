@@ -24,12 +24,12 @@ impl AutoGainControl {
     /// Create a new AGC with sensible VoIP defaults.
     pub fn new() -> Self {
         Self {
-            target_rms: 3000.0,   // ~-20 dBFS for i16
+            target_rms: 3000.0, // ~-20 dBFS for i16
             current_gain: 1.0,
             min_gain: 0.5,
             max_gain: 32.0,
-            attack_alpha: 0.3,    // fast attack
-            release_alpha: 0.02,  // slow release
+            attack_alpha: 0.3,   // fast attack
+            release_alpha: 0.02, // slow release
             enabled: true,
         }
     }
@@ -211,9 +211,6 @@ mod tests {
     fn agc_gain_db_at_unity() {
         let agc = AutoGainControl::new();
         let db = agc.current_gain_db();
-        assert!(
-            db.abs() < 0.01,
-            "expected ~0 dB at unity gain, got {db}"
-        );
+        assert!(db.abs() < 0.01, "expected ~0 dB at unity gain, got {db}");
     }
 }

@@ -9,8 +9,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use crate::packet::QualityReport;
 use crate::QualityProfile;
+use crate::packet::QualityReport;
 
 /// Network congestion state derived from delay and loss signals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -396,10 +396,7 @@ mod tests {
 
         // Below 8 => CATASTROPHIC
         let bwe_cat = BandwidthEstimator::new(7.9, 2.0, 100.0);
-        assert_eq!(
-            bwe_cat.recommended_profile(),
-            QualityProfile::CATASTROPHIC
-        );
+        assert_eq!(bwe_cat.recommended_profile(), QualityProfile::CATASTROPHIC);
 
         // High bandwidth
         let bwe_high = BandwidthEstimator::new(80.0, 2.0, 100.0);
@@ -413,7 +410,7 @@ mod tests {
         // Build a QualityReport with moderate loss and RTT.
         let report = QualityReport {
             loss_pct: (10.0_f32 / 100.0 * 255.0) as u8, // ~10% loss
-            rtt_4ms: 25,                                   // 100ms RTT
+            rtt_4ms: 25,                                // 100ms RTT
             jitter_ms: 10,
             bitrate_cap_kbps: 200,
         };

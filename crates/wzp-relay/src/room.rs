@@ -4,18 +4,18 @@
 //! the relay forwards it to all other participants in the room (SFU model).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
 use tracing::{error, info, warn};
 
+use wzp_proto::MediaTransport;
 use wzp_proto::packet::TrunkFrame;
 use wzp_proto::quality::{AdaptiveQualityController, Tier};
 use wzp_proto::traits::QualityController;
-use wzp_proto::MediaTransport;
 
 use crate::metrics::RelayMetrics;
 use crate::trunk::TrunkBatcher;
@@ -32,7 +32,14 @@ impl DebugTap {
         self.room_filter == "*" || self.room_filter == room_name
     }
 
-    pub fn log_packet(&self, room: &str, dir: &str, addr: &std::net::SocketAddr, pkt: &wzp_proto::MediaPacket, fan_out: usize) {
+    pub fn log_packet(
+        &self,
+        room: &str,
+        dir: &str,
+        addr: &std::net::SocketAddr,
+        pkt: &wzp_proto::MediaPacket,
+        fan_out: usize,
+    ) {
         let h = &pkt.header;
         info!(
             target: "debug_tap",
@@ -43,8 +50,7 @@ impl DebugTap {
             codec = ?h.codec_id,
             ts = h.timestamp,
             fec_block = h.fec_block,
-            fec_sym = h.fec_symbol,
-            repair = h.is_repair,
+            repair = h.is_repair(),
             len = pkt.payload.len(),
             fan_out,
             "TAP"
@@ -53,8 +59,12 @@ impl DebugTap {
 
     pub fn log_signal(&self, room: &str, signal: &wzp_proto::SignalMessage) {
         match signal {
-            wzp_proto::SignalMessage::RoomUpdate { count, participants } => {
-                let names: Vec<&str> = participants.iter()
+            wzp_proto::SignalMessage::RoomUpdate {
+                count,
+                participants,
+            } => {
+                let names: Vec<&str> = participants
+                    .iter()
                     .map(|p| p.alias.as_deref().unwrap_or("?"))
                     .collect();
                 info!(
@@ -66,7 +76,10 @@ impl DebugTap {
                     "TAP SIGNAL"
                 );
             }
-            wzp_proto::SignalMessage::QualityDirective { recommended_profile, reason } => {
+            wzp_proto::SignalMessage::QualityDirective {
+                recommended_profile,
+                reason,
+            } => {
                 info!(
                     target: "debug_tap",
                     room = %room,
@@ -119,7 +132,7 @@ pub struct TapStats {
     pub out_pkts: u64,
     pub seq_gaps: u64,
     pub codecs_seen: std::collections::HashSet<wzp_proto::CodecId>,
-    last_seq: Option<u16>,
+    last_seq: Option<u32>,
 }
 
 impl TapStats {
@@ -225,17 +238,29 @@ impl ParticipantSender {
     /// Send raw bytes to this participant.
     pub async fn send_raw(&self, data: &[u8]) -> Result<(), String> {
         match self {
-            ParticipantSender::WebSocket(tx) => {
-                tx.try_send(Bytes::copy_from_slice(data))
-                    .map_err(|e| format!("ws send: {e}"))
-            }
+            ParticipantSender::WebSocket(tx) => tx
+                .try_send(Bytes::copy_from_slice(data))
+                .map_err(|e| format!("ws send: {e}")),
             ParticipantSender::Quic(transport) => {
                 let pkt = wzp_proto::MediaPacket {
-                    header: wzp_proto::packet::MediaHeader::default_pcm(),
+                    header: wzp_proto::packet::MediaHeader {
+                        version: 2,
+                        flags: 0,
+                        media_type: wzp_proto::MediaType::Audio,
+                        codec_id: wzp_proto::CodecId::Opus24k,
+                        stream_id: 0,
+                        fec_ratio: 0,
+                        seq: 0,
+                        timestamp: 0,
+                        fec_block: 0,
+                    },
                     payload: Bytes::copy_from_slice(data),
                     quality_report: None,
                 };
-                transport.send_media(&pkt).await.map_err(|e| format!("quic send: {e}"))
+                transport
+                    .send_media(&pkt)
+                    .await
+                    .map_err(|e| format!("quic send: {e}"))
             }
         }
     }
@@ -301,13 +326,23 @@ impl Room {
     ) -> ParticipantId {
         let id = next_id();
         info!(room_size = self.participants.len() + 1, participant = id, %addr, "joined room");
-        self.participants.push(Participant { id, _addr: addr, sender, fingerprint, alias });
+        self.participants.push(Participant {
+            id,
+            _addr: addr,
+            sender,
+            fingerprint,
+            alias,
+        });
         id
     }
 
     fn remove(&mut self, id: ParticipantId) {
         self.participants.retain(|p| p.id != id);
-        info!(room_size = self.participants.len(), participant = id, "left room");
+        info!(
+            room_size = self.participants.len(),
+            participant = id,
+            "left room"
+        );
     }
 
     fn others(&self, exclude_id: ParticipantId) -> Vec<ParticipantSender> {
@@ -387,7 +422,8 @@ impl RoomManager {
     /// Grant a fingerprint access to a room.
     pub fn allow(&self, room_name: &str, fingerprint: &str) {
         if let Some(ref acl) = self.acl {
-            acl.lock().unwrap()
+            acl.lock()
+                .unwrap()
                 .entry(room_name.to_string())
                 .or_default()
                 .insert(fingerprint.to_string());
@@ -398,7 +434,7 @@ impl RoomManager {
     /// Returns true if ACL is disabled (open mode) or the fingerprint is in the allow list.
     pub fn is_authorized(&self, room_name: &str, fingerprint: Option<&str>) -> bool {
         match (&self.acl, fingerprint) {
-            (None, _) => true, // no ACL = open
+            (None, _) => true,        // no ACL = open
             (Some(_), None) => false, // ACL enabled but no fingerprint
             (Some(acl), Some(fp)) => {
                 let acl = acl.lock().unwrap();
@@ -419,14 +455,29 @@ impl RoomManager {
         sender: ParticipantSender,
         fingerprint: Option<&str>,
         alias: Option<&str>,
-    ) -> Result<(ParticipantId, wzp_proto::SignalMessage, Vec<ParticipantSender>), String> {
+    ) -> Result<
+        (
+            ParticipantId,
+            wzp_proto::SignalMessage,
+            Vec<ParticipantSender>,
+        ),
+        String,
+    > {
         if !self.is_authorized(room_name, fingerprint) {
             warn!(room = room_name, fingerprint = ?fingerprint, "unauthorized room join attempt");
             return Err("not authorized for this room".to_string());
         }
         let was_empty = self.rooms.get(room_name).map_or(true, |r| r.is_empty());
-        let mut room = self.rooms.entry(room_name.to_string()).or_insert_with(Room::new);
-        let id = room.add(addr, sender, fingerprint.map(|s| s.to_string()), alias.map(|s| s.to_string()));
+        let mut room = self
+            .rooms
+            .entry(room_name.to_string())
+            .or_insert_with(Room::new);
+        let id = room.add(
+            addr,
+            sender,
+            fingerprint.map(|s| s.to_string()),
+            alias.map(|s| s.to_string()),
+        );
         room.qualities.insert(id, ParticipantQuality::new());
         let update = wzp_proto::SignalMessage::RoomUpdate {
             count: room.len() as u32,
@@ -435,7 +486,9 @@ impl RoomManager {
         let senders = room.all_senders();
         drop(room); // release DashMap guard before event_tx send (not async, but good practice)
         if was_empty {
-            let _ = self.event_tx.send(RoomEvent::LocalJoin { room: room_name.to_string() });
+            let _ = self.event_tx.send(RoomEvent::LocalJoin {
+                room: room_name.to_string(),
+            });
         }
         Ok((id, update, senders))
     }
@@ -448,7 +501,13 @@ impl RoomManager {
         sender: tokio::sync::mpsc::Sender<Bytes>,
         fingerprint: Option<&str>,
     ) -> Result<ParticipantId, String> {
-        let (id, _update, _senders) = self.join(room_name, addr, ParticipantSender::WebSocket(sender), fingerprint, None)?;
+        let (id, _update, _senders) = self.join(
+            room_name,
+            addr,
+            ParticipantSender::WebSocket(sender),
+            fingerprint,
+            None,
+        )?;
         Ok(id)
     }
 
@@ -458,23 +517,30 @@ impl RoomManager {
     }
 
     /// Get participant list for a room (fingerprint + alias).
-    pub fn local_participant_list(&self, room_name: &str) -> Vec<wzp_proto::packet::RoomParticipant> {
-        self.rooms.get(room_name)
+    pub fn local_participant_list(
+        &self,
+        room_name: &str,
+    ) -> Vec<wzp_proto::packet::RoomParticipant> {
+        self.rooms
+            .get(room_name)
             .map(|room| room.participant_list())
             .unwrap_or_default()
     }
 
     /// Get all senders for participants in a room (for federation inbound media delivery).
     pub fn local_senders(&self, room_name: &str) -> Vec<ParticipantSender> {
-        self.rooms.get(room_name)
-            .map(|room| room.participants.iter()
-                .map(|p| p.sender.clone())
-                .collect())
+        self.rooms
+            .get(room_name)
+            .map(|room| room.participants.iter().map(|p| p.sender.clone()).collect())
             .unwrap_or_default()
     }
 
     /// Leave a room. Returns (room_update_msg, remaining_senders) for broadcasting, or None if room is now empty.
-    pub fn leave(&self, room_name: &str, participant_id: ParticipantId) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
+    pub fn leave(
+        &self,
+        room_name: &str,
+        participant_id: ParticipantId,
+    ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
         let result = {
             if let Some(mut room) = self.rooms.get_mut(room_name) {
                 room.qualities.remove(&participant_id);
@@ -482,7 +548,9 @@ impl RoomManager {
                 if room.is_empty() {
                     drop(room); // release write guard before remove
                     self.rooms.remove(room_name);
-                    let _ = self.event_tx.send(RoomEvent::LocalLeave { room: room_name.to_string() });
+                    let _ = self.event_tx.send(RoomEvent::LocalLeave {
+                        room: room_name.to_string(),
+                    });
                     info!(room = room_name, "room closed (empty)");
                     return None;
                 }
@@ -500,11 +568,7 @@ impl RoomManager {
     }
 
     /// Get senders for all OTHER participants in a room.
-    pub fn others(
-        &self,
-        room_name: &str,
-        participant_id: ParticipantId,
-    ) -> Vec<ParticipantSender> {
+    pub fn others(&self, room_name: &str, participant_id: ParticipantId) -> Vec<ParticipantSender> {
         self.rooms
             .get(room_name)
             .map(|r| r.others(participant_id))
@@ -523,7 +587,10 @@ impl RoomManager {
 
     /// List all rooms with their sizes.
     pub fn list(&self) -> Vec<(String, usize)> {
-        self.rooms.iter().map(|r| (r.key().clone(), r.len())).collect()
+        self.rooms
+            .iter()
+            .map(|r| (r.key().clone(), r.len()))
+            .collect()
     }
 
     /// Feed a quality report from a participant. If the room-wide weakest
@@ -537,7 +604,8 @@ impl RoomManager {
     ) -> Option<(wzp_proto::SignalMessage, Vec<ParticipantSender>)> {
         let mut room = self.rooms.get_mut(room_name)?;
 
-        let tier_changed = room.qualities
+        let tier_changed = room
+            .qualities
             .get_mut(&participant_id)
             .and_then(|pq| pq.observe(report))
             .is_some();
@@ -639,7 +707,9 @@ impl TrunkedForwarder {
     }
 
     fn send_frame(&self, frame: &TrunkFrame) -> anyhow::Result<()> {
-        self.transport.send_trunk(frame).map_err(|e| anyhow::anyhow!(e))
+        self.transport
+            .send_trunk(frame)
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -667,12 +737,25 @@ pub async fn run_participant(
 ) {
     if trunking_enabled {
         run_participant_trunked(
-            room_mgr, room_name, participant_id, transport, metrics, session_id,
+            room_mgr,
+            room_name,
+            participant_id,
+            transport,
+            metrics,
+            session_id,
         )
         .await;
     } else {
         run_participant_plain(
-            room_mgr, room_name, participant_id, transport, metrics, session_id, debug_tap, federation_tx, federation_room_hash,
+            room_mgr,
+            room_name,
+            participant_id,
+            transport,
+            metrics,
+            session_id,
+            debug_tap,
+            federation_tx,
+            federation_room_hash,
         )
         .await;
     }
@@ -822,7 +905,8 @@ async fn run_participant_plain(
             let data = pkt.to_bytes();
             let _ = fed_tx.try_send(FederationMediaOut {
                 room_name: room_name.clone(),
-                room_hash: federation_room_hash.unwrap_or_else(|| crate::federation::room_hash(&room_name)),
+                room_hash: federation_room_hash
+                    .unwrap_or_else(|| crate::federation::room_hash(&room_name)),
                 data,
             });
         }
@@ -874,18 +958,24 @@ async fn run_participant_plain(
     if let Some((update, senders)) = room_mgr.leave(&room_name, participant_id) {
         if let Some(ref tap) = debug_tap {
             if tap.matches(&room_name) {
-                tap.log_event(&room_name, "leave", &format!(
-                    "participant={participant_id} addr={addr} forwarded={packets_forwarded}"
-                ));
+                tap.log_event(
+                    &room_name,
+                    "leave",
+                    &format!(
+                        "participant={participant_id} addr={addr} forwarded={packets_forwarded}"
+                    ),
+                );
                 tap.log_signal(&room_name, &update);
             }
         }
         broadcast_signal(&senders, &update).await;
     } else if let Some(ref tap) = debug_tap {
         if tap.matches(&room_name) {
-            tap.log_event(&room_name, "leave", &format!(
-                "participant={participant_id} addr={addr} (room closed)"
-            ));
+            tap.log_event(
+                &room_name,
+                "leave",
+                &format!("participant={participant_id} addr={addr} (room closed)"),
+            );
         }
     }
 }
@@ -1146,17 +1236,15 @@ mod tests {
     fn make_test_packet(payload: &[u8]) -> wzp_proto::MediaPacket {
         wzp_proto::MediaPacket {
             header: wzp_proto::packet::MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: wzp_proto::MediaType::Audio,
                 codec_id: wzp_proto::CodecId::Opus16k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq: 1,
                 timestamp: 100,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(payload.to_vec()),
             quality_report: None,
@@ -1266,6 +1354,10 @@ mod tests {
 
         let participants = vec![good, bad];
         let weakest = weakest_tier(participants.iter());
-        assert_ne!(weakest, Tier::Good, "weakest should not be Good when one participant is bad");
+        assert_ne!(
+            weakest,
+            Tier::Good,
+            "weakest should not be Good when one participant is bad"
+        );
     }
 }

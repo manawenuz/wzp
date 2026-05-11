@@ -99,7 +99,11 @@ mod tests {
         }
         let original_len = pcm.len();
         ns.process(&mut pcm);
-        assert_eq!(pcm.len(), original_len, "output length must match input length");
+        assert_eq!(
+            pcm.len(),
+            original_len,
+            "output length must match input length"
+        );
     }
 
     #[test]

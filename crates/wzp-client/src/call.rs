@@ -13,11 +13,11 @@ use wzp_codec::{
 };
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
+use wzp_proto::packet::QualityReport;
 use wzp_proto::packet::{MediaHeader, MediaPacket, MiniFrameContext};
 use wzp_proto::quality::AdaptiveQualityController;
 use wzp_proto::traits::{AudioDecoder, AudioEncoder, FecDecoder, FecEncoder};
-use wzp_proto::packet::QualityReport;
-use wzp_proto::{CodecId, QualityProfile};
+use wzp_proto::{CodecId, MediaType, QualityProfile};
 
 /// Configuration for a call session.
 pub struct CallConfig {
@@ -205,7 +205,7 @@ pub struct CallEncoder {
     /// Current profile.
     profile: QualityProfile,
     /// Outbound sequence counter.
-    seq: u16,
+    seq: u32,
     /// Current FEC block.
     block_id: u8,
     /// Frame index within current block.
@@ -318,17 +318,15 @@ impl CallEncoder {
             if self.cn_counter % 10 == 0 {
                 let cn_pkt = MediaPacket {
                     header: MediaHeader {
-                        version: 0,
-                        is_repair: false,
+                        version: 2,
+                        flags: 0,
+                        media_type: MediaType::Audio,
                         codec_id: CodecId::ComfortNoise,
-                        has_quality_report: false,
-                        fec_ratio_encoded: 0,
+                        stream_id: 0,
+                        fec_ratio: 0,
                         seq: self.seq,
                         timestamp: self.timestamp_ms,
-                        fec_block: self.block_id,
-                        fec_symbol: 0,
-                        reserved: 0,
-                        csrc_count: 0,
+                        fec_block: u16::from(self.block_id),
                     },
                     payload: Bytes::from(vec![self.cn_level as u8]),
                     quality_report: None,
@@ -354,30 +352,31 @@ impl CallEncoder {
         // can cleanly identify "no RaptorQ block to assemble" and new
         // receivers can short-circuit their FEC ingest path.
         let is_opus = self.profile.codec.is_opus();
-        let (fec_block, fec_symbol, fec_ratio_encoded) = if is_opus {
-            (0u8, 0u8, 0u8)
+        let (fec_block, fec_ratio) = if is_opus {
+            (0u16, 0u8)
         } else {
             (
-                self.block_id,
-                self.frame_in_block,
+                u16::from(self.block_id) | (u16::from(self.frame_in_block) << 8),
                 MediaHeader::encode_fec_ratio(self.profile.fec_ratio),
             )
         };
 
         // Build source media packet
+        let mut flags = 0u8;
+        if self.pending_quality_report.is_some() {
+            flags |= MediaHeader::FLAG_QUALITY;
+        }
         let source_pkt = MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags,
+                media_type: MediaType::Audio,
                 codec_id: self.profile.codec,
-                has_quality_report: self.pending_quality_report.is_some(),
-                fec_ratio_encoded,
+                stream_id: 0,
+                fec_ratio,
                 seq: self.seq,
                 timestamp: self.timestamp_ms,
                 fec_block,
-                fec_symbol,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(encoded.clone()),
             quality_report: self.pending_quality_report.take(),
@@ -402,19 +401,15 @@ impl CallEncoder {
                     for (sym_idx, repair_data) in repairs {
                         output.push(MediaPacket {
                             header: MediaHeader {
-                                version: 0,
-                                is_repair: true,
+                                version: 2,
+                                flags: MediaHeader::FLAG_REPAIR,
+                                media_type: MediaType::Audio,
                                 codec_id: self.profile.codec,
-                                has_quality_report: false,
-                                fec_ratio_encoded: MediaHeader::encode_fec_ratio(
-                                    self.profile.fec_ratio,
-                                ),
+                                stream_id: 0,
+                                fec_ratio: MediaHeader::encode_fec_ratio(self.profile.fec_ratio),
                                 seq: self.seq,
                                 timestamp: self.timestamp_ms,
-                                fec_block: self.block_id,
-                                fec_symbol: sym_idx,
-                                reserved: 0,
-                                csrc_count: 0,
+                                fec_block: u16::from(self.block_id) | (u16::from(sym_idx) << 8),
                             },
                             payload: Bytes::from(repair_data),
                             quality_report: None,
@@ -508,7 +503,7 @@ pub struct CallDecoder {
     last_good_dred: DredState,
     /// Sequence number of the packet that produced `last_good_dred`. `None`
     /// if no packet has yielded DRED state yet (cold start or legacy sender).
-    last_good_dred_seq: Option<u16>,
+    last_good_dred_seq: Option<u32>,
     /// Phase 4 telemetry counter: gaps recovered via DRED reconstruction.
     pub dred_reconstructions: u64,
     /// Phase 4 telemetry counter: gaps filled via classical Opus PLC
@@ -570,9 +565,9 @@ impl CallDecoder {
         // ignored — a graceful mixed-version degradation).
         if !packet.header.codec_id.is_opus() {
             let _ = self.fec_dec.add_symbol(
-                packet.header.fec_block,
-                packet.header.fec_symbol,
-                packet.header.is_repair,
+                (packet.header.fec_block & 0xFF) as u8,
+                (packet.header.fec_block >> 8) as u8,
+                packet.header.is_repair(),
                 &packet.payload,
             );
         }
@@ -582,7 +577,7 @@ impl CallDecoder {
         // swap with the cached `last_good_dred` so later gap reconstruction
         // has fresh neural redundancy to draw from. Parsing happens before
         // the jitter push because the jitter buffer consumes the packet.
-        if packet.header.codec_id.is_opus() && !packet.header.is_repair {
+        if packet.header.codec_id.is_opus() && !packet.header.is_repair() {
             match self
                 .dred_decoder
                 .parse_into(&mut self.dred_parse_scratch, &packet.payload)
@@ -611,7 +606,7 @@ impl CallDecoder {
         // Source packets (Opus or Codec2) go to the jitter buffer for decode.
         // Repair packets never reach the jitter buffer; for Codec2 they're
         // used by the FEC decoder above, for Opus they're dropped here.
-        if !packet.header.is_repair {
+        if !packet.header.is_repair() {
             self.jitter.push(packet);
         }
     }
@@ -711,12 +706,12 @@ impl CallDecoder {
                     if let Some(last_seq) = self.last_good_dred_seq {
                         // How many frames ahead of the missing seq is the
                         // last-good packet? Use wrapping arithmetic for the
-                        // u16 seq space.
+                        // u32 seq space.
                         let seq_delta = last_seq.wrapping_sub(seq);
-                        // Reject stale or backward state. u16 wraparound
+                        // Reject stale or backward state. u32 wraparound
                         // would make a "seq went backward" delta very large;
                         // cap at a sane forward-looking window.
-                        const MAX_SEQ_DELTA: u16 = 128;
+                        const MAX_SEQ_DELTA: u32 = 128;
                         if seq_delta > 0 && seq_delta <= MAX_SEQ_DELTA {
                             let frame_samples =
                                 (48_000 * self.profile.frame_duration_ms as i32) / 1000;
@@ -785,7 +780,7 @@ impl CallDecoder {
     /// Phase 3b introspection: sequence number of the most recently parsed
     /// valid DRED state, or `None` if no Opus packet has yielded DRED data
     /// yet. Used by tests to debug reconstruction eligibility.
-    pub fn last_good_dred_seq(&self) -> Option<u16> {
+    pub fn last_good_dred_seq(&self) -> Option<u32> {
         self.last_good_dred_seq
     }
 
@@ -852,7 +847,7 @@ mod tests {
         let packets = enc.encode_frame(&pcm).unwrap();
         assert!(!packets.is_empty());
         assert_eq!(packets[0].header.seq, 0);
-        assert!(!packets[0].header.is_repair);
+        assert!(!packets[0].header.is_repair());
     }
 
     /// Phase 2: Opus packets have zero FEC header fields — no block, no
@@ -875,10 +870,9 @@ mod tests {
         assert_eq!(packets.len(), 1, "Opus must emit exactly 1 source packet");
         let hdr = &packets[0].header;
         assert!(hdr.codec_id.is_opus());
-        assert!(!hdr.is_repair);
+        assert!(!hdr.is_repair());
         assert_eq!(hdr.fec_block, 0, "Opus fec_block must be 0");
-        assert_eq!(hdr.fec_symbol, 0, "Opus fec_symbol must be 0");
-        assert_eq!(hdr.fec_ratio_encoded, 0, "Opus fec_ratio_encoded must be 0");
+        assert_eq!(hdr.fec_ratio, 0, "Opus fec_ratio must be 0");
     }
 
     /// Phase 2: Opus never emits repair packets, regardless of how many
@@ -902,7 +896,7 @@ mod tests {
         for _ in 0..20 {
             let packets = enc.encode_frame(&pcm).unwrap();
             total_packets += packets.len();
-            repair_count += packets.iter().filter(|p| p.header.is_repair).count();
+            repair_count += packets.iter().filter(|p| p.header.is_repair()).count();
         }
         assert_eq!(repair_count, 0, "Opus must emit zero repair packets");
         assert_eq!(
@@ -934,7 +928,7 @@ mod tests {
         for _ in 0..16 {
             let packets = enc.encode_frame(&pcm).unwrap();
             for p in &packets {
-                if p.header.is_repair {
+                if p.header.is_repair() {
                     repair_count += 1;
                 }
             }
@@ -953,17 +947,15 @@ mod tests {
 
         let pkt = MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus24k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq: 0,
                 timestamp: 0,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(vec![0u8; 60]),
             quality_report: None,
@@ -1025,17 +1017,15 @@ mod tests {
                 encoded.truncate(n);
                 let pkt = MediaPacket {
                     header: MediaHeader {
-                        version: 0,
-                        is_repair: false,
+                        version: 2,
+                        flags: 0,
+                        media_type: MediaType::Audio,
                         codec_id: CodecId::Opus24k,
-                        has_quality_report: false,
-                        fec_ratio_encoded: 0,
-                        seq: i,
+                        stream_id: 0,
+                        fec_ratio: 0,
+                        seq: i as u32,
                         timestamp: (i as u32) * 20,
                         fec_block: 0,
-                        fec_symbol: 0,
-                        reserved: 0,
-                        csrc_count: 0,
                     },
                     payload: Bytes::from(encoded),
                     quality_report: None,
@@ -1105,9 +1095,7 @@ mod tests {
 
         let dred_delta = dec.dred_reconstructions - baseline_dred;
         let plc_delta = dec.classical_plc_invocations - baseline_plc;
-        eprintln!(
-            "[phase3b probe] post-drain: dred_delta={dred_delta} plc_delta={plc_delta}"
-        );
+        eprintln!("[phase3b probe] post-drain: dred_delta={dred_delta} plc_delta={plc_delta}");
         assert!(
             dred_delta >= 1,
             "expected ≥1 DRED reconstruction on single-packet loss, \
@@ -1168,7 +1156,7 @@ mod tests {
             let packets = enc.encode_frame(&pcm).unwrap();
             for pkt in packets {
                 // Drop every 5th source packet to simulate loss.
-                if !pkt.header.is_repair && i % 5 == 3 {
+                if !pkt.header.is_repair() && i % 5 == 3 {
                     continue;
                 }
                 dec.ingest(pkt);
@@ -1322,20 +1310,18 @@ mod tests {
 
     // ---- JitterStats telemetry tests ----
 
-    fn make_test_packet(seq: u16) -> MediaPacket {
+    fn make_test_packet(seq: u32) -> MediaPacket {
         MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus24k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq,
-                timestamp: seq as u32 * 20,
+                timestamp: seq * 20,
                 fec_block: 0,
-                fec_symbol: seq as u8,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(vec![0u8; 60]),
             quality_report: None,
@@ -1347,7 +1333,7 @@ mod tests {
         let config = CallConfig::default();
         let mut dec = CallDecoder::new(&config);
 
-        for i in 0..5u16 {
+        for i in 0..5u32 {
             dec.ingest(make_test_packet(i));
         }
 
@@ -1377,7 +1363,7 @@ mod tests {
         let mut dec = CallDecoder::new(&config);
 
         // Generate some stats: ingest packets and trigger underruns on empty buffer
-        for i in 0..3u16 {
+        for i in 0..3u32 {
             dec.ingest(make_test_packet(i));
         }
         // Also call decode on empty decoder to get underruns
@@ -1456,10 +1442,7 @@ mod tests {
             cn_packets >= 1,
             "should have at least one CN packet, got {cn_packets}"
         );
-        assert!(
-            enc.frames_suppressed > 0,
-            "frames_suppressed should be > 0"
-        );
+        assert!(enc.frames_suppressed > 0, "frames_suppressed should be > 0");
     }
 
     // ---- DredTuner integration tests ----
@@ -1506,7 +1489,10 @@ mod tests {
         // Verify the encoder still works after tuning.
         let pcm = voice_frame_20ms(0);
         let packets = enc.encode_frame(&pcm).unwrap();
-        assert!(!packets.is_empty(), "encoder must still produce packets after DRED tuning");
+        assert!(
+            !packets.is_empty(),
+            "encoder must still produce packets after DRED tuning"
+        );
     }
 
     /// DredTuner jitter spike triggers pre-emptive DRED boost to ceiling.
@@ -1524,11 +1510,15 @@ mod tests {
 
         // Jitter spikes to 40ms (8x baseline of ~5ms).
         let tuning = tuner.update(0.0, 50, 40);
-        assert!(tuner.spike_boost_active(), "jitter spike should activate boost");
+        assert!(
+            tuner.spike_boost_active(),
+            "jitter spike should activate boost"
+        );
         assert!(tuning.is_some());
         // Ceiling for Opus24k is 50 frames = 500 ms.
         assert_eq!(
-            tuning.unwrap().dred_frames, 50,
+            tuning.unwrap().dred_frames,
+            50,
             "spike should push to ceiling"
         );
     }
@@ -1604,12 +1594,18 @@ mod tests {
         let pcm = voice_frame_20ms(0);
         let packets = enc.encode_frame(&pcm).unwrap();
         assert!(!packets.is_empty());
-        assert!(packets[0].header.has_quality_report, "first packet should have quality report");
+        assert!(
+            packets[0].header.has_quality(),
+            "first packet should have quality report"
+        );
         assert!(packets[0].quality_report.is_some());
 
         // Next frame should NOT have quality_report (it was consumed)
         let packets2 = enc.encode_frame(&voice_frame_20ms(960)).unwrap();
-        assert!(!packets2[0].header.has_quality_report, "second packet should not have quality report");
+        assert!(
+            !packets2[0].header.has_quality(),
+            "second packet should not have quality report"
+        );
         assert!(packets2[0].quality_report.is_none());
     }
 }

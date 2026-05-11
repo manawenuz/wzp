@@ -40,10 +40,7 @@ impl RelayLink {
     /// should skip normal client auth/handshake for relay-SNI connections.
     pub async fn connect(target: SocketAddr) -> Result<Self, anyhow::Error> {
         // Create a client-only endpoint on an OS-assigned port.
-        let endpoint = wzp_transport::create_endpoint(
-            "0.0.0.0:0".parse().unwrap(),
-            None,
-        )?;
+        let endpoint = wzp_transport::create_endpoint("0.0.0.0:0".parse().unwrap(), None)?;
 
         let client_cfg = wzp_transport::client_config();
         let conn = wzp_transport::connect(&endpoint, target, "_relay", client_cfg).await?;
@@ -457,17 +454,15 @@ mod tests {
 
         let pkt = MediaPacket {
             header: wzp_proto::packet::MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: wzp_proto::MediaType::Audio,
                 codec_id: wzp_proto::CodecId::Opus16k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq: 1,
                 timestamp: 100,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: bytes::Bytes::from_static(b"test"),
             quality_report: None,

@@ -81,9 +81,7 @@ impl AdaptivePlayoutDelay {
             let jitter = (actual_delta - expected_delta).abs();
 
             // Spike detection: check before EMA update
-            if self.jitter_ema > 0.0
-                && jitter > self.jitter_ema * self.spike_threshold_multiplier
-            {
+            if self.jitter_ema > 0.0 && jitter > self.jitter_ema * self.spike_threshold_multiplier {
                 self.spike_detected_at = Some(Instant::now());
             }
 
@@ -107,10 +105,8 @@ impl AdaptivePlayoutDelay {
                 self.target_delay = self.max_delay;
             } else {
                 // Convert jitter estimate to target delay in packets
-                let raw_target =
-                    (self.jitter_ema / FRAME_DURATION_MS).ceil() + self.safety_margin;
-                self.target_delay =
-                    (raw_target as usize).clamp(self.min_delay, self.max_delay);
+                let raw_target = (self.jitter_ema / FRAME_DURATION_MS).ceil() + self.safety_margin;
+                self.target_delay = (raw_target as usize).clamp(self.min_delay, self.max_delay);
             }
         }
 
@@ -162,9 +158,9 @@ impl AdaptivePlayoutDelay {
 /// Manages packet reordering, gap detection, and signals when PLC is needed.
 pub struct JitterBuffer {
     /// Packets waiting to be consumed, ordered by sequence number.
-    buffer: BTreeMap<u16, MediaPacket>,
+    buffer: BTreeMap<u32, MediaPacket>,
     /// Next sequence number expected for playout.
-    next_playout_seq: u16,
+    next_playout_seq: u32,
     /// Maximum buffer depth in number of packets.
     max_depth: usize,
     /// Target buffer depth (adaptive, based on jitter).
@@ -204,7 +200,7 @@ pub enum PlayoutResult {
     /// A packet is available for playout.
     Packet(MediaPacket),
     /// The expected packet is missing — decoder should generate PLC.
-    Missing { seq: u16 },
+    Missing { seq: u32 },
     /// Buffer is empty or not yet filled to target depth.
     NotReady,
 }
@@ -278,9 +274,18 @@ impl JitterBuffer {
         // federation room — reset instead of dropping.
         if self.stats.packets_played > 0 && seq_before(seq, self.next_playout_seq) {
             let backward_distance = self.next_playout_seq.wrapping_sub(seq);
-            tracing::warn!(seq, next = self.next_playout_seq, backward_distance, "jitter: backward seq detected");
+            tracing::warn!(
+                seq,
+                next = self.next_playout_seq,
+                backward_distance,
+                "jitter: backward seq detected"
+            );
             if backward_distance > 100 {
-                tracing::info!(seq, next = self.next_playout_seq, "jitter: RESET — new sender detected");
+                tracing::info!(
+                    seq,
+                    next = self.next_playout_seq,
+                    "jitter: RESET — new sender detected"
+                );
                 self.buffer.clear();
                 self.next_playout_seq = seq;
                 self.stats.packets_late = 0;
@@ -428,9 +433,18 @@ impl JitterBuffer {
         // federation room — reset instead of dropping.
         if self.stats.packets_played > 0 && seq_before(seq, self.next_playout_seq) {
             let backward_distance = self.next_playout_seq.wrapping_sub(seq);
-            tracing::warn!(seq, next = self.next_playout_seq, backward_distance, "jitter: backward seq detected");
+            tracing::warn!(
+                seq,
+                next = self.next_playout_seq,
+                backward_distance,
+                "jitter: backward seq detected"
+            );
             if backward_distance > 100 {
-                tracing::info!(seq, next = self.next_playout_seq, "jitter: RESET — new sender detected");
+                tracing::info!(
+                    seq,
+                    next = self.next_playout_seq,
+                    "jitter: RESET — new sender detected"
+                );
                 self.buffer.clear();
                 self.next_playout_seq = seq;
                 self.stats.packets_late = 0;
@@ -489,7 +503,7 @@ impl JitterBuffer {
 
 /// Sequence number comparison with wrapping (RFC 1982 serial number arithmetic).
 /// Returns true if `a` comes before `b` in sequence space.
-fn seq_before(a: u16, b: u16) -> bool {
+fn seq_before(a: u32, b: u32) -> bool {
     let diff = b.wrapping_sub(a);
     diff > 0 && diff < 0x8000
 }
@@ -497,24 +511,23 @@ fn seq_before(a: u16, b: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CodecId;
+    use crate::MediaType;
     use crate::packet::{MediaHeader, MediaPacket};
     use bytes::Bytes;
-    use crate::CodecId;
 
-    fn make_packet(seq: u16) -> MediaPacket {
+    fn make_packet(seq: u32) -> MediaPacket {
         MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus24k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq,
-                timestamp: seq as u32 * 20,
+                timestamp: seq * 20,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(vec![0u8; 60]),
             quality_report: None,
@@ -598,7 +611,7 @@ mod tests {
     fn seq_before_wrapping() {
         assert!(seq_before(0, 1));
         assert!(seq_before(65534, 65535));
-        assert!(seq_before(65535, 0)); // wrap
+        assert!(seq_before(u32::MAX, 0)); // wrap
         assert!(!seq_before(1, 0));
         assert!(!seq_before(5, 5)); // equal
     }
@@ -800,7 +813,7 @@ mod tests {
         let mut jb = JitterBuffer::new_adaptive(3, 50);
 
         // Push packets with consistent timing
-        for i in 0u16..20 {
+        for i in 0u32..20 {
             let pkt = make_packet(i);
             let arrival_ms = i as u64 * 20;
             jb.push_with_arrival(pkt, arrival_ms);

@@ -9,8 +9,8 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use wzp_proto::{CryptoError, CryptoSession, KeyExchange};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::session::ChaChaSession;
 
@@ -95,12 +95,11 @@ impl KeyExchange for WarzoneKeyExchange {
         &self,
         peer_ephemeral_pub: &[u8; 32],
     ) -> Result<Box<dyn CryptoSession>, CryptoError> {
-        let secret = self
-            .ephemeral_secret
-            .as_ref()
-            .ok_or_else(|| {
-                CryptoError::Internal("no ephemeral key generated; call generate_ephemeral first".into())
-            })?;
+        let secret = self.ephemeral_secret.as_ref().ok_or_else(|| {
+            CryptoError::Internal(
+                "no ephemeral key generated; call generate_ephemeral first".into(),
+            )
+        })?;
 
         let peer_public = X25519PublicKey::from(*peer_ephemeral_pub);
         // Use diffie_hellman with a clone of the StaticSecret

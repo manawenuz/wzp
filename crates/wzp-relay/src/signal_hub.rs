@@ -34,12 +34,15 @@ impl SignalHub {
     /// Register a new signaling client.
     pub fn register(&mut self, fp: String, transport: Arc<QuinnTransport>, alias: Option<String>) {
         info!(fingerprint = %fp, alias = ?alias, "signal client registered");
-        self.clients.insert(fp.clone(), SignalClient {
-            fingerprint: fp,
-            alias,
-            transport,
-            connected_at: Instant::now(),
-        });
+        self.clients.insert(
+            fp.clone(),
+            SignalClient {
+                fingerprint: fp,
+                alias,
+                transport,
+                connected_at: Instant::now(),
+            },
+        );
     }
 
     /// Unregister a signaling client. Returns the client if found.
@@ -64,10 +67,11 @@ impl SignalHub {
     /// Send a signal message to a client by fingerprint.
     pub async fn send_to(&self, fp: &str, msg: &SignalMessage) -> Result<(), String> {
         match self.clients.get(fp) {
-            Some(client) => {
-                client.transport.send_signal(msg).await
-                    .map_err(|e| format!("send to {fp}: {e}"))
-            }
+            Some(client) => client
+                .transport
+                .send_signal(msg)
+                .await
+                .map_err(|e| format!("send to {fp}: {e}")),
             None => Err(format!("{fp} not online")),
         }
     }

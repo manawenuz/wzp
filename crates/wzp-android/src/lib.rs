@@ -26,6 +26,6 @@ pub mod audio_android;
 pub mod audio_ring;
 pub mod commands;
 pub mod engine;
+pub mod jni_bridge;
 pub mod pipeline;
 pub mod stats;
-pub mod jni_bridge;

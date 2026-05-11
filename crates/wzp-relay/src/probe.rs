@@ -43,8 +43,7 @@ impl ProbeMetrics {
     /// Register probe metrics with the given `target` label value.
     pub fn register(target: &str, registry: &Registry) -> Self {
         let rtt_ms = Gauge::with_opts(
-            Opts::new("wzp_probe_rtt_ms", "RTT to peer relay in ms")
-                .const_label("target", target),
+            Opts::new("wzp_probe_rtt_ms", "RTT to peer relay in ms").const_label("target", target),
         )
         .expect("probe metric");
 
@@ -66,9 +65,15 @@ impl ProbeMetrics {
         )
         .expect("probe metric");
 
-        registry.register(Box::new(rtt_ms.clone())).expect("register");
-        registry.register(Box::new(loss_pct.clone())).expect("register");
-        registry.register(Box::new(jitter_ms.clone())).expect("register");
+        registry
+            .register(Box::new(rtt_ms.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(loss_pct.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(jitter_ms.clone()))
+            .expect("register");
         registry.register(Box::new(up.clone())).expect("register");
 
         Self {
@@ -168,7 +173,11 @@ impl ProbeRunner {
     ) -> Self {
         let target_str = config.target.to_string();
         let metrics = ProbeMetrics::register(&target_str, registry);
-        Self { config, metrics, presence }
+        Self {
+            config,
+            metrics,
+            presence,
+        }
     }
 
     /// Run the probe forever. This function never returns under normal operation.
@@ -198,13 +207,8 @@ impl ProbeRunner {
         let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
         let client_cfg = wzp_transport::client_config();
-        let conn = wzp_transport::connect(
-            &endpoint,
-            self.config.target,
-            "_probe",
-            client_cfg,
-        )
-        .await?;
+        let conn =
+            wzp_transport::connect(&endpoint, self.config.target, "_probe", client_cfg).await?;
 
         let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
         self.metrics.up.set(1);
@@ -237,11 +241,15 @@ impl ProbeRunner {
                         loss_gauge.set(w.loss_pct());
                         jitter_gauge.set(w.jitter_ms());
                     }
-                    Ok(Some(SignalMessage::PresenceUpdate { fingerprints, relay_addr })) => {
+                    Ok(Some(SignalMessage::PresenceUpdate {
+                        fingerprints,
+                        relay_addr,
+                    })) => {
                         if let Some(ref reg) = recv_presence {
                             // Parse the relay_addr; fall back to the connection target
                             let addr = relay_addr.parse().unwrap_or(recv_target);
-                            let fps: std::collections::HashSet<String> = fingerprints.into_iter().collect();
+                            let fps: std::collections::HashSet<String> =
+                                fingerprints.into_iter().collect();
                             let mut r = reg.lock().await;
                             r.update_peer(addr, fps);
                         }
@@ -374,10 +382,7 @@ pub fn mesh_summary(registry: &Registry) -> String {
         let name = family.get_name();
         for metric in family.get_metric() {
             // Find the "target" label
-            let target_label = metric
-                .get_label()
-                .iter()
-                .find(|l| l.get_name() == "target");
+            let target_label = metric.get_label().iter().find(|l| l.get_name() == "target");
             let target = match target_label {
                 Some(l) => l.get_value().to_string(),
                 None => continue,
@@ -420,10 +425,7 @@ pub fn mesh_summary(registry: &Registry) -> String {
 
 /// Handle an incoming Ping signal by replying with a Pong carrying the same timestamp.
 /// Returns true if the message was a Ping and was handled, false otherwise.
-pub async fn handle_ping(
-    transport: &wzp_transport::QuinnTransport,
-    msg: &SignalMessage,
-) -> bool {
+pub async fn handle_ping(transport: &wzp_transport::QuinnTransport, msg: &SignalMessage) -> bool {
     if let SignalMessage::Ping { timestamp_ms } = msg {
         if let Err(e) = transport
             .send_signal(&SignalMessage::Pong {
@@ -456,9 +458,18 @@ mod tests {
         encoder.encode(&families, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("wzp_probe_rtt_ms"), "missing wzp_probe_rtt_ms");
-        assert!(output.contains("wzp_probe_loss_pct"), "missing wzp_probe_loss_pct");
-        assert!(output.contains("wzp_probe_jitter_ms"), "missing wzp_probe_jitter_ms");
+        assert!(
+            output.contains("wzp_probe_rtt_ms"),
+            "missing wzp_probe_rtt_ms"
+        );
+        assert!(
+            output.contains("wzp_probe_loss_pct"),
+            "missing wzp_probe_loss_pct"
+        );
+        assert!(
+            output.contains("wzp_probe_jitter_ms"),
+            "missing wzp_probe_jitter_ms"
+        );
         assert!(output.contains("wzp_probe_up"), "missing wzp_probe_up");
         assert!(
             output.contains("target=\"127.0.0.1:4433\""),

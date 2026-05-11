@@ -11,14 +11,18 @@ use wzp_client::perform_handshake;
 use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
 use wzp_proto::{MediaTransport, SignalMessage};
 use wzp_relay::handshake::accept_handshake;
-use wzp_transport::{client_config, create_endpoint, server_config, QuinnTransport};
+use wzp_transport::{QuinnTransport, client_config, create_endpoint, server_config};
 
 /// Establish a QUIC connection and wrap both sides in `QuinnTransport`.
 ///
 /// Returns (client_transport, server_transport, _endpoints) where the endpoint
 /// tuple must be kept alive for the duration of the test to avoid premature
 /// connection teardown.
-async fn connected_pair() -> (Arc<QuinnTransport>, Arc<QuinnTransport>, (quinn::Endpoint, quinn::Endpoint)) {
+async fn connected_pair() -> (
+    Arc<QuinnTransport>,
+    Arc<QuinnTransport>,
+    (quinn::Endpoint, quinn::Endpoint),
+) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let (sc, _cert_der) = server_config();
@@ -31,7 +35,9 @@ async fn connected_pair() -> (Arc<QuinnTransport>, Arc<QuinnTransport>, (quinn::
 
     let server_ep_clone = server_ep.clone();
     let accept_fut = tokio::spawn(async move {
-        let conn = wzp_transport::accept(&server_ep_clone).await.expect("accept");
+        let conn = wzp_transport::accept(&server_ep_clone)
+            .await
+            .expect("accept");
         Arc::new(QuinnTransport::new(conn))
     });
 
@@ -59,9 +65,8 @@ async fn handshake_succeeds() {
 
     // Clone Arc so the server transport stays alive in the main task too.
     let server_t = Arc::clone(&server_transport);
-    let callee_handle = tokio::spawn(async move {
-        accept_handshake(server_t.as_ref(), &callee_seed).await
-    });
+    let callee_handle =
+        tokio::spawn(async move { accept_handshake(server_t.as_ref(), &callee_seed).await });
 
     let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
@@ -120,9 +125,8 @@ async fn handshake_verifies_identity() {
     );
 
     let server_t = Arc::clone(&server_transport);
-    let callee_handle = tokio::spawn(async move {
-        accept_handshake(server_t.as_ref(), &callee_seed).await
-    });
+    let callee_handle =
+        tokio::spawn(async move { accept_handshake(server_t.as_ref(), &callee_seed).await });
 
     let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
@@ -179,13 +183,17 @@ async fn auth_then_handshake() {
 
         let token = match auth_msg {
             SignalMessage::AuthToken { token } => token,
-            other => panic!("expected AuthToken, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected AuthToken, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         };
 
         // 2. Run the cryptographic handshake
-        let (session, profile, _caller_fp, _caller_alias) = accept_handshake(server_t.as_ref(), &callee_seed)
-            .await
-            .expect("accept_handshake after auth");
+        let (session, profile, _caller_fp, _caller_alias) =
+            accept_handshake(server_t.as_ref(), &callee_seed)
+                .await
+                .expect("accept_handshake after auth");
 
         (token, session, profile)
     });
@@ -203,9 +211,7 @@ async fn auth_then_handshake() {
         .await
         .expect("perform_handshake after auth");
 
-    let (received_token, callee_session, _profile) = callee_handle
-        .await
-        .expect("join callee task");
+    let (received_token, callee_session, _profile) = callee_handle.await.expect("join callee task");
 
     // Verify the auth token was received correctly.
     assert_eq!(received_token, "bearer-test-token-12345");
@@ -246,9 +252,8 @@ async fn handshake_rejects_bad_signature() {
 
     // Spawn callee -- it should reject the tampered CallOffer.
     let server_t = Arc::clone(&server_transport);
-    let callee_handle = tokio::spawn(async move {
-        accept_handshake(server_t.as_ref(), &callee_seed).await
-    });
+    let callee_handle =
+        tokio::spawn(async move { accept_handshake(server_t.as_ref(), &callee_seed).await });
 
     // Manually build a CallOffer with a corrupted signature.
     let mut kx = WarzoneKeyExchange::from_identity_seed(&caller_seed);

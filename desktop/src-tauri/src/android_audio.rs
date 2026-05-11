@@ -11,8 +11,8 @@
 
 #![cfg(target_os = "android")]
 
-use jni::objects::{JObject, JString, JValue};
 use jni::JavaVM;
+use jni::objects::{JObject, JString, JValue};
 
 /// Grab the JavaVM + current Activity from the ndk_context that Tauri's
 /// mobile runtime sets up at process startup.
@@ -22,8 +22,7 @@ fn jvm_and_activity() -> Result<(JavaVM, JObject<'static>), String> {
     if vm_ptr.is_null() {
         return Err("ndk_context: JavaVM pointer is null".into());
     }
-    let vm = unsafe { JavaVM::from_raw(vm_ptr) }
-        .map_err(|e| format!("JavaVM::from_raw: {e}"))?;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr) }.map_err(|e| format!("JavaVM::from_raw: {e}"))?;
     let activity_ptr = ctx.context() as jni::sys::jobject;
     if activity_ptr.is_null() {
         return Err("ndk_context: activity pointer is null".into());
@@ -140,13 +139,8 @@ pub fn start_bluetooth_sco() -> Result<(), String> {
     let am = audio_manager(&mut env, &activity)?;
 
     // Ensure speaker is off — mutually exclusive with BT.
-    env.call_method(
-        &am,
-        "setSpeakerphoneOn",
-        "(Z)V",
-        &[JValue::Bool(0)],
-    )
-    .map_err(|e| format!("setSpeakerphoneOn(false): {e}"))?;
+    env.call_method(&am, "setSpeakerphoneOn", "(Z)V", &[JValue::Bool(0)])
+        .map_err(|e| format!("setSpeakerphoneOn(false): {e}"))?;
 
     // Try modern API first (API 31+): setCommunicationDevice(AudioDeviceInfo)
     // Find a BT SCO or BLE device from getAvailableCommunicationDevices()
@@ -195,11 +189,7 @@ fn try_set_communication_device(
 ) -> Result<bool, String> {
     // Check SDK_INT >= 31 (Android 12)
     let sdk_int = env
-        .get_static_field(
-            "android/os/Build$VERSION",
-            "SDK_INT",
-            "I",
-        )
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
         .and_then(|v| v.i())
         .unwrap_or(0);
 
@@ -261,11 +251,7 @@ fn try_set_communication_device(
                 .and_then(|v| v.z())
                 .unwrap_or(false);
 
-            tracing::info!(
-                device_type,
-                ok,
-                "setCommunicationDevice: set BT device"
-            );
+            tracing::info!(device_type, ok, "setCommunicationDevice: set BT device");
             return Ok(ok);
         }
     }
@@ -293,7 +279,12 @@ pub fn is_bluetooth_sco_on() -> Result<bool, String> {
     if sdk_int >= 31 {
         // getCommunicationDevice() → AudioDeviceInfo (nullable)
         let device = env
-            .call_method(am, "getCommunicationDevice", "()Landroid/media/AudioDeviceInfo;", &[])
+            .call_method(
+                am,
+                "getCommunicationDevice",
+                "()Landroid/media/AudioDeviceInfo;",
+                &[],
+            )
             .and_then(|v| v.l())
             .unwrap_or(JObject::null());
         if device.is_null() {
@@ -351,7 +342,11 @@ pub fn is_bluetooth_available() -> Result<bool, String> {
             .unwrap_or(0);
         // TYPE_BLUETOOTH_SCO = 7, TYPE_BLUETOOTH_A2DP = 8
         if device_type == 7 || device_type == 8 {
-            tracing::info!(device_type, idx = i, "is_bluetooth_available: found BT device");
+            tracing::info!(
+                device_type,
+                idx = i,
+                "is_bluetooth_available: found BT device"
+            );
             return Ok(true);
         }
     }

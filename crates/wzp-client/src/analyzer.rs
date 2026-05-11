@@ -86,7 +86,7 @@ struct ParticipantStats {
     /// Detected lost packets (sequence gaps)
     lost: u64,
     /// Last seen sequence number
-    last_seq: u16,
+    last_seq: u32,
     /// Whether we've seen the first packet (for gap detection)
     seq_initialized: bool,
     /// EWMA jitter in ms
@@ -181,7 +181,7 @@ impl ParticipantStats {
 /// distinguish streams by proximity of consecutive sequence numbers.
 fn find_or_create_participant(
     participants: &mut Vec<ParticipantStats>,
-    seq: u16,
+    seq: u32,
     codec: CodecId,
 ) -> usize {
     for (i, p) in participants.iter().enumerate() {
@@ -304,7 +304,7 @@ struct TimelineEntry {
     #[allow(dead_code)]
     codec: CodecId,
     #[allow(dead_code)]
-    seq: u16,
+    seq: u32,
     #[allow(dead_code)]
     payload_len: usize,
     loss_pct: f64,
@@ -333,21 +333,25 @@ async fn run_replay(path: &str, args: &Args) -> anyhow::Result<()> {
     let mut timeline: Vec<TimelineEntry> = Vec::new();
 
     // Decrypt session from --key (optional)
-    let mut decrypt_session: Option<wzp_crypto::ChaChaSession> = args.key.as_ref().and_then(|hex| {
-        if hex.len() != 64 { return None; }
-        let mut key = [0u8; 32];
-        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-            let s = std::str::from_utf8(chunk).unwrap_or("00");
-            key[i] = u8::from_str_radix(s, 16).unwrap_or(0);
-        }
-        Some(wzp_crypto::ChaChaSession::new(key))
-    });
+    let mut decrypt_session: Option<wzp_crypto::ChaChaSession> =
+        args.key.as_ref().and_then(|hex| {
+            if hex.len() != 64 {
+                return None;
+            }
+            let mut key = [0u8; 32];
+            for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+                let s = std::str::from_utf8(chunk).unwrap_or("00");
+                key[i] = u8::from_str_radix(s, 16).unwrap_or(0);
+            }
+            Some(wzp_crypto::ChaChaSession::new(key))
+        });
     let mut decrypt_ok: u64 = 0;
     let mut decrypt_fail: u64 = 0;
 
     while let Some((ts_us, pkt)) = reader.next_packet()? {
         let now = Instant::now();
-        let idx = find_or_create_participant(&mut participants, pkt.header.seq, pkt.header.codec_id);
+        let idx =
+            find_or_create_participant(&mut participants, pkt.header.seq, pkt.header.codec_id);
         participants[idx].ingest(&pkt, now);
         total_packets += 1;
 
@@ -362,8 +366,10 @@ async fn run_replay(path: &str, args: &Args) -> anyhow::Result<()> {
                     if decrypt_ok <= 5 || decrypt_ok % 100 == 0 {
                         eprintln!(
                             "  decrypt ok: seq={} codec={:?} payload={}B → plaintext={}B",
-                            pkt.header.seq, pkt.header.codec_id,
-                            pkt.payload.len(), plaintext.len()
+                            pkt.header.seq,
+                            pkt.header.codec_id,
+                            pkt.payload.len(),
+                            plaintext.len()
                         );
                     }
                 }
@@ -402,7 +408,13 @@ async fn run_replay(path: &str, args: &Args) -> anyhow::Result<()> {
 
     // Generate HTML if requested
     if let Some(html_path) = &args.html {
-        generate_html_report(html_path, &participants, &timeline, total_packets, &reader.header)?;
+        generate_html_report(
+            html_path,
+            &participants,
+            &timeline,
+            total_packets,
+            &reader.header,
+        )?;
         eprintln!("HTML report: {}", html_path);
     }
 
@@ -587,12 +599,12 @@ async fn run_no_tui(
                     w.write_packet(&pkt, now)?;
                 }
             }
-            Ok(Ok(None)) => break,   // connection closed
+            Ok(Ok(None)) => break, // connection closed
             Ok(Err(e)) => {
                 tracing::warn!("recv error: {e}");
                 break;
             }
-            Err(_) => {}              // timeout, loop again
+            Err(_) => {} // timeout, loop again
         }
         if print_timer.elapsed() >= Duration::from_secs(2) {
             print_stats(participants, *total_packets);
@@ -603,7 +615,11 @@ async fn run_no_tui(
 }
 
 fn print_stats(participants: &[ParticipantStats], total: u64) {
-    eprintln!("--- {} participants | {} total packets ---", participants.len(), total);
+    eprintln!(
+        "--- {} participants | {} total packets ---",
+        participants.len(),
+        total
+    );
     for p in participants {
         eprintln!(
             "  {}: {} pkts, {:.1}% loss, {:.0}ms jitter, {:?}, {:.0}s",
@@ -693,10 +709,7 @@ async fn run_tui(
 
     // Always restore terminal, even on error
     crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
 
     result
 }
@@ -723,7 +736,7 @@ fn draw_ui(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header
-            Constraint::Min(5),   // participant table
+            Constraint::Min(5),    // participant table
             Constraint::Length(3), // footer
         ])
         .split(f.area());
@@ -735,7 +748,11 @@ fn draw_ui(
         total_packets,
         elapsed_str
     ))
-    .block(Block::default().borders(Borders::ALL).title(" Protocol Analyzer "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Protocol Analyzer "),
+    );
     f.render_widget(header, chunks[0]);
 
     // Participant table
@@ -780,9 +797,11 @@ fn draw_ui(
         Constraint::Length(10), // Duration
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header_row)
-        .block(Block::default().borders(Borders::ALL).title(" Participants "));
+    let table = Table::new(rows, widths).header(header_row).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Participants "),
+    );
     f.render_widget(table, chunks[1]);
 
     // Footer
@@ -832,7 +851,10 @@ async fn main() -> anyhow::Result<()> {
     let _crypto_session: Option<std::sync::Mutex<wzp_crypto::ChaChaSession>> =
         if let Some(ref key_hex) = args.key {
             if key_hex.len() != 64 {
-                eprintln!("Error: --key must be 64 hex characters (32 bytes). Got {} chars.", key_hex.len());
+                eprintln!(
+                    "Error: --key must be 64 hex characters (32 bytes). Got {} chars.",
+                    key_hex.len()
+                );
                 std::process::exit(1);
             }
             let mut key_bytes = [0u8; 32];
@@ -841,9 +863,9 @@ async fn main() -> anyhow::Result<()> {
                 key_bytes[i] = u8::from_str_radix(hex_str, 16).unwrap_or(0);
             }
             eprintln!("Encrypted payload decoding enabled (key loaded).");
-            Some(std::sync::Mutex::new(
-                wzp_crypto::ChaChaSession::new(key_bytes),
-            ))
+            Some(std::sync::Mutex::new(wzp_crypto::ChaChaSession::new(
+                key_bytes,
+            )))
         } else {
             None
         };
@@ -854,14 +876,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Live mode requires relay and room
-    let relay = args
-        .relay
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("relay address required for live mode (use --replay for offline)"))?;
-    let room = args
-        .room
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--room required for live mode (use --replay for offline)"))?;
+    let relay = args.relay.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("relay address required for live mode (use --replay for offline)")
+    })?;
+    let room = args.room.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("--room required for live mode (use --replay for offline)")
+    })?;
 
     // TLS crypto provider
     let _ = rustls::crypto::ring::default_provider().install_default();

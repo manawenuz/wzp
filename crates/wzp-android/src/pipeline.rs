@@ -9,8 +9,8 @@ use wzp_codec::{AdaptiveDecoder, AdaptiveEncoder, AutoGainControl, EchoCanceller
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
 use wzp_proto::quality::AdaptiveQualityController;
-use wzp_proto::traits::{AudioDecoder, AudioEncoder, FecDecoder, FecEncoder};
 use wzp_proto::traits::QualityController;
+use wzp_proto::traits::{AudioDecoder, AudioEncoder, FecDecoder, FecEncoder};
 use wzp_proto::{MediaPacket, QualityProfile};
 
 use crate::audio_android::FRAME_SAMPLES;
@@ -58,14 +58,12 @@ pub struct Pipeline {
 impl Pipeline {
     /// Create a new pipeline configured for the given quality profile.
     pub fn new(profile: QualityProfile) -> Result<Self, anyhow::Error> {
-        let encoder = AdaptiveEncoder::new(profile)
-            .map_err(|e| anyhow::anyhow!("encoder init: {e}"))?;
-        let decoder = AdaptiveDecoder::new(profile)
-            .map_err(|e| anyhow::anyhow!("decoder init: {e}"))?;
-        let fec_encoder =
-            RaptorQFecEncoder::with_defaults(profile.frames_per_block as usize);
-        let fec_decoder =
-            RaptorQFecDecoder::with_defaults(profile.frames_per_block as usize);
+        let encoder =
+            AdaptiveEncoder::new(profile).map_err(|e| anyhow::anyhow!("encoder init: {e}"))?;
+        let decoder =
+            AdaptiveDecoder::new(profile).map_err(|e| anyhow::anyhow!("decoder init: {e}"))?;
+        let fec_encoder = RaptorQFecEncoder::with_defaults(profile.frames_per_block as usize);
+        let fec_decoder = RaptorQFecDecoder::with_defaults(profile.frames_per_block as usize);
         let jitter_buffer = JitterBuffer::new(10, 250, 3);
         let quality_ctrl = AdaptiveQualityController::new();
 
@@ -211,10 +209,7 @@ impl Pipeline {
     ///
     /// Returns a new profile if a tier transition occurred.
     #[allow(unused)]
-    pub fn observe_quality(
-        &mut self,
-        report: &wzp_proto::QualityReport,
-    ) -> Option<QualityProfile> {
+    pub fn observe_quality(&mut self, report: &wzp_proto::QualityReport) -> Option<QualityProfile> {
         let new_profile = self.quality_ctrl.observe(report);
         if let Some(ref profile) = new_profile {
             if let Err(e) = self.encoder.set_profile(*profile) {

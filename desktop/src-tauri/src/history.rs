@@ -74,7 +74,9 @@ fn save_to_disk(entries: &[CallHistoryEntry]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(json) = serde_json::to_vec_pretty(entries) else { return };
+    let Ok(json) = serde_json::to_vec_pretty(entries) else {
+        return;
+    };
     // Atomic write via temp file + rename so a crash mid-write doesn't
     // leave us with a half-file on disk.
     let tmp = path.with_extension("json.tmp");
@@ -94,12 +96,7 @@ fn now_unix() -> u64 {
 
 /// Append a new entry to the store and persist to disk. Trims the store to
 /// `MAX_ENTRIES` after insertion.
-pub fn log(
-    call_id: String,
-    peer_fp: String,
-    peer_alias: Option<String>,
-    direction: CallDirection,
-) {
+pub fn log(call_id: String, peer_fp: String, peer_alias: Option<String>, direction: CallDirection) {
     tracing::info!(
         %call_id, %peer_fp, ?direction,
         alias = ?peer_alias,

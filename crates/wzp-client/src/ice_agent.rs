@@ -106,14 +106,9 @@ impl IceAgent {
         );
 
         let reflexive = stun_result.ok().and_then(|r| r.ok());
-        let mapped = portmap_result
-            .ok()
-            .flatten()
-            .map(|m| m.external_addr);
-        let local = reflect::local_host_candidates(
-            self.config.local_v4_port,
-            self.config.local_v6_port,
-        );
+        let mapped = portmap_result.ok().flatten().map(|m| m.external_addr);
+        let local =
+            reflect::local_host_candidates(self.config.local_v4_port, self.config.local_v6_port);
 
         tracing::info!(
             generation,
@@ -151,10 +146,7 @@ impl IceAgent {
     /// Process a peer's candidate update. Returns `Some(PeerCandidates)`
     /// if the update is newer than the last-seen generation, `None`
     /// if it's stale.
-    pub fn apply_peer_update(
-        &self,
-        update: &SignalMessage,
-    ) -> Option<PeerCandidates> {
+    pub fn apply_peer_update(&self, update: &SignalMessage) -> Option<PeerCandidates> {
         let (reflexive_addr, local_addrs, mapped_addr, generation) = match update {
             SignalMessage::CandidateUpdate {
                 reflexive_addr,
@@ -177,16 +169,9 @@ impl IceAgent {
             return None;
         }
 
-        let reflexive = reflexive_addr
-            .as_deref()
-            .and_then(|s| s.parse().ok());
-        let local: Vec<SocketAddr> = local_addrs
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        let mapped = mapped_addr
-            .as_deref()
-            .and_then(|s| s.parse().ok());
+        let reflexive = reflexive_addr.as_deref().and_then(|s| s.parse().ok());
+        let local: Vec<SocketAddr> = local_addrs.iter().filter_map(|s| s.parse().ok()).collect();
+        let mapped = mapped_addr.as_deref().and_then(|s| s.parse().ok());
 
         tracing::info!(
             generation,
@@ -304,10 +289,7 @@ mod tests {
         let update = SignalMessage::CandidateUpdate {
             call_id: "test-call".into(),
             reflexive_addr: Some("203.0.113.5:4433".into()),
-            local_addrs: vec![
-                "192.168.1.10:4433".into(),
-                "10.0.0.5:4433".into(),
-            ],
+            local_addrs: vec!["192.168.1.10:4433".into(), "10.0.0.5:4433".into()],
             mapped_addr: Some("198.51.100.42:12345".into()),
             generation: 1,
         };
@@ -382,16 +364,19 @@ mod tests {
     async fn gather_returns_candidates_even_with_no_stun() {
         // With default config (port 0 = no portmap, STUN will timeout
         // quickly on loopback), gather should still return host candidates.
-        let agent = IceAgent::new("test".into(), IceAgentConfig {
-            stun_config: stun::StunConfig {
-                servers: vec![], // no servers = quick failure
-                timeout: Duration::from_millis(100),
+        let agent = IceAgent::new(
+            "test".into(),
+            IceAgentConfig {
+                stun_config: stun::StunConfig {
+                    servers: vec![], // no servers = quick failure
+                    timeout: Duration::from_millis(100),
+                },
+                enable_portmap: false,
+                gather_timeout: Duration::from_millis(200),
+                local_v4_port: 12345,
+                local_v6_port: None,
             },
-            enable_portmap: false,
-            gather_timeout: Duration::from_millis(200),
-            local_v4_port: 12345,
-            local_v6_port: None,
-        });
+        );
 
         let candidates = agent.gather().await;
         assert_eq!(candidates.generation, 0);
@@ -405,16 +390,19 @@ mod tests {
 
     #[tokio::test]
     async fn re_gather_produces_signal_message() {
-        let agent = IceAgent::new("call-42".into(), IceAgentConfig {
-            stun_config: stun::StunConfig {
-                servers: vec![],
-                timeout: Duration::from_millis(50),
+        let agent = IceAgent::new(
+            "call-42".into(),
+            IceAgentConfig {
+                stun_config: stun::StunConfig {
+                    servers: vec![],
+                    timeout: Duration::from_millis(50),
+                },
+                enable_portmap: false,
+                gather_timeout: Duration::from_millis(100),
+                local_v4_port: 4433,
+                local_v6_port: None,
             },
-            enable_portmap: false,
-            gather_timeout: Duration::from_millis(100),
-            local_v4_port: 4433,
-            local_v6_port: None,
-        });
+        );
 
         let (candidates, signal) = agent.re_gather().await;
         assert_eq!(candidates.generation, 0);

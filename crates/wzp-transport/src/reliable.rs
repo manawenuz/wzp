@@ -9,10 +9,14 @@ use wzp_proto::{SignalMessage, TransportError};
 /// Send a signaling message over a new bidirectional QUIC stream.
 ///
 /// Opens a new bidi stream, writes a length-prefixed JSON frame, then finishes the send side.
-pub async fn send_signal(connection: &Connection, msg: &SignalMessage) -> Result<(), TransportError> {
-    let (mut send, _recv) = connection.open_bi().await.map_err(|e| {
-        TransportError::Internal(format!("failed to open bidi stream: {e}"))
-    })?;
+pub async fn send_signal(
+    connection: &Connection,
+    msg: &SignalMessage,
+) -> Result<(), TransportError> {
+    let (mut send, _recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| TransportError::Internal(format!("failed to open bidi stream: {e}")))?;
 
     let json = serde_json::to_vec(msg)
         .map_err(|e| TransportError::Internal(format!("signal serialize error: {e}")))?;

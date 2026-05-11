@@ -52,7 +52,10 @@ fn wzp_identity_module_matches_featherchat() {
     assert_eq!(wzp_pub.signing.as_bytes(), fc_pub.signing.as_bytes());
     assert_eq!(wzp_pub.encryption.as_bytes(), fc_pub.encryption.as_bytes());
     assert_eq!(wzp_pub.fingerprint.0, fc_pub.fingerprint.0);
-    assert_eq!(wzp_pub.fingerprint.to_string(), fc_pub.fingerprint.to_string());
+    assert_eq!(
+        wzp_pub.fingerprint.to_string(),
+        fc_pub.fingerprint.to_string()
+    );
 }
 
 #[test]
@@ -148,16 +151,25 @@ fn wzp_signal_serializes_into_fc_callsignal_payload() {
     // And deserializes back
     let decoded: warzone_protocol::message::WireMessage = bincode::deserialize(&encoded).unwrap();
     if let warzone_protocol::message::WireMessage::CallSignal {
-        id, payload: p, signal_type, ..
+        id,
+        payload: p,
+        signal_type,
+        ..
     } = decoded
     {
         assert_eq!(id, "call-123");
-        assert!(matches!(signal_type, warzone_protocol::message::CallSignalType::Offer));
+        assert!(matches!(
+            signal_type,
+            warzone_protocol::message::CallSignalType::Offer
+        ));
 
         // Decode the WZP payload back
         let wzp_payload = wzp_client::featherchat::decode_call_payload(&p).unwrap();
         assert_eq!(wzp_payload.relay_addr.unwrap(), "relay.example.com:4433");
-        assert!(matches!(wzp_payload.signal, wzp_proto::SignalMessage::CallOffer { .. }));
+        assert!(matches!(
+            wzp_payload.signal,
+            wzp_proto::SignalMessage::CallOffer { .. }
+        ));
     } else {
         panic!("expected CallSignal");
     }
@@ -204,7 +216,10 @@ fn wzp_hangup_round_trips_through_fc_callsignal() {
 
     let payload = wzp_client::featherchat::encode_call_payload(&hangup, None, None);
     let signal_type = wzp_client::featherchat::signal_to_call_type(&hangup);
-    assert!(matches!(signal_type, wzp_client::featherchat::CallSignalType::Hangup));
+    assert!(matches!(
+        signal_type,
+        wzp_client::featherchat::CallSignalType::Hangup
+    ));
 
     let fc_msg = warzone_protocol::message::WireMessage::CallSignal {
         id: "call-789".to_string(),
@@ -219,7 +234,10 @@ fn wzp_hangup_round_trips_through_fc_callsignal() {
 
     if let warzone_protocol::message::WireMessage::CallSignal { payload, .. } = decoded {
         let wzp = wzp_client::featherchat::decode_call_payload(&payload).unwrap();
-        assert!(matches!(wzp.signal, wzp_proto::SignalMessage::Hangup { .. }));
+        assert!(matches!(
+            wzp.signal,
+            wzp_proto::SignalMessage::Hangup { .. }
+        ));
     }
 }
 
@@ -252,8 +270,7 @@ fn auth_validate_response_matches_wzp_expectations() {
         "eth_address": null
     });
 
-    let wzp_resp: wzp_relay::auth::ValidateResponse =
-        serde_json::from_value(fc_response).unwrap();
+    let wzp_resp: wzp_relay::auth::ValidateResponse = serde_json::from_value(fc_response).unwrap();
     assert!(wzp_resp.valid);
     assert_eq!(
         wzp_resp.fingerprint.unwrap(),
@@ -265,8 +282,7 @@ fn auth_validate_response_matches_wzp_expectations() {
 #[test]
 fn auth_invalid_response_matches() {
     let fc_response = serde_json::json!({ "valid": false });
-    let wzp_resp: wzp_relay::auth::ValidateResponse =
-        serde_json::from_value(fc_response).unwrap();
+    let wzp_resp: wzp_relay::auth::ValidateResponse = serde_json::from_value(fc_response).unwrap();
     assert!(!wzp_resp.valid);
     assert!(wzp_resp.fingerprint.is_none());
 }
@@ -280,15 +296,18 @@ fn all_signal_types_map_correctly() {
     let cases: Vec<(wzp_proto::SignalMessage, &str)> = vec![
         (
             wzp_proto::SignalMessage::CallOffer {
-                identity_pub: [0; 32], ephemeral_pub: [0; 32],
-                signature: vec![], supported_profiles: vec![],
+                identity_pub: [0; 32],
+                ephemeral_pub: [0; 32],
+                signature: vec![],
+                supported_profiles: vec![],
                 alias: None,
             },
             "Offer",
         ),
         (
             wzp_proto::SignalMessage::CallAnswer {
-                identity_pub: [0; 32], ephemeral_pub: [0; 32],
+                identity_pub: [0; 32],
+                ephemeral_pub: [0; 32],
                 signature: vec![],
                 chosen_profile: wzp_proto::QualityProfile::GOOD,
             },
@@ -312,7 +331,10 @@ fn all_signal_types_map_correctly() {
     for (signal, expected_name) in cases {
         let ct = signal_to_call_type(&signal);
         let name = format!("{ct:?}");
-        assert_eq!(name, expected_name, "signal type mapping for {expected_name}");
+        assert_eq!(
+            name, expected_name,
+            "signal type mapping for {expected_name}"
+        );
     }
 }
 
@@ -426,8 +448,7 @@ fn auth_response_with_eth_address() {
         "alias": "vitalik",
         "eth_address": "0x1234567890abcdef1234567890abcdef12345678"
     });
-    let resp: wzp_relay::auth::ValidateResponse =
-        serde_json::from_value(with_eth).unwrap();
+    let resp: wzp_relay::auth::ValidateResponse = serde_json::from_value(with_eth).unwrap();
     assert!(resp.valid);
     assert_eq!(
         resp.fingerprint.unwrap(),
@@ -442,8 +463,7 @@ fn auth_response_with_eth_address() {
         "alias": "anon",
         "eth_address": null
     });
-    let resp2: wzp_relay::auth::ValidateResponse =
-        serde_json::from_value(with_null_eth).unwrap();
+    let resp2: wzp_relay::auth::ValidateResponse = serde_json::from_value(with_null_eth).unwrap();
     assert!(resp2.valid);
     assert_eq!(
         resp2.fingerprint.unwrap(),
@@ -454,8 +474,7 @@ fn auth_response_with_eth_address() {
     let without_eth = serde_json::json!({
         "valid": false
     });
-    let resp3: wzp_relay::auth::ValidateResponse =
-        serde_json::from_value(without_eth).unwrap();
+    let resp3: wzp_relay::auth::ValidateResponse = serde_json::from_value(without_eth).unwrap();
     assert!(!resp3.valid);
 }
 
@@ -496,7 +515,11 @@ fn all_fc_call_signal_types_representable() {
         (CallSignalType::Busy, "Busy"),
     ];
 
-    assert_eq!(variants.len(), 7, "featherChat defines exactly 7 call signal types");
+    assert_eq!(
+        variants.len(),
+        7,
+        "featherChat defines exactly 7 call signal types"
+    );
 
     for (variant, expected_name) in &variants {
         let name = format!("{variant:?}");
@@ -550,10 +573,7 @@ fn hash_room_name_used_as_sni_is_valid() {
 #[test]
 fn wzp_proto_cargo_toml_is_standalone() {
     // Try both paths (run from workspace root or from crate directory)
-    let candidates = [
-        "crates/wzp-proto/Cargo.toml",
-        "../wzp-proto/Cargo.toml",
-    ];
+    let candidates = ["crates/wzp-proto/Cargo.toml", "../wzp-proto/Cargo.toml"];
 
     let contents = candidates
         .iter()

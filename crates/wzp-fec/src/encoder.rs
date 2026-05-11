@@ -1,8 +1,8 @@
 //! RaptorQ FEC encoder — accumulates source symbols into blocks and generates repair symbols.
 
 use raptorq::{EncodingPacket, ObjectTransmissionInformation, PayloadId, SourceBlockEncoder};
-use wzp_proto::error::FecError;
 use wzp_proto::FecEncoder;
+use wzp_proto::error::FecError;
 
 /// Maximum symbol size in bytes. Audio frames are typically < 200 bytes,
 /// but we pad to a uniform size within a block.
@@ -54,8 +54,7 @@ impl RaptorQFecEncoder {
             let payload_len = sym.len().min(max_payload);
             let offset = i * ss;
             // Write 2-byte little-endian length prefix.
-            data[offset..offset + LEN_PREFIX]
-                .copy_from_slice(&(payload_len as u16).to_le_bytes());
+            data[offset..offset + LEN_PREFIX].copy_from_slice(&(payload_len as u16).to_le_bytes());
             // Write payload after prefix.
             data[offset + LEN_PREFIX..offset + LEN_PREFIX + payload_len]
                 .copy_from_slice(&sym[..payload_len]);
@@ -81,7 +80,8 @@ impl FecEncoder for RaptorQFecEncoder {
         }
 
         let block_data = self.build_block_data();
-        let config = ObjectTransmissionInformation::with_defaults(block_data.len() as u64, self.symbol_size);
+        let config =
+            ObjectTransmissionInformation::with_defaults(block_data.len() as u64, self.symbol_size);
         let encoder = SourceBlockEncoder::new(self.block_id, &config, &block_data);
 
         let num_source = self.source_symbols.len() as u32;
@@ -130,8 +130,7 @@ fn build_prefixed_block_data(symbols: &[Vec<u8>], symbol_size: u16) -> Vec<u8> {
         let max_payload = ss - LEN_PREFIX;
         let payload_len = sym.len().min(max_payload);
         let offset = i * ss;
-        data[offset..offset + LEN_PREFIX]
-            .copy_from_slice(&(payload_len as u16).to_le_bytes());
+        data[offset..offset + LEN_PREFIX].copy_from_slice(&(payload_len as u16).to_le_bytes());
         data[offset + LEN_PREFIX..offset + LEN_PREFIX + payload_len]
             .copy_from_slice(&sym[..payload_len]);
     }

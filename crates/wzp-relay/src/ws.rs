@@ -8,17 +8,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     extract::{
-        ws::{Message, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
@@ -143,9 +143,15 @@ async fn handle_ws_connection(socket: WebSocket, room: String, state: WsState) {
     // 4. Join room with WS sender
     let addr: SocketAddr = ([0, 0, 0, 0], 0).into();
     let participant_id = {
-        match state.room_mgr.join_ws(&room, addr, tx, fingerprint.as_deref()) {
+        match state
+            .room_mgr
+            .join_ws(&room, addr, tx, fingerprint.as_deref())
+        {
             Ok(id) => {
-                state.metrics.active_rooms.set(state.room_mgr.list().len() as i64);
+                state
+                    .metrics
+                    .active_rooms
+                    .set(state.room_mgr.list().len() as i64);
                 id
             }
             Err(e) => {
@@ -187,10 +193,7 @@ async fn handle_ws_connection(socket: WebSocket, room: String, state: WsState) {
                 for other in &others {
                     let _ = other.send_raw(&data).await;
                 }
-                state
-                    .metrics
-                    .packets_forwarded
-                    .inc_by(others.len() as u64);
+                state.metrics.packets_forwarded.inc_by(others.len() as u64);
                 state
                     .metrics
                     .bytes_forwarded
@@ -211,7 +214,10 @@ async fn handle_ws_connection(socket: WebSocket, room: String, state: WsState) {
     }
 
     state.room_mgr.leave(&room, participant_id);
-    state.metrics.active_rooms.set(state.room_mgr.list().len() as i64);
+    state
+        .metrics
+        .active_rooms
+        .set(state.room_mgr.list().len() as i64);
 
     let session_id_str: String = session_id.iter().map(|b| format!("{b:02x}")).collect();
     state.metrics.remove_session_metrics(&session_id_str);

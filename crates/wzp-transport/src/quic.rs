@@ -127,9 +127,9 @@ impl QuinnTransport {
             }
         }
 
-        self.connection.send_datagram(data).map_err(|e| {
-            TransportError::Internal(format!("send trunk datagram error: {e}"))
-        })?;
+        self.connection
+            .send_datagram(data)
+            .map_err(|e| TransportError::Internal(format!("send trunk datagram error: {e}")))?;
 
         Ok(())
     }
@@ -146,7 +146,7 @@ impl QuinnTransport {
             Err(e) => {
                 return Err(TransportError::Internal(format!(
                     "recv trunk datagram error: {e}"
-                )))
+                )));
             }
         };
 
@@ -177,9 +177,9 @@ impl MediaTransport for QuinnTransport {
             monitor.observe_sent(packet.header.seq, packet.header.timestamp as u64);
         }
 
-        self.connection.send_datagram(data).map_err(|e| {
-            TransportError::Internal(format!("send datagram error: {e}"))
-        })?;
+        self.connection
+            .send_datagram(data)
+            .map_err(|e| TransportError::Internal(format!("send datagram error: {e}")))?;
 
         Ok(())
     }
@@ -192,7 +192,7 @@ impl MediaTransport for QuinnTransport {
             Err(e) => {
                 return Err(TransportError::Internal(format!(
                     "recv datagram error: {e}"
-                )))
+                )));
             }
         };
 
@@ -201,15 +201,15 @@ impl MediaTransport for QuinnTransport {
                 // Record receive observation
                 {
                     let mut monitor = self.path_monitor.lock().unwrap();
-                    monitor.observe_received(
-                        packet.header.seq,
-                        packet.header.timestamp as u64,
-                    );
+                    monitor.observe_received(packet.header.seq, packet.header.timestamp as u64);
                 }
                 Ok(Some(packet))
             }
             None => {
-                tracing::warn!(len = data.len(), "skipping malformed media datagram, continuing");
+                tracing::warn!(
+                    len = data.len(),
+                    "skipping malformed media datagram, continuing"
+                );
                 // Don't return Ok(None) — that signals connection closed.
                 // Recurse to read the next datagram instead.
                 Box::pin(self.recv_media()).await
@@ -241,10 +241,8 @@ impl MediaTransport for QuinnTransport {
     }
 
     async fn close(&self) -> Result<(), TransportError> {
-        self.connection.close(
-            quinn::VarInt::from_u32(0),
-            b"normal close",
-        );
+        self.connection
+            .close(quinn::VarInt::from_u32(0), b"normal close");
         Ok(())
     }
 }

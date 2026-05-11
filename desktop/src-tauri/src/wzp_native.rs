@@ -29,8 +29,10 @@ static AUDIO_START: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static AUDIO_START_BT: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static AUDIO_STOP: OnceLock<unsafe extern "C" fn()> = OnceLock::new();
 static AUDIO_CAPTURE_AVAILABLE: OnceLock<extern "C" fn() -> usize> = OnceLock::new();
-static AUDIO_READ_CAPTURE: OnceLock<unsafe extern "C" fn(*mut i16, usize) -> usize> = OnceLock::new();
-static AUDIO_WRITE_PLAYOUT: OnceLock<unsafe extern "C" fn(*const i16, usize) -> usize> = OnceLock::new();
+static AUDIO_READ_CAPTURE: OnceLock<unsafe extern "C" fn(*mut i16, usize) -> usize> =
+    OnceLock::new();
+static AUDIO_WRITE_PLAYOUT: OnceLock<unsafe extern "C" fn(*const i16, usize) -> usize> =
+    OnceLock::new();
 static AUDIO_IS_RUNNING: OnceLock<unsafe extern "C" fn() -> i32> = OnceLock::new();
 static AUDIO_CAPTURE_LATENCY: OnceLock<unsafe extern "C" fn() -> f32> = OnceLock::new();
 static AUDIO_PLAYOUT_LATENCY: OnceLock<unsafe extern "C" fn() -> f32> = OnceLock::new();
@@ -56,25 +58,68 @@ pub fn init() -> Result<(), String> {
     unsafe {
         macro_rules! resolve {
             ($cell:expr, $ty:ty, $name:expr) => {{
-                let sym: libloading::Symbol<$ty> = lib_ref.get($name)
-                    .map_err(|e| format!("dlsym {}: {e}", core::str::from_utf8($name).unwrap_or("?")))?;
+                let sym: libloading::Symbol<$ty> = lib_ref.get($name).map_err(|e| {
+                    format!("dlsym {}: {e}", core::str::from_utf8($name).unwrap_or("?"))
+                })?;
                 // Dereference the Symbol to extract the raw fn pointer;
                 // it stays valid because lib_ref is 'static.
-                $cell.set(*sym).map_err(|_| format!("{} already set", core::str::from_utf8($name).unwrap_or("?")))?;
+                $cell.set(*sym).map_err(|_| {
+                    format!("{} already set", core::str::from_utf8($name).unwrap_or("?"))
+                })?;
             }};
         }
 
-        resolve!(VERSION, unsafe extern "C" fn() -> i32, b"wzp_native_version");
-        resolve!(HELLO, unsafe extern "C" fn(*mut u8, usize) -> usize, b"wzp_native_hello");
-        resolve!(AUDIO_START, unsafe extern "C" fn() -> i32, b"wzp_native_audio_start");
-        resolve!(AUDIO_START_BT, unsafe extern "C" fn() -> i32, b"wzp_native_audio_start_bt");
+        resolve!(
+            VERSION,
+            unsafe extern "C" fn() -> i32,
+            b"wzp_native_version"
+        );
+        resolve!(
+            HELLO,
+            unsafe extern "C" fn(*mut u8, usize) -> usize,
+            b"wzp_native_hello"
+        );
+        resolve!(
+            AUDIO_START,
+            unsafe extern "C" fn() -> i32,
+            b"wzp_native_audio_start"
+        );
+        resolve!(
+            AUDIO_START_BT,
+            unsafe extern "C" fn() -> i32,
+            b"wzp_native_audio_start_bt"
+        );
         resolve!(AUDIO_STOP, unsafe extern "C" fn(), b"wzp_native_audio_stop");
-        resolve!(AUDIO_CAPTURE_AVAILABLE, extern "C" fn() -> usize, b"wzp_native_audio_capture_available");
-        resolve!(AUDIO_READ_CAPTURE, unsafe extern "C" fn(*mut i16, usize) -> usize, b"wzp_native_audio_read_capture");
-        resolve!(AUDIO_WRITE_PLAYOUT, unsafe extern "C" fn(*const i16, usize) -> usize, b"wzp_native_audio_write_playout");
-        resolve!(AUDIO_IS_RUNNING, unsafe extern "C" fn() -> i32, b"wzp_native_audio_is_running");
-        resolve!(AUDIO_CAPTURE_LATENCY, unsafe extern "C" fn() -> f32, b"wzp_native_audio_capture_latency_ms");
-        resolve!(AUDIO_PLAYOUT_LATENCY, unsafe extern "C" fn() -> f32, b"wzp_native_audio_playout_latency_ms");
+        resolve!(
+            AUDIO_CAPTURE_AVAILABLE,
+            extern "C" fn() -> usize,
+            b"wzp_native_audio_capture_available"
+        );
+        resolve!(
+            AUDIO_READ_CAPTURE,
+            unsafe extern "C" fn(*mut i16, usize) -> usize,
+            b"wzp_native_audio_read_capture"
+        );
+        resolve!(
+            AUDIO_WRITE_PLAYOUT,
+            unsafe extern "C" fn(*const i16, usize) -> usize,
+            b"wzp_native_audio_write_playout"
+        );
+        resolve!(
+            AUDIO_IS_RUNNING,
+            unsafe extern "C" fn() -> i32,
+            b"wzp_native_audio_is_running"
+        );
+        resolve!(
+            AUDIO_CAPTURE_LATENCY,
+            unsafe extern "C" fn() -> f32,
+            b"wzp_native_audio_capture_latency_ms"
+        );
+        resolve!(
+            AUDIO_PLAYOUT_LATENCY,
+            unsafe extern "C" fn() -> f32,
+            b"wzp_native_audio_playout_latency_ms"
+        );
     }
 
     Ok(())
@@ -92,7 +137,9 @@ pub fn version() -> i32 {
 }
 
 pub fn hello() -> String {
-    let Some(f) = HELLO.get() else { return String::new(); };
+    let Some(f) = HELLO.get() else {
+        return String::new();
+    };
     let mut buf = [0u8; 64];
     let n = unsafe { f(buf.as_mut_ptr(), buf.len()) };
     String::from_utf8_lossy(&buf[..n]).into_owned()
@@ -125,32 +172,47 @@ pub fn audio_stop() {
 
 /// Number of capture samples available to read without blocking.
 pub fn audio_capture_available() -> usize {
-    let Some(f) = AUDIO_CAPTURE_AVAILABLE.get() else { return 0; };
+    let Some(f) = AUDIO_CAPTURE_AVAILABLE.get() else {
+        return 0;
+    };
     f()
 }
 
 /// Read captured i16 PCM into `out`. Returns bytes actually copied.
 pub fn audio_read_capture(out: &mut [i16]) -> usize {
-    let Some(f) = AUDIO_READ_CAPTURE.get() else { return 0; };
+    let Some(f) = AUDIO_READ_CAPTURE.get() else {
+        return 0;
+    };
     unsafe { f(out.as_mut_ptr(), out.len()) }
 }
 
 /// Write i16 PCM into the playout ring. Returns samples enqueued.
 pub fn audio_write_playout(input: &[i16]) -> usize {
-    let Some(f) = AUDIO_WRITE_PLAYOUT.get() else { return 0; };
+    let Some(f) = AUDIO_WRITE_PLAYOUT.get() else {
+        return 0;
+    };
     unsafe { f(input.as_ptr(), input.len()) }
 }
 
 pub fn audio_is_running() -> bool {
-    AUDIO_IS_RUNNING.get().map(|f| unsafe { f() } != 0).unwrap_or(false)
+    AUDIO_IS_RUNNING
+        .get()
+        .map(|f| unsafe { f() } != 0)
+        .unwrap_or(false)
 }
 
 #[allow(dead_code)]
 pub fn audio_capture_latency_ms() -> f32 {
-    AUDIO_CAPTURE_LATENCY.get().map(|f| unsafe { f() }).unwrap_or(0.0)
+    AUDIO_CAPTURE_LATENCY
+        .get()
+        .map(|f| unsafe { f() })
+        .unwrap_or(0.0)
 }
 
 #[allow(dead_code)]
 pub fn audio_playout_latency_ms() -> f32 {
-    AUDIO_PLAYOUT_LATENCY.get().map(|f| unsafe { f() }).unwrap_or(0.0)
+    AUDIO_PLAYOUT_LATENCY
+        .get()
+        .map(|f| unsafe { f() })
+        .unwrap_or(0.0)
 }

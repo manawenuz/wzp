@@ -9,8 +9,8 @@
 //! still fails cleanly but the rest of the engine code links in.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 use tauri::Emitter;
 use tokio::sync::Mutex;
@@ -120,7 +120,10 @@ fn codec_to_profile(codec: CodecId) -> QualityProfile {
             frame_duration_ms: 20,
             frames_per_block: 5,
         },
-        other => QualityProfile { codec: other, ..QualityProfile::GOOD },
+        other => QualityProfile {
+            codec: other,
+            ..QualityProfile::GOOD
+        },
     }
 }
 
@@ -289,8 +292,7 @@ impl DredRecvState {
                 // user can see "DRED is on the wire" in logcat. After
                 // that, sample every 100th parse to confirm the window
                 // is steady-state without drowning the log.
-                let should_log = self.parses_with_data == 1
-                    || self.parses_with_data % 100 == 0;
+                let should_log = self.parses_with_data == 1 || self.parses_with_data % 100 == 0;
                 if should_log && wzp_codec::dred_verbose_logs() {
                     info!(
                         seq,
@@ -467,8 +469,7 @@ impl CallEngine {
         let relay_addr: SocketAddr = relay.parse()?;
         info!(%relay_addr, "resolved relay addr");
 
-        let seed = crate::load_or_create_seed()
-            .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
+        let seed = crate::load_or_create_seed().map_err(|e| anyhow::anyhow!("identity: {e}"))?;
         let fp = seed.derive_identity().public_identity().fingerprint;
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
@@ -476,7 +477,10 @@ impl CallEngine {
         // Transport source: either the pre-connected one from the
         // dual-path race or build a fresh one here.
         let transport = if let Some(t) = pre_connected_transport {
-            info!(t_ms = call_t0.elapsed().as_millis(), is_direct_p2p, "first-join diag: using pre-connected transport");
+            info!(
+                t_ms = call_t0.elapsed().as_millis(),
+                is_direct_p2p, "first-join diag: using pre-connected transport"
+            );
             t
         } else {
             // QUIC transport + handshake (Phase 0 relay-only path).
@@ -492,8 +496,10 @@ impl CallEngine {
                 ep
             } else {
                 let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-                let ep = wzp_transport::create_endpoint(bind_addr, None)
-                    .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+                let ep = wzp_transport::create_endpoint(bind_addr, None).map_err(|e| {
+                    error!("create_endpoint failed: {e}");
+                    e
+                })?;
                 info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
                 ep
             };
@@ -501,18 +507,27 @@ impl CallEngine {
             let conn = match tokio::time::timeout(
                 std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
                 wzp_transport::connect(&endpoint, relay_addr, &room, client_config),
-            ).await {
+            )
+            .await
+            {
                 Ok(Ok(c)) => c,
                 Ok(Err(e)) => {
                     error!("connect failed: {e}");
                     return Err(e.into());
                 }
                 Err(_) => {
-                    error!("connect TIMED OUT after {CONNECT_TIMEOUT_SECS}s — QUIC handshake never completed. Relay may be unreachable from this endpoint.");
-                    return Err(anyhow::anyhow!("QUIC connect timeout ({CONNECT_TIMEOUT_SECS}s)"));
+                    error!(
+                        "connect TIMED OUT after {CONNECT_TIMEOUT_SECS}s — QUIC handshake never completed. Relay may be unreachable from this endpoint."
+                    );
+                    return Err(anyhow::anyhow!(
+                        "QUIC connect timeout ({CONNECT_TIMEOUT_SECS}s)"
+                    ));
                 }
             };
-            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: QUIC connection established, performing handshake");
+            info!(
+                t_ms = call_t0.elapsed().as_millis(),
+                "first-join diag: QUIC connection established, performing handshake"
+            );
             Arc::new(wzp_transport::QuinnTransport::new(conn))
         };
 
@@ -526,16 +541,22 @@ impl CallEngine {
         // through the signal channel (DirectCallOffer/Answer carry
         // identity_pub + ephemeral_pub + signature).
         if !is_direct_p2p {
-            let _session = wzp_client::handshake::perform_handshake(
-                &*transport,
-                &seed.0,
-                Some(&alias),
-            )
-            .await
-            .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
-            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: connected to relay, handshake complete");
+            let _session =
+                wzp_client::handshake::perform_handshake(&*transport, &seed.0, Some(&alias))
+                    .await
+                    .map_err(|e| {
+                        error!("perform_handshake failed: {e}");
+                        e
+                    })?;
+            info!(
+                t_ms = call_t0.elapsed().as_millis(),
+                "first-join diag: connected to relay, handshake complete"
+            );
         } else {
-            info!(t_ms = call_t0.elapsed().as_millis(), "first-join diag: direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
+            info!(
+                t_ms = call_t0.elapsed().as_millis(),
+                "first-join diag: direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)"
+            );
         }
         event_cb("connected", &format!("joined room {room}"));
 
@@ -579,7 +600,9 @@ impl CallEngine {
 
         let t_pre_audio = call_t0.elapsed().as_millis();
         if let Err(code) = crate::wzp_native::audio_start() {
-            return Err(anyhow::anyhow!("wzp_native_audio_start failed: code {code}"));
+            return Err(anyhow::anyhow!(
+                "wzp_native_audio_start failed: code {code}"
+            ));
         }
 
         // Fix C (task #36): prime the playout ring with 20ms of
@@ -688,15 +711,17 @@ impl CallEngine {
                 }
 
                 // RMS for UI meter
-                let sum_sq: f64 = buf[..frame_samples].iter().map(|&s| (s as f64) * (s as f64)).sum();
+                let sum_sq: f64 = buf[..frame_samples]
+                    .iter()
+                    .map(|&s| (s as f64) * (s as f64))
+                    .sum();
                 let rms = (sum_sq / frame_samples as f64).sqrt() as u32;
                 send_level.store(rms, Ordering::Relaxed);
                 last_rms = rms;
                 if !first_nonzero_rms_logged && rms > 0 {
                     info!(
                         t_ms = send_t0.elapsed().as_millis(),
-                        rms,
-                        "first-join diag: send first non-zero capture RMS"
+                        rms, "first-join diag: send first non-zero capture RMS"
                     );
                     first_nonzero_rms_logged = true;
                 }
@@ -763,11 +788,9 @@ impl CallEngine {
                     frames_since_dred_poll = 0;
                     let snap = send_t.quinn_path_stats();
                     let pq = send_t.path_quality();
-                    if let Some(tuning) = dred_tuner.update(
-                        snap.loss_pct,
-                        snap.rtt_ms,
-                        pq.jitter_ms,
-                    ) {
+                    if let Some(tuning) =
+                        dred_tuner.update(snap.loss_pct, snap.rtt_ms, pq.jitter_ms)
+                    {
                         encoder.apply_dred_tuning(tuning);
                         if wzp_codec::dred_verbose_logs() {
                             info!(
@@ -874,9 +897,7 @@ impl CallEngine {
             // independent of Oboe routing. Convert locally with e.g.
             //   ffmpeg -f s16le -ar 48000 -ac 1 -i decoded.pcm decoded.wav
             use std::io::Write;
-            let recorder_path = crate::APP_DATA_DIR
-                .get()
-                .map(|p| p.join("decoded.pcm"));
+            let recorder_path = crate::APP_DATA_DIR.get().map(|p| p.join("decoded.pcm"));
             let mut recorder = match recorder_path.as_ref() {
                 Some(p) => match std::fs::File::create(p) {
                     Ok(f) => {
@@ -954,7 +975,9 @@ impl CallEngine {
                             {
                                 let mut rx = recv_rx_codec.lock().await;
                                 let codec_name = format!("{:?}", pkt.header.codec_id);
-                                if *rx != codec_name { *rx = codec_name; }
+                                if *rx != codec_name {
+                                    *rx = codec_name;
+                                }
                             }
                             if pkt.header.codec_id != current_codec {
                                 let new_profile = codec_to_profile(pkt.header.codec_id);
@@ -980,9 +1003,8 @@ impl CallEngine {
                             // no-op.
                             if pkt.header.codec_id.is_opus() {
                                 dred_recv.ingest_opus(pkt.header.seq, &pkt.payload);
-                                let frame_samples_now = (48_000
-                                    * current_profile.frame_duration_ms as usize)
-                                    / 1000;
+                                let frame_samples_now =
+                                    (48_000 * current_profile.frame_duration_ms as usize) / 1000;
                                 let spk_muted_flag = recv_spk.load(Ordering::Relaxed);
                                 dred_recv.fill_gap_to(
                                     &mut decoder,
@@ -1046,10 +1068,15 @@ impl CallEngine {
                                     // Log sample range for the first few decoded frames and periodically
                                     if decoded_frames <= 3 || decoded_frames % 100 == 0 {
                                         let slice = &pcm[..n];
-                                        let (mut lo, mut hi, mut sumsq) = (i16::MAX, i16::MIN, 0i64);
+                                        let (mut lo, mut hi, mut sumsq) =
+                                            (i16::MAX, i16::MIN, 0i64);
                                         for &s in slice.iter() {
-                                            if s < lo { lo = s; }
-                                            if s > hi { hi = s; }
+                                            if s < lo {
+                                                lo = s;
+                                            }
+                                            if s > hi {
+                                                hi = s;
+                                            }
                                             sumsq += (s as i64) * (s as i64);
                                         }
                                         let rms = (sumsq as f64 / n as f64).sqrt() as i32;
@@ -1086,7 +1113,10 @@ impl CallEngine {
                                                 .saturating_add(byte_slice.len() as u64);
                                             if recorder_bytes >= RECORDER_MAX_BYTES {
                                                 let _ = rec.flush();
-                                                info!(recorder_bytes, "decoded-pcm recorder: stopped after limit");
+                                                info!(
+                                                    recorder_bytes,
+                                                    "decoded-pcm recorder: stopped after limit"
+                                                );
                                             }
                                         }
                                     }
@@ -1105,11 +1135,18 @@ impl CallEngine {
                                         last_written = w;
                                         written_samples = written_samples.saturating_add(w as u64);
                                         if w < n && decoded_frames <= 10 {
-                                            tracing::warn!(n, w, "recv: partial playout write (ring nearly full)");
+                                            tracing::warn!(
+                                                n,
+                                                w,
+                                                "recv: partial playout write (ring nearly full)"
+                                            );
                                         }
                                     } else if decoded_frames <= 3 || decoded_frames % 100 == 0 {
                                         // User clicked spk-mute — log it so we don't chase ghost bugs
-                                        tracing::info!(decoded_frames, "recv: spk_muted=true, skipping playout write");
+                                        tracing::info!(
+                                            decoded_frames,
+                                            "recv: spk_muted=true, skipping playout write"
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -1302,8 +1339,7 @@ impl CallEngine {
 
         let relay_addr: SocketAddr = relay.parse()?;
 
-        let seed = crate::load_or_create_seed()
-            .map_err(|e| anyhow::anyhow!("identity: {e}"))?;
+        let seed = crate::load_or_create_seed().map_err(|e| anyhow::anyhow!("identity: {e}"))?;
         let fp = seed.derive_identity().public_identity().fingerprint;
         let fingerprint = fp.to_string();
         info!(%fp, "identity loaded");
@@ -1325,15 +1361,20 @@ impl CallEngine {
                 ep
             } else {
                 let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-                let ep = wzp_transport::create_endpoint(bind_addr, None)
-                    .map_err(|e| { error!("create_endpoint failed: {e}"); e })?;
+                let ep = wzp_transport::create_endpoint(bind_addr, None).map_err(|e| {
+                    error!("create_endpoint failed: {e}");
+                    e
+                })?;
                 info!(local_addr = ?ep.local_addr().ok(), "created new endpoint, dialing relay");
                 ep
             };
             let client_config = wzp_transport::client_config();
             let conn = wzp_transport::connect(&endpoint, relay_addr, &room, client_config)
                 .await
-                .map_err(|e| { error!("connect failed: {e}"); e })?;
+                .map_err(|e| {
+                    error!("connect failed: {e}");
+                    e
+                })?;
             info!("QUIC connection established, performing handshake");
             Arc::new(wzp_transport::QuinnTransport::new(conn))
         };
@@ -1343,13 +1384,13 @@ impl CallEngine {
         // accept_handshake handler. See the android branch's
         // comment for the full rationale.
         if !is_direct_p2p {
-            let _session = wzp_client::handshake::perform_handshake(
-                &*transport,
-                &seed.0,
-                Some(&alias),
-            )
-            .await
-            .map_err(|e| { error!("perform_handshake failed: {e}"); e })?;
+            let _session =
+                wzp_client::handshake::perform_handshake(&*transport, &seed.0, Some(&alias))
+                    .await
+                    .map_err(|e| {
+                        error!("perform_handshake failed: {e}");
+                        e
+                    })?;
         } else {
             info!("direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
         }
@@ -1494,11 +1535,9 @@ impl CallEngine {
                     frames_since_dred_poll = 0;
                     let snap = send_t.quinn_path_stats();
                     let pq = send_t.path_quality();
-                    if let Some(tuning) = dred_tuner.update(
-                        snap.loss_pct,
-                        snap.rtt_ms,
-                        pq.jitter_ms,
-                    ) {
+                    if let Some(tuning) =
+                        dred_tuner.update(snap.loss_pct, snap.rtt_ms, pq.jitter_ms)
+                    {
                         encoder.apply_dred_tuning(tuning);
                     }
                 }
@@ -1558,7 +1597,9 @@ impl CallEngine {
                             {
                                 let mut rx = recv_rx_codec.lock().await;
                                 let codec_name = format!("{:?}", pkt.header.codec_id);
-                                if *rx != codec_name { *rx = codec_name; }
+                                if *rx != codec_name {
+                                    *rx = codec_name;
+                                }
                             }
                             // Auto-switch decoder if incoming codec differs
                             if pkt.header.codec_id != current_codec {
@@ -1575,9 +1616,8 @@ impl CallEngine {
                             // start() recv task for full commentary.
                             if pkt.header.codec_id.is_opus() {
                                 dred_recv.ingest_opus(pkt.header.seq, &pkt.payload);
-                                let frame_samples_now = (48_000
-                                    * current_profile.frame_duration_ms as usize)
-                                    / 1000;
+                                let frame_samples_now =
+                                    (48_000 * current_profile.frame_duration_ms as usize) / 1000;
                                 let spk_muted_flag = recv_spk.load(Ordering::Relaxed);
                                 dred_recv.fill_gap_to(
                                     &mut decoder,

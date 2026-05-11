@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use raptorq::{EncodingPacket, ObjectTransmissionInformation, PayloadId, SourceBlockDecoder};
-use wzp_proto::error::FecError;
 use wzp_proto::FecDecoder;
+use wzp_proto::error::FecError;
 
 /// Length prefix size (u16 little-endian), must match encoder.
 const LEN_PREFIX: usize = 2;
@@ -140,10 +140,7 @@ impl FecDecoder for RaptorQFecDecoder {
                         frames.push(Vec::new());
                         continue;
                     }
-                    let payload_len = u16::from_le_bytes([
-                        data[offset],
-                        data[offset + 1],
-                    ]) as usize;
+                    let payload_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
                     let payload_start = offset + LEN_PREFIX;
                     let payload_end = (payload_start + payload_len).min(data.len());
                     frames.push(data[payload_start..payload_end].to_vec());
@@ -198,9 +195,7 @@ mod tests {
 
         // Feed all source symbols (using the length-prefixed padded data).
         for (i, pkt) in source_pkts.iter().enumerate() {
-            decoder
-                .add_symbol(0, i as u8, false, pkt.data())
-                .unwrap();
+            decoder.add_symbol(0, i as u8, false, pkt.data()).unwrap();
         }
 
         let result = decoder.try_decode(0).unwrap();
@@ -233,7 +228,11 @@ mod tests {
         let config = ObjectTransmissionInformation::new(block_len, SYMBOL_SIZE, 1, 1, 1);
         let mut dec = SourceBlockDecoder::new(0, &config, block_len);
         let decoded = dec.decode(all);
-        assert!(decoded.is_some(), "Should recover with {:.0}% loss", drop_fraction * 100.0);
+        assert!(
+            decoded.is_some(),
+            "Should recover with {:.0}% loss",
+            drop_fraction * 100.0
+        );
 
         let data = decoded.unwrap();
         let ss = SYMBOL_SIZE as usize;
@@ -245,13 +244,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_with_30pct_loss() { run_loss_test(FRAMES_PER_BLOCK, 0.5, 0.3); }
+    fn decode_with_30pct_loss() {
+        run_loss_test(FRAMES_PER_BLOCK, 0.5, 0.3);
+    }
 
     #[test]
-    fn decode_with_50pct_loss() { run_loss_test(FRAMES_PER_BLOCK, 1.0, 0.5); }
+    fn decode_with_50pct_loss() {
+        run_loss_test(FRAMES_PER_BLOCK, 1.0, 0.5);
+    }
 
     #[test]
-    fn decode_with_70pct_source_loss_heavy_repair() { run_loss_test(8, 2.0, 0.5); }
+    fn decode_with_70pct_source_loss_heavy_repair() {
+        run_loss_test(8, 2.0, 0.5);
+    }
 
     #[test]
     fn expire_removes_old_blocks() {

@@ -5,9 +5,9 @@
 
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
-use x25519_dalek::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use wzp_proto::{CryptoError, CryptoSession};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::nonce::{self, Direction};
 use crate::rekey::RekeyManager;
@@ -135,7 +135,9 @@ impl CryptoSession for ChaChaSession {
             .ok_or_else(|| CryptoError::RekeyFailed("no pending rekey".into()))?;
 
         let total_packets = self.send_seq as u64 + self.recv_seq as u64;
-        let new_key = self.rekey_mgr.perform_rekey(peer_ephemeral_pub, secret, total_packets);
+        let new_key = self
+            .rekey_mgr
+            .perform_rekey(peer_ephemeral_pub, secret, total_packets);
         self.install_key(new_key);
 
         // Reset sequence counters after rekey for nonce uniqueness

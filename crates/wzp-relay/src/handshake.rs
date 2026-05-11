@@ -20,29 +20,48 @@ use wzp_proto::{MediaTransport, QualityProfile, SignalMessage};
 pub async fn accept_handshake(
     transport: &dyn MediaTransport,
     seed: &[u8; 32],
-) -> Result<(Box<dyn CryptoSession>, QualityProfile, String, Option<String>), anyhow::Error> {
+) -> Result<
+    (
+        Box<dyn CryptoSession>,
+        QualityProfile,
+        String,
+        Option<String>,
+    ),
+    anyhow::Error,
+> {
     // 1. Receive CallOffer
     let offer = transport
         .recv_signal()
         .await?
         .ok_or_else(|| anyhow::anyhow!("connection closed before receiving CallOffer"))?;
 
-    let (caller_identity_pub, caller_ephemeral_pub, caller_signature, supported_profiles, caller_alias) =
-        match offer {
-            SignalMessage::CallOffer {
-                identity_pub,
-                ephemeral_pub,
-                signature,
-                supported_profiles,
-                alias,
-            } => (identity_pub, ephemeral_pub, signature, supported_profiles, alias),
-            other => {
-                return Err(anyhow::anyhow!(
-                    "expected CallOffer, got {:?}",
-                    std::mem::discriminant(&other)
-                ))
-            }
-        };
+    let (
+        caller_identity_pub,
+        caller_ephemeral_pub,
+        caller_signature,
+        supported_profiles,
+        caller_alias,
+    ) = match offer {
+        SignalMessage::CallOffer {
+            identity_pub,
+            ephemeral_pub,
+            signature,
+            supported_profiles,
+            alias,
+        } => (
+            identity_pub,
+            ephemeral_pub,
+            signature,
+            supported_profiles,
+            alias,
+        ),
+        other => {
+            return Err(anyhow::anyhow!(
+                "expected CallOffer, got {:?}",
+                std::mem::discriminant(&other)
+            ));
+        }
+    };
 
     // 2. Verify caller's signature over (ephemeral_pub || "call-offer")
     let mut verify_data = Vec::with_capacity(32 + 10);
@@ -81,11 +100,11 @@ pub async fn accept_handshake(
     // Derive caller fingerprint: SHA-256(Ed25519 pub)[:16], formatted as xxxx:xxxx:...
     // Must match the format used in signal registration and presence.
     let caller_fp = {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = Sha256::digest(&caller_identity_pub);
         let fp = wzp_crypto::Fingerprint([
-            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
-            hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
+            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
         ]);
         fp.to_string()
     };

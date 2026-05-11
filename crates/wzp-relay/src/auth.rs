@@ -32,10 +32,7 @@ pub struct AuthenticatedClient {
 ///
 /// Calls `POST {auth_url}` with `{ "token": "..." }`.
 /// Returns the client identity if valid, or an error string.
-pub async fn validate_token(
-    auth_url: &str,
-    token: &str,
-) -> Result<AuthenticatedClient, String> {
+pub async fn validate_token(auth_url: &str, token: &str) -> Result<AuthenticatedClient, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()

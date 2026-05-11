@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use wzp_crypto::ChaChaSession;
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
-use wzp_proto::traits::{CryptoSession, FecDecoder, FecEncoder};
 use wzp_proto::QualityProfile;
+use wzp_proto::traits::{CryptoSession, FecDecoder, FecEncoder};
 
 use crate::call::{CallConfig, CallDecoder, CallEncoder};
 
@@ -201,9 +201,13 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
         // Deterministic shuffle for reproducibility using a simple seed
         // We use a basic Fisher-Yates with a fixed-per-block seed
         let mut indices: Vec<usize> = (0..all_symbols.len()).collect();
-        let mut seed = (block_idx as u64).wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut seed = (block_idx as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
         for i in (1..indices.len()).rev() {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = (seed >> 33) as usize % (i + 1);
             indices.swap(i, j);
         }

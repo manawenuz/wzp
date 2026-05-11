@@ -8,8 +8,8 @@
 //! The web bridge connects with room name as SNI.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
@@ -116,7 +116,9 @@ fn parse_args() -> CliResult {
     }
 
     // Track if we need to create the config after identity is known
-    let config_needs_create = args.config_file.as_ref()
+    let config_needs_create = args
+        .config_file
+        .as_ref()
         .map(|p| !std::path::Path::new(p).exists())
         .unwrap_or(false);
 
@@ -125,11 +127,10 @@ fn parse_args() -> CliResult {
             // Will be re-created with personalized info after identity is loaded
             RelayConfig::default()
         } else {
-            wzp_relay::config::load_config(path)
-                .unwrap_or_else(|e| {
-                    eprintln!("failed to load config from {path}: {e}");
-                    std::process::exit(1);
-                })
+            wzp_relay::config::load_config(path).unwrap_or_else(|e| {
+                eprintln!("failed to load config from {path}: {e}");
+                std::process::exit(1);
+            })
         }
     } else {
         RelayConfig::default()
@@ -164,7 +165,9 @@ fn parse_args() -> CliResult {
         config.static_dir = Some(dir);
     }
     for name in args.global_room {
-        config.global_rooms.push(wzp_relay::config::GlobalRoomConfig { name });
+        config
+            .global_rooms
+            .push(wzp_relay::config::GlobalRoomConfig { name });
     }
     if let Some(tap) = args.debug_tap {
         config.debug_tap = Some(tap);
@@ -199,7 +202,9 @@ async fn run_upstream(
                     let mut pipe = pipeline.lock().await;
                     let decoded = pipe.ingest(pkt);
                     let mut out = Vec::new();
-                    for p in decoded { out.extend(pipe.prepare_outbound(p)); }
+                    for p in decoded {
+                        out.extend(pipe.prepare_outbound(p));
+                    }
                     out
                 };
                 for p in &outbound {
@@ -208,10 +213,18 @@ async fn run_upstream(
                         return;
                     }
                 }
-                stats.upstream_packets.fetch_add(outbound.len() as u64, Ordering::Relaxed);
+                stats
+                    .upstream_packets
+                    .fetch_add(outbound.len() as u64, Ordering::Relaxed);
             }
-            Ok(None) => { info!("client disconnected (upstream)"); break; }
-            Err(e) => { error!("upstream recv: {e}"); break; }
+            Ok(None) => {
+                info!("client disconnected (upstream)");
+                break;
+            }
+            Err(e) => {
+                error!("upstream recv: {e}");
+                break;
+            }
         }
     }
 }
@@ -229,7 +242,9 @@ async fn run_downstream(
                     let mut pipe = pipeline.lock().await;
                     let decoded = pipe.ingest(pkt);
                     let mut out = Vec::new();
-                    for p in decoded { out.extend(pipe.prepare_outbound(p)); }
+                    for p in decoded {
+                        out.extend(pipe.prepare_outbound(p));
+                    }
                     out
                 };
                 for p in &outbound {
@@ -238,10 +253,18 @@ async fn run_downstream(
                         return;
                     }
                 }
-                stats.downstream_packets.fetch_add(outbound.len() as u64, Ordering::Relaxed);
+                stats
+                    .downstream_packets
+                    .fetch_add(outbound.len() as u64, Ordering::Relaxed);
             }
-            Ok(None) => { info!("remote disconnected (downstream)"); break; }
-            Err(e) => { error!("downstream recv: {e}"); break; }
+            Ok(None) => {
+                info!("remote disconnected (downstream)");
+                break;
+            }
+            Err(e) => {
+                error!("downstream recv: {e}");
+                break;
+            }
         }
     }
 }
@@ -266,7 +289,12 @@ const BUILD_GIT_HASH: &str = env!("WZP_BUILD_HASH");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let CliResult { config, identity_path, config_file, config_needs_create } = parse_args();
+    let CliResult {
+        config,
+        identity_path,
+        config_file,
+        config_needs_create,
+    } = parse_args();
     tracing_subscriber::fmt().init();
     info!(version = BUILD_GIT_HASH, "wzp-relay build");
     rustls::crypto::ring::default_provider()
@@ -303,7 +331,10 @@ async fn main() -> anyhow::Result<()> {
                     info!("loaded relay identity from {}", id_path.display());
                     s
                 } else {
-                    warn!("corrupt identity file {}, generating new", id_path.display());
+                    warn!(
+                        "corrupt identity file {}, generating new",
+                        id_path.display()
+                    );
                     let s = wzp_crypto::Seed::generate();
                     let hex: String = s.0.iter().map(|b| format!("{b:02x}")).collect();
                     let _ = std::fs::write(&id_path, &hex);
@@ -386,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             // Probe via a dummy "connected" UDP socket. Never actually sends.
             match std::net::UdpSocket::bind("0.0.0.0:0")
-                .and_then(|s| { s.connect("8.8.8.8:80").map(|_| s) })
+                .and_then(|s| s.connect("8.8.8.8:80").map(|_| s))
                 .and_then(|s| s.local_addr())
             {
                 Ok(a) if !a.ip().is_loopback() => a.ip(),
@@ -398,47 +429,48 @@ async fn main() -> anyhow::Result<()> {
     info!(%advertised_addr_str, "relay advertised address for CallSetup");
 
     // Forward mode
-    let remote_transport: Option<Arc<wzp_transport::QuinnTransport>> =
-        if let Some(remote_addr) = config.remote_relay {
-            info!(%remote_addr, "forward mode → remote relay");
-            let client_cfg = wzp_transport::client_config();
-            let conn = wzp_transport::connect(&endpoint, remote_addr, "localhost", client_cfg).await?;
-            Some(Arc::new(wzp_transport::QuinnTransport::new(conn)))
-        } else {
-            info!("room mode — clients join named rooms (SFU)");
-            None
-        };
+    let remote_transport: Option<Arc<wzp_transport::QuinnTransport>> = if let Some(remote_addr) =
+        config.remote_relay
+    {
+        info!(%remote_addr, "forward mode → remote relay");
+        let client_cfg = wzp_transport::client_config();
+        let conn = wzp_transport::connect(&endpoint, remote_addr, "localhost", client_cfg).await?;
+        Some(Arc::new(wzp_transport::QuinnTransport::new(conn)))
+    } else {
+        info!("room mode — clients join named rooms (SFU)");
+        None
+    };
 
     // Room manager (room mode only)
     let room_mgr = Arc::new(RoomManager::new());
 
     // Event log for protocol analysis
     let event_log = wzp_relay::event_log::start_event_log(
-        config.event_log.as_ref().map(std::path::PathBuf::from)
+        config.event_log.as_ref().map(std::path::PathBuf::from),
     );
 
     // Federation manager
-    let global_room_set: std::collections::HashSet<String> = config.global_rooms.iter()
-        .map(|g| g.name.clone())
-        .collect();
+    let global_room_set: std::collections::HashSet<String> =
+        config.global_rooms.iter().map(|g| g.name.clone()).collect();
 
-    let federation_mgr = if !config.peers.is_empty() || !config.trusted.is_empty() || !global_room_set.is_empty() {
-        let fm = Arc::new(wzp_relay::federation::FederationManager::new(
-            config.peers.clone(),
-            config.trusted.clone(),
-            global_room_set.clone(),
-            room_mgr.clone(),
-            endpoint.clone(),
-            tls_fp.clone(),
-            metrics.clone(),
-            event_log.clone(),
-        ));
-        let fm_run = fm.clone();
-        tokio::spawn(async move { fm_run.run().await });
-        Some(fm)
-    } else {
-        None
-    };
+    let federation_mgr =
+        if !config.peers.is_empty() || !config.trusted.is_empty() || !global_room_set.is_empty() {
+            let fm = Arc::new(wzp_relay::federation::FederationManager::new(
+                config.peers.clone(),
+                config.trusted.clone(),
+                global_room_set.clone(),
+                room_mgr.clone(),
+                endpoint.clone(),
+                tls_fp.clone(),
+                metrics.clone(),
+                event_log.clone(),
+            ));
+            let fm_run = fm.clone();
+            tokio::spawn(async move { fm_run.run().await });
+            Some(fm)
+        } else {
+            None
+        };
 
     // Session manager — enforces max concurrent sessions
     let session_mgr = Arc::new(Mutex::new(SessionManager::new(config.max_sessions)));
@@ -624,14 +656,15 @@ async fn main() -> anyhow::Result<()> {
                         // active, then read back everything needed to
                         // cross-wire into the local CallSetup.
                         let room_name = format!("call-{call_id}");
-                        let (callee_addr_for_setup, callee_local_for_setup, callee_mapped_for_setup) = {
+                        let (
+                            callee_addr_for_setup,
+                            callee_local_for_setup,
+                            callee_mapped_for_setup,
+                        ) = {
                             let mut reg = call_registry_d.lock().await;
                             reg.set_active(call_id, accept_mode, room_name.clone());
                             reg.set_peer_relay_fp(call_id, Some(origin_relay_fp.clone()));
-                            reg.set_callee_reflexive_addr(
-                                call_id,
-                                callee_reflexive_addr.clone(),
-                            );
+                            reg.set_callee_reflexive_addr(call_id, callee_reflexive_addr.clone());
                             reg.set_callee_local_addrs(call_id, callee_local_addrs.clone());
                             reg.set_callee_mapped_addr(call_id, callee_mapped_addr.clone());
                             let c = reg.get(call_id);
@@ -762,7 +795,9 @@ async fn main() -> anyhow::Result<()> {
         let relay_seed_bytes = relay_seed.0;
         let metrics = metrics.clone();
         let trunking_enabled = config.trunking_enabled;
-        let debug_tap = config.debug_tap.as_ref().map(|filter| room::DebugTap { room_filter: filter.clone() });
+        let debug_tap = config.debug_tap.as_ref().map(|filter| room::DebugTap {
+            room_filter: filter.clone(),
+        });
         let presence = presence.clone();
         let route_resolver = route_resolver.clone();
         let federation_mgr = federation_mgr.clone();
@@ -771,7 +806,9 @@ async fn main() -> anyhow::Result<()> {
         let advertised_addr_str = advertised_addr_str.clone();
         // Phase 8: relay region + peer addresses for RegisterPresenceAck
         let relay_region = config.region.clone();
-        let relay_peers_for_ack: Vec<String> = config.peers.iter()
+        let relay_peers_for_ack: Vec<String> = config
+            .peers
+            .iter()
             .filter_map(|p| {
                 let label = p.label.as_deref().unwrap_or("peer");
                 Some(format!("{label}|{}", p.url))
@@ -800,9 +837,7 @@ async fn main() -> anyhow::Result<()> {
 
             let room_name = connection
                 .handshake_data()
-                .and_then(|hd| {
-                    hd.downcast::<quinn::crypto::rustls::HandshakeData>().ok()
-                })
+                .and_then(|hd| hd.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
                 .and_then(|hd| hd.server_name.clone())
                 .unwrap_or_else(|| "default".to_string());
 
@@ -832,17 +867,23 @@ async fn main() -> anyhow::Result<()> {
                 loop {
                     match transport.recv_signal().await {
                         Ok(Some(wzp_proto::SignalMessage::Ping { timestamp_ms })) => {
-                            if let Err(e) = transport.send_signal(
-                                &wzp_proto::SignalMessage::Pong { timestamp_ms },
-                            ).await {
+                            if let Err(e) = transport
+                                .send_signal(&wzp_proto::SignalMessage::Pong { timestamp_ms })
+                                .await
+                            {
                                 error!(%addr, "probe pong send error: {e}");
                                 break;
                             }
                         }
-                        Ok(Some(wzp_proto::SignalMessage::PresenceUpdate { fingerprints, relay_addr })) => {
+                        Ok(Some(wzp_proto::SignalMessage::PresenceUpdate {
+                            fingerprints,
+                            relay_addr,
+                        })) => {
                             // A peer relay is telling us which fingerprints it has
-                            let peer_addr: std::net::SocketAddr = relay_addr.parse().unwrap_or(addr);
-                            let fps: std::collections::HashSet<String> = fingerprints.into_iter().collect();
+                            let peer_addr: std::net::SocketAddr =
+                                relay_addr.parse().unwrap_or(addr);
+                            let fps: std::collections::HashSet<String> =
+                                fingerprints.into_iter().collect();
                             {
                                 let mut reg = presence.lock().await;
                                 reg.update_peer(peer_addr, fps);
@@ -871,9 +912,13 @@ async fn main() -> anyhow::Result<()> {
                                 wzp_relay::route::Route::Local => {
                                     (true, vec![route_resolver.local_addr().to_string()])
                                 }
-                                wzp_relay::route::Route::DirectPeer(peer_addr) => {
-                                    (true, vec![route_resolver.local_addr().to_string(), peer_addr.to_string()])
-                                }
+                                wzp_relay::route::Route::DirectPeer(peer_addr) => (
+                                    true,
+                                    vec![
+                                        route_resolver.local_addr().to_string(),
+                                        peer_addr.to_string(),
+                                    ],
+                                ),
                                 _ => {
                                     // Not found locally; if ttl > 0 we could forward
                                     // to other peers (future multi-hop). For now, reply not found.
@@ -918,8 +963,12 @@ async fn main() -> anyhow::Result<()> {
                     let hello_fp = match tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         transport.recv_signal(),
-                    ).await {
-                        Ok(Ok(Some(wzp_proto::SignalMessage::FederationHello { tls_fingerprint }))) => tls_fingerprint,
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(wzp_proto::SignalMessage::FederationHello {
+                            tls_fingerprint,
+                        }))) => tls_fingerprint,
                         _ => {
                             warn!(%addr, "federation: no hello received, closing");
                             return;
@@ -964,7 +1013,10 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         }
-                        _ => { warn!(%addr, "signal: expected AuthToken"); return; }
+                        _ => {
+                            warn!(%addr, "signal: expected AuthToken");
+                            return;
+                        }
                     }
                 } else {
                     None
@@ -974,15 +1026,22 @@ async fn main() -> anyhow::Result<()> {
                 let (client_fp, client_alias) = match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     transport.recv_signal(),
-                ).await {
-                    Ok(Ok(Some(SignalMessage::RegisterPresence { identity_pub, signature: _, alias }))) => {
+                )
+                .await
+                {
+                    Ok(Ok(Some(SignalMessage::RegisterPresence {
+                        identity_pub,
+                        signature: _,
+                        alias,
+                    }))) => {
                         // Compute fingerprint: SHA-256(Ed25519 pub key)[:16], same as Fingerprint type
                         let fp = {
-                            use sha2::{Sha256, Digest};
+                            use sha2::{Digest, Sha256};
                             let hash = Sha256::digest(&identity_pub);
                             let fingerprint = wzp_crypto::Fingerprint([
-                                hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
-                                hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+                                hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6],
+                                hash[7], hash[8], hash[9], hash[10], hash[11], hash[12], hash[13],
+                                hash[14], hash[15],
                             ]);
                             fingerprint.to_string()
                         };
@@ -1006,13 +1065,15 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 // Send ack
-                let _ = transport.send_signal(&SignalMessage::RegisterPresenceAck {
-                    success: true,
-                    error: None,
-                    relay_build: Some(BUILD_GIT_HASH.to_string()),
-                    relay_region: relay_region.clone(),
-                    available_relays: relay_peers_for_ack.clone(),
-                }).await;
+                let _ = transport
+                    .send_signal(&SignalMessage::RegisterPresenceAck {
+                        success: true,
+                        error: None,
+                        relay_build: Some(BUILD_GIT_HASH.to_string()),
+                        relay_region: relay_region.clone(),
+                        available_relays: relay_peers_for_ack.clone(),
+                    })
+                    .await;
 
                 info!(%addr, fingerprint = %client_fp, alias = ?client_alias, "signal client registered");
 
@@ -1086,10 +1147,12 @@ async fn main() -> anyhow::Result<()> {
 
                                         if !forwarded {
                                             info!(%addr, target = %target_fp, "call target not online (no federation route)");
-                                            let _ = transport.send_signal(&SignalMessage::Hangup {
-                                                reason: wzp_proto::HangupReason::Normal,
-                                                call_id: None,
-                                            }).await;
+                                            let _ = transport
+                                                .send_signal(&SignalMessage::Hangup {
+                                                    reason: wzp_proto::HangupReason::Normal,
+                                                    call_id: None,
+                                                })
+                                                .await;
                                             continue;
                                         }
 
@@ -1128,9 +1191,11 @@ async fn main() -> anyhow::Result<()> {
                                         // Send ringing to caller immediately
                                         // so the UI shows feedback while the
                                         // federated delivery is in flight.
-                                        let _ = transport.send_signal(&SignalMessage::CallRinging {
-                                            call_id: call_id.clone(),
-                                        }).await;
+                                        let _ = transport
+                                            .send_signal(&SignalMessage::CallRinging {
+                                                call_id: call_id.clone(),
+                                            })
+                                            .await;
                                         continue;
                                     }
 
@@ -1141,10 +1206,23 @@ async fn main() -> anyhow::Result<()> {
                                     // injected later into the callee's CallSetup.
                                     {
                                         let mut reg = call_registry.lock().await;
-                                        reg.create_call(call_id.clone(), client_fp.clone(), target_fp.clone());
-                                        reg.set_caller_reflexive_addr(&call_id, caller_addr_for_registry);
-                                        reg.set_caller_local_addrs(&call_id, caller_local_for_registry);
-                                        reg.set_caller_mapped_addr(&call_id, caller_mapped_for_registry);
+                                        reg.create_call(
+                                            call_id.clone(),
+                                            client_fp.clone(),
+                                            target_fp.clone(),
+                                        );
+                                        reg.set_caller_reflexive_addr(
+                                            &call_id,
+                                            caller_addr_for_registry,
+                                        );
+                                        reg.set_caller_local_addrs(
+                                            &call_id,
+                                            caller_local_for_registry,
+                                        );
+                                        reg.set_caller_mapped_addr(
+                                            &call_id,
+                                            caller_mapped_for_registry,
+                                        );
                                     }
 
                                     // Forward offer to callee
@@ -1156,9 +1234,11 @@ async fn main() -> anyhow::Result<()> {
 
                                     // Send ringing to caller
                                     drop(hub);
-                                    let _ = transport.send_signal(&SignalMessage::CallRinging {
-                                        call_id: call_id.clone(),
-                                    }).await;
+                                    let _ = transport
+                                        .send_signal(&SignalMessage::CallRinging {
+                                            call_id: call_id.clone(),
+                                        })
+                                        .await;
                                 }
 
                                 SignalMessage::DirectCallAnswer {
@@ -1186,7 +1266,10 @@ async fn main() -> anyhow::Result<()> {
                                         let reg = call_registry.lock().await;
                                         match reg.get(&call_id) {
                                             Some(c) => (
-                                                Some(reg.peer_fingerprint(&call_id, &client_fp).map(|s| s.to_string())),
+                                                Some(
+                                                    reg.peer_fingerprint(&call_id, &client_fp)
+                                                        .map(|s| s.to_string()),
+                                                ),
                                                 c.peer_relay_fp.clone(),
                                             ),
                                             None => (None, None),
@@ -1213,20 +1296,29 @@ async fn main() -> anyhow::Result<()> {
                                                     reason: wzp_proto::HangupReason::Normal,
                                                     call_id: Some(call_id.clone()),
                                                 };
-                                                let forward = SignalMessage::FederatedSignalForward {
-                                                    inner: Box::new(hangup),
-                                                    origin_relay_fp: tls_fp.clone(),
-                                                };
-                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                let forward =
+                                                    SignalMessage::FederatedSignalForward {
+                                                        inner: Box::new(hangup),
+                                                        origin_relay_fp: tls_fp.clone(),
+                                                    };
+                                                if let Err(e) = fm
+                                                    .send_signal_to_peer(origin_fp, &forward)
+                                                    .await
+                                                {
                                                     warn!(%call_id, %origin_fp, error = %e, "cross-relay reject forward failed");
                                                 }
                                             }
                                         } else {
                                             let hub = signal_hub.lock().await;
-                                            let _ = hub.send_to(&peer_fp, &SignalMessage::Hangup {
-                                                reason: wzp_proto::HangupReason::Normal,
-                                                call_id: Some(call_id.clone()),
-                                            }).await;
+                                            let _ = hub
+                                                .send_to(
+                                                    &peer_fp,
+                                                    &SignalMessage::Hangup {
+                                                        reason: wzp_proto::HangupReason::Normal,
+                                                        call_id: Some(call_id.clone()),
+                                                    },
+                                                )
+                                                .await;
                                         }
                                     } else {
                                         // Accept — create private room + stash the
@@ -1236,18 +1328,36 @@ async fn main() -> anyhow::Result<()> {
                                         // BOTH parties' addrs so we can cross-wire
                                         // peer_direct_addr on the CallSetups below.
                                         let room = format!("call-{call_id}");
-                                        let (caller_addr, callee_addr, caller_local, callee_local, caller_mapped, callee_mapped) = {
+                                        let (
+                                            caller_addr,
+                                            callee_addr,
+                                            caller_local,
+                                            callee_local,
+                                            caller_mapped,
+                                            callee_mapped,
+                                        ) = {
                                             let mut reg = call_registry.lock().await;
                                             reg.set_active(&call_id, mode, room.clone());
-                                            reg.set_callee_reflexive_addr(&call_id, callee_addr_for_registry);
-                                            reg.set_callee_local_addrs(&call_id, callee_local_for_registry.clone());
-                                            reg.set_callee_mapped_addr(&call_id, callee_mapped_for_registry);
+                                            reg.set_callee_reflexive_addr(
+                                                &call_id,
+                                                callee_addr_for_registry,
+                                            );
+                                            reg.set_callee_local_addrs(
+                                                &call_id,
+                                                callee_local_for_registry.clone(),
+                                            );
+                                            reg.set_callee_mapped_addr(
+                                                &call_id,
+                                                callee_mapped_for_registry,
+                                            );
                                             let call = reg.get(&call_id);
                                             (
                                                 call.and_then(|c| c.caller_reflexive_addr.clone()),
                                                 call.and_then(|c| c.callee_reflexive_addr.clone()),
-                                                call.map(|c| c.caller_local_addrs.clone()).unwrap_or_default(),
-                                                call.map(|c| c.callee_local_addrs.clone()).unwrap_or_default(),
+                                                call.map(|c| c.caller_local_addrs.clone())
+                                                    .unwrap_or_default(),
+                                                call.map(|c| c.callee_local_addrs.clone())
+                                                    .unwrap_or_default(),
                                                 call.and_then(|c| c.caller_mapped_addr.clone()),
                                                 call.and_then(|c| c.callee_mapped_addr.clone()),
                                             )
@@ -1278,11 +1388,15 @@ async fn main() -> anyhow::Result<()> {
                                             // CallSetup (to our callee) with
                                             // peer_direct_addr = caller_addr.
                                             if let Some(ref fm) = federation_mgr {
-                                                let forward = SignalMessage::FederatedSignalForward {
-                                                    inner: Box::new(msg.clone()),
-                                                    origin_relay_fp: tls_fp.clone(),
-                                                };
-                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                let forward =
+                                                    SignalMessage::FederatedSignalForward {
+                                                        inner: Box::new(msg.clone()),
+                                                        origin_relay_fp: tls_fp.clone(),
+                                                    };
+                                                if let Err(e) = fm
+                                                    .send_signal_to_peer(origin_fp, &forward)
+                                                    .await
+                                                {
                                                     warn!(
                                                         %call_id,
                                                         %origin_fp,
@@ -1301,7 +1415,8 @@ async fn main() -> anyhow::Result<()> {
                                                 peer_mapped_addr: caller_mapped.clone(),
                                             };
                                             let hub = signal_hub.lock().await;
-                                            let _ = hub.send_to(&client_fp, &setup_for_callee).await;
+                                            let _ =
+                                                hub.send_to(&client_fp, &setup_for_callee).await;
                                         } else {
                                             // Local call (existing Phase 3 path).
                                             // Forward answer to caller
@@ -1331,7 +1446,8 @@ async fn main() -> anyhow::Result<()> {
                                             };
                                             let hub = signal_hub.lock().await;
                                             let _ = hub.send_to(&peer_fp, &setup_for_caller).await;
-                                            let _ = hub.send_to(&client_fp, &setup_for_callee).await;
+                                            let _ =
+                                                hub.send_to(&client_fp, &setup_for_callee).await;
                                         }
                                     }
                                 }
@@ -1346,21 +1462,31 @@ async fn main() -> anyhow::Result<()> {
                                         if let Some(cid) = call_id {
                                             // Targeted hangup: only the named call
                                             reg.get(cid)
-                                                .map(|c| vec![(c.call_id.clone(), if c.caller_fingerprint == client_fp {
-                                                    c.callee_fingerprint.clone()
-                                                } else {
-                                                    c.caller_fingerprint.clone()
-                                                })])
+                                                .map(|c| {
+                                                    vec![(
+                                                        c.call_id.clone(),
+                                                        if c.caller_fingerprint == client_fp {
+                                                            c.callee_fingerprint.clone()
+                                                        } else {
+                                                            c.caller_fingerprint.clone()
+                                                        },
+                                                    )]
+                                                })
                                                 .unwrap_or_default()
                                         } else {
                                             // Legacy: end all calls for this user
                                             reg.calls_for_fingerprint(&client_fp)
                                                 .iter()
-                                                .map(|c| (c.call_id.clone(), if c.caller_fingerprint == client_fp {
-                                                    c.callee_fingerprint.clone()
-                                                } else {
-                                                    c.caller_fingerprint.clone()
-                                                }))
+                                                .map(|c| {
+                                                    (
+                                                        c.call_id.clone(),
+                                                        if c.caller_fingerprint == client_fp {
+                                                            c.callee_fingerprint.clone()
+                                                        } else {
+                                                            c.caller_fingerprint.clone()
+                                                        },
+                                                    )
+                                                })
                                                 .collect::<Vec<_>>()
                                         }
                                     };
@@ -1396,11 +1522,15 @@ async fn main() -> anyhow::Result<()> {
                                         if let Some(ref origin_fp) = peer_relay_fp {
                                             // Cross-relay: wrap and forward
                                             if let Some(ref fm) = federation_mgr {
-                                                let forward = SignalMessage::FederatedSignalForward {
-                                                    inner: Box::new(msg.clone()),
-                                                    origin_relay_fp: tls_fp.clone(),
-                                                };
-                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                let forward =
+                                                    SignalMessage::FederatedSignalForward {
+                                                        inner: Box::new(msg.clone()),
+                                                        origin_relay_fp: tls_fp.clone(),
+                                                    };
+                                                if let Err(e) = fm
+                                                    .send_signal_to_peer(origin_fp, &forward)
+                                                    .await
+                                                {
                                                     warn!(
                                                         %call_id,
                                                         %origin_fp,
@@ -1436,11 +1566,15 @@ async fn main() -> anyhow::Result<()> {
                                     if let Some(fp) = peer_fp {
                                         if let Some(ref origin_fp) = peer_relay_fp {
                                             if let Some(ref fm) = federation_mgr {
-                                                let forward = SignalMessage::FederatedSignalForward {
-                                                    inner: Box::new(msg.clone()),
-                                                    origin_relay_fp: tls_fp.clone(),
-                                                };
-                                                if let Err(e) = fm.send_signal_to_peer(origin_fp, &forward).await {
+                                                let forward =
+                                                    SignalMessage::FederatedSignalForward {
+                                                        inner: Box::new(msg.clone()),
+                                                        origin_relay_fp: tls_fp.clone(),
+                                                    };
+                                                if let Err(e) = fm
+                                                    .send_signal_to_peer(origin_fp, &forward)
+                                                    .await
+                                                {
                                                     warn!(
                                                         %call_id,
                                                         %origin_fp,
@@ -1458,12 +1592,12 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Hard NAT: forward HardNatProbe + HardNatBirthdayStart
                                 // to call peer (same pattern as CandidateUpdate).
-                                SignalMessage::HardNatBirthdayStart { ref call_id, .. } |
-                                SignalMessage::HardNatProbe { ref call_id, .. } |
-                                SignalMessage::UpgradeProposal { ref call_id, .. } |
-                                SignalMessage::UpgradeResponse { ref call_id, .. } |
-                                SignalMessage::UpgradeConfirm { ref call_id, .. } |
-                                SignalMessage::QualityCapability { ref call_id, .. } => {
+                                SignalMessage::HardNatBirthdayStart { ref call_id, .. }
+                                | SignalMessage::HardNatProbe { ref call_id, .. }
+                                | SignalMessage::UpgradeProposal { ref call_id, .. }
+                                | SignalMessage::UpgradeResponse { ref call_id, .. }
+                                | SignalMessage::UpgradeConfirm { ref call_id, .. }
+                                | SignalMessage::QualityCapability { ref call_id, .. } => {
                                     let (peer_fp, peer_relay_fp) = {
                                         let reg = call_registry.lock().await;
                                         match reg.get(call_id) {
@@ -1479,11 +1613,14 @@ async fn main() -> anyhow::Result<()> {
                                     if let Some(fp) = peer_fp {
                                         if let Some(ref origin_fp) = peer_relay_fp {
                                             if let Some(ref fm) = federation_mgr {
-                                                let forward = SignalMessage::FederatedSignalForward {
-                                                    inner: Box::new(msg.clone()),
-                                                    origin_relay_fp: tls_fp.clone(),
-                                                };
-                                                let _ = fm.send_signal_to_peer(origin_fp, &forward).await;
+                                                let forward =
+                                                    SignalMessage::FederatedSignalForward {
+                                                        inner: Box::new(msg.clone()),
+                                                        origin_relay_fp: tls_fp.clone(),
+                                                    };
+                                                let _ = fm
+                                                    .send_signal_to_peer(origin_fp, &forward)
+                                                    .await;
                                             }
                                         } else {
                                             let hub = signal_hub.lock().await;
@@ -1493,7 +1630,9 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 SignalMessage::Ping { timestamp_ms } => {
-                                    let _ = transport.send_signal(&SignalMessage::Pong { timestamp_ms }).await;
+                                    let _ = transport
+                                        .send_signal(&SignalMessage::Pong { timestamp_ms })
+                                        .await;
                                 }
 
                                 // QUIC-native NAT reflection ("STUN for QUIC").
@@ -1510,11 +1649,12 @@ async fn main() -> anyhow::Result<()> {
                                 // reaches this match arm.
                                 SignalMessage::Reflect => {
                                     let observed_addr = addr.to_string();
-                                    if let Err(e) = transport.send_signal(
-                                        &SignalMessage::ReflectResponse {
+                                    if let Err(e) = transport
+                                        .send_signal(&SignalMessage::ReflectResponse {
                                             observed_addr: observed_addr.clone(),
-                                        },
-                                    ).await {
+                                        })
+                                        .await
+                                    {
                                         warn!(%addr, error = %e, "reflect: failed to send response");
                                     } else {
                                         debug!(%addr, %observed_addr, "reflect: responded");
@@ -1552,19 +1692,29 @@ async fn main() -> anyhow::Result<()> {
                     let reg = call_registry.lock().await;
                     reg.calls_for_fingerprint(&client_fp)
                         .iter()
-                        .map(|c| (c.call_id.clone(), if c.caller_fingerprint == client_fp {
-                            c.callee_fingerprint.clone()
-                        } else {
-                            c.caller_fingerprint.clone()
-                        }))
+                        .map(|c| {
+                            (
+                                c.call_id.clone(),
+                                if c.caller_fingerprint == client_fp {
+                                    c.callee_fingerprint.clone()
+                                } else {
+                                    c.caller_fingerprint.clone()
+                                },
+                            )
+                        })
                         .collect::<Vec<_>>()
                 };
                 for (call_id, peer_fp) in &active_calls {
                     let hub = signal_hub.lock().await;
-                    let _ = hub.send_to(peer_fp, &SignalMessage::Hangup {
-                        reason: wzp_proto::HangupReason::Normal,
-                        call_id: Some(call_id.clone()),
-                    }).await;
+                    let _ = hub
+                        .send_to(
+                            peer_fp,
+                            &SignalMessage::Hangup {
+                                reason: wzp_proto::HangupReason::Normal,
+                                call_id: Some(call_id.clone()),
+                            },
+                        )
+                        .await;
                     drop(hub);
                     let mut reg = call_registry.lock().await;
                     reg.end_call(call_id);
@@ -1632,22 +1782,20 @@ async fn main() -> anyhow::Result<()> {
 
             // Crypto handshake: verify client identity + negotiate quality profile
             let handshake_start = std::time::Instant::now();
-            let (_crypto_session, _chosen_profile, caller_fp, caller_alias) = match wzp_relay::handshake::accept_handshake(
-                &*transport,
-                &relay_seed_bytes,
-            ).await {
-                Ok(result) => {
-                    let elapsed = handshake_start.elapsed().as_secs_f64();
-                    metrics.handshake_duration.observe(elapsed);
-                    info!(%addr, elapsed_ms = %(elapsed * 1000.0), "crypto handshake complete");
-                    result
-                }
-                Err(e) => {
-                    error!(%addr, "handshake failed: {e}");
-                    close_transport(&*transport, "cleanup").await;
-                    return;
-                }
-            };
+            let (_crypto_session, _chosen_profile, caller_fp, caller_alias) =
+                match wzp_relay::handshake::accept_handshake(&*transport, &relay_seed_bytes).await {
+                    Ok(result) => {
+                        let elapsed = handshake_start.elapsed().as_secs_f64();
+                        metrics.handshake_duration.observe(elapsed);
+                        info!(%addr, elapsed_ms = %(elapsed * 1000.0), "crypto handshake complete");
+                        result
+                    }
+                    Err(e) => {
+                        error!(%addr, "handshake failed: {e}");
+                        close_transport(&*transport, "cleanup").await;
+                        return;
+                    }
+                };
 
             // Use the caller's identity fingerprint from the handshake
             let participant_fp = authenticated_fp.clone().unwrap_or(caller_fp);
@@ -1704,8 +1852,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                 });
 
-                let up = tokio::spawn(run_upstream(transport.clone(), remote.clone(), up_pipe, stats.clone()));
-                let dn = tokio::spawn(run_downstream(transport.clone(), remote.clone(), dn_pipe, stats));
+                let up = tokio::spawn(run_upstream(
+                    transport.clone(),
+                    remote.clone(),
+                    up_pipe,
+                    stats.clone(),
+                ));
+                let dn = tokio::spawn(run_downstream(
+                    transport.clone(),
+                    remote.clone(),
+                    dn_pipe,
+                    stats,
+                ));
 
                 tokio::select! { _ = up => {} _ = dn => {} }
                 stats_handle.abort();
@@ -1752,7 +1910,11 @@ async fn main() -> anyhow::Result<()> {
                             // Merge federated participants into RoomUpdate if this is a global room
                             let merged_update = if let Some(ref fm) = federation_mgr {
                                 if fm.is_global_room(&room_name) {
-                                    if let SignalMessage::RoomUpdate { count: _, participants: mut local_parts } = update {
+                                    if let SignalMessage::RoomUpdate {
+                                        count: _,
+                                        participants: mut local_parts,
+                                    } = update
+                                    {
                                         let remote = fm.get_remote_participants(&room_name).await;
                                         local_parts.extend(remote);
                                         // Deduplicate by fingerprint
@@ -1762,17 +1924,27 @@ async fn main() -> anyhow::Result<()> {
                                             count: local_parts.len() as u32,
                                             participants: local_parts,
                                         }
-                                    } else { update }
-                                } else { update }
-                            } else { update };
+                                    } else {
+                                        update
+                                    }
+                                } else {
+                                    update
+                                }
+                            } else {
+                                update
+                            };
 
                             if let Some(ref tap) = debug_tap {
                                 if tap.matches(&room_name) {
                                     tap.log_signal(&room_name, &merged_update);
-                                    tap.log_event(&room_name, "join", &format!(
-                                        "participant={id} addr={addr} alias={}",
-                                        caller_alias.as_deref().unwrap_or("?")
-                                    ));
+                                    tap.log_event(
+                                        &room_name,
+                                        "join",
+                                        &format!(
+                                            "participant={id} addr={addr} alias={}",
+                                            caller_alias.as_deref().unwrap_or("?")
+                                        ),
+                                    );
                                 }
                             }
                             room::broadcast_signal(&senders, &merged_update).await;
@@ -1789,10 +1961,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                let session_id_str: String = session_id
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
+                let session_id_str: String =
+                    session_id.iter().map(|b| format!("{b:02x}")).collect();
                 // Set up federation media channel if this is a global room
                 let (federation_tx, federation_room_hash) = if let Some(ref fm) = federation_mgr {
                     let is_global = fm.is_global_room(&room_name);
@@ -1823,7 +1993,8 @@ async fn main() -> anyhow::Result<()> {
                     debug_tap,
                     federation_tx,
                     federation_room_hash,
-                ).await;
+                )
+                .await;
 
                 // Participant disconnected — clean up presence + per-session metrics
                 if let Some(ref fp) = authenticated_fp {

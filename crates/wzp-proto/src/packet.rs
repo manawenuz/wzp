@@ -3,162 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CodecId, MediaType};
 
-/// 12-byte v1 media packet header for the lossy link.
-///
-/// Wire layout:
-/// ```text
-/// Byte 0:  [V:1][T:1][CodecID:4][Q:1][FecRatioHi:1]
-/// Byte 1:  [FecRatioLo:6][unused:2]
-/// Byte 2-3: Sequence number (big-endian u16)
-/// Byte 4-7: Timestamp in ms since session start (big-endian u32)
-/// Byte 8:   FEC block ID
-/// Byte 9:   FEC symbol index within block
-/// Byte 10:  Reserved / flags
-/// Byte 11:  CSRC count
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MediaHeaderV1 {
-    /// Protocol version (0 = v1).
-    pub version: u8,
-    /// true = FEC repair packet, false = source media.
-    pub is_repair: bool,
-    /// Codec identifier.
-    pub codec_id: CodecId,
-    /// Whether a QualityReport trailer is appended.
-    pub has_quality_report: bool,
-    /// FEC ratio as 7-bit value (0-127 maps to 0.0-1.0).
-    pub fec_ratio_encoded: u8,
-    /// Wrapping packet sequence number.
-    pub seq: u16,
-    /// Milliseconds since session start.
-    pub timestamp: u32,
-    /// FEC source block ID (wrapping).
-    pub fec_block: u8,
-    /// Symbol index within the FEC block.
-    pub fec_symbol: u8,
-    /// Reserved flags byte.
-    pub reserved: u8,
-    /// Number of contributing sources (for future mixing).
-    pub csrc_count: u8,
-}
-
-impl MediaHeaderV1 {
-    /// Header size in bytes on the wire.
-    pub const WIRE_SIZE: usize = 12;
-
-    /// Create a default header for raw PCM relay (used by WebSocket bridge).
-    pub fn default_pcm() -> Self {
-        Self {
-            version: 0,
-            is_repair: false,
-            codec_id: CodecId::Opus24k,
-            has_quality_report: false,
-            fec_ratio_encoded: 0,
-            seq: 0,
-            timestamp: 0,
-            fec_block: 0,
-            fec_symbol: 0,
-            reserved: 0,
-            csrc_count: 0,
-        }
-    }
-
-    /// Encode the FEC ratio float (0.0-2.0+) to a 7-bit value (0-127).
-    pub fn encode_fec_ratio(ratio: f32) -> u8 {
-        // Map 0.0-2.0 to 0-127, clamping at 127
-        let scaled = (ratio * 63.5).round() as u8;
-        scaled.min(127)
-    }
-
-    /// Decode the 7-bit FEC ratio value back to a float.
-    pub fn decode_fec_ratio(encoded: u8) -> f32 {
-        (encoded & 0x7F) as f32 / 63.5
-    }
-
-    /// Serialize to a 12-byte buffer.
-    pub fn write_to(&self, buf: &mut impl BufMut) {
-        // Byte 0: V(1) | T(1) | CodecID(4) | Q(1) | FecRatioHi(1)
-        let byte0 = ((self.version & 0x01) << 7)
-            | ((self.is_repair as u8) << 6)
-            | ((self.codec_id.to_wire() & 0x0F) << 2)
-            | ((self.has_quality_report as u8) << 1)
-            | ((self.fec_ratio_encoded >> 6) & 0x01);
-        buf.put_u8(byte0);
-
-        // Byte 1: FecRatioLo(6) | unused(2)
-        let byte1 = (self.fec_ratio_encoded & 0x3F) << 2;
-        buf.put_u8(byte1);
-
-        // Bytes 2-3: sequence number
-        buf.put_u16(self.seq);
-
-        // Bytes 4-7: timestamp
-        buf.put_u32(self.timestamp);
-
-        // Byte 8: FEC block
-        buf.put_u8(self.fec_block);
-
-        // Byte 9: FEC symbol
-        buf.put_u8(self.fec_symbol);
-
-        // Byte 10: reserved
-        buf.put_u8(self.reserved);
-
-        // Byte 11: CSRC count
-        buf.put_u8(self.csrc_count);
-    }
-
-    /// Deserialize from a buffer. Returns None if insufficient data.
-    pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
-        if buf.remaining() < Self::WIRE_SIZE {
-            return None;
-        }
-
-        let byte0 = buf.get_u8();
-        let byte1 = buf.get_u8();
-
-        let version = (byte0 >> 7) & 0x01;
-        let is_repair = ((byte0 >> 6) & 0x01) != 0;
-        let codec_wire = (byte0 >> 2) & 0x0F;
-        let has_quality_report = ((byte0 >> 1) & 0x01) != 0;
-        let fec_ratio_hi = byte0 & 0x01;
-        let fec_ratio_lo = (byte1 >> 2) & 0x3F;
-        let fec_ratio_encoded = (fec_ratio_hi << 6) | fec_ratio_lo;
-
-        let codec_id = CodecId::from_wire(codec_wire)?;
-        let seq = buf.get_u16();
-        let timestamp = buf.get_u32();
-        let fec_block = buf.get_u8();
-        let fec_symbol = buf.get_u8();
-        let reserved = buf.get_u8();
-        let csrc_count = buf.get_u8();
-
-        Some(Self {
-            version,
-            is_repair,
-            codec_id,
-            has_quality_report,
-            fec_ratio_encoded,
-            seq,
-            timestamp,
-            fec_block,
-            fec_symbol,
-            reserved,
-            csrc_count,
-        })
-    }
-
-    /// Serialize header to a new Bytes value.
-    pub fn to_bytes(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(Self::WIRE_SIZE);
-        self.write_to(&mut buf);
-        buf.freeze()
-    }
-}
-
-/// Temporary alias so existing code continues to compile.
-/// Removed in T1.5 once all emit/parse sites migrate to v2.
-pub type MediaHeader = MediaHeaderV1;
+/// v2 media header alias. All production code uses this type.
+pub type MediaHeader = MediaHeaderV2;
 
 /// 16-byte v2 media header. See docs/PRD/PRD-wire-format-v2.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +103,23 @@ impl MediaHeaderV2 {
     /// Returns true if the frame-end flag is set.
     pub fn is_frame_end(&self) -> bool {
         self.flags & Self::FLAG_FRAME_END != 0
+    }
+
+    /// Encode the FEC ratio float (0.0-2.0) to an 8-bit value (0-200).
+    pub fn encode_fec_ratio(ratio: f32) -> u8 {
+        (ratio * 100.0).round() as u8
+    }
+
+    /// Decode the 8-bit FEC ratio value back to a float.
+    pub fn decode_fec_ratio(encoded: u8) -> f32 {
+        encoded as f32 / 100.0
+    }
+
+    /// Serialize header to a new Bytes value.
+    pub fn to_bytes(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(Self::WIRE_SIZE);
+        self.write_to(&mut buf);
+        buf.freeze()
     }
 }
 
@@ -363,7 +226,7 @@ impl MediaPacket {
         let header = MediaHeader::read_from(&mut cursor)?;
 
         let remaining = data.len() - MediaHeader::WIRE_SIZE;
-        let (payload_len, quality_report) = if header.has_quality_report {
+        let (payload_len, quality_report) = if header.has_quality() {
             if remaining < QualityReport::WIRE_SIZE {
                 return None;
             }
@@ -393,11 +256,12 @@ impl MediaPacket {
     pub fn encode_compact(&self, ctx: &mut MiniFrameContext, frames_since_full: &mut u32) -> Bytes {
         if *frames_since_full > 0 && *frames_since_full < MINI_FRAME_FULL_INTERVAL {
             // --- mini frame ---
-            let ts_delta = self
-                .header
-                .timestamp
-                .wrapping_sub(ctx.last_header.unwrap().timestamp) as u16;
+            let ts_delta =
+                self.header
+                    .timestamp
+                    .wrapping_sub(ctx.last_header().unwrap().timestamp) as u16;
             let mini = MiniHeader {
+                seq_delta: 1,
                 timestamp_delta_ms: ts_delta,
                 payload_len: self.payload.len() as u16,
             };
@@ -599,42 +463,8 @@ pub const FRAME_TYPE_FULL: u8 = 0x00;
 /// Frame type tag: MiniHeader follows (requires prior baseline).
 pub const FRAME_TYPE_MINI: u8 = 0x01;
 
-/// Compact 4-byte v1 header used after a full MediaHeader baseline has been
-/// established. Only the timestamp delta and payload length are transmitted;
-/// all other fields are inherited from the last full header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MiniHeaderV1 {
-    /// Milliseconds elapsed since the last header's timestamp.
-    pub timestamp_delta_ms: u16,
-    /// Length of the payload that follows this header.
-    pub payload_len: u16,
-}
-
-impl MiniHeaderV1 {
-    /// Header size in bytes on the wire.
-    pub const WIRE_SIZE: usize = 4;
-
-    /// Serialize to a 4-byte buffer.
-    pub fn write_to(&self, buf: &mut impl BufMut) {
-        buf.put_u16(self.timestamp_delta_ms);
-        buf.put_u16(self.payload_len);
-    }
-
-    /// Deserialize from a buffer. Returns `None` if insufficient data.
-    pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
-        if buf.remaining() < Self::WIRE_SIZE {
-            return None;
-        }
-        Some(Self {
-            timestamp_delta_ms: buf.get_u16(),
-            payload_len: buf.get_u16(),
-        })
-    }
-}
-
-/// Temporary alias so existing code continues to compile.
-/// Removed in T1.5 once all emit/parse sites migrate to v2.
-pub type MiniHeader = MiniHeaderV1;
+/// v2 mini header alias. All production code uses this type.
+pub type MiniHeader = MiniHeaderV2;
 
 /// Compact 5-byte v2 mini header with explicit `seq_delta`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -672,34 +502,8 @@ impl MiniHeaderV2 {
     }
 }
 
-/// Stateful v1 context that expands [`MiniHeaderV1`]s back into full
-/// [`MediaHeader`]s by tracking the last baseline header.
-#[derive(Clone, Debug, Default)]
-pub struct MiniFrameContextV1 {
-    last_header: Option<MediaHeader>,
-}
-
-impl MiniFrameContextV1 {
-    /// Record a full header as the new baseline for subsequent mini-frames.
-    pub fn update(&mut self, header: &MediaHeader) {
-        self.last_header = Some(*header);
-    }
-
-    /// Expand a mini-header into a full [`MediaHeader`] using the stored
-    /// baseline.  Returns `None` if no baseline has been set yet.
-    pub fn expand(&mut self, mini: &MiniHeader) -> Option<MediaHeader> {
-        let base = self.last_header.as_ref()?;
-        let mut expanded = *base;
-        expanded.seq = base.seq.wrapping_add(1);
-        expanded.timestamp = base.timestamp.wrapping_add(mini.timestamp_delta_ms as u32);
-        self.last_header = Some(expanded);
-        Some(expanded)
-    }
-}
-
-/// Temporary alias so existing code continues to compile.
-/// Removed in T1.5 once all emit/parse sites migrate to v2.
-pub type MiniFrameContext = MiniFrameContextV1;
+/// v2 mini frame context alias. All production code uses this type.
+pub type MiniFrameContext = MiniFrameContextV2;
 
 /// Stateful v2 context that expands [`MiniHeaderV2`]s back into full
 /// [`MediaHeaderV2`]s by tracking the last baseline header.
@@ -723,6 +527,11 @@ impl MiniFrameContextV2 {
         e.timestamp = base.timestamp.wrapping_add(m.timestamp_delta_ms as u32);
         self.last = Some(e);
         Some(e)
+    }
+
+    /// Return a reference to the last baseline header, if any.
+    pub fn last_header(&self) -> Option<&MediaHeaderV2> {
+        self.last.as_ref()
     }
 }
 
@@ -1332,17 +1141,15 @@ mod tests {
     #[test]
     fn header_roundtrip() {
         let header = MediaHeader {
-            version: 0,
-            is_repair: false,
+            version: 2,
+            flags: MediaHeader::FLAG_QUALITY,
+            media_type: MediaType::Audio,
             codec_id: CodecId::Opus24k,
-            has_quality_report: true,
-            fec_ratio_encoded: 42,
+            stream_id: 0,
+            fec_ratio: 42,
             seq: 12345,
             timestamp: 987654,
             fec_block: 7,
-            fec_symbol: 3,
-            reserved: 0,
-            csrc_count: 0,
         };
 
         let bytes = header.to_bytes();
@@ -1356,17 +1163,15 @@ mod tests {
     #[test]
     fn header_repair_flag() {
         let header = MediaHeader {
-            version: 0,
-            is_repair: true,
+            version: 2,
+            flags: MediaHeader::FLAG_REPAIR,
+            media_type: MediaType::Audio,
             codec_id: CodecId::Codec2_1200,
-            has_quality_report: false,
-            fec_ratio_encoded: 127,
-            seq: 65535,
+            stream_id: 0,
+            fec_ratio: 127,
+            seq: 0xDEAD_BEEF,
             timestamp: u32::MAX,
-            fec_block: 255,
-            fec_symbol: 255,
-            reserved: 0xFF,
-            csrc_count: 0,
+            fec_block: 0xABCD,
         };
 
         let bytes = header.to_bytes();
@@ -1418,17 +1223,15 @@ mod tests {
     fn media_packet_roundtrip() {
         let packet = MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: MediaHeader::FLAG_QUALITY,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus6k,
-                has_quality_report: true,
-                fec_ratio_encoded: 32,
+                stream_id: 0,
+                fec_ratio: 32,
                 seq: 100,
                 timestamp: 2000,
                 fec_block: 1,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from_static(b"test audio data here"),
             quality_report: Some(QualityReport {
@@ -1859,11 +1662,11 @@ mod tests {
         let ratio = 0.5;
         let encoded = MediaHeader::encode_fec_ratio(ratio);
         let decoded = MediaHeader::decode_fec_ratio(encoded);
-        assert!((decoded - ratio).abs() < 0.02);
+        assert!((decoded - ratio).abs() < 0.01);
 
         let ratio_max = 2.0;
         let encoded_max = MediaHeader::encode_fec_ratio(ratio_max);
-        assert_eq!(encoded_max, 127);
+        assert_eq!(encoded_max, 200);
     }
 
     // ---------------------------------------------------------------
@@ -1924,6 +1727,7 @@ mod tests {
     #[test]
     fn mini_header_encode_decode() {
         let mini = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 160,
         };
@@ -1938,29 +1742,28 @@ mod tests {
     #[test]
     fn mini_header_wire_size() {
         let mini = MiniHeader {
+            seq_delta: 0xFF,
             timestamp_delta_ms: 0xFFFF,
             payload_len: 0xFFFF,
         };
         let mut buf = BytesMut::new();
         mini.write_to(&mut buf);
-        assert_eq!(buf.len(), 4);
-        assert_eq!(MiniHeader::WIRE_SIZE, 4);
+        assert_eq!(buf.len(), 5);
+        assert_eq!(MiniHeader::WIRE_SIZE, 5);
     }
 
     #[test]
     fn mini_frame_context_expand() {
         let baseline = MediaHeader {
-            version: 0,
-            is_repair: false,
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
             codec_id: CodecId::Opus24k,
-            has_quality_report: false,
-            fec_ratio_encoded: 10,
+            stream_id: 0,
+            fec_ratio: 10,
             seq: 100,
             timestamp: 1000,
             fec_block: 5,
-            fec_symbol: 0,
-            reserved: 0,
-            csrc_count: 0,
         };
 
         let mut ctx = MiniFrameContext::default();
@@ -1968,6 +1771,7 @@ mod tests {
 
         // First expansion
         let mini1 = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };
@@ -1979,6 +1783,7 @@ mod tests {
 
         // Second expansion — builds on expanded h1
         let mini2 = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };
@@ -1991,6 +1796,7 @@ mod tests {
     fn mini_frame_context_no_baseline() {
         let mut ctx = MiniFrameContext::default();
         let mini = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };
@@ -2065,13 +1871,13 @@ mod tests {
 
     #[test]
     fn full_vs_mini_size_comparison() {
-        // Full frame on wire: 1 byte type tag + 12 byte MediaHeader = 13
+        // Full frame on wire: 1 byte type tag + 16 byte MediaHeader = 17
         let full_size = 1 + MediaHeader::WIRE_SIZE;
-        assert_eq!(full_size, 13);
+        assert_eq!(full_size, 17);
 
-        // Mini frame on wire: 1 byte type tag + 4 byte MiniHeader = 5
+        // Mini frame on wire: 1 byte type tag + 5 byte MiniHeader = 6
         let mini_size = 1 + MiniHeader::WIRE_SIZE;
-        assert_eq!(mini_size, 5);
+        assert_eq!(mini_size, 6);
 
         // Verify the constants match expectations
         assert_eq!(FRAME_TYPE_FULL, 0x00);
@@ -2082,20 +1888,18 @@ mod tests {
     // encode_compact / decode_compact tests
     // ---------------------------------------------------------------
 
-    fn make_media_packet(seq: u16, ts: u32, payload: &[u8]) -> MediaPacket {
+    fn make_media_packet(seq: u32, ts: u32, payload: &[u8]) -> MediaPacket {
         MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus24k,
-                has_quality_report: false,
-                fec_ratio_encoded: 10,
+                stream_id: 0,
+                fec_ratio: 10,
                 seq,
                 timestamp: ts,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(payload.to_vec()),
             quality_report: None,
@@ -2109,7 +1913,7 @@ mod tests {
         let mut frames_since_full: u32 = 0;
 
         let packets: Vec<MediaPacket> = (0..5)
-            .map(|i| make_media_packet(i, i as u32 * 20, b"audio"))
+            .map(|i| make_media_packet(i, i * 20, b"audio"))
             .collect();
 
         for (i, pkt) in packets.iter().enumerate() {
@@ -2121,7 +1925,7 @@ mod tests {
             } else {
                 // Subsequent frames should be mini
                 assert_eq!(wire[0], FRAME_TYPE_MINI, "frame {i} should be MINI");
-                // Mini wire: 1 (tag) + 4 (mini header) + payload
+                // Mini wire: 1 (tag) + 5 (mini header) + payload
                 assert_eq!(wire.len(), 1 + MiniHeader::WIRE_SIZE + pkt.payload.len());
             }
 
@@ -2141,7 +1945,7 @@ mod tests {
         // Encode MINI_FRAME_FULL_INTERVAL + 1 frames. Frame 0 and frame 50
         // should be FULL, everything in between should be MINI.
         for i in 0..=MINI_FRAME_FULL_INTERVAL {
-            let pkt = make_media_packet(i as u16, i * 20, b"data");
+            let pkt = make_media_packet(i, i * 20, b"data");
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
 
             if i == 0 || i == MINI_FRAME_FULL_INTERVAL {
@@ -2196,8 +2000,8 @@ mod tests {
         // (which is what the encoder does when the feature is off).
         let mut ctx = MiniFrameContext::default();
 
-        for i in 0..10u16 {
-            let pkt = make_media_packet(i, i as u32 * 20, b"payload");
+        for i in 0..10u32 {
+            let pkt = make_media_packet(i, i * 20, b"payload");
             // When mini-frames are disabled, the encoder always passes
             // frames_since_full = 0 equivalent by never using encode_compact.
             // We test the raw path: frames_since_full forced to 0 every time.

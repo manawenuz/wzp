@@ -144,7 +144,7 @@ pub async fn run_drift_test(
             }
             match tokio::time::timeout(Duration::from_millis(2), transport.recv_media()).await {
                 Ok(Ok(Some(pkt))) => {
-                    let is_repair = pkt.header.is_repair;
+                    let is_repair = pkt.header.is_repair();
                     decoder.ingest(pkt);
                     if !is_repair {
                         if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
@@ -180,7 +180,7 @@ pub async fn run_drift_test(
     while Instant::now() < drain_deadline {
         match tokio::time::timeout(Duration::from_millis(100), transport.recv_media()).await {
             Ok(Ok(Some(pkt))) => {
-                let is_repair = pkt.header.is_repair;
+                let is_repair = pkt.header.is_repair();
                 decoder.ingest(pkt);
                 if !is_repair {
                     if let Some(_n) = decoder.decode_next(&mut pcm_buf) {
@@ -234,7 +234,10 @@ pub fn print_drift_report(result: &DriftResult) {
     println!();
     println!("Expected duration:  {} ms", result.expected_duration_ms);
     println!("Actual duration:    {} ms", result.actual_duration_ms);
-    println!("Drift:              {} ms ({:+.4}%)", result.drift_ms, result.drift_pct);
+    println!(
+        "Drift:              {} ms ({:+.4}%)",
+        result.drift_ms, result.drift_pct
+    );
     println!();
 
     // Interpretation
@@ -246,9 +249,15 @@ pub fn print_drift_report(result: &DriftResult) {
     } else if abs_drift < 20 {
         println!("Result: GOOD -- drift is within acceptable bounds (<20 ms).");
     } else if abs_drift < 100 {
-        println!("Result: FAIR -- noticeable drift ({} ms). Clock sync may be needed.", abs_drift);
+        println!(
+            "Result: FAIR -- noticeable drift ({} ms). Clock sync may be needed.",
+            abs_drift
+        );
     } else {
-        println!("Result: POOR -- significant drift ({} ms). Investigate clock sources.", abs_drift);
+        println!(
+            "Result: POOR -- significant drift ({} ms). Investigate clock sources.",
+            abs_drift
+        );
     }
     println!();
 }

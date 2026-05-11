@@ -109,11 +109,9 @@ impl RelayMap {
 
     /// Check if any entry has a stale probe (older than `max_age`).
     pub fn needs_reprobe(&self, max_age: Duration) -> bool {
-        self.entries.iter().any(|e| {
-            match e.last_probed {
-                None => true,
-                Some(t) => t.elapsed() > max_age,
-            }
+        self.entries.iter().any(|e| match e.last_probed {
+            None => true,
+            Some(t) => t.elapsed() > max_age,
         })
     }
 

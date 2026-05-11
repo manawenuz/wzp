@@ -325,7 +325,10 @@ mod tests {
         // Feed 960 samples (= delay amount). No samples released yet.
         aec.feed_farend(&vec![1i16; 960]);
         // far_buf should still be all zeros (nothing released).
-        assert!(aec.far_buf.iter().all(|&s| s == 0.0), "nothing should be released yet");
+        assert!(
+            aec.far_buf.iter().all(|&s| s == 0.0),
+            "nothing should be released yet"
+        );
 
         // Feed 480 more. 480 should be released to far_buf.
         aec.feed_farend(&vec![2i16; 480]);

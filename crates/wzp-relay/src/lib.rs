@@ -12,7 +12,6 @@ pub mod call_registry;
 pub mod config;
 pub mod event_log;
 pub mod federation;
-pub mod signal_hub;
 pub mod handshake;
 pub mod metrics;
 pub mod pipeline;
@@ -22,6 +21,7 @@ pub mod relay_link;
 pub mod room;
 pub mod route;
 pub mod session_mgr;
+pub mod signal_hub;
 pub mod trunk;
 pub mod ws;
 

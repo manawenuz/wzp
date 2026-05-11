@@ -129,8 +129,7 @@ impl Downsampler48to8 {
 
         // Update history: keep the last (FIR_TAPS - 1) samples from work.
         if work.len() >= hist_len {
-            self.history
-                .copy_from_slice(&work[work.len() - hist_len..]);
+            self.history.copy_from_slice(&work[work.len() - hist_len..]);
         } else {
             // Input was shorter than history — shift.
             let shift = hist_len - work.len();
@@ -209,8 +208,7 @@ impl Upsampler8to48 {
 
         // Update history.
         if work.len() >= hist_len {
-            self.history
-                .copy_from_slice(&work[work.len() - hist_len..]);
+            self.history.copy_from_slice(&work[work.len() - hist_len..]);
         } else {
             let shift = hist_len - work.len();
             self.history.copy_within(shift.., 0);

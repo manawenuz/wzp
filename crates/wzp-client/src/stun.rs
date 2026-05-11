@@ -223,9 +223,7 @@ pub fn parse_binding_response(
         pos = value_end + ((4 - (attr_len % 4)) % 4);
     }
 
-    xor_mapped
-        .or(mapped)
-        .ok_or(StunError::NoMappedAddress)
+    xor_mapped.or(mapped).ok_or(StunError::NoMappedAddress)
 }
 
 /// Parse a MAPPED-ADDRESS attribute value (RFC 5389 §15.1).
@@ -279,10 +277,7 @@ fn parse_mapped_address(value: &[u8]) -> Result<SocketAddr, StunError> {
 /// - Port: XOR with top 16 bits of magic cookie
 /// - IPv4 address: XOR with magic cookie
 /// - IPv6 address: XOR with magic cookie || transaction ID
-fn parse_xor_mapped_address(
-    value: &[u8],
-    txn_id: &[u8; 12],
-) -> Result<SocketAddr, StunError> {
+fn parse_xor_mapped_address(value: &[u8], txn_id: &[u8; 12]) -> Result<SocketAddr, StunError> {
     if value.len() < 4 {
         return Err(StunError::Malformed("XOR-MAPPED-ADDRESS too short".into()));
     }
@@ -471,9 +466,7 @@ pub async fn discover_reflexive(config: &StunConfig) -> Result<SocketAddr, StunE
 /// Unlike `discover_reflexive` (which returns on first success), this
 /// waits for ALL servers and returns individual results — needed for
 /// NAT type classification which requires 2+ observations.
-pub async fn probe_stun_servers(
-    config: &StunConfig,
-) -> Vec<crate::reflect::NatProbeResult> {
+pub async fn probe_stun_servers(config: &StunConfig) -> Vec<crate::reflect::NatProbeResult> {
     use std::time::Instant;
 
     let mut set = tokio::task::JoinSet::new();
@@ -596,9 +589,7 @@ pub struct PortAllocationResult {
 /// - No pattern → `Random`
 ///
 /// Requires at least 3 servers for reliable classification.
-pub async fn detect_port_allocation(
-    config: &StunConfig,
-) -> PortAllocationResult {
+pub async fn detect_port_allocation(config: &StunConfig) -> PortAllocationResult {
     if config.servers.len() < 2 {
         return PortAllocationResult {
             allocation: PortAllocation::Unknown,
@@ -696,11 +687,15 @@ pub fn classify_port_allocation(ports: &[u16]) -> PortAllocation {
 
     // Allow small jitter: if all deltas are within ±1 of each other,
     // consider it sequential with the median delta.
-    let all_close = deltas.iter().all(|&d| (d - first_delta).unsigned_abs() <= 1);
+    let all_close = deltas
+        .iter()
+        .all(|&d| (d - first_delta).unsigned_abs() <= 1);
     if all_close {
         // Use the most common delta (mode).
         let median_delta = first_delta;
-        return PortAllocation::Sequential { delta: median_delta };
+        return PortAllocation::Sequential {
+            delta: median_delta,
+        };
     }
 
     // Check for consistent delta with occasional skip (some NATs
@@ -727,12 +722,7 @@ pub fn classify_port_allocation(ports: &[u16]) -> PortAllocation {
 /// predicted ports centered around the most likely next value.
 /// The `offset` parameter accounts for additional flows that may
 /// open between the probe and the actual connection attempt.
-pub fn predict_ports(
-    last_port: u16,
-    delta: i16,
-    offset: u16,
-    spread: u16,
-) -> Vec<u16> {
+pub fn predict_ports(last_port: u16, delta: i16, offset: u16, spread: u16) -> Vec<u16> {
     let base = last_port as i32 + (delta as i32 * (offset as i32 + 1));
     let mut ports = Vec::with_capacity((spread * 2 + 1) as usize);
     for i in -(spread as i32)..=(spread as i32) {
@@ -1217,7 +1207,11 @@ mod tests {
         assert!(StunError::TxnMismatch.to_string().contains("mismatch"));
         assert!(StunError::NoMappedAddress.to_string().contains("MAPPED"));
         assert!(StunError::Io("test".into()).to_string().contains("test"));
-        assert!(StunError::DnsError("bad".into()).to_string().contains("bad"));
+        assert!(
+            StunError::DnsError("bad".into())
+                .to_string()
+                .contains("bad")
+        );
         assert!(StunError::ErrorResponse(420).to_string().contains("420"));
         assert!(StunError::Malformed("x".into()).to_string().contains("x"));
     }
@@ -1244,7 +1238,10 @@ mod tests {
     #[test]
     fn classify_port_preserving() {
         let ports = vec![4433, 4433, 4433, 4433, 4433];
-        assert_eq!(classify_port_allocation(&ports), PortAllocation::PortPreserving);
+        assert_eq!(
+            classify_port_allocation(&ports),
+            PortAllocation::PortPreserving
+        );
     }
 
     #[test]
@@ -1290,7 +1287,10 @@ mod tests {
     #[test]
     fn classify_two_same_is_preserving() {
         let ports = vec![4433, 4433];
-        assert_eq!(classify_port_allocation(&ports), PortAllocation::PortPreserving);
+        assert_eq!(
+            classify_port_allocation(&ports),
+            PortAllocation::PortPreserving
+        );
     }
 
     #[test]
@@ -1359,8 +1359,14 @@ mod tests {
 
     #[test]
     fn port_allocation_display() {
-        assert_eq!(PortAllocation::PortPreserving.to_string(), "port-preserving");
-        assert_eq!(PortAllocation::Sequential { delta: 1 }.to_string(), "sequential(delta=1)");
+        assert_eq!(
+            PortAllocation::PortPreserving.to_string(),
+            "port-preserving"
+        );
+        assert_eq!(
+            PortAllocation::Sequential { delta: 1 }.to_string(),
+            "sequential(delta=1)"
+        );
         assert_eq!(PortAllocation::Random.to_string(), "random");
         assert_eq!(PortAllocation::Unknown.to_string(), "unknown");
     }
@@ -1421,7 +1427,10 @@ mod tests {
         let config = StunConfig::default();
         let probes = probe_stun_servers(&config).await;
         assert!(!probes.is_empty());
-        let successes: Vec<_> = probes.iter().filter(|p| p.observed_addr.is_some()).collect();
+        let successes: Vec<_> = probes
+            .iter()
+            .filter(|p| p.observed_addr.is_some())
+            .collect();
         assert!(
             !successes.is_empty(),
             "at least one STUN server should respond"
