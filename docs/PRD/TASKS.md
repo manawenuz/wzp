@@ -83,7 +83,7 @@ test result: ok. 1 passed; 0 failed; ...
 - Tests added: <count + names>
 - Tests modified: <count + names>
 - Workspace test count before: <N> / after: <M>
-- `cargo clippy --workspace --all-targets -- -D warnings`: pass / fail
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass / fail (or N known-debt errors in <crate>; see PROTOCOL-AUDIT.md)
 - `cargo fmt --all -- --check`: pass / fail
 
 ## Risks / follow-ups
@@ -108,7 +108,7 @@ These apply to every task. They are NOT repeated in each task block. Violating t
 
 1. **Rust edition 2024** (set in workspace root). No exceptions.
 2. **`cargo fmt --all`** must produce a clean diff before commit. CI will reject otherwise.
-3. **`cargo clippy --workspace --all-targets -- -D warnings`** must pass. Do not `#[allow(...)]` to silence — fix the root cause. If a lint is genuinely wrong, justify the allow in the report.
+3. **`cargo clippy --workspace --all-targets -- -D warnings`** must pass in crates you touch. Do not `#[allow(...)]` to silence — fix the root cause. If a lint is genuinely wrong, justify the allow in the report. Pre-existing debt in other crates (documented in `PROTOCOL-AUDIT.md`) is not your problem.
 4. **No `unwrap()` / `expect()` in production code paths.** Tests are fine. Production: return a typed error.
 5. **No `println!` / `eprintln!`.** Use `tracing::{debug,info,warn,error}!`. The crates are already wired for tracing.
 6. **No new dependencies without justification.** If a task forces a new crate, list it under "Risks / follow-ups" in the report so the reviewer can sanity-check the supply chain.
@@ -166,7 +166,7 @@ If either fails before you start a task, stop and report — the tree is dirty.
 ### Conventions
 
 - Format on save: `cargo fmt --all` after any code change.
-- Lints: `cargo clippy --workspace --all-targets -- -D warnings` must pass before commit.
+- Lints: `cargo clippy --workspace --all-targets -- -D warnings` must pass in crates you touch before commit. Pre-existing debt in other crates is documented in `PROTOCOL-AUDIT.md`.
 - Tests live next to code under `#[cfg(test)]` modules, or in `crates/<x>/tests/`.
 - Wire format types: `crates/wzp-proto/src/packet.rs` is authoritative. Do not duplicate field semantics elsewhere.
 - Commit one task per commit. Reference task ID in commit message: `T1.1: widen MediaHeader to v2`.
@@ -664,6 +664,71 @@ cargo test --workspace --no-fail-fast
 - Workspace builds clean.
 - All audio tests pass.
 - No reference to `MediaHeaderV1` / `MiniHeaderV1` anywhere.
+
+---
+
+## T1.5.1 — Remove `unwrap()` from `encode_compact`
+
+- **Parent:** T1.5 (Approved)
+- **PRD:** `PRD-wire-format-v2.md` (cleanup)
+- **Effort:** 20 min
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+
+### Context
+`encode_compact` calls `ctx.last_header().unwrap()` at line ~262. The invariant ("a full header is forced on the first frame and every `MINI_FRAME_FULL_INTERVAL` frames") makes it logically safe, but standard #4 forbids `unwrap()` in production paths. Carried over from v1.
+
+### Steps
+
+1. Open `crates/wzp-proto/src/packet.rs`. Find `pub fn encode_compact`.
+2. Replace the `unwrap()` with one of:
+   - **Recommended:** when `ctx.last_header()` is `None`, fall back to emitting a full frame and force `frames_since_full = 0`. This makes the invariant explicit in the code rather than implicit.
+   - Alternative: return `Result<Bytes, EncodeError>` with a typed `NoBaselineHeader` variant. More invasive (changes the public signature).
+3. Add a test that constructs a fresh `MiniFrameContext` and calls `encode_compact` immediately — without the existing fix, this would panic; with the fix, it should emit a full frame.
+
+### Verify
+```bash
+cargo test -p wzp-proto encode_compact
+cargo clippy -p wzp-proto --all-targets -- -D warnings
+grep -n "\.unwrap()" crates/wzp-proto/src/packet.rs | grep -v "#\[cfg(test)\]\|^[[:space:]]*//\|tests::"
+# the unwrap on line ~262 should be gone; only test-code unwraps remain.
+```
+
+### Done when
+- No `unwrap()` in `encode_compact` or anywhere else in non-test code in `packet.rs`.
+- New test passes; existing `encode_compact` tests still pass.
+
+---
+
+## T1.5.2 — Workspace clippy hygiene + document pre-existing debt
+
+- **Parent:** T1.5 (Approved)
+- **PRD:** `PRD-wire-format-v2.md` (process)
+- **Effort:** 30 min
+- **Files:**
+  - `docs/PROTOCOL-AUDIT.md` (add a "Known pre-existing clippy debt" section)
+  - This file (TASKS.md) — update report template instruction to require workspace clippy
+
+### Context
+T1.5 review revealed two issues: (1) the agent ran only `-p wzp-proto` clippy, not workspace; (2) workspace clippy fails with 9 `wzp-codec` errors and 3 `warzone-protocol` errors. Both are pre-existing (verified against HEAD~1). Need to capture these as known debt so they don't stay invisible, and tighten the report template to require workspace clippy on every task.
+
+### Steps
+
+1. Run `cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E "^error\[|could not compile" | head -50` and capture the output.
+2. Add a section to `docs/PROTOCOL-AUDIT.md` named **"Known pre-existing clippy debt (as of T1.5.2)"** listing the failing crates and a brief description per error category (manual ASCII case-cmp, manual arithmetic check, loop index, etc.). Reference the commit SHA of HEAD at time of measurement.
+3. In `docs/PRD/TASKS.md`, update the report template's "Test summary" section: change `cargo clippy --workspace --all-targets -- -D warnings: pass / fail` to `cargo clippy --workspace --all-targets -- -D warnings: pass / fail (or N known-debt errors in <crate>; see PROTOCOL-AUDIT.md)`. This makes the expectation explicit and gives agents a way to acknowledge known debt without re-discussing it every task.
+4. Optional: add a `make clippy-baseline` or similar script to `tools/` that prints expected-error count so agents can detect regressions.
+
+### Verify
+```bash
+grep -c "Known pre-existing clippy debt" docs/PROTOCOL-AUDIT.md   # >= 1
+grep -c "or N known-debt errors" docs/PRD/TASKS.md                # >= 1
+```
+
+### Done when
+- PROTOCOL-AUDIT.md has the known-debt section with current error counts and categories.
+- TASKS.md report template reflects the new expectation.
+- A follow-up cleanup task is created in the audit (separate from this one) to actually fix the pre-existing debt over time.
 
 ---
 
@@ -1242,7 +1307,9 @@ Statuses (in order of progression):
 | T1.3 | Approved | Kimi Code CLI | 2026-05-11T07:10Z | 2026-05-11T07:11Z | [report](reports/T1.3-report.md) | Approved 2026-05-11. No follow-ups; docs-and-test-only change. |
 | T1.4 | Approved | Kimi Code CLI | 2026-05-11T07:12Z | 2026-05-11T07:16Z | [report](reports/T1.4-report.md) | Approved 2026-05-11. Spawned T1.4.1 (rustdoc on v2 mini types). The two-step expand test catches the W4 desync scenario nicely. |
 | T1.4.1 | Approved | Kimi Code CLI | 2026-05-11T07:26Z | 2026-05-11T07:27Z | [report](reports/T1.4.1-report.md) | Approved. Closes rustdoc trilogy (T1.1.1/T1.2.1/T1.4.1). |
-| T1.5 | Pending Review | Kimi Code CLI | 2026-05-11T07:28Z | 2026-05-11T10:09Z | [report](reports/T1.5-report.md) | — |
+| T1.5 | Approved | Kimi Code CLI | 2026-05-11T07:28Z | 2026-05-11T10:09Z | [report](reports/T1.5-report.md) | Approved with follow-ups. Migration correct; scope creep (120 files) and workspace clippy skipped — spawned T1.5.1 (encode_compact unwrap) and T1.5.2 (clippy hygiene). |
+| T1.5.1 | Pending Review | Kimi Code CLI | 2026-05-11T10:09Z | 2026-05-11T10:15Z | [report](reports/T1.5.1-report.md) | — |
+| T1.5.2 | Pending Review | Kimi Code CLI | 2026-05-11T10:15Z | 2026-05-11T10:20Z | [report](reports/T1.5.2-report.md) | — |
 | T1.6 | Open | — | — | — | — | — |
 | T1.7 | Open | — | — | — | — | — |
 | T1.8 | Open | — | — | — | — | — |
@@ -1280,6 +1347,7 @@ Statuses (in order of progression):
 
 Items currently waiting on the reviewer:
 
-- T1.5 — Migrate emit/parse sites to v2 wire format — report: reports/T1.5-report.md
+- T1.5.1 — Remove unwrap() from encode_compact — report: reports/T1.5.1-report.md
+- T1.5.2 — Workspace clippy hygiene + document pre-existing debt — report: reports/T1.5.2-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).

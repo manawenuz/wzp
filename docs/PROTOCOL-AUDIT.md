@@ -78,3 +78,29 @@ The v2 wire format specified in `ROAD-TO-VIDEO.md` Phase V1 addresses:
 | W10 (MediaType) | Explicit `media_type: u8` byte |
 
 W6 / W14 (BWE + TransportFeedback) addressed in Phase V2. W7 (NACK) addressed in Phase V2 / V4. Others remain open.
+
+## Known pre-existing clippy debt (as of T1.5.2)
+
+Measured at commit `c93d302` on `experimental-ui` (2026-05-11).
+
+`cargo clippy --workspace --all-targets -- -D warnings` fails in two crates with **pre-existing** errors (verified against `HEAD~1`). These are not introduced by any Wave 1 task; they should be cleaned up in a dedicated hygiene sprint or accepted as known debt.
+
+### `wzp-codec` — 9 errors
+
+| Category | Count | Lint | Files |
+|---|---|---|---|
+| Manual saturating sub | 1 | `clippy::implicit_saturating_sub` | `aec.rs:117` |
+| Needless range loop | 2 | `clippy::needless_range_loop` | `aec.rs:164`, `resample.rs:51` |
+| Manual `div_ceil` | 2 | `clippy::manual_div_ceil` | `codec2_dec.rs:48`, `codec2_enc.rs:48` |
+| Manual `clamp` | 2 | `clippy::manual_clamp` | `denoise.rs:59`, `opus_enc.rs:250` |
+| Manual ASCII case-cmp | 1 | `clippy::manual_ascii_check` | `opus_enc.rs:99` |
+| Same-item push in loop | 1 | `clippy::same_item_push` | `resample.rs:184` |
+
+### `warzone-protocol` (submodule `deps/featherchat`) — 3 errors
+
+| Category | Count | Lint | Files |
+|---|---|---|---|
+| `clone` on `Copy` type | 1 | `clippy::clone_on_copy` | `ratchet.rs:202` |
+| Missing `Default` impl | 2 | `clippy::new_without_default` | `types.rs:59`, `types.rs:69` |
+
+**Policy:** New tasks must not add *new* clippy errors in crates they touch. The 12 errors above are grandfathered; a follow-up cleanup task should be scheduled to fix them (especially the `wzp-codec` ones, which are straightforward mechanical replacements).
