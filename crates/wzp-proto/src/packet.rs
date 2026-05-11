@@ -163,14 +163,23 @@ pub type MediaHeader = MediaHeaderV1;
 /// 16-byte v2 media header. See docs/PRD/PRD-wire-format-v2.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaHeaderV2 {
-    pub version: u8, // always 2
-    pub flags: u8,   // bit 7 T, bit 6 Q, bit 5 KeyFrame, bit 4 FrameEnd
+    /// Protocol version (always 2 for v2).
+    pub version: u8,
+    /// Bit flags: bit 7 T (repair), bit 6 Q (quality report), bit 5 KeyFrame, bit 4 FrameEnd.
+    pub flags: u8,
+    /// Media stream type (Audio, Video, Data, Control).
     pub media_type: MediaType,
+    /// Codec identifier.
     pub codec_id: CodecId,
+    /// Stream identifier within the session (0 for default audio).
     pub stream_id: u8,
-    pub fec_ratio: u8, // 0..200 -> 0.0..2.0
+    /// FEC ratio encoded as 0..200, mapping to 0.0..2.0.
+    pub fec_ratio: u8,
+    /// Wrapping packet sequence number (32-bit in v2).
     pub seq: u32,
+    /// Milliseconds since session start.
     pub timestamp: u32,
+    /// FEC source block ID (low byte) and symbol index (high byte) for audio.
     pub fec_block: u16,
 }
 
