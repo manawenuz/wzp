@@ -13,10 +13,10 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use tracing::{error, info, warn};
 
-use wzp_proto::MediaTransport;
 use wzp_proto::packet::TrunkFrame;
 use wzp_proto::quality::{AdaptiveQualityController, Tier};
 use wzp_proto::traits::QualityController;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 use crate::conformance::ConformanceMeter;
 use crate::metrics::RelayMetrics;
@@ -64,6 +64,7 @@ impl DebugTap {
             wzp_proto::SignalMessage::RoomUpdate {
                 count,
                 participants,
+                ..
             } => {
                 let names: Vec<&str> = participants
                     .iter()
@@ -81,6 +82,7 @@ impl DebugTap {
             wzp_proto::SignalMessage::QualityDirective {
                 recommended_profile,
                 reason,
+                ..
             } => {
                 info!(
                     target: "debug_tap",
@@ -493,6 +495,7 @@ impl RoomManager {
         );
         room.qualities.insert(id, ParticipantQuality::new());
         let update = wzp_proto::SignalMessage::RoomUpdate {
+            version: default_signal_version(),
             count: room.len() as u32,
             participants: room.participant_list(),
         };
@@ -570,6 +573,7 @@ impl RoomManager {
                     return None;
                 }
                 let update = wzp_proto::SignalMessage::RoomUpdate {
+                    version: default_signal_version(),
                     count: room.len() as u32,
                     participants: room.participant_list(),
                 };
@@ -654,6 +658,7 @@ impl RoomManager {
         );
 
         let directive = wzp_proto::SignalMessage::QualityDirective {
+            version: default_signal_version(),
             recommended_profile: profile,
             reason: Some(format!("weakest link: {weakest:?}")),
         };

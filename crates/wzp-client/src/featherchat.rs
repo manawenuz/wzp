@@ -11,7 +11,7 @@
 //! 5. Connects QUIC to relay for media
 
 use serde::{Deserialize, Serialize};
-use wzp_proto::packet::SignalMessage;
+use wzp_proto::packet::{SignalMessage, default_signal_version};
 
 /// featherChat CallSignal types (mirrors warzone-protocol::message::CallSignalType).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn payload_roundtrip() {
         let signal = SignalMessage::CallOffer {
+            version: default_signal_version(),
             identity_pub: [1u8; 32],
             ephemeral_pub: [2u8; 32],
             signature: vec![3u8; 64],
@@ -172,6 +173,7 @@ mod tests {
     #[test]
     fn signal_type_mapping() {
         let offer = SignalMessage::CallOffer {
+            version: default_signal_version(),
             identity_pub: [0; 32],
             ephemeral_pub: [0; 32],
             signature: vec![],
@@ -183,6 +185,7 @@ mod tests {
         assert!(matches!(signal_to_call_type(&offer), CallSignalType::Offer));
 
         let hangup = SignalMessage::Hangup {
+            version: default_signal_version(),
             reason: wzp_proto::HangupReason::Normal,
             call_id: None,
         };
@@ -209,6 +212,7 @@ mod tests {
         ));
 
         let transfer = SignalMessage::Transfer {
+            version: default_signal_version(),
             target_fingerprint: "abc".to_string(),
             relay_addr: None,
         };

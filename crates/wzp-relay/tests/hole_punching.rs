@@ -20,7 +20,7 @@
 //! to reason about, no real network, and what we actually want to
 //! test is the cross-wiring logic, not the whole signal stack.
 
-use wzp_proto::{CallAcceptMode, SignalMessage};
+use wzp_proto::{CallAcceptMode, SignalMessage, default_signal_version};
 use wzp_relay::call_registry::CallRegistry;
 
 /// Helper: simulate the relay's handling of a DirectCallOffer. In
@@ -77,6 +77,7 @@ fn handle_answer_and_build_setups(
     };
 
     let setup_for_caller = SignalMessage::CallSetup {
+        version: default_signal_version(),
         call_id: call_id.clone(),
         room: room.clone(),
         relay_addr: "203.0.113.5:4433".into(),
@@ -85,6 +86,7 @@ fn handle_answer_and_build_setups(
         peer_mapped_addr: None,
     };
     let setup_for_callee = SignalMessage::CallSetup {
+        version: default_signal_version(),
         call_id,
         room,
         relay_addr: "203.0.113.5:4433".into(),
@@ -97,6 +99,7 @@ fn handle_answer_and_build_setups(
 
 fn mk_offer(call_id: &str, caller_reflexive_addr: Option<&str>) -> SignalMessage {
     SignalMessage::DirectCallOffer {
+        version: default_signal_version(),
         caller_fingerprint: "alice".into(),
         caller_alias: None,
         target_fingerprint: "bob".into(),
@@ -118,6 +121,7 @@ fn mk_answer(
     callee_reflexive_addr: Option<&str>,
 ) -> SignalMessage {
     SignalMessage::DirectCallAnswer {
+        version: default_signal_version(),
         call_id: call_id.into(),
         accept_mode: mode,
         identity_pub: None,

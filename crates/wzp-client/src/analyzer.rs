@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use tracing::info;
 
-use wzp_proto::{CodecId, MediaPacket, MediaTransport};
+use wzp_proto::{CodecId, MediaPacket, MediaTransport, default_signal_version};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -919,6 +919,7 @@ async fn main() -> anyhow::Result<()> {
     // Auth if token provided
     if let Some(ref token) = args.token {
         let auth = wzp_proto::SignalMessage::AuthToken {
+            version: default_signal_version(),
             token: token.clone(),
         };
         transport.send_signal(&auth).await?;

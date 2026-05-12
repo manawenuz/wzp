@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tracing::info;
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_transport::QuinnTransport;
 
 /// A client connected via `_signal` for direct calling.
@@ -101,7 +101,10 @@ impl SignalHub {
                 alias: c.alias.clone(),
             })
             .collect();
-        SignalMessage::PresenceList { users }
+        SignalMessage::PresenceList {
+            version: default_signal_version(),
+            users,
+        }
     }
 
     /// Broadcast a message to ALL connected signal clients.

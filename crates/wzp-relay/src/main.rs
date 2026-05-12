@@ -16,7 +16,7 @@ use clap::Parser;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_relay::config::RelayConfig;
 use wzp_relay::metrics::RelayMetrics;
 use wzp_relay::pipeline::{PipelineConfig, RelayPipeline};
@@ -640,6 +640,7 @@ async fn main() -> anyhow::Result<()> {
                                 .send_to(
                                     &caller_fp,
                                     &SignalMessage::Hangup {
+                                        version: default_signal_version(),
                                         reason: wzp_proto::HangupReason::Normal,
                                         call_id: None,
                                     },
@@ -685,6 +686,7 @@ async fn main() -> anyhow::Result<()> {
 
                         // Emit the LOCAL CallSetup to our local caller.
                         let setup = SignalMessage::CallSetup {
+                            version: default_signal_version(),
                             call_id: call_id.clone(),
                             room: room_name.clone(),
                             relay_addr: advertised_addr_d.clone(),
@@ -703,7 +705,7 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
 
-                    SignalMessage::CallRinging { ref call_id } => {
+                    SignalMessage::CallRinging { ref call_id, .. } => {
                         // Forward to local caller for "ringing..." UX.
                         let caller_fp = {
                             let reg = call_registry_d.lock().await;
@@ -866,9 +868,12 @@ async fn main() -> anyhow::Result<()> {
                 info!(%addr, "probe connection detected, entering Ping/Pong + presence responder");
                 loop {
                     match transport.recv_signal().await {
-                        Ok(Some(wzp_proto::SignalMessage::Ping { timestamp_ms })) => {
+                        Ok(Some(wzp_proto::SignalMessage::Ping { timestamp_ms, .. })) => {
                             if let Err(e) = transport
-                                .send_signal(&wzp_proto::SignalMessage::Pong { timestamp_ms })
+                                .send_signal(&wzp_proto::SignalMessage::Pong {
+                                    version: default_signal_version(),
+                                    timestamp_ms,
+                                })
                                 .await
                             {
                                 error!(%addr, "probe pong send error: {e}");
@@ -878,6 +883,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(Some(wzp_proto::SignalMessage::PresenceUpdate {
                             fingerprints,
                             relay_addr,
+                            ..
                         })) => {
                             // A peer relay is telling us which fingerprints it has
                             let peer_addr: std::net::SocketAddr =
@@ -894,6 +900,7 @@ async fn main() -> anyhow::Result<()> {
                                 reg.local_fingerprints().into_iter().collect()
                             };
                             let reply = wzp_proto::SignalMessage::PresenceUpdate {
+                                version: default_signal_version(),
                                 fingerprints: local_fps,
                                 relay_addr: addr.to_string(),
                             };
@@ -902,7 +909,9 @@ async fn main() -> anyhow::Result<()> {
                                 break;
                             }
                         }
-                        Ok(Some(wzp_proto::SignalMessage::RouteQuery { fingerprint, ttl })) => {
+                        Ok(Some(wzp_proto::SignalMessage::RouteQuery {
+                            fingerprint, ttl, ..
+                        })) => {
                             // Look up the fingerprint in our local registry
                             let reg = presence.lock().await;
                             let route = route_resolver.resolve(&reg, &fingerprint);
@@ -930,6 +939,7 @@ async fn main() -> anyhow::Result<()> {
                             };
 
                             let reply = wzp_proto::SignalMessage::RouteResponse {
+                                version: default_signal_version(),
                                 fingerprint,
                                 found,
                                 relay_chain,
@@ -968,6 +978,7 @@ async fn main() -> anyhow::Result<()> {
                     {
                         Ok(Ok(Some(wzp_proto::SignalMessage::FederationHello {
                             tls_fingerprint,
+                            ..
                         }))) => tls_fingerprint,
                         _ => {
                             warn!(%addr, "federation: no hello received, closing");
@@ -1004,7 +1015,7 @@ async fn main() -> anyhow::Result<()> {
                 // Optional auth
                 let auth_fp: Option<String> = if let Some(ref url) = auth_url {
                     match transport.recv_signal().await {
-                        Ok(Some(SignalMessage::AuthToken { token })) => {
+                        Ok(Some(SignalMessage::AuthToken { token, .. })) => {
                             match wzp_relay::auth::validate_token(url, &token).await {
                                 Ok(client) => Some(client.fingerprint),
                                 Err(e) => {
@@ -1033,6 +1044,7 @@ async fn main() -> anyhow::Result<()> {
                         identity_pub,
                         signature: _,
                         alias,
+                        ..
                     }))) => {
                         // Compute fingerprint: SHA-256(Ed25519 pub key)[:16], same as Fingerprint type
                         let fp = {
@@ -1067,6 +1079,7 @@ async fn main() -> anyhow::Result<()> {
                 // Send ack
                 let _ = transport
                     .send_signal(&SignalMessage::RegisterPresenceAck {
+                        version: default_signal_version(),
                         success: true,
                         error: None,
                         relay_build: Some(BUILD_GIT_HASH.to_string()),
@@ -1126,6 +1139,7 @@ async fn main() -> anyhow::Result<()> {
                                         // federation has a matching entry.
                                         let forwarded = if let Some(ref fm) = federation_mgr {
                                             let forward = SignalMessage::FederatedSignalForward {
+                                                version: default_signal_version(),
                                                 inner: Box::new(msg.clone()),
                                                 origin_relay_fp: tls_fp.clone(),
                                             };
@@ -1149,6 +1163,7 @@ async fn main() -> anyhow::Result<()> {
                                             info!(%addr, target = %target_fp, "call target not online (no federation route)");
                                             let _ = transport
                                                 .send_signal(&SignalMessage::Hangup {
+                                                    version: default_signal_version(),
                                                     reason: wzp_proto::HangupReason::Normal,
                                                     call_id: None,
                                                 })
@@ -1193,6 +1208,7 @@ async fn main() -> anyhow::Result<()> {
                                         // federated delivery is in flight.
                                         let _ = transport
                                             .send_signal(&SignalMessage::CallRinging {
+                                                version: default_signal_version(),
                                                 call_id: call_id.clone(),
                                             })
                                             .await;
@@ -1236,6 +1252,7 @@ async fn main() -> anyhow::Result<()> {
                                     drop(hub);
                                     let _ = transport
                                         .send_signal(&SignalMessage::CallRinging {
+                                            version: default_signal_version(),
                                             call_id: call_id.clone(),
                                         })
                                         .await;
@@ -1293,11 +1310,13 @@ async fn main() -> anyhow::Result<()> {
                                         if let Some(ref origin_fp) = peer_relay_fp {
                                             if let Some(ref fm) = federation_mgr {
                                                 let hangup = SignalMessage::Hangup {
+                                                    version: default_signal_version(),
                                                     reason: wzp_proto::HangupReason::Normal,
                                                     call_id: Some(call_id.clone()),
                                                 };
                                                 let forward =
                                                     SignalMessage::FederatedSignalForward {
+                                                        version: default_signal_version(),
                                                         inner: Box::new(hangup),
                                                         origin_relay_fp: tls_fp.clone(),
                                                     };
@@ -1314,6 +1333,7 @@ async fn main() -> anyhow::Result<()> {
                                                 .send_to(
                                                     &peer_fp,
                                                     &SignalMessage::Hangup {
+                                                        version: default_signal_version(),
                                                         reason: wzp_proto::HangupReason::Normal,
                                                         call_id: Some(call_id.clone()),
                                                     },
@@ -1390,6 +1410,7 @@ async fn main() -> anyhow::Result<()> {
                                             if let Some(ref fm) = federation_mgr {
                                                 let forward =
                                                     SignalMessage::FederatedSignalForward {
+                                                        version: default_signal_version(),
                                                         inner: Box::new(msg.clone()),
                                                         origin_relay_fp: tls_fp.clone(),
                                                     };
@@ -1407,6 +1428,7 @@ async fn main() -> anyhow::Result<()> {
                                             }
 
                                             let setup_for_callee = SignalMessage::CallSetup {
+                                                version: default_signal_version(),
                                                 call_id: call_id.clone(),
                                                 room: room.clone(),
                                                 relay_addr: relay_addr_for_setup,
@@ -1429,6 +1451,7 @@ async fn main() -> anyhow::Result<()> {
                                             // cross-wired candidates (Phase 5.5 ICE
                                             // + Phase 8 port-mapped addrs).
                                             let setup_for_caller = SignalMessage::CallSetup {
+                                                version: default_signal_version(),
                                                 call_id: call_id.clone(),
                                                 room: room.clone(),
                                                 relay_addr: relay_addr_for_setup.clone(),
@@ -1437,6 +1460,7 @@ async fn main() -> anyhow::Result<()> {
                                                 peer_mapped_addr: callee_mapped,
                                             };
                                             let setup_for_callee = SignalMessage::CallSetup {
+                                                version: default_signal_version(),
                                                 call_id: call_id.clone(),
                                                 room: room.clone(),
                                                 relay_addr: relay_addr_for_setup,
@@ -1524,6 +1548,7 @@ async fn main() -> anyhow::Result<()> {
                                             if let Some(ref fm) = federation_mgr {
                                                 let forward =
                                                     SignalMessage::FederatedSignalForward {
+                                                        version: default_signal_version(),
                                                         inner: Box::new(msg.clone()),
                                                         origin_relay_fp: tls_fp.clone(),
                                                     };
@@ -1568,6 +1593,7 @@ async fn main() -> anyhow::Result<()> {
                                             if let Some(ref fm) = federation_mgr {
                                                 let forward =
                                                     SignalMessage::FederatedSignalForward {
+                                                        version: default_signal_version(),
                                                         inner: Box::new(msg.clone()),
                                                         origin_relay_fp: tls_fp.clone(),
                                                     };
@@ -1615,6 +1641,7 @@ async fn main() -> anyhow::Result<()> {
                                             if let Some(ref fm) = federation_mgr {
                                                 let forward =
                                                     SignalMessage::FederatedSignalForward {
+                                                        version: default_signal_version(),
                                                         inner: Box::new(msg.clone()),
                                                         origin_relay_fp: tls_fp.clone(),
                                                     };
@@ -1629,9 +1656,12 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
 
-                                SignalMessage::Ping { timestamp_ms } => {
+                                SignalMessage::Ping { timestamp_ms, .. } => {
                                     let _ = transport
-                                        .send_signal(&SignalMessage::Pong { timestamp_ms })
+                                        .send_signal(&SignalMessage::Pong {
+                                            version: default_signal_version(),
+                                            timestamp_ms,
+                                        })
                                         .await;
                                 }
 
@@ -1651,6 +1681,7 @@ async fn main() -> anyhow::Result<()> {
                                     let observed_addr = addr.to_string();
                                     if let Err(e) = transport
                                         .send_signal(&SignalMessage::ReflectResponse {
+                                            version: default_signal_version(),
                                             observed_addr: observed_addr.clone(),
                                         })
                                         .await
@@ -1710,6 +1741,7 @@ async fn main() -> anyhow::Result<()> {
                         .send_to(
                             peer_fp,
                             &SignalMessage::Hangup {
+                                version: default_signal_version(),
                                 reason: wzp_proto::HangupReason::Normal,
                                 call_id: Some(call_id.clone()),
                             },
@@ -1741,7 +1773,7 @@ async fn main() -> anyhow::Result<()> {
             let authenticated_fp: Option<String> = if let Some(ref url) = auth_url {
                 info!(%addr, "waiting for auth token...");
                 match transport.recv_signal().await {
-                    Ok(Some(wzp_proto::SignalMessage::AuthToken { token })) => {
+                    Ok(Some(wzp_proto::SignalMessage::AuthToken { token, .. })) => {
                         match wzp_relay::auth::validate_token(url, &token).await {
                             Ok(client) => {
                                 metrics.auth_attempts.with_label_values(&["ok"]).inc();
@@ -1913,6 +1945,7 @@ async fn main() -> anyhow::Result<()> {
                                     if let SignalMessage::RoomUpdate {
                                         count: _,
                                         participants: mut local_parts,
+                                        ..
                                     } = update
                                     {
                                         let remote = fm.get_remote_participants(&room_name).await;
@@ -1921,6 +1954,7 @@ async fn main() -> anyhow::Result<()> {
                                         let mut seen = std::collections::HashSet::new();
                                         local_parts.retain(|p| seen.insert(p.fingerprint.clone()));
                                         SignalMessage::RoomUpdate {
+                                            version: default_signal_version(),
                                             count: local_parts.len() as u32,
                                             participants: local_parts,
                                         }

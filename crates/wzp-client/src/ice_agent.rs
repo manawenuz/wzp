@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use wzp_proto::SignalMessage;
+use wzp_proto::{SignalMessage, default_signal_version};
 
 use crate::dual_path::PeerCandidates;
 use crate::portmap;
@@ -133,6 +133,7 @@ impl IceAgent {
         let candidates = self.gather().await;
 
         let update = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: self.call_id.clone(),
             reflexive_addr: candidates.reflexive.map(|a| a.to_string()),
             local_addrs: candidates.local.iter().map(|a| a.to_string()).collect(),
@@ -206,6 +207,7 @@ mod tests {
 
         // First update (gen=1) should succeed.
         let update1 = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-call".into(),
             reflexive_addr: Some("203.0.113.5:4433".into()),
             local_addrs: vec!["192.168.1.10:4433".into()],
@@ -223,6 +225,7 @@ mod tests {
 
         // Same generation (gen=1) should be rejected.
         let update1b = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-call".into(),
             reflexive_addr: Some("198.51.100.9:4433".into()),
             local_addrs: vec![],
@@ -233,6 +236,7 @@ mod tests {
 
         // Older generation (gen=0) should be rejected.
         let update0 = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-call".into(),
             reflexive_addr: Some("10.0.0.1:4433".into()),
             local_addrs: vec![],
@@ -243,6 +247,7 @@ mod tests {
 
         // Newer generation (gen=2) should succeed.
         let update2 = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-call".into(),
             reflexive_addr: Some("198.51.100.9:5555".into()),
             local_addrs: vec![],
@@ -287,6 +292,7 @@ mod tests {
         let agent = IceAgent::new("test-call".into(), IceAgentConfig::default());
 
         let update = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-call".into(),
             reflexive_addr: Some("203.0.113.5:4433".into()),
             local_addrs: vec!["192.168.1.10:4433".into(), "10.0.0.5:4433".into()],
@@ -315,6 +321,7 @@ mod tests {
         let agent = IceAgent::new("test".into(), IceAgentConfig::default());
 
         let update = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test".into(),
             reflexive_addr: None,
             local_addrs: vec![],
@@ -333,6 +340,7 @@ mod tests {
         let agent = IceAgent::new("test".into(), IceAgentConfig::default());
 
         let update = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test".into(),
             reflexive_addr: Some("not-an-addr".into()),
             local_addrs: vec![

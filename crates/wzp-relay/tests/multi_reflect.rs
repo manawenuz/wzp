@@ -63,6 +63,7 @@ async fn spawn_mock_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
                         Ok(Some(SignalMessage::RegisterPresence { .. })) => {
                             let _ = t
                                 .send_signal(&SignalMessage::RegisterPresenceAck {
+                                    version: 1,
                                     success: true,
                                     error: None,
                                     relay_build: None,
@@ -74,6 +75,7 @@ async fn spawn_mock_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
                         Ok(Some(SignalMessage::Reflect)) => {
                             let _ = t
                                 .send_signal(&SignalMessage::ReflectResponse {
+                                    version: 1,
                                     observed_addr: observed_addr.to_string(),
                                 })
                                 .await;

@@ -4,7 +4,9 @@
 //! send `CallOffer` → recv `CallAnswer` → derive shared `CryptoSession`.
 
 use wzp_crypto::{CryptoSession, KeyExchange, WarzoneKeyExchange};
-use wzp_proto::{HangupReason, MediaTransport, QualityProfile, SignalMessage};
+use wzp_proto::{
+    HangupReason, MediaTransport, QualityProfile, SignalMessage, default_signal_version,
+};
 
 /// Errors that can occur during the client-side cryptographic handshake.
 #[derive(Debug)]
@@ -78,6 +80,7 @@ pub async fn perform_handshake(
 
     // 4. Send CallOffer
     let offer = SignalMessage::CallOffer {
+        version: default_signal_version(),
         identity_pub,
         ephemeral_pub,
         signature,
@@ -112,6 +115,7 @@ pub async fn perform_handshake(
                 ephemeral_pub,
                 signature,
                 chosen_profile,
+                ..
             } => (identity_pub, ephemeral_pub, signature, chosen_profile),
             SignalMessage::Hangup {
                 reason: HangupReason::ProtocolVersionMismatch { server_supported },

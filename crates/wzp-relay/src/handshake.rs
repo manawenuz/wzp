@@ -4,7 +4,7 @@
 //! recv `CallOffer` → verify → generate ephemeral → derive session → send `CallAnswer`.
 
 use wzp_crypto::{CryptoSession, KeyExchange, WarzoneKeyExchange};
-use wzp_proto::{MediaTransport, QualityProfile, SignalMessage};
+use wzp_proto::{MediaTransport, QualityProfile, SignalMessage, default_signal_version};
 
 /// Accept the relay (callee) side of the cryptographic handshake.
 ///
@@ -51,6 +51,7 @@ pub async fn accept_handshake(
             alias,
             protocol_version,
             supported_versions: _,
+            ..
         } => (
             identity_pub,
             ephemeral_pub,
@@ -70,6 +71,7 @@ pub async fn accept_handshake(
     // 1a. Protocol version check — we only speak v2.
     if protocol_version != 2 {
         let mismatch = SignalMessage::Hangup {
+            version: default_signal_version(),
             reason: wzp_proto::HangupReason::ProtocolVersionMismatch {
                 server_supported: vec![2],
             },
@@ -108,6 +110,7 @@ pub async fn accept_handshake(
 
     // 6. Send CallAnswer
     let answer = SignalMessage::CallAnswer {
+        version: default_signal_version(),
         identity_pub,
         ephemeral_pub,
         signature,

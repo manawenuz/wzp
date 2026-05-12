@@ -30,7 +30,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_transport::{QuinnTransport, client_config, create_endpoint};
 
 /// Result of one probe against one relay. Always returned so the
@@ -123,6 +123,7 @@ pub async fn probe_reflect_addr(
         // path does in desktop/src-tauri/src/lib.rs register_signal.
         transport
             .send_signal(&SignalMessage::RegisterPresence {
+                version: default_signal_version(),
                 identity_pub: [0u8; 32],
                 signature: vec![],
                 alias: None,
@@ -150,7 +151,7 @@ pub async fn probe_reflect_addr(
             .map_err(|e| format!("send Reflect: {e}"))?;
 
         match transport.recv_signal().await {
-            Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
+            Ok(Some(SignalMessage::ReflectResponse { observed_addr, .. })) => {
                 let parsed: SocketAddr = observed_addr
                     .parse()
                     .map_err(|e| format!("parse observed_addr {observed_addr:?}: {e}"))?;

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 const FRAME_SAMPLES: usize = 960; // 20ms @ 48kHz
 
@@ -380,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
     // Send auth token if provided (relay with --auth-url expects this first)
     if let Some(ref token) = cli.token {
         let auth = wzp_proto::SignalMessage::AuthToken {
+            version: default_signal_version(),
             token: token.clone(),
         };
         transport.send_signal(&auth).await?;
@@ -473,6 +474,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
 
     info!(total_source, total_repair, total_bytes, "done — closing");
     let hangup = wzp_proto::SignalMessage::Hangup {
+        version: default_signal_version(),
         reason: wzp_proto::HangupReason::Normal,
         call_id: None,
     };
@@ -632,6 +634,7 @@ async fn run_file_mode(
 
     // Send Hangup signal so the relay knows we're done
     let hangup = wzp_proto::SignalMessage::Hangup {
+        version: default_signal_version(),
         reason: wzp_proto::HangupReason::Normal,
         call_id: None,
     };
@@ -769,7 +772,7 @@ async fn run_signal_mode(
     token: Option<String>,
     call_target: Option<String>,
 ) -> anyhow::Result<()> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
 
     let identity = seed.derive_identity();
     let pub_id = identity.public_identity();
@@ -792,13 +795,17 @@ async fn run_signal_mode(
     // Auth if token provided
     if let Some(ref tok) = token {
         transport
-            .send_signal(&SignalMessage::AuthToken { token: tok.clone() })
+            .send_signal(&SignalMessage::AuthToken {
+                version: default_signal_version(),
+                token: tok.clone(),
+            })
             .await?;
     }
 
     // Register presence (signature not verified in Phase 1)
     transport
         .send_signal(&SignalMessage::RegisterPresence {
+            version: default_signal_version(),
             identity_pub,
             signature: vec![], // Phase 1: not verified
             alias: None,
@@ -835,6 +842,7 @@ async fn run_signal_mode(
 
         transport
             .send_signal(&SignalMessage::DirectCallOffer {
+                version: default_signal_version(),
                 caller_fingerprint: fp.clone(),
                 caller_alias: None,
                 target_fingerprint: target.clone(),
@@ -861,7 +869,7 @@ async fn run_signal_mode(
     loop {
         match signal_transport.recv_signal().await {
             Ok(Some(msg)) => match msg {
-                SignalMessage::CallRinging { call_id } => {
+                SignalMessage::CallRinging { call_id, .. } => {
                     info!(call_id = %call_id, "ringing...");
                 }
                 SignalMessage::DirectCallOffer {
@@ -879,6 +887,7 @@ async fn run_signal_mode(
                     // Auto-accept for CLI testing
                     let _ = signal_transport
                         .send_signal(&SignalMessage::DirectCallAnswer {
+                            version: default_signal_version(),
                             call_id,
                             accept_mode: wzp_proto::CallAcceptMode::AcceptGeneric,
                             identity_pub: Some(identity_pub),
@@ -908,6 +917,7 @@ async fn run_signal_mode(
                     peer_direct_addr: _,
                     peer_local_addrs: _,
                     peer_mapped_addr: _,
+                    ..
                 } => {
                     info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
 
@@ -970,6 +980,7 @@ async fn run_signal_mode(
                                             _ = tokio::signal::ctrl_c() => {
                                                 info!("hanging up...");
                                                 let _ = signal_transport.send_signal(&SignalMessage::Hangup {
+                                                    version: default_signal_version(),
                                                     reason: wzp_proto::HangupReason::Normal,
                                                     call_id: None,
                                                 }).await;

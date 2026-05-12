@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_transport::QuinnTransport;
 
 use crate::config::{PeerConfig, TrustedConfig};
@@ -520,7 +520,11 @@ async fn run_room_event_dispatcher(
                 if fm.is_global_room(&room) {
                     let participants = fm.room_mgr.local_participant_list(&room);
                     info!(room = %room, count = participants.len(), "global room now active, announcing to peers");
-                    let msg = SignalMessage::GlobalRoomActive { room, participants };
+                    let msg = SignalMessage::GlobalRoomActive {
+                        version: default_signal_version(),
+                        room,
+                        participants,
+                    };
                     let transports: Vec<Arc<QuinnTransport>> = {
                         let links = fm.peer_links.lock().await;
                         links.values().map(|l| l.transport.clone()).collect()
@@ -533,7 +537,10 @@ async fn run_room_event_dispatcher(
             Ok(RoomEvent::LocalLeave { room }) => {
                 if fm.is_global_room(&room) {
                     info!(room = %room, "global room now inactive, announcing to peers");
-                    let msg = SignalMessage::GlobalRoomInactive { room };
+                    let msg = SignalMessage::GlobalRoomInactive {
+                        version: default_signal_version(),
+                        room,
+                    };
                     let transports: Vec<Arc<QuinnTransport>> = {
                         let links = fm.peer_links.lock().await;
                         links.values().map(|l| l.transport.clone()).collect()
@@ -609,6 +616,7 @@ async fn run_stale_presence_sweeper(fm: Arc<FederationManager>) {
                     let mut seen = HashSet::new();
                     all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
                     let update = SignalMessage::RoomUpdate {
+                        version: default_signal_version(),
                         count: all_participants.len() as u32,
                         participants: all_participants,
                     };
@@ -659,6 +667,7 @@ async fn connect_to_peer(
 
     // Send hello with our TLS fingerprint
     let hello = SignalMessage::FederationHello {
+        version: default_signal_version(),
         tls_fingerprint: fm.local_tls_fp.clone(),
     };
     transport
@@ -710,6 +719,7 @@ async fn run_federation_link(
                 let participants = fm.room_mgr.local_participant_list(room_name);
                 info!(peer = %peer_label, room = %room_name, participants = participants.len(), "announcing local global room to new peer");
                 msgs.push(SignalMessage::GlobalRoomActive {
+                    version: default_signal_version(),
                     room: room_name.clone(),
                     participants,
                 });
@@ -724,6 +734,7 @@ async fn run_federation_link(
                     if fm.is_global_room(room) {
                         info!(peer = %peer_label, room = %room, via = %link.label, "propagating remote room to new peer");
                         msgs.push(SignalMessage::GlobalRoomActive {
+                            version: default_signal_version(),
                             room: room.clone(),
                             participants: participants.clone(),
                         });
@@ -837,7 +848,9 @@ async fn handle_signal(
     }
 
     match msg {
-        SignalMessage::GlobalRoomActive { room, participants } => {
+        SignalMessage::GlobalRoomActive {
+            room, participants, ..
+        } => {
             if fm.is_global_room(&room) {
                 info!(peer = %peer_label, room = %room, remote_participants = participants.len(), "peer has global room active");
                 let mut links = fm.peer_links.lock().await;
@@ -882,6 +895,7 @@ async fn handle_signal(
                         let _ = link
                             .transport
                             .send_signal(&SignalMessage::GlobalRoomActive {
+                                version: default_signal_version(),
                                 room: room.clone(),
                                 participants: tagged_for_propagation.clone(),
                             })
@@ -923,6 +937,7 @@ async fn handle_signal(
                         let mut seen = HashSet::new();
                         all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
                         let update = SignalMessage::RoomUpdate {
+                            version: default_signal_version(),
                             count: all_participants.len() as u32,
                             participants: all_participants,
                         };
@@ -933,7 +948,7 @@ async fn handle_signal(
                 }
             }
         }
-        SignalMessage::GlobalRoomInactive { room } => {
+        SignalMessage::GlobalRoomInactive { room, .. } => {
             info!(peer = %peer_label, room = %room, "peer global room now inactive");
             let mut links = fm.peer_links.lock().await;
             if let Some(link) = links.get_mut(peer_fp) {
@@ -999,6 +1014,7 @@ async fn handle_signal(
                     }
                 }
                 let msg = SignalMessage::GlobalRoomActive {
+                    version: default_signal_version(),
                     room: room.clone(),
                     participants: updated_participants,
                 };
@@ -1007,7 +1023,10 @@ async fn handle_signal(
                 }
             } else {
                 // No participants left anywhere — propagate inactive
-                let msg = SignalMessage::GlobalRoomInactive { room: room.clone() };
+                let msg = SignalMessage::GlobalRoomInactive {
+                    version: default_signal_version(),
+                    room: room.clone(),
+                };
                 for transport in &peer_sends {
                     let _ = transport.send_signal(&msg).await;
                 }
@@ -1025,6 +1044,7 @@ async fn handle_signal(
                     let mut seen = HashSet::new();
                     all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
                     let update = SignalMessage::RoomUpdate {
+                        version: default_signal_version(),
                         count: all_participants.len() as u32,
                         participants: all_participants,
                     };
@@ -1050,6 +1070,7 @@ async fn handle_signal(
         SignalMessage::FederatedSignalForward {
             inner,
             origin_relay_fp,
+            ..
         } => {
             if origin_relay_fp == fm.local_tls_fp {
                 tracing::debug!(

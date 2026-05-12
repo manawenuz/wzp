@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use wzp_proto::packet::MediaPacket;
 use wzp_proto::traits::{MediaTransport, PathQuality};
-use wzp_proto::{SignalMessage, TransportError};
+use wzp_proto::{SignalMessage, TransportError, default_signal_version};
 
 /// A mock transport backed by two mpsc channels (one per direction).
 ///
@@ -151,6 +151,7 @@ async fn handshake_rejects_tampered_signature() {
         let bad_signature = kx.sign(b"wrong-data-intentionally");
 
         let offer = SignalMessage::CallOffer {
+            version: default_signal_version(),
             identity_pub,
             ephemeral_pub,
             signature: bad_signature,
@@ -197,6 +198,7 @@ async fn client_receives_protocol_version_mismatch() {
 
         // Respond with ProtocolVersionMismatch.
         let mismatch = SignalMessage::Hangup {
+            version: default_signal_version(),
             reason: wzp_proto::HangupReason::ProtocolVersionMismatch {
                 server_supported: vec![3],
             },

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_relay::config::{PeerConfig, TrustedConfig};
 use wzp_relay::event_log::EventLogger;
 use wzp_relay::federation::{FederationManager, room_hash};
@@ -348,7 +348,9 @@ async fn broadcast_signal_sends_to_all_peers() {
         .expect("some message");
 
     match hello {
-        SignalMessage::FederationHello { tls_fingerprint } => {
+        SignalMessage::FederationHello {
+            tls_fingerprint, ..
+        } => {
             assert_eq!(tls_fingerprint, "test-relay-fp-abc123");
         }
         other => panic!(
@@ -367,6 +369,7 @@ async fn broadcast_signal_sends_to_all_peers() {
 
     // Now call broadcast_signal on the FM
     let test_msg = SignalMessage::FederatedSignalForward {
+        version: default_signal_version(),
         inner: Box::new(SignalMessage::Reflect),
         origin_relay_fp: "other-relay-fp".into(),
     };

@@ -22,7 +22,7 @@ use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 mod metrics;
 use metrics::WebMetrics;
@@ -297,6 +297,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     // Send auth token to relay (if auth is enabled)
     if let Some(ref token) = browser_token {
         let auth = wzp_proto::SignalMessage::AuthToken {
+            version: default_signal_version(),
             token: token.clone(),
         };
         if let Err(e) = transport.send_signal(&auth).await {

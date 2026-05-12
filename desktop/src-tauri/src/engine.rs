@@ -168,6 +168,7 @@ async fn run_signal_task(
             Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
                 recommended_profile,
                 reason,
+                ..
             }))) => {
                 let idx = profile_to_index(&recommended_profile);
                 info!(

@@ -540,10 +540,23 @@ impl MiniFrameContextV2 {
 /// Compatible with Warzone messenger's identity model:
 /// - Identity keys are Ed25519 (signing) + X25519 (encryption) derived from a 32-byte seed via HKDF
 /// - Fingerprint = SHA-256(Ed25519 public key)[:16]
+///
+/// **Version field:** every struct variant carries `version: u8` (default 1).
+/// Old payloads that omit `version` deserialize cleanly thanks to `#[serde(default)]`.
+///
+/// **Unknown variant handling:** `#[serde(other)]` is designed for
+/// string/integer enums with adjacent tagging, not for externally tagged enum
+/// variants. With externally tagged representation (the default for Rust enums),
+/// the variant name IS the tag, so there is no other value to catch. `bincode`
+/// in particular does not support `#[serde(other)]`. Unknown variants will
+/// naturally cause a deserialization error, which is the correct behavior for
+/// the signal protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignalMessage {
     /// Call initiation (analogous to Warzone's WireMessage::CallOffer).
     CallOffer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Caller's Ed25519 identity public key (32 bytes).
         identity_pub: [u8; 32],
         /// Ephemeral X25519 public key for this call.
@@ -565,6 +578,8 @@ pub enum SignalMessage {
 
     /// Call acceptance (analogous to Warzone's WireMessage::CallAnswer).
     CallAnswer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Callee's Ed25519 identity public key (32 bytes).
         identity_pub: [u8; 32],
         /// Callee's ephemeral X25519 public key.
@@ -577,11 +592,15 @@ pub enum SignalMessage {
 
     /// ICE candidate for NAT traversal.
     IceCandidate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         candidate: String,
     },
 
     /// Periodic rekeying (forward secrecy).
     Rekey {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// New ephemeral X25519 public key.
         new_ephemeral_pub: [u8; 32],
         /// Ed25519 signature over (new_ephemeral_pub || session_id).
@@ -590,6 +609,8 @@ pub enum SignalMessage {
 
     /// Quality/profile change request.
     QualityUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         report: QualityReport,
         recommended_profile: crate::QualityProfile,
     },
@@ -601,6 +622,8 @@ pub enum SignalMessage {
     /// introducing this variant is backward-compatible with pre-Phase-4
     /// relays — they'll just log "unknown signal variant" on receipt.
     LossRecoveryUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Total frames reconstructed via DRED since call start (monotonic).
         #[serde(default)]
         dred_reconstructions: u64,
@@ -616,9 +639,13 @@ pub enum SignalMessage {
 
     /// Connection keepalive / RTT measurement.
     Ping {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         timestamp_ms: u64,
     },
     Pong {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         timestamp_ms: u64,
     },
 
@@ -626,6 +653,8 @@ pub enum SignalMessage {
     /// with older clients that send Hangup without it — the relay falls
     /// back to ending ALL active calls for the sender in that case.
     Hangup {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         reason: HangupReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
@@ -634,6 +663,8 @@ pub enum SignalMessage {
     /// featherChat bearer token for relay authentication.
     /// Sent as the first signal message when --auth-url is configured.
     AuthToken {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         token: String,
     },
 
@@ -647,6 +678,8 @@ pub enum SignalMessage {
     Unmute,
     /// Transfer the call to another peer.
     Transfer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         target_fingerprint: String,
         /// Optional relay address for the transfer target.
         relay_addr: Option<String>,
@@ -658,6 +691,8 @@ pub enum SignalMessage {
     /// Sent periodically over probe connections to share which fingerprints
     /// are connected to the sending relay.
     PresenceUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Fingerprints currently connected to the sending relay.
         fingerprints: Vec<String>,
         /// Address of the sending relay (e.g., "192.168.1.10:4433").
@@ -666,11 +701,15 @@ pub enum SignalMessage {
 
     /// Ask a peer relay to look up a fingerprint in its registry.
     RouteQuery {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         fingerprint: String,
         ttl: u8,
     },
     /// Response to a route query.
     RouteResponse {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         fingerprint: String,
         found: bool,
         relay_chain: Vec<String>,
@@ -680,6 +719,8 @@ pub enum SignalMessage {
     /// Sent over a relay link (`_relay` SNI) to ask the peer relay to
     /// create a room and forward media for the given session.
     SessionForward {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         session_id: String,
         target_fingerprint: String,
         source_relay: String,
@@ -687,12 +728,16 @@ pub enum SignalMessage {
     /// Confirm that the forwarding session has been set up on the peer relay.
     /// The `room_name` tells the source relay which room to address media to.
     SessionForwardAck {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         session_id: String,
         room_name: String,
     },
 
     /// Room membership update — sent by relay to all participants when someone joins or leaves.
     RoomUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Current participant count.
         count: u32,
         /// List of participants currently in the room.
@@ -702,12 +747,16 @@ pub enum SignalMessage {
     // ── Federation signals (relay-to-relay) ──
     /// Federation: initial handshake — the connecting relay identifies itself.
     FederationHello {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// TLS certificate fingerprint of the connecting relay.
         tls_fingerprint: String,
     },
 
     /// Federation: this relay now has local participants in a global room.
     GlobalRoomActive {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         room: String,
         /// Participants on the announcing relay (for federated presence).
         #[serde(default)]
@@ -716,6 +765,8 @@ pub enum SignalMessage {
 
     /// Federation: this relay's last local participant left a global room.
     GlobalRoomInactive {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         room: String,
     },
 
@@ -723,6 +774,8 @@ pub enum SignalMessage {
     /// Register on relay for direct calls. Sent on `_signal` connections
     /// after optional AuthToken.
     RegisterPresence {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Client's Ed25519 identity public key.
         identity_pub: [u8; 32],
         /// Signature over ("register-presence" || identity_pub).
@@ -733,6 +786,8 @@ pub enum SignalMessage {
 
     /// Relay confirms presence registration.
     RegisterPresenceAck {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -750,6 +805,8 @@ pub enum SignalMessage {
 
     /// Direct call offer routed through the relay to a specific peer.
     DirectCallOffer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Caller's fingerprint.
         caller_fingerprint: String,
         /// Caller's display name.
@@ -798,6 +855,8 @@ pub enum SignalMessage {
 
     /// Callee's response to a direct call.
     DirectCallAnswer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// How the callee accepts (or rejects).
         accept_mode: CallAcceptMode,
@@ -838,6 +897,8 @@ pub enum SignalMessage {
 
     /// Relay tells both parties: media room is ready.
     CallSetup {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Room name on the relay for the media session (e.g., "_call:a1b2c3d4").
         room: String,
@@ -871,6 +932,8 @@ pub enum SignalMessage {
 
     /// Ringing notification (relay → caller, callee received the offer).
     CallRinging {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
     },
 
@@ -893,6 +956,8 @@ pub enum SignalMessage {
     /// for IPv4, "[::1]:p" for IPv6. Clients parse it with
     /// `SocketAddr::from_str`.
     ReflectResponse {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         observed_addr: String,
     },
 
@@ -910,6 +975,8 @@ pub enum SignalMessage {
     /// and the other picks Relay — they now agree on the path
     /// before any media flows.
     MediaPathReport {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Did the direct QUIC connection (P2P dial or accept)
         /// complete successfully on this side?
@@ -931,6 +998,8 @@ pub enum SignalMessage {
     /// — peers ignore updates with a generation <= their last-seen
     /// generation to handle reordering.
     CandidateUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// New server-reflexive address (STUN-discovered or relay-reflected).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -951,6 +1020,8 @@ pub enum SignalMessage {
     /// and recent port sequence so the peer can predict which port
     /// to dial.
     HardNatProbe {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Last observed external ports (most recent first).
         /// Typically 3-5 entries from sequential STUN probes.
@@ -968,6 +1039,8 @@ pub enum SignalMessage {
     /// ports it has open. The Dialer then sprays QUIC connects to
     /// these ports (and optionally random ports) on the Acceptor's IP.
     HardNatBirthdayStart {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Number of sockets the Acceptor opened.
         acceptor_port_count: u16,
@@ -995,6 +1068,8 @@ pub enum SignalMessage {
     /// A→B→A echo loops; proper TTL + dedup will land when
     /// multi-hop federation is added (Phase 4.2).
     FederatedSignalForward {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// The signal message being forwarded
         /// (`DirectCallOffer`, `DirectCallAnswer`, `CallRinging`,
         /// `Hangup`, ...). Boxed because `SignalMessage` is
@@ -1011,6 +1086,8 @@ pub enum SignalMessage {
     /// Relay-initiated quality directive: all participants should switch
     /// to the recommended profile to match the weakest link.
     QualityDirective {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         recommended_profile: crate::QualityProfile,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -1021,6 +1098,8 @@ pub enum SignalMessage {
     /// users to all connected clients. Sent on every register/
     /// deregister so clients can maintain a live lobby user list.
     PresenceList {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// List of online users. Each entry is { fingerprint, alias }.
         users: Vec<PresenceUser>,
     },
@@ -1031,6 +1110,8 @@ pub enum SignalMessage {
     /// conditions. Used for consensual upgrades that require both
     /// sides to agree (e.g., switching from Opus24k to Studio48k).
     UpgradeProposal {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Unique ID for this proposal (to match response).
         proposal_id: String,
@@ -1045,6 +1126,8 @@ pub enum SignalMessage {
 
     /// Response to an UpgradeProposal.
     UpgradeResponse {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         proposal_id: String,
         /// true = accepted, both sides switch. false = rejected.
@@ -1057,6 +1140,8 @@ pub enum SignalMessage {
     /// Confirmation that the upgrade is committed — both sides
     /// should switch encoder at the next frame boundary.
     UpgradeConfirm {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         proposal_id: String,
         confirmed_profile: crate::QualityProfile,
@@ -1067,6 +1152,8 @@ pub enum SignalMessage {
     /// encoding where each side uses the best quality its connection
     /// supports, rather than forcing all to the weakest link.
     QualityCapability {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// The best profile this peer can sustain based on its
         /// current network conditions.
@@ -1083,7 +1170,7 @@ pub enum SignalMessage {
     /// carrying ACK/NACK vectors and a REMB-style bandwidth estimate.
     TransportFeedback {
         /// Feedback format version (default 1).
-        #[serde(default)]
+        #[serde(default = "default_signal_version")]
         version: u8,
         /// Which media stream this feedback applies to.
         stream_id: u8,
@@ -1131,6 +1218,10 @@ pub fn default_proto_version() -> u8 {
 /// Default supported versions for `CallOffer` (only v2).
 pub fn default_supported_versions() -> Vec<u8> {
     vec![2]
+}
+/// Default signal message version (v1).
+pub fn default_signal_version() -> u8 {
+    1
 }
 
 /// Reasons for ending a call.
@@ -1304,12 +1395,13 @@ mod tests {
         // for v6 and the client side has to parse that back.
         for addr in ["192.0.2.17:4433", "[2001:db8::1]:4433", "127.0.0.1:54321"] {
             let resp = SignalMessage::ReflectResponse {
+                version: default_signal_version(),
                 observed_addr: addr.to_string(),
             };
             let json = serde_json::to_string(&resp).unwrap();
             let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
             match decoded {
-                SignalMessage::ReflectResponse { observed_addr } => {
+                SignalMessage::ReflectResponse { observed_addr, .. } => {
                     assert_eq!(observed_addr, addr);
                     // Must parse back to a SocketAddr cleanly.
                     let _parsed: std::net::SocketAddr = observed_addr
@@ -1326,6 +1418,7 @@ mod tests {
         // Wrap a DirectCallOffer inside FederatedSignalForward and
         // prove both directions of serde preserve every field.
         let inner = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: Some("Alice".into()),
             target_fingerprint: "bob".into(),
@@ -1340,6 +1433,7 @@ mod tests {
             caller_build_version: None,
         };
         let forward = SignalMessage::FederatedSignalForward {
+            version: default_signal_version(),
             inner: Box::new(inner),
             origin_relay_fp: "relay-a-tls-fp".into(),
         };
@@ -1349,6 +1443,7 @@ mod tests {
             SignalMessage::FederatedSignalForward {
                 inner,
                 origin_relay_fp,
+                ..
             } => {
                 assert_eq!(origin_relay_fp, "relay-a-tls-fp");
                 match *inner {
@@ -1375,6 +1470,7 @@ mod tests {
         // we intend to forward survives being boxed + re-serialized.
         let cases: Vec<SignalMessage> = vec![
             SignalMessage::DirectCallAnswer {
+                version: default_signal_version(),
                 call_id: "c1".into(),
                 accept_mode: CallAcceptMode::AcceptTrusted,
                 identity_pub: None,
@@ -1387,9 +1483,11 @@ mod tests {
                 callee_build_version: None,
             },
             SignalMessage::CallRinging {
+                version: default_signal_version(),
                 call_id: "c1".into(),
             },
             SignalMessage::Hangup {
+                version: default_signal_version(),
                 reason: HangupReason::Normal,
                 call_id: None,
             },
@@ -1397,6 +1495,7 @@ mod tests {
         for inner in cases {
             let inner_disc = std::mem::discriminant(&inner);
             let forward = SignalMessage::FederatedSignalForward {
+                version: default_signal_version(),
                 inner: Box::new(inner),
                 origin_relay_fp: "r".into(),
             };
@@ -1415,6 +1514,7 @@ mod tests {
     fn hole_punching_optional_fields_roundtrip() {
         // DirectCallOffer with Some(caller_reflexive_addr)
         let offer = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -1448,6 +1548,7 @@ mod tests {
         // OMIT the field from the JSON so older relays that don't
         // know about caller_reflexive_addr don't see it.
         let offer_none = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -1469,6 +1570,7 @@ mod tests {
 
         // DirectCallAnswer with callee_reflexive_addr.
         let answer = SignalMessage::DirectCallAnswer {
+            version: default_signal_version(),
             call_id: "c1".into(),
             accept_mode: CallAcceptMode::AcceptTrusted,
             identity_pub: None,
@@ -1494,6 +1596,7 @@ mod tests {
 
         // CallSetup with peer_direct_addr.
         let setup = SignalMessage::CallSetup {
+            version: default_signal_version(),
             call_id: "c1".into(),
             room: "call-c1".into(),
             relay_addr: "203.0.113.5:4433".into(),
@@ -1566,14 +1669,17 @@ mod tests {
         // test a sample of the pre-existing ones.
         let cases = vec![
             SignalMessage::Ping {
+                version: default_signal_version(),
                 timestamp_ms: 12345,
             },
             SignalMessage::Hold,
             SignalMessage::Hangup {
+                version: default_signal_version(),
                 reason: HangupReason::Normal,
                 call_id: None,
             },
             SignalMessage::CallRinging {
+                version: default_signal_version(),
                 call_id: "abcd".into(),
             },
         ];
@@ -1614,6 +1720,7 @@ mod tests {
     #[test]
     fn transfer_serialize() {
         let transfer = SignalMessage::Transfer {
+            version: default_signal_version(),
             target_fingerprint: "abc123".to_string(),
             relay_addr: Some("relay.example.com:4433".to_string()),
         };
@@ -1623,6 +1730,7 @@ mod tests {
             SignalMessage::Transfer {
                 target_fingerprint,
                 relay_addr,
+                ..
             } => {
                 assert_eq!(target_fingerprint, "abc123");
                 assert_eq!(relay_addr.unwrap(), "relay.example.com:4433");
@@ -1632,6 +1740,7 @@ mod tests {
 
         // Also test with relay_addr = None
         let transfer_no_relay = SignalMessage::Transfer {
+            version: default_signal_version(),
             target_fingerprint: "def456".to_string(),
             relay_addr: None,
         };
@@ -1641,6 +1750,7 @@ mod tests {
             SignalMessage::Transfer {
                 target_fingerprint,
                 relay_addr,
+                ..
             } => {
                 assert_eq!(target_fingerprint, "def456");
                 assert!(relay_addr.is_none());
@@ -1660,6 +1770,7 @@ mod tests {
     #[test]
     fn presence_update_signal_roundtrip() {
         let msg = SignalMessage::PresenceUpdate {
+            version: default_signal_version(),
             fingerprints: vec!["aabb".to_string(), "ccdd".to_string()],
             relay_addr: "10.0.0.1:4433".to_string(),
         };
@@ -1669,6 +1780,7 @@ mod tests {
             SignalMessage::PresenceUpdate {
                 fingerprints,
                 relay_addr,
+                ..
             } => {
                 assert_eq!(fingerprints.len(), 2);
                 assert!(fingerprints.contains(&"aabb".to_string()));
@@ -1680,6 +1792,7 @@ mod tests {
 
         // Empty fingerprints list
         let msg_empty = SignalMessage::PresenceUpdate {
+            version: default_signal_version(),
             fingerprints: vec![],
             relay_addr: "10.0.0.2:4433".to_string(),
         };
@@ -1689,6 +1802,7 @@ mod tests {
             SignalMessage::PresenceUpdate {
                 fingerprints,
                 relay_addr,
+                ..
             } => {
                 assert!(fingerprints.is_empty());
                 assert_eq!(relay_addr, "10.0.0.2:4433");
@@ -1999,6 +2113,7 @@ mod tests {
     #[test]
     fn quality_directive_roundtrip() {
         let msg = SignalMessage::QualityDirective {
+            version: default_signal_version(),
             recommended_profile: crate::QualityProfile::DEGRADED,
             reason: Some("weakest link degraded".into()),
         };
@@ -2008,6 +2123,7 @@ mod tests {
             SignalMessage::QualityDirective {
                 recommended_profile,
                 reason,
+                ..
             } => {
                 assert_eq!(recommended_profile.codec, CodecId::Opus6k);
                 assert_eq!(reason.as_deref(), Some("weakest link degraded"));
@@ -2019,6 +2135,7 @@ mod tests {
     #[test]
     fn quality_directive_without_reason_roundtrip() {
         let msg = SignalMessage::QualityDirective {
+            version: default_signal_version(),
             recommended_profile: crate::QualityProfile::GOOD,
             reason: None,
         };
@@ -2078,6 +2195,7 @@ mod tests {
     #[test]
     fn upgrade_proposal_roundtrip() {
         let msg = SignalMessage::UpgradeProposal {
+            version: default_signal_version(),
             call_id: "c1".into(),
             proposal_id: "p1".into(),
             proposed_profile: crate::QualityProfile::STUDIO_48K,
@@ -2102,6 +2220,7 @@ mod tests {
     #[test]
     fn upgrade_response_roundtrip() {
         let msg = SignalMessage::UpgradeResponse {
+            version: default_signal_version(),
             call_id: "c1".into(),
             proposal_id: "p1".into(),
             accepted: true,
@@ -2118,6 +2237,7 @@ mod tests {
     #[test]
     fn upgrade_confirm_roundtrip() {
         let msg = SignalMessage::UpgradeConfirm {
+            version: default_signal_version(),
             call_id: "c1".into(),
             proposal_id: "p1".into(),
             confirmed_profile: crate::QualityProfile::STUDIO_64K,
@@ -2137,6 +2257,7 @@ mod tests {
     #[test]
     fn quality_capability_roundtrip() {
         let msg = SignalMessage::QualityCapability {
+            version: default_signal_version(),
             call_id: "c1".into(),
             max_profile: crate::QualityProfile::GOOD,
             loss_pct: Some(2.5),
@@ -2162,6 +2283,7 @@ mod tests {
     #[test]
     fn candidate_update_roundtrip() {
         let msg = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-123".into(),
             reflexive_addr: Some("203.0.113.5:4433".into()),
             local_addrs: vec!["192.168.1.10:4433".into(), "10.0.0.5:4433".into()],
@@ -2177,6 +2299,7 @@ mod tests {
                 local_addrs,
                 mapped_addr,
                 generation,
+                ..
             } => {
                 assert_eq!(call_id, "test-123");
                 assert_eq!(reflexive_addr.as_deref(), Some("203.0.113.5:4433"));
@@ -2191,6 +2314,7 @@ mod tests {
     #[test]
     fn candidate_update_minimal_roundtrip() {
         let msg = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "c".into(),
             reflexive_addr: None,
             local_addrs: vec![],
@@ -2215,6 +2339,7 @@ mod tests {
     #[test]
     fn offer_with_mapped_addr_roundtrip() {
         let msg = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -2246,6 +2371,7 @@ mod tests {
     #[test]
     fn offer_without_mapped_addr_omits_field() {
         let msg = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -2266,6 +2392,7 @@ mod tests {
     #[test]
     fn answer_with_mapped_addr_roundtrip() {
         let msg = SignalMessage::DirectCallAnswer {
+            version: default_signal_version(),
             call_id: "c1".into(),
             accept_mode: CallAcceptMode::AcceptTrusted,
             identity_pub: None,
@@ -2292,6 +2419,7 @@ mod tests {
     #[test]
     fn setup_with_mapped_addr_roundtrip() {
         let msg = SignalMessage::CallSetup {
+            version: default_signal_version(),
             call_id: "c1".into(),
             room: "room".into(),
             relay_addr: "1.2.3.4:5".into(),
@@ -2368,6 +2496,7 @@ mod tests {
     #[test]
     fn register_presence_ack_with_new_fields_roundtrip() {
         let msg = SignalMessage::RegisterPresenceAck {
+            version: default_signal_version(),
             success: true,
             error: None,
             relay_build: Some("abc123".into()),
@@ -2443,6 +2572,7 @@ mod tests {
                 nacked_seqs,
                 remb_bps,
                 recv_time_us,
+                ..
             } => {
                 assert_eq!(version, 1);
                 assert_eq!(stream_id, 0);
@@ -2475,7 +2605,76 @@ mod tests {
         let decoded: SignalMessage = serde_json::from_str(json).unwrap();
         match decoded {
             SignalMessage::TransportFeedback { version, .. } => {
-                assert_eq!(version, 0, "serde default makes omitted version 0");
+                assert_eq!(version, 1, "serde default makes omitted version 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn old_payload_without_version_deserializes() {
+        // CallOffer without version field — old client sending to new receiver.
+        let json = r#"{
+            "CallOffer": {
+                "identity_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "ephemeral_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "signature": [],
+                "supported_profiles": [],
+                "alias": null,
+                "protocol_version": 2,
+                "supported_versions": [2]
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::CallOffer {
+                version,
+                protocol_version,
+                ..
+            } => {
+                assert_eq!(version, 1, "missing version defaults to 1");
+                assert_eq!(protocol_version, 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Ping without version field.
+        let json = r#"{"Ping": {"timestamp_ms": 1234}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Ping {
+                version,
+                timestamp_ms,
+            } => {
+                assert_eq!(version, 1, "missing version defaults to 1");
+                assert_eq!(timestamp_ms, 1234);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Hangup without version field.
+        let json = r#"{"Hangup": {"reason": "Normal", "call_id": null}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Hangup { version, .. } => {
+                assert_eq!(version, 1, "missing version defaults to 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn new_payload_with_version_deserializes() {
+        // Payload that explicitly includes version = 2.
+        let json = r#"{"Ping": {"version": 2, "timestamp_ms": 5678}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Ping {
+                version,
+                timestamp_ms,
+            } => {
+                assert_eq!(version, 2, "explicit version is preserved");
+                assert_eq!(timestamp_ms, 5678);
             }
             _ => panic!("wrong variant"),
         }

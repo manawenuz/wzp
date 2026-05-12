@@ -333,10 +333,11 @@ mod tests {
 
     #[test]
     fn session_forward_signal_roundtrip() {
-        use wzp_proto::SignalMessage;
+        use wzp_proto::{SignalMessage, default_signal_version};
 
         // SessionForward roundtrip
         let msg = SignalMessage::SessionForward {
+            version: default_signal_version(),
             session_id: "abcd1234".to_string(),
             target_fingerprint: "deadbeef".to_string(),
             source_relay: "10.0.0.1:4433".to_string(),
@@ -348,6 +349,7 @@ mod tests {
                 session_id,
                 target_fingerprint,
                 source_relay,
+                ..
             } => {
                 assert_eq!(session_id, "abcd1234");
                 assert_eq!(target_fingerprint, "deadbeef");
@@ -358,6 +360,7 @@ mod tests {
 
         // SessionForwardAck roundtrip
         let ack = SignalMessage::SessionForwardAck {
+            version: default_signal_version(),
             session_id: "abcd1234".to_string(),
             room_name: "relay-room-42".to_string(),
         };
@@ -367,6 +370,7 @@ mod tests {
             SignalMessage::SessionForwardAck {
                 session_id,
                 room_name,
+                ..
             } => {
                 assert_eq!(session_id, "abcd1234");
                 assert_eq!(room_name, "relay-room-42");

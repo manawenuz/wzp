@@ -23,7 +23,7 @@ use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::{
     AdaptiveQualityController, AudioDecoder, AudioEncoder, CodecId, FecDecoder, FecEncoder,
     MediaHeader, MediaPacket, MediaTransport, MediaType, QualityController, QualityProfile,
-    SignalMessage,
+    SignalMessage, default_signal_version,
 };
 
 use crate::audio_ring::AudioRing;
@@ -321,11 +321,12 @@ impl WzpEngine {
 
             // Auth if token provided
             if let Some(ref tok) = token {
-                let _ = transport.send_signal(&SignalMessage::AuthToken { token: tok.clone() }).await;
+                let _ = transport.send_signal(&SignalMessage::AuthToken { version: default_signal_version(),  token: tok.clone() }).await;
             }
 
             // Register presence
             let _ = transport.send_signal(&SignalMessage::RegisterPresence {
+                version: default_signal_version(),
                 identity_pub,
                 signature: vec![],
                 alias: alias.clone(),
@@ -350,7 +351,7 @@ impl WzpEngine {
                     break;
                 }
                 match transport.recv_signal().await {
-                    Ok(Some(SignalMessage::CallRinging { call_id })) => {
+                    Ok(Some(SignalMessage::CallRinging { call_id, ..})) => {
                         info!(call_id = %call_id, "signal: ringing");
                         let mut stats = signal_state.stats.lock().unwrap();
                         stats.state = crate::stats::CallState::Ringing;
@@ -522,6 +523,7 @@ async fn run_call(
     let signature = kx.sign(&sign_data);
 
     let offer = SignalMessage::CallOffer {
+        version: default_signal_version(),
         identity_pub,
         ephemeral_pub,
         signature,
@@ -1223,6 +1225,7 @@ async fn run_call(
                 Ok(Some(SignalMessage::RoomUpdate {
                     count,
                     participants,
+                    ..
                 })) => {
                     info!(count, "RoomUpdate received");
                     let members: Vec<crate::stats::RoomMember> = participants
@@ -1240,6 +1243,7 @@ async fn run_call(
                 Ok(Some(SignalMessage::QualityDirective {
                     recommended_profile,
                     reason,
+                    ..
                 })) => {
                     let idx = profile_to_index(&recommended_profile);
                     info!(

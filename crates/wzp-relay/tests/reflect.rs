@@ -30,7 +30,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_transport::{QuinnTransport, client_config, create_endpoint, server_config};
 
 /// Spawn a minimal mock relay that loops over `recv_signal`,
@@ -49,6 +49,7 @@ async fn spawn_mock_relay_with_reflect(
             match server_transport.recv_signal().await {
                 Ok(Some(SignalMessage::Reflect)) => {
                     let resp = SignalMessage::ReflectResponse {
+                        version: default_signal_version(),
                         observed_addr: observed.to_string(),
                     };
                     // If the send fails the client has gone; just exit.
@@ -164,7 +165,7 @@ async fn reflect_happy_path() {
         .expect("some message");
 
     let observed_addr = match resp {
-        SignalMessage::ReflectResponse { observed_addr } => observed_addr,
+        SignalMessage::ReflectResponse { observed_addr, .. } => observed_addr,
         other => panic!(
             "expected ReflectResponse, got {:?}",
             std::mem::discriminant(&other)
@@ -251,7 +252,7 @@ async fn reflect_two_clients_distinct_ports() {
             .expect("ok")
             .expect("some");
         match resp {
-            SignalMessage::ReflectResponse { observed_addr } => observed_addr,
+            SignalMessage::ReflectResponse { observed_addr, .. } => observed_addr,
             _ => panic!("wrong variant"),
         }
     };

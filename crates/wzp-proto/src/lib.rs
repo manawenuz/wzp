@@ -32,7 +32,7 @@ pub use media_type::MediaType;
 pub use packet::{
     CallAcceptMode, FRAME_TYPE_FULL, FRAME_TYPE_MINI, HangupReason, MediaHeader, MediaHeaderV2,
     MediaPacket, MiniFrameContext, MiniFrameContextV2, MiniHeader, MiniHeaderV2, PresenceUser,
-    QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame,
+    QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, default_signal_version,
 };
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};

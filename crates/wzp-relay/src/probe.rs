@@ -13,7 +13,7 @@ use prometheus::{Gauge, IntGauge, Opts, Registry};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 
 /// Configuration for a single probe target.
 #[derive(Clone, Debug)]
@@ -229,7 +229,7 @@ impl ProbeRunner {
         let recv_handle = tokio::spawn(async move {
             loop {
                 match recv_transport.recv_signal().await {
-                    Ok(Some(SignalMessage::Pong { timestamp_ms })) => {
+                    Ok(Some(SignalMessage::Pong { timestamp_ms, .. })) => {
                         let now_ms = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -244,6 +244,7 @@ impl ProbeRunner {
                     Ok(Some(SignalMessage::PresenceUpdate {
                         fingerprints,
                         relay_addr,
+                        ..
                     })) => {
                         if let Some(ref reg) = recv_presence {
                             // Parse the relay_addr; fall back to the connection target
@@ -293,7 +294,10 @@ impl ProbeRunner {
             }
 
             if let Err(e) = transport
-                .send_signal(&SignalMessage::Ping { timestamp_ms })
+                .send_signal(&SignalMessage::Ping {
+                    version: default_signal_version(),
+                    timestamp_ms,
+                })
                 .await
             {
                 error!(target = %self.config.target, "probe ping send error: {e}");
@@ -310,6 +314,7 @@ impl ProbeRunner {
                         r.local_fingerprints().into_iter().collect()
                     };
                     let msg = SignalMessage::PresenceUpdate {
+                        version: default_signal_version(),
                         fingerprints: fps,
                         relay_addr: self.config.target.to_string(),
                     };
@@ -426,9 +431,10 @@ pub fn mesh_summary(registry: &Registry) -> String {
 /// Handle an incoming Ping signal by replying with a Pong carrying the same timestamp.
 /// Returns true if the message was a Ping and was handled, false otherwise.
 pub async fn handle_ping(transport: &wzp_transport::QuinnTransport, msg: &SignalMessage) -> bool {
-    if let SignalMessage::Ping { timestamp_ms } = msg {
+    if let SignalMessage::Ping { timestamp_ms, .. } = msg {
         if let Err(e) = transport
             .send_signal(&SignalMessage::Pong {
+                version: default_signal_version(),
                 timestamp_ms: *timestamp_ms,
             })
             .await

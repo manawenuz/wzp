@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 // ─── Call-flow debug logs (GUI-gated) ────────────────────────────────
 //
@@ -615,6 +615,7 @@ async fn connect(
                         // Send our report
                         if let Some(ref t) = transport_for_report {
                             let report = wzp_proto::SignalMessage::MediaPathReport {
+                                version: default_signal_version(),
                                 call_id: call_id_for_report.clone(),
                                 direct_ok: local_direct_ok,
                                 race_winner: format!("{:?}", local_winner),
@@ -1247,7 +1248,7 @@ fn do_register_signal(
     relay: String,
 ) -> impl std::future::Future<Output = Result<String, String>> + Send {
     async move {
-        use wzp_proto::SignalMessage;
+        use wzp_proto::{SignalMessage, default_signal_version};
 
         emit_call_debug(
             &app,
@@ -1316,6 +1317,7 @@ fn do_register_signal(
         let alias = derive_alias(&seed);
         transport
             .send_signal(&SignalMessage::RegisterPresence {
+                version: default_signal_version(),
                 identity_pub,
                 signature: vec![],
                 alias: Some(alias),
@@ -1375,7 +1377,7 @@ fn do_register_signal(
             let signal_state = signal_state_loop.clone();
             loop {
                 match transport.recv_signal().await {
-                    Ok(Some(SignalMessage::CallRinging { call_id })) => {
+                    Ok(Some(SignalMessage::CallRinging { call_id, .. })) => {
                         tracing::info!(%call_id, "signal: CallRinging");
                         emit_call_debug(
                             &app_clone,
@@ -1453,6 +1455,7 @@ fn do_register_signal(
                         peer_direct_addr,
                         peer_local_addrs,
                         peer_mapped_addr,
+                        ..
                     })) => {
                         // Phase 3: peer_direct_addr carries the OTHER party's
                         // reflex addr. Phase 5.5: peer_local_addrs carries
@@ -1512,6 +1515,7 @@ fn do_register_signal(
                         call_id,
                         direct_ok,
                         race_winner,
+                        ..
                     })) => {
                         // Phase 6: the peer is telling us whether
                         // their direct path succeeded. Fire the
@@ -1543,6 +1547,7 @@ fn do_register_signal(
                         local_addrs,
                         mapped_addr,
                         generation,
+                        ..
                     })) => {
                         // Phase 8: peer re-gathered candidates after a
                         // network change. Emit to JS for UI notification
@@ -1586,6 +1591,7 @@ fn do_register_signal(
                         allocation,
                         probe_time_ms,
                         external_ip,
+                        ..
                     })) => {
                         tracing::info!(
                             %call_id,
@@ -1647,6 +1653,7 @@ fn do_register_signal(
                                         let _ = t
                                             .send_signal(
                                                 &wzp_proto::SignalMessage::HardNatBirthdayStart {
+                                                    version: default_signal_version(),
                                                     call_id: call_id_bg,
                                                     acceptor_port_count: result.succeeded,
                                                     acceptor_ports: ext_ports,
@@ -1661,7 +1668,7 @@ fn do_register_signal(
                             });
                         }
                     }
-                    Ok(Some(SignalMessage::PresenceList { users })) => {
+                    Ok(Some(SignalMessage::PresenceList { users, .. })) => {
                         tracing::info!(count = users.len(), "signal: PresenceList received");
                         // Emit to JS frontend for lobby user list
                         let user_list: Vec<serde_json::Value> = users
@@ -1687,6 +1694,7 @@ fn do_register_signal(
                         proposed_profile,
                         local_loss_pct,
                         local_rtt_ms,
+                        ..
                     })) => {
                         tracing::info!(%call_id, %proposal_id, ?proposed_profile, "signal: UpgradeProposal from peer");
                         emit_call_debug(
@@ -1706,6 +1714,7 @@ fn do_register_signal(
                         proposal_id,
                         accepted,
                         reason,
+                        ..
                     })) => {
                         tracing::info!(%call_id, %proposal_id, accepted, ?reason, "signal: UpgradeResponse from peer");
                         emit_call_debug(
@@ -1722,6 +1731,7 @@ fn do_register_signal(
                         call_id,
                         proposal_id,
                         confirmed_profile,
+                        ..
                     })) => {
                         tracing::info!(%call_id, %proposal_id, ?confirmed_profile, "signal: UpgradeConfirm");
                         emit_call_debug(
@@ -1739,6 +1749,7 @@ fn do_register_signal(
                         max_profile,
                         loss_pct,
                         rtt_ms,
+                        ..
                     })) => {
                         tracing::info!(%call_id, ?max_profile, "signal: QualityCapability from peer");
                         emit_call_debug(
@@ -1758,6 +1769,7 @@ fn do_register_signal(
                         acceptor_port_count,
                         acceptor_ports,
                         external_ip,
+                        ..
                     })) => {
                         tracing::info!(
                             %call_id,
@@ -1786,7 +1798,7 @@ fn do_register_signal(
                             });
                         }
                     }
-                    Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
+                    Ok(Some(SignalMessage::ReflectResponse { observed_addr, .. })) => {
                         // "STUN for QUIC" response — the relay told us our
                         // own server-reflexive address. If a Tauri command
                         // is currently awaiting this, fire the oneshot;
@@ -2009,7 +2021,7 @@ async fn place_call(
     app: tauri::AppHandle,
     target_fp: String,
 ) -> Result<(), String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
 
     emit_call_debug(
         &app,
@@ -2140,6 +2152,7 @@ async fn place_call(
     tracing::info!(%call_id, %target_fp, reflex = ?own_reflex, mapped = ?caller_mapped_addr, "place_call: sending DirectCallOffer");
     transport
         .send_signal(&SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: sig.fingerprint.clone(),
             caller_alias: None,
             target_fingerprint: target_fp.clone(),
@@ -2199,6 +2212,7 @@ async fn place_call(
             if let Some(ref t) = sig.transport {
                 let _ = t
                     .send_signal(&SignalMessage::HardNatProbe {
+                        version: default_signal_version(),
                         call_id: call_id_bg,
                         port_sequence: result.observed_ports,
                         allocation: alloc_str,
@@ -2228,7 +2242,7 @@ async fn answer_call(
     call_id: String,
     mode: i32,
 ) -> Result<(), String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
     let accept_mode = match mode {
         0 => wzp_proto::CallAcceptMode::Reject,
         1 => wzp_proto::CallAcceptMode::AcceptTrusted,
@@ -2375,6 +2389,7 @@ async fn answer_call(
     tracing::info!(%call_id, ?accept_mode, reflex = ?own_reflex, mapped = ?callee_mapped_addr, "answer_call: sending DirectCallAnswer");
     transport
         .send_signal(&SignalMessage::DirectCallAnswer {
+            version: default_signal_version(),
             call_id: call_id.clone(),
             accept_mode,
             identity_pub: None,
@@ -2437,6 +2452,7 @@ async fn answer_call(
             if let Some(ref t) = sig.transport {
                 let _ = t
                     .send_signal(&wzp_proto::SignalMessage::HardNatProbe {
+                        version: default_signal_version(),
                         call_id: call_id_bg,
                         port_sequence: result.observed_ports,
                         allocation: alloc_str,
@@ -2475,7 +2491,7 @@ async fn answer_call(
 /// or temporarily unreachable for reflect but the call can still
 /// proceed with STUN-discovered addresses.
 async fn try_reflect_own_addr(state: &Arc<AppState>) -> Result<Option<String>, String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
     let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
     let transport = {
         let mut sig = state.signal.lock().await;
@@ -2562,7 +2578,7 @@ async fn try_stun_fallback(state: &Arc<AppState>) -> Result<Option<String>, Stri
 /// with `new URL(...)` / a regex if needed.
 #[tauri::command]
 async fn get_reflected_address(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
     let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
     let transport = {
         let mut sig = state.signal.lock().await;
@@ -2766,7 +2782,7 @@ async fn hangup_call(
     state: tauri::State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
 
     emit_call_debug(&app, "hangup_call:start", serde_json::json!({}));
 
@@ -2778,6 +2794,7 @@ async fn hangup_call(
         if let Some(ref transport) = sig.transport {
             match transport
                 .send_signal(&SignalMessage::Hangup {
+                    version: default_signal_version(),
                     reason: wzp_proto::HangupReason::Normal,
                     call_id: None,
                 })

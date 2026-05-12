@@ -6,7 +6,7 @@
 //! 3. Auth: WZP auth module request/response matches FC's /v1/auth/validate contract
 //! 4. Mnemonic: BIP39 interop between both implementations
 
-use wzp_proto::KeyExchange;
+use wzp_proto::{KeyExchange, default_signal_version};
 
 // ─── Identity Compatibility (WZP-FC-8) ──────────────────────────────────────
 
@@ -114,6 +114,7 @@ fn mnemonic_strings_identical() {
 fn wzp_signal_serializes_into_fc_callsignal_payload() {
     // WZP creates a CallOffer SignalMessage
     let offer = wzp_proto::SignalMessage::CallOffer {
+        version: default_signal_version(),
         identity_pub: [1u8; 32],
         ephemeral_pub: [2u8; 32],
         signature: vec![3u8; 64],
@@ -180,6 +181,7 @@ fn wzp_signal_serializes_into_fc_callsignal_payload() {
 #[test]
 fn wzp_answer_round_trips_through_fc_callsignal() {
     let answer = wzp_proto::SignalMessage::CallAnswer {
+        version: default_signal_version(),
         identity_pub: [10u8; 32],
         ephemeral_pub: [20u8; 32],
         signature: vec![30u8; 64],
@@ -212,6 +214,7 @@ fn wzp_answer_round_trips_through_fc_callsignal() {
 #[test]
 fn wzp_hangup_round_trips_through_fc_callsignal() {
     let hangup = wzp_proto::SignalMessage::Hangup {
+        version: default_signal_version(),
         reason: wzp_proto::HangupReason::Normal,
         call_id: None,
     };
@@ -298,6 +301,7 @@ fn all_signal_types_map_correctly() {
     let cases: Vec<(wzp_proto::SignalMessage, &str)> = vec![
         (
             wzp_proto::SignalMessage::CallOffer {
+                version: default_signal_version(),
                 identity_pub: [0; 32],
                 ephemeral_pub: [0; 32],
                 signature: vec![],
@@ -310,6 +314,7 @@ fn all_signal_types_map_correctly() {
         ),
         (
             wzp_proto::SignalMessage::CallAnswer {
+                version: default_signal_version(),
                 identity_pub: [0; 32],
                 ephemeral_pub: [0; 32],
                 signature: vec![],
@@ -319,12 +324,14 @@ fn all_signal_types_map_correctly() {
         ),
         (
             wzp_proto::SignalMessage::IceCandidate {
+                version: default_signal_version(),
                 candidate: "candidate:1".to_string(),
             },
             "IceCandidate",
         ),
         (
             wzp_proto::SignalMessage::Hangup {
+                version: default_signal_version(),
                 reason: wzp_proto::HangupReason::Normal,
                 call_id: None,
             },
@@ -482,10 +489,11 @@ fn auth_response_with_eth_address() {
     assert!(!resp3.valid);
 }
 
-/// WZP-S-7: SignalMessage::AuthToken { token } exists and round-trips via serde.
+/// WZP-S-7: SignalMessage::AuthToken { version: default_signal_version(),  token } exists and round-trips via serde.
 #[test]
 fn wzp_proto_has_auth_token_variant() {
     let msg = wzp_proto::SignalMessage::AuthToken {
+        version: default_signal_version(),
         token: "fc-bearer-token-xyz".to_string(),
     };
 
@@ -496,7 +504,7 @@ fn wzp_proto_has_auth_token_variant() {
 
     // Deserialize back
     let decoded: wzp_proto::SignalMessage = serde_json::from_str(&json).unwrap();
-    if let wzp_proto::SignalMessage::AuthToken { token } = decoded {
+    if let wzp_proto::SignalMessage::AuthToken { token, .. } = decoded {
         assert_eq!(token, "fc-bearer-token-xyz");
     } else {
         panic!("expected AuthToken variant, got: {decoded:?}");

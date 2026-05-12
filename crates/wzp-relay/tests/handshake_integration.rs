@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use wzp_client::perform_handshake;
 use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_relay::handshake::accept_handshake;
 use wzp_transport::{QuinnTransport, client_config, create_endpoint, server_config};
 
@@ -129,6 +129,7 @@ async fn handshake_rejects_v1_protocol_version() {
     let signature = kx.sign(&sign_data);
 
     let v1_offer = SignalMessage::CallOffer {
+        version: 1,
         identity_pub,
         ephemeral_pub,
         signature,
@@ -255,7 +256,7 @@ async fn auth_then_handshake() {
             .expect("should receive a message");
 
         let token = match auth_msg {
-            SignalMessage::AuthToken { token } => token,
+            SignalMessage::AuthToken { token, .. } => token,
             other => panic!(
                 "expected AuthToken, got {:?}",
                 std::mem::discriminant(&other)
@@ -273,6 +274,7 @@ async fn auth_then_handshake() {
 
     // Caller side: send AuthToken first, then perform_handshake.
     let auth = SignalMessage::AuthToken {
+        version: default_signal_version(),
         token: "bearer-test-token-12345".to_string(),
     };
     client_transport
@@ -344,6 +346,7 @@ async fn handshake_rejects_bad_signature() {
     }
 
     let bad_offer = SignalMessage::CallOffer {
+        version: default_signal_version(),
         identity_pub,
         ephemeral_pub,
         signature,

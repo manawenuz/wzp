@@ -201,9 +201,10 @@ mod tests {
 
     #[test]
     fn route_query_signal_roundtrip() {
-        use wzp_proto::SignalMessage;
+        use wzp_proto::{SignalMessage, default_signal_version};
 
         let query = SignalMessage::RouteQuery {
+            version: default_signal_version(),
             fingerprint: "aabbccdd".to_string(),
             ttl: 3,
         };
@@ -211,11 +212,12 @@ mod tests {
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             decoded,
-            SignalMessage::RouteQuery { ref fingerprint, ttl }
+            SignalMessage::RouteQuery { ref fingerprint, ttl, ..}
             if fingerprint == "aabbccdd" && ttl == 3
         ));
 
         let response = SignalMessage::RouteResponse {
+            version: default_signal_version(),
             fingerprint: "aabbccdd".to_string(),
             found: true,
             relay_chain: vec!["10.0.0.1:4433".to_string(), "10.0.0.2:4433".to_string()],
@@ -224,7 +226,7 @@ mod tests {
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             decoded,
-            SignalMessage::RouteResponse { ref fingerprint, found, ref relay_chain }
+            SignalMessage::RouteResponse { ref fingerprint, found, ref relay_chain, ..}
             if fingerprint == "aabbccdd" && found && relay_chain.len() == 2
         ));
     }
