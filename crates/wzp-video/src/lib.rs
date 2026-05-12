@@ -11,6 +11,7 @@ pub mod decoder;
 pub mod depacketizer;
 pub mod encoder;
 pub mod encoder_mode;
+pub mod factory;
 pub mod framer;
 pub mod mediacodec;
 pub mod nack;
@@ -25,6 +26,7 @@ pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
 pub use encoder::{VideoEncoder, VideoError, VideoFrame};
 pub use encoder_mode::EncoderMode;
+pub use factory::{create_video_decoder, create_video_encoder};
 pub use framer::{FramedPacket, H264Framer};
 pub use mediacodec::{
     MediaCodecAv1Decoder, MediaCodecAv1Encoder, MediaCodecDecoder, MediaCodecEncoder,
@@ -34,7 +36,8 @@ pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
 pub use simulcast::{LayerPacket, LayerTarget, SimulcastEncoder, SimulcastLayer};
 pub use svt_av1::SvtAv1Encoder;
 pub use videotoolbox::{
-    VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder, VideoToolboxHevcEncoder,
+    VideoToolboxAv1Decoder, VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder,
+    VideoToolboxHevcEncoder,
 };
 
 #[cfg(test)]

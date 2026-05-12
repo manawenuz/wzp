@@ -7811,6 +7811,7 @@ dependencies = [
  "wzp-proto",
  "wzp-relay",
  "wzp-transport",
+ "wzp-video",
 ]
 
 [[package]]

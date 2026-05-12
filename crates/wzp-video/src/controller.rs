@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
 
 use wzp_proto::BandwidthEstimator;
+use wzp_proto::CodecId;
 use wzp_proto::PriorityMode;
 
 use crate::simulcast::LayerTarget;
@@ -49,7 +50,7 @@ struct Step {
 ///
 /// Steps are ordered from highest to lowest budget.  The first step whose
 /// `min_budget_kbps` is <= the available video budget wins.
-static STEP_TABLE: &[Step] = &[
+static STEP_TABLE_H264: &[Step] = &[
     Step {
         min_budget_kbps: 4000,
         width: 1280,
@@ -100,6 +101,122 @@ static STEP_TABLE: &[Step] = &[
     },
 ];
 
+/// H.265 main step table.  H.265 is ~20% more efficient than H.264,
+/// so thresholds are ~80% of the H.264 values.
+static STEP_TABLE_H265: &[Step] = &[
+    Step {
+        min_budget_kbps: 3200,
+        width: 1280,
+        height: 720,
+        fps: 30,
+    },
+    Step {
+        min_budget_kbps: 1600,
+        width: 640,
+        height: 480,
+        fps: 30,
+    },
+    Step {
+        min_budget_kbps: 800,
+        width: 480,
+        height: 360,
+        fps: 30,
+    },
+    Step {
+        min_budget_kbps: 400,
+        width: 480,
+        height: 360,
+        fps: 15,
+    },
+    Step {
+        min_budget_kbps: 200,
+        width: 320,
+        height: 240,
+        fps: 15,
+    },
+    Step {
+        min_budget_kbps: 120,
+        width: 320,
+        height: 240,
+        fps: 10,
+    },
+    Step {
+        min_budget_kbps: 80,
+        width: 240,
+        height: 180,
+        fps: 10,
+    },
+    Step {
+        min_budget_kbps: 40,
+        width: 240,
+        height: 180,
+        fps: 5,
+    },
+];
+
+/// AV1 main step table.  AV1 is ~30% more efficient than H.264,
+/// so thresholds are ~70% of the H.264 values.
+static STEP_TABLE_AV1: &[Step] = &[
+    Step {
+        min_budget_kbps: 2800,
+        width: 1280,
+        height: 720,
+        fps: 30,
+    },
+    Step {
+        min_budget_kbps: 1400,
+        width: 640,
+        height: 480,
+        fps: 30,
+    },
+    Step {
+        min_budget_kbps: 700,
+        width: 480,
+        height: 360,
+        fps: 30,
+    },
+    Step {
+        min_budget_kbps: 350,
+        width: 480,
+        height: 360,
+        fps: 15,
+    },
+    Step {
+        min_budget_kbps: 175,
+        width: 320,
+        height: 240,
+        fps: 15,
+    },
+    Step {
+        min_budget_kbps: 105,
+        width: 320,
+        height: 240,
+        fps: 10,
+    },
+    Step {
+        min_budget_kbps: 70,
+        width: 240,
+        height: 180,
+        fps: 10,
+    },
+    Step {
+        min_budget_kbps: 35,
+        width: 240,
+        height: 180,
+        fps: 5,
+    },
+];
+
+/// Select the step table for the given video codec.
+fn step_table_for_codec(codec: CodecId) -> &'static [Step] {
+    match codec {
+        CodecId::H264Baseline => STEP_TABLE_H264,
+        CodecId::H265Main => STEP_TABLE_H265,
+        CodecId::Av1Main => STEP_TABLE_AV1,
+        _ => STEP_TABLE_H264, // safe default for non-video codecs
+    }
+}
+
 /// Audio floor budgets per priority mode (kbps).
 const AUDIO_FLOOR_KBPS: u32 = 24;
 const AUDIO_FLOOR_SCREENCAST_KBPS: u32 = 16;
@@ -122,7 +239,8 @@ const SD_VIDEO_FLOOR_KBPS: u32 = 150;
 /// thread while `tick()` runs on the encoder thread.
 pub struct VideoQualityController {
     bwe: Arc<BandwidthEstimator>,
-    mode: AtomicU8, // PriorityMode as u8
+    mode: AtomicU8,  // PriorityMode as u8
+    codec: AtomicU8, // CodecId as u8
     loss_pct: AtomicU8,
     rtt_ms: AtomicU32,
     last_target: std::sync::Mutex<VideoTarget>,
@@ -130,15 +248,36 @@ pub struct VideoQualityController {
 }
 
 impl VideoQualityController {
-    /// Create a new controller.
+    /// Create a new controller defaulting to H.264.
     pub fn new(bwe: Arc<BandwidthEstimator>) -> Self {
+        Self::with_codec(bwe, CodecId::H264Baseline)
+    }
+
+    /// Create a new controller with an explicit video codec.
+    pub fn with_codec(bwe: Arc<BandwidthEstimator>, codec: CodecId) -> Self {
         Self {
             bwe,
             mode: AtomicU8::new(PriorityMode::AudioFirst as u8),
+            codec: AtomicU8::new(codec as u8),
             loss_pct: AtomicU8::new(0),
             rtt_ms: AtomicU32::new(0),
             last_target: std::sync::Mutex::new(VideoTarget::DISABLED),
             last_tick_ms: AtomicU32::new(0),
+        }
+    }
+
+    /// Set the active video codec (mid-call codec switch).
+    pub fn set_codec(&self, codec: CodecId) {
+        self.codec.store(codec as u8, Relaxed);
+    }
+
+    /// Read the current video codec.
+    pub fn codec(&self) -> CodecId {
+        match self.codec.load(Relaxed) {
+            9 => CodecId::H264Baseline,
+            11 => CodecId::H265Main,
+            12 => CodecId::Av1Main,
+            _ => CodecId::H264Baseline,
         }
     }
 
@@ -186,6 +325,7 @@ impl VideoQualityController {
     pub fn allocate(&self) -> (u32, u32) {
         let bwe_kbps = (self.bwe.target_send_bps() / 1000) as u32;
         let mode = self.mode();
+        let table = step_table_for_codec(self.codec());
 
         match mode {
             PriorityMode::AudioFirst => {
@@ -194,8 +334,8 @@ impl VideoQualityController {
                 (audio, video)
             }
             PriorityMode::VideoFirst => {
-                // Video floor: enough for the lowest step (240x180 @ 5fps).
-                let video_floor = STEP_TABLE.last().map(|s| s.min_budget_kbps).unwrap_or(50);
+                // Video floor: enough for the lowest step.
+                let video_floor = table.last().map(|s| s.min_budget_kbps).unwrap_or(50);
                 let video = video_floor.min(bwe_kbps);
                 let audio = bwe_kbps.saturating_sub(video);
                 (audio, video)
@@ -218,7 +358,8 @@ impl VideoQualityController {
     /// Uses the static step table.  If budget is below the lowest step,
     /// returns [`VideoTarget::DISABLED`].
     fn derive_target(&self, video_budget_kbps: u32) -> VideoTarget {
-        for step in STEP_TABLE {
+        let table = step_table_for_codec(self.codec());
+        for step in table {
             if video_budget_kbps >= step.min_budget_kbps {
                 return VideoTarget {
                     bitrate_kbps: video_budget_kbps,
@@ -538,5 +679,74 @@ mod tests {
         assert!(!layers[0].active, "low should be inactive");
         assert!(!layers[1].active, "mid should be inactive");
         assert!(!layers[2].active, "high should be inactive");
+    }
+
+    #[test]
+    fn av1_step_table_lower_than_h264() {
+        // At 1500 kbps budget:
+        // - H.264: below 2000 kbps step → 480×360 @ 30fps
+        // - AV1:  above 1400 kbps step → 640×480 @ 30fps
+        let bwe = dummy_bwe(2_000_000); // ~1800 kbps after 90% factor
+        let h264_ctrl = VideoQualityController::with_codec(bwe.clone(), CodecId::H264Baseline);
+        let av1_ctrl = VideoQualityController::with_codec(bwe.clone(), CodecId::Av1Main);
+
+        let h264_target = h264_ctrl.derive_target(1800);
+        let av1_target = av1_ctrl.derive_target(1800);
+
+        assert_eq!(h264_target.width, 480);
+        assert_eq!(
+            av1_target.width, 640,
+            "AV1 should sustain higher res at same budget"
+        );
+    }
+
+    #[test]
+    fn h265_step_table_between_h264_and_av1() {
+        let bwe = dummy_bwe(2_000_000);
+        let h264_ctrl = VideoQualityController::with_codec(bwe.clone(), CodecId::H264Baseline);
+        let h265_ctrl = VideoQualityController::with_codec(bwe.clone(), CodecId::H265Main);
+        let av1_ctrl = VideoQualityController::with_codec(bwe.clone(), CodecId::Av1Main);
+
+        let h264_target = h264_ctrl.derive_target(1800);
+        let h265_target = h265_ctrl.derive_target(1800);
+        let av1_target = av1_ctrl.derive_target(1800);
+
+        // H.265 should be better than H.264 but worse than AV1 at the same budget.
+        assert!(h265_target.width >= h264_target.width);
+        assert!(av1_target.width >= h265_target.width);
+    }
+
+    #[test]
+    fn codec_switch_changes_target() {
+        let bwe = dummy_bwe(2_000_000);
+        let ctrl = VideoQualityController::with_codec(bwe, CodecId::H264Baseline);
+
+        let h264_target = ctrl.derive_target(1800);
+        assert_eq!(h264_target.width, 480);
+
+        ctrl.set_codec(CodecId::Av1Main);
+        let av1_target = ctrl.derive_target(1800);
+        assert_eq!(av1_target.width, 640);
+
+        ctrl.set_codec(CodecId::H265Main);
+        let h265_target = ctrl.derive_target(1800);
+        assert_eq!(h265_target.width, 640);
+    }
+
+    #[test]
+    fn av1_video_first_floor_lower_than_h264() {
+        // VideoFirst mode reserves the video floor first.
+        // AV1 floor (35 kbps) < H.264 floor (50 kbps).
+        let bwe_h264 = dummy_bwe(100_000);
+        let h264_ctrl = VideoQualityController::with_codec(bwe_h264, CodecId::H264Baseline);
+        h264_ctrl.set_mode(PriorityMode::VideoFirst);
+        let (_audio_h264, video_h264) = h264_ctrl.allocate();
+        assert_eq!(video_h264, 50); // H.264 floor
+
+        let bwe_av1 = dummy_bwe(100_000);
+        let av1_ctrl = VideoQualityController::with_codec(bwe_av1, CodecId::Av1Main);
+        av1_ctrl.set_mode(PriorityMode::VideoFirst);
+        let (_audio_av1, video_av1) = av1_ctrl.allocate();
+        assert_eq!(video_av1, 35); // AV1 floor
     }
 }

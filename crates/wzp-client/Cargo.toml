@@ -12,6 +12,7 @@ wzp-codec = { workspace = true }
 wzp-fec = { workspace = true }
 wzp-crypto = { workspace = true }
 wzp-transport = { workspace = true }
+wzp-video = { path = "../wzp-video" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
