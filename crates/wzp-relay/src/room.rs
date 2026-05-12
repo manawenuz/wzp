@@ -1261,6 +1261,11 @@ async fn run_participant_plain(
             );
         }
 
+        // TODO(T6.2-follow-up): feed video packets to VideoScorer here.
+        // if pkt.header.media_type == MediaType::Video {
+        //     video_scorer.observe(&pkt.header, pkt.payload.len(), now, bwe_kbps);
+        // }
+
         // Update per-session quality metrics if a quality report is present
         if let Some(ref report) = pkt.quality_report {
             metrics.update_session_quality(&session_id, report);
