@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use wzp_proto::{CodecId, MediaHeader, MediaType};
 
+use crate::verdict::Verdict;
+
 /// Maximum samples kept in rolling windows.
 const MAX_IAT_SAMPLES: usize = 200;
 const MAX_SIZE_SAMPLES: usize = 200;
@@ -22,17 +24,6 @@ const BITRATE_WINDOW_SECS: u64 = 30;
 
 // Number of payload-size histogram bins.
 // (SIZE_BINS reserved for future histogram-based bimodality)
-
-/// Verdict produced by the scorer after sufficient observation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// No suspicion. Score ≥ 0.7.
-    Legitimate,
-    /// Tightened monitoring. 0.3 ≤ score < 0.7.
-    Suspect,
-    /// High confidence of abuse. Score < 0.3.
-    Abusive,
-}
 
 /// Audio-specific behavioural scorer (Tier F).
 pub struct AudioScorer {

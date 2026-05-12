@@ -11,18 +11,7 @@ use std::time::{Duration, Instant};
 
 use wzp_proto::packet::{HangupReason, ViolationCode};
 
-/// Conformance verdict produced by Tier F scoring.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// No suspicion.
-    Legitimate,
-    /// Tightened monitoring.
-    Suspect,
-    /// High confidence of abuse — close session.
-    Abusive,
-    /// Already abusive once in the last 24 h — escalate to block.
-    RepeatAbusive,
-}
+use crate::verdict::Verdict;
 
 /// Enforcement action recommended by the response policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +73,6 @@ impl ResponsePolicy {
                     }
                 }
             }
-            Verdict::RepeatAbusive => Action::Block,
         }
     }
 

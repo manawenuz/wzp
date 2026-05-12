@@ -26,6 +26,7 @@ pub mod route;
 pub mod session_mgr;
 pub mod signal_hub;
 pub mod trunk;
+pub mod verdict;
 pub mod ws;
 
 pub use config::RelayConfig;
