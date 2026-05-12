@@ -1711,8 +1711,8 @@ Statuses (in order of progression):
 | T4.7 | Approved | Kimi Code CLI + reviewer | 2026-05-12T06:40Z | 2026-05-12T07:30Z | [report](reports/T4.7-report.md) | Approved. Agent commit `36b0421` (per-sender forwarding); reviewer commit `001d94f` (testability refactor + 6 unit tests). 93 → 99 wzp-relay lib tests. |
 | T5.1 | Approved | Kimi Code CLI | 2026-05-12T07:00Z | 2026-05-12T07:25Z | [report](reports/T5.1-report.md) | Approved. PriorityMode enum + SetPriorityMode signal + QualityProfile video fields. Commit `c8d1239`. Spawned T5.1.1 for round-trip / default tests. |
 | T5.1.1 | Open | — | — | — | — | Spawned from T5.1. Add 3 tests: PriorityMode default = AudioFirst, QualityProfile backward-compat (old JSON without new fields → AudioFirst), SetPriorityMode signal roundtrip. ~15 min. |
-| T5.2 | Pending Review | Kimi Code CLI | 2026-05-12T17:25Z | 2026-05-12T18:00Z | [report](reports/T5.2-report.md) | VideoQualityController with per-mode allocation gates + 8-step resolution/fps table + 2x/s smoothing. |
-| T5.3 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.2 | Approved | Kimi Code CLI | 2026-05-12T07:25Z | 2026-05-12T08:00Z | [report](reports/T5.2-report.md) | Approved. VideoQualityController + 4 PriorityMode gates + 8 unit tests + 2× smoothing. Commit `2e0bdc5`. |
+| T5.3 | Pending Review | Kimi Code CLI | 2026-05-12T18:00Z | 2026-05-12T18:10Z | [report](reports/T5.3-report.md) | EncoderMode enum (Normal / SlideFallback) + VideoEncoder::set_mode() trait method + VideoQualityController::encoder_mode() detection at 150 kbps SD floor. |
 | T5.4 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.5 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.6 | Open | — | — | — | — | Skeleton — expand before claiming |

@@ -108,6 +108,10 @@ const BALANCED_AUDIO_RATIO: f64 = 0.15;
 /// Maximum bitrate change ratio per second (2x up or down).
 const MAX_CHANGE_RATIO_PER_SEC: f64 = 2.0;
 
+/// SD video floor (kbps).  When ScreenShare video budget drops below this,
+/// the controller recommends [`EncoderMode::SlideFallback`].
+const SD_VIDEO_FLOOR_KBPS: u32 = 150;
+
 /// Video quality controller.
 ///
 /// Consumes a [`BandwidthEstimator`] and a [`PriorityMode`] and produces
@@ -154,6 +158,23 @@ impl VideoQualityController {
             2 => PriorityMode::ScreenShare,
             3 => PriorityMode::Balanced,
             _ => PriorityMode::AudioFirst,
+        }
+    }
+
+    /// Recommend the encoder operating mode based on priority + budget.
+    ///
+    /// Returns [`EncoderMode::SlideFallback`] when the current mode is
+    /// [`PriorityMode::ScreenShare`] and the video budget is below the
+    /// SD floor (150 kbps).  Otherwise returns [`EncoderMode::Normal`].
+    pub fn encoder_mode(&self) -> crate::EncoderMode {
+        if self.mode() != PriorityMode::ScreenShare {
+            return crate::EncoderMode::Normal;
+        }
+        let (_audio, video) = self.allocate();
+        if video < SD_VIDEO_FLOOR_KBPS {
+            crate::EncoderMode::SlideFallback
+        } else {
+            crate::EncoderMode::Normal
         }
     }
 
@@ -380,5 +401,35 @@ mod tests {
         assert_eq!(ctrl.mode(), PriorityMode::AudioFirst);
         ctrl.set_mode(PriorityMode::ScreenShare);
         assert_eq!(ctrl.mode(), PriorityMode::ScreenShare);
+    }
+
+    #[test]
+    fn screenshare_above_floor_is_normal() {
+        // 1 Mbps → ~900 kbps after 90% factor. Video budget ~884 kbps > 150.
+        let bwe = dummy_bwe(1_000_000);
+        let ctrl = VideoQualityController::new(bwe);
+        ctrl.set_mode(PriorityMode::ScreenShare);
+        assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::Normal);
+    }
+
+    #[test]
+    fn screenshare_below_floor_is_slide_fallback() {
+        // 100 kbps → ~90 kbps after 90% factor. Video budget ~74 kbps < 150.
+        let bwe = dummy_bwe(100_000);
+        let ctrl = VideoQualityController::new(bwe);
+        ctrl.set_mode(PriorityMode::ScreenShare);
+        assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::SlideFallback);
+    }
+
+    #[test]
+    fn non_screenshare_never_slide_fallback() {
+        let bwe = dummy_bwe(50_000);
+        let ctrl = VideoQualityController::new(bwe);
+        ctrl.set_mode(PriorityMode::AudioFirst);
+        assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::Normal);
+        ctrl.set_mode(PriorityMode::VideoFirst);
+        assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::Normal);
+        ctrl.set_mode(PriorityMode::Balanced);
+        assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::Normal);
     }
 }

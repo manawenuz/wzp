@@ -44,6 +44,11 @@ pub trait VideoEncoder: Send {
     /// Default implementation is a no-op; platform encoders override to
     /// reconfigure the underlying session.
     fn set_target(&mut self, _target: &crate::VideoTarget) {}
+
+    /// Switch the encoder operating mode (normal vs slide fallback).
+    ///
+    /// Default implementation is a no-op.
+    fn set_mode(&mut self, _mode: crate::EncoderMode) {}
 }
 
 /// Raw video frame input for encoding.
