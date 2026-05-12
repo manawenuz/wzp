@@ -8,6 +8,7 @@ pub mod decoder;
 pub mod depacketizer;
 pub mod encoder;
 pub mod framer;
+pub mod mediacodec;
 pub mod videotoolbox;
 
 pub use decoder::VideoDecoder;

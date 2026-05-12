@@ -1324,6 +1324,75 @@ cargo build -p wzp-video
 
 ---
 
+## T4.2.1 — Wire real VideoToolbox VTCompressionSession / VTDecompressionSession (macOS)
+
+- **Parent:** T4.2 (Approved — scaffold only)
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 3–4 d
+- **Files:**
+  - `crates/wzp-video/src/videotoolbox.rs`
+  - `crates/wzp-video/Cargo.toml` (will need `core-foundation`, `core-media`, `core-video`, `block` crates or equivalent — disclose under "Risks / follow-ups")
+  - `crates/wzp-video/tests/encode_decode_macos.rs` (new — round-trip test, `#[cfg(target_os = "macos")]`)
+
+### Context
+T4.2 shipped the API surface (traits, structs, `is_keyframe`) but stubbed both `encode()` and `decode()`. This task fills in those stubs against the actual Apple frameworks. **This is the task that satisfies the original PRD-video-v1 T4.2 acceptance criterion.**
+
+The current TODOs are at:
+- `crates/wzp-video/src/videotoolbox.rs:34` — `VideoToolboxEncoder::encode` stub.
+- `crates/wzp-video/src/videotoolbox.rs:72` — `VideoToolboxDecoder::decode` stub.
+
+### Steps
+
+1. **Encoder.** Replace the `encode()` stub with a real `VTCompressionSession`:
+   - Create the session once at first `encode()` call (or in `new()`).
+   - Configure: `kVTCompressionPropertyKey_RealTime = true`, `kVTProfileLevel_H264_Baseline_AutoLevel`, `kVTCompressionPropertyKey_AverageBitRate = bitrate_bps`, `kVTCompressionPropertyKey_MaxKeyFrameInterval = 30` (≈ 1 s at 30 fps), `kVTCompressionPropertyKey_AllowFrameReordering = false`.
+   - Wrap the input `VideoFrame.data` (assume NV12 or I420 for now — disclose the format choice) into a `CVPixelBuffer`.
+   - Encode via `VTCompressionSessionEncodeFrame`, collect the resulting `CMSampleBuffer` from the callback.
+   - Extract NAL units from the sample buffer's `CMBlockBuffer` and convert to Annex-B (add `0x000001` start codes).
+   - Return the assembled Annex-B byte vector.
+   - On `force_keyframe` flag: pass `kVTEncodeFrameOptionKey_ForceKeyFrame = true` and clear the flag.
+
+2. **Decoder.** Replace the `decode()` stub with a real `VTDecompressionSession`:
+   - Parse incoming Annex-B access unit into NAL units.
+   - On SPS/PPS NALs, build/refresh `CMFormatDescription`.
+   - Wrap remaining NALs into `CMSampleBuffer`.
+   - Call `VTDecompressionSessionDecodeFrame`; in the callback, convert the output `CVImageBuffer` back to `VideoFrame.data` (mirror the encoder's pixel format).
+
+3. **Threading.** VideoToolbox callbacks run on internal queues. Use a `crossbeam_channel` (single-producer, single-consumer; already in workspace deps via Quinn) or `std::sync::mpsc` to bridge callback → caller. Keep the encode/decode API synchronous from the caller's perspective.
+
+4. **Test.** Add `crates/wzp-video/tests/encode_decode_macos.rs` (`#[cfg(target_os = "macos")]`):
+   - Generate a synthetic 640×360 NV12 frame (gradient pattern).
+   - Encode 30 frames at 30 fps.
+   - Assert at least one keyframe in the first 5 frames.
+   - Pipe the encoded bytes through the depacketizer and decoder.
+   - Assert the decoded frame dimensions match input dimensions (pixel-exact match not required given lossy compression).
+
+5. **Acceptance measurement.**
+   - Measure encode CPU: run 60 s of 1280×720 @ 30 fps NV12 input on M1, log wall-clock + `getrusage` CPU time.
+   - Acceptance: CPU < 5 % of one core on M1 (PRD-video-v1 line).
+
+### Verify
+
+```bash
+cargo test -p wzp-video --test encode_decode_macos
+cargo test -p wzp-video
+cargo clippy -p wzp-video --all-targets -- -D warnings
+cargo fmt --all -- --check
+# Optional manual measurement (record in report):
+cargo run -p wzp-video --release --example bench_encode_720p
+```
+
+### Done when
+- `cargo test -p wzp-video --test encode_decode_macos` passes on macOS.
+- A round-trip (raw frame → encode → packetize → depacketize → decode → frame) produces a frame with matching dimensions.
+- CPU measurement at 720p30 documented in the report. If > 5 %, document why (e.g., software fallback path) and propose mitigation.
+- Non-macOS targets remain unaffected (the existing `target_os` gates already do this; just don't break them).
+
+### Out of scope
+- Android MediaCodec (T4.3).
+- NACK (T4.4) / FEC boost (T4.5) / keyframe cache (T4.6) / PLI (T4.7).
+- Multi-codec negotiation (T5.4 / T6.1).
+
 ---
 
 ## T4.3 — MediaCodec H.264 encoder + decoder via JNI (Android)
@@ -1331,11 +1400,32 @@ cargo build -p wzp-video
 - **PRD:** `PRD-video-v1.md`
 - **Effort:** 5 d
 - **Files:**
-  - `crates/wzp-video/src/encoder.rs`
-  - `crates/wzp-video/src/decoder.rs`
-  - `crates/wzp-android/...`
+  - `crates/wzp-video/src/mediacodec.rs`
+  - `crates/wzp-android/src/...`
 
-Skeleton — expand before claiming.
+### Context
+
+T4.2 created the `VideoEncoder` / `VideoDecoder` traits and a macOS VideoToolbox implementation. T4.3 adds the Android equivalent using `MediaCodec` via JNI. Because the agent runs on macOS, the MediaCodec implementation is a compile-gated stub; real hardware integration requires an Android device/emulator.
+
+### Steps
+
+1. Create `MediaCodecEncoder` and `MediaCodecDecoder` structs in `wzp-video/src/mediacodec.rs`.
+2. Implement `VideoEncoder` / `VideoDecoder` traits for the structs.
+3. Gate the module with `#[cfg(target_os = "android")]`; on non-Android targets the module exports placeholder types that return `NotInitialized` errors.
+4. Leave JNI surface-texture wiring as a TODO for the Android build environment.
+
+### Verify
+
+```bash
+cargo test -p wzp-video mediacodec
+cargo build -p wzp-video
+```
+
+### Done when
+
+`MediaCodecEncoder` / `MediaCodecDecoder` compile on Android targets and return `Err(NotInitialized)` on non-Android targets.
+
+---
 
 ---
 
@@ -1463,8 +1553,9 @@ Statuses (in order of progression):
 | T3.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:24Z | [report](reports/T3.4-report.md) | Approved. Tier D payload-size EWMA + per-codec bound table. Commit `017c371`. Clean process. |
 | T3.5 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T02:46Z | [report](reports/T3.5-report.md) | Approved. Tier E TokenBucket (256 kbps/1.92 MB burst), observe-only. Commit `f1b86e0`. Wave 3 complete. |
 | T4.1 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T07:22Z | [report](reports/T4.1-report.md) | Approved. wzp-video crate + H.264 NAL framer/depacketizer (RFC 6184 FU-A). Commit `490d2d3`. Wave 4 opened. |
-| T4.2 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T4.2-report.md) | — |
-| T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.2 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:10Z | [report](reports/T4.2-report.md) | Approved as scaffold (API surface + `is_keyframe`). Original PRD acceptance moved to T4.2.1 — `encode`/`decode` are stubs. Process note in report. Commit `3356ba9`. |
+| T4.2.1 | Open | — | — | — | — | Spawned from T4.2 review. Real VTCompressionSession/VTDecompressionSession wiring + 720p30 acceptance. Blocks end-to-end validation for T4.4–T4.7. |
+| T4.3 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | Rule #7 violated (started before T4.2 approval). Tighten. |
 | T4.4 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.5 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.6 | Open | — | — | — | — | Skeleton — expand before claiming |

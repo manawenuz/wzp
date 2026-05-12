@@ -8,9 +8,9 @@ use crate::encoder::{VideoEncoder, VideoError, VideoFrame};
 /// Wraps `VTCompressionSession`.  Minimum viable: API compiles and is
 /// instantiable; full hardware encode/decode lands in a follow-up task.
 pub struct VideoToolboxEncoder {
-    width: u32,
-    height: u32,
-    bitrate_bps: u32,
+    _width: u32,
+    _height: u32,
+    _bitrate_bps: u32,
     force_keyframe: bool,
 }
 
@@ -21,9 +21,9 @@ impl VideoToolboxEncoder {
     /// * `bitrate_bps` — target bitrate in bits per second.
     pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
         Ok(Self {
-            width,
-            height,
-            bitrate_bps,
+            _width: width,
+            _height: height,
+            _bitrate_bps: bitrate_bps,
             force_keyframe: false,
         })
     }
@@ -56,14 +56,17 @@ impl VideoEncoder for VideoToolboxEncoder {
 /// Wraps `VTDecompressionSession`.  Minimum viable: API compiles and is
 /// instantiable.
 pub struct VideoToolboxDecoder {
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
 }
 
 impl VideoToolboxDecoder {
     /// Create a new decoder.
     pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
-        Ok(Self { width, height })
+        Ok(Self {
+            _width: width,
+            _height: height,
+        })
     }
 }
 
