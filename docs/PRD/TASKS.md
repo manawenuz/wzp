@@ -1231,19 +1231,121 @@ Unit test: 100 KB at 256 kbps cap consumes no tokens; 1 MB exceeds.
 
 # Wave 4 — Video v1 (3 weeks)
 
-Detailed task breakdown deferred until Wave 1-3 land. Skeleton:
+See `PRD-video-v1.md` for design.
 
-| Task | Summary | Effort |
-|---|---|---|
-| T4.1 | `wzp-video` crate scaffold + H.264 NAL framer + depacketizer (no encoder yet) | 3 d |
-| T4.2 | VideoToolbox H.264 encoder + decoder (macOS) — minimum viable | 3 d |
-| T4.3 | MediaCodec H.264 encoder + decoder via JNI (Android) | 5 d |
-| T4.4 | `SignalMessage::Nack` variant + RTT-gated NACK loop | 2 d |
-| T4.5 | I-frame FEC ratio boost (encoder hint → FEC layer) | 1 d |
-| T4.6 | SFU keyframe cache per `(room, sender, stream_id)` | 2 d |
-| T4.7 | PLI suppression at SFU | 1 d |
+---
 
-Each of these will be expanded into the same step-by-step format as T1.x once Wave 3 is in progress. See `PRD-video-v1.md` for design.
+## T4.1 — `wzp-video` crate scaffold + H.264 NAL framer + depacketizer
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 3 d
+- **Files:**
+  - `crates/wzp-video/Cargo.toml`
+  - `crates/wzp-video/src/lib.rs`
+  - `crates/wzp-video/src/framer.rs`
+  - `crates/wzp-video/src/depacketizer.rs`
+  - `crates/wzp-proto/src/codec_id.rs`
+  - `Cargo.toml` (workspace members)
+
+### Context
+
+WZP currently has no video path. Wave 4 adds H.264 baseline single-layer video. T4.1 is the foundation: a new `wzp-video` crate parallel to `wzp-codec`, containing the NAL framer and depacketizer. No platform encoder/decoder yet — that lands in T4.2/T4.3.
+
+### Steps
+
+1. Create `crates/wzp-video` and register it in the workspace `Cargo.toml`.
+2. Add `H264Baseline = 9` to `CodecId` in `wzp-proto` (reserved slot).
+3. Implement `H264Framer` in `framer.rs`:
+   - Parses access units into NAL units (split by 0x000001 / 0x00000001 start codes).
+   - Emits Single-NAL packets when the NAL fits in `max_payload_size`.
+   - Fragments oversized NALs using H.264 FU-A (RFC 6184).
+   - Returns a `Vec<FramedPacket>` where the last packet has `is_frame_end = true`.
+4. Implement `H264Depacketizer` in `depacketizer.rs`:
+   - Reassembles Single-NAL packets directly.
+   - Accumulates FU-A fragments until the end marker is seen.
+   - Emits a complete access unit (`Vec<u8>`) when `is_frame_end` arrives and no fragmentation is in progress.
+5. Add roundtrip tests and edge-case tests (empty input, single NAL, multi-NAL access unit, FU-A fragmentation, FU-A reassembly).
+
+### Verify
+
+```bash
+cargo test -p wzp-video
+```
+
+### Done when
+
+Synthetic H.264 access units (single NAL, multi-NAL, and oversized NAL requiring FU-A fragmentation) roundtrip correctly through framer + depacketizer.
+
+---
+
+## T4.2 — VideoToolbox H.264 encoder + decoder (macOS)
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 3 d
+- **Files:**
+  - `crates/wzp-video/src/encoder.rs`
+  - `crates/wzp-video/src/decoder.rs`
+
+Skeleton — expand before claiming.
+
+---
+
+## T4.3 — MediaCodec H.264 encoder + decoder via JNI (Android)
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 5 d
+- **Files:**
+  - `crates/wzp-video/src/encoder.rs`
+  - `crates/wzp-video/src/decoder.rs`
+  - `crates/wzp-android/...`
+
+Skeleton — expand before claiming.
+
+---
+
+## T4.4 — `SignalMessage::Nack` variant + RTT-gated NACK loop
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 2 d
+- **Files:**
+  - `crates/wzp-proto/src/packet.rs`
+  - `crates/wzp-video/src/nack.rs`
+
+Skeleton — expand before claiming.
+
+---
+
+## T4.5 — I-frame FEC ratio boost
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 1 d
+- **Files:**
+  - `crates/wzp-fec/src/...`
+  - `crates/wzp-video/src/...`
+
+Skeleton — expand before claiming.
+
+---
+
+## T4.6 — SFU keyframe cache
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 2 d
+- **Files:**
+  - `crates/wzp-relay/src/room.rs`
+
+Skeleton — expand before claiming.
+
+---
+
+## T4.7 — PLI suppression at SFU
+
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 1 d
+- **Files:**
+  - `crates/wzp-relay/src/room.rs`
+
+Skeleton — expand before claiming.
 
 ---
 
@@ -1323,8 +1425,8 @@ Statuses (in order of progression):
 | T3.2 | Approved | Kimi Code CLI | 2026-05-11T21:15Z | 2026-05-11T21:25Z | [report](reports/T3.2-report.md) | Approved. timestamp_ms monotonic across rekey, documented + tested. Commit `1b4f7b0`. |
 | T3.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:08Z | [report](reports/T3.3-report.md) | Approved. W12 SignalMessage versioning. Commit `f7f413e`. |
 | T3.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:24Z | [report](reports/T3.4-report.md) | Approved. Tier D payload-size EWMA + per-codec bound table. Commit `017c371`. Clean process. |
-| T3.5 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T3.5-report.md) | — |
-| T4.1 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T3.5 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T02:46Z | [report](reports/T3.5-report.md) | Approved. Tier E TokenBucket (256 kbps/1.92 MB burst), observe-only. Commit `f1b86e0`. Wave 3 complete. |
+| T4.1 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | — |
 | T4.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.4 | Open | — | — | — | — | Skeleton — expand before claiming |

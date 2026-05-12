@@ -7911,6 +7911,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wzp-video"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rand 0.8.6",
+ "tracing",
+]
+
+[[package]]
 name = "wzp-web"
 version = "0.1.0"
 dependencies = [

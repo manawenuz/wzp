@@ -85,8 +85,11 @@ pub fn dred_duration_for(codec: CodecId) -> u8 {
         // offsets, so the extra window costs only ~1-2 kbps additional overhead
         // while buying substantially better burst resilience (up from 500 ms).
         CodecId::Opus6k => 104,
-        // Non-Opus (Codec2 / CN): DRED is N/A.
-        CodecId::Codec2_1200 | CodecId::Codec2_3200 | CodecId::ComfortNoise => 0,
+        // Non-Opus (Codec2 / CN / video): DRED is N/A.
+        CodecId::Codec2_1200
+        | CodecId::Codec2_3200
+        | CodecId::ComfortNoise
+        | CodecId::H264Baseline => 0,
     }
 }
 

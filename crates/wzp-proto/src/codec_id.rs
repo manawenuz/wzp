@@ -25,8 +25,9 @@ pub enum CodecId {
     Opus48k = 7,
     /// Opus at 64kbps (studio high)
     Opus64k = 8,
+    /// H.264 baseline profile (video).
+    H264Baseline = 9,
     // Reserved for video codecs; implementations land in PRD-video-multicodec.
-    // 9  => H264 baseline
     // 10 => H264 main
     // 11 => H265 main
     // 12 => AV1
@@ -46,6 +47,7 @@ impl CodecId {
             Self::Codec2_3200 => 3_200,
             Self::Codec2_1200 => 1_200,
             Self::ComfortNoise => 0,
+            Self::H264Baseline => 2_000_000,
         }
     }
 
@@ -57,6 +59,7 @@ impl CodecId {
             Self::Codec2_3200 => 20,
             Self::Codec2_1200 => 40,
             Self::ComfortNoise => 20,
+            Self::H264Baseline => 33,
         }
     }
 
@@ -71,6 +74,7 @@ impl CodecId {
             | Self::Opus64k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
             Self::ComfortNoise => 48_000,
+            Self::H264Baseline => 48_000,
         }
     }
 
@@ -86,6 +90,7 @@ impl CodecId {
             6 => Some(Self::Opus32k),
             7 => Some(Self::Opus48k),
             8 => Some(Self::Opus64k),
+            9 => Some(Self::H264Baseline),
             _ => None,
         }
     }
@@ -93,6 +98,11 @@ impl CodecId {
     /// Encode to the 4-bit wire representation.
     pub const fn to_wire(self) -> u8 {
         self as u8
+    }
+
+    /// Returns true if this is a video codec variant.
+    pub const fn is_video(self) -> bool {
+        matches!(self, Self::H264Baseline)
     }
 
     /// Returns true if this is an Opus variant.
@@ -184,7 +194,7 @@ mod tests {
 
     #[test]
     fn codec_id_unknown_values_rejected() {
-        for v in 9u8..=255 {
+        for v in 10u8..=255 {
             assert!(CodecId::from_wire(v).is_none(), "v={v}");
         }
     }
