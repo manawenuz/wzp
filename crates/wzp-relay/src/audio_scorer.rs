@@ -20,7 +20,7 @@ const SILENCE_SIZE_THRESHOLD: usize = 16;
 /// Observation window for bitrate tracking.
 const BITRATE_WINDOW_SECS: u64 = 30;
 
-/// Number of payload-size histogram bins.
+// Number of payload-size histogram bins.
 // (SIZE_BINS reserved for future histogram-based bimodality)
 
 /// Verdict produced by the scorer after sufficient observation.
@@ -190,7 +190,7 @@ impl AudioScorer {
             }
         }
 
-        Some(score.max(0.0).min(1.0))
+        Some(score.clamp(0.0, 1.0))
     }
 
     /// Map legitimacy score to a [`Verdict`].
@@ -299,7 +299,7 @@ impl AudioScorer {
         let large = self.size_samples.len() - small;
         let total = self.size_samples.len() as f64;
         let p_small = small as f64 / total;
-        let p_large = large as f64 / total;
+        let _p_large = large as f64 / total;
         // Max bimodality when both bins are equally populated (~0.5 each)
         let bimodality = 1.0 - (p_small - 0.5).abs() * 2.0;
         Some(bimodality)

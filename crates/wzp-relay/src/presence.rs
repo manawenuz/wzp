@@ -63,6 +63,12 @@ pub struct PresenceRegistry {
     peers: HashMap<SocketAddr, PeerRelay>,
 }
 
+impl Default for PresenceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PresenceRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {

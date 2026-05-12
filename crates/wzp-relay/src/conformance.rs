@@ -27,6 +27,10 @@ pub enum Violation {
     RateCapExceeded,
 }
 
+/// Error type returned when a [`TokenBucket`] does not hold enough tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenExhausted;
+
 /// Simple token bucket for per-session rate capping (Tier E).
 ///
 /// Tokens represent bytes.  The bucket refills at `refill_per_sec` bytes per
@@ -61,9 +65,9 @@ impl TokenBucket {
     /// Attempt to consume `bytes` from the bucket.
     ///
     /// Refills based on elapsed time since the last call, then deducts the
-    /// cost.  Returns `Ok(())` if enough tokens were available, `Err(())`
-    /// otherwise.
-    pub fn try_consume(&mut self, bytes: u64, now: Instant) -> Result<(), ()> {
+    /// cost.  Returns `Ok(())` if enough tokens were available,
+    /// `Err(TokenExhausted)` otherwise.
+    pub fn try_consume(&mut self, bytes: u64, now: Instant) -> Result<(), TokenExhausted> {
         let elapsed = now.duration_since(self.last_refill);
         self.last_refill = now;
         self.tokens += elapsed.as_secs_f64() * self.refill_per_sec as f64;
@@ -74,7 +78,7 @@ impl TokenBucket {
             self.tokens -= bytes as f64;
             Ok(())
         } else {
-            Err(())
+            Err(TokenExhausted)
         }
     }
 }

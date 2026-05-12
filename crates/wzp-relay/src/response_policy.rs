@@ -41,8 +41,6 @@ pub enum Action {
 pub struct ResponsePolicy {
     /// `(fingerprint, violation_code)` → last abusive instant.
     cooldowns: HashMap<(String, ViolationCode), Instant>,
-    /// Cool-down duration for first-time abuse.
-    cooldown_duration: Duration,
     /// Block duration for repeat abuse.
     block_duration: Duration,
 }
@@ -51,8 +49,7 @@ impl ResponsePolicy {
     pub fn new() -> Self {
         Self {
             cooldowns: HashMap::new(),
-            cooldown_duration: Duration::from_secs(3600), // 1 h
-            block_duration: Duration::from_secs(86400),   // 24 h
+            block_duration: Duration::from_secs(86400), // 24 h
         }
     }
 
