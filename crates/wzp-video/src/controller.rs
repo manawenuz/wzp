@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
 use wzp_proto::BandwidthEstimator;
 use wzp_proto::PriorityMode;
 
+use crate::simulcast::LayerTarget;
+
 /// Target parameters for the video encoder.
 ///
 /// A `bitrate_kbps` of `0` means video is disabled (not enough bandwidth).
@@ -277,6 +279,67 @@ impl VideoQualityController {
         *self.last_target.lock().unwrap() = smoothed;
         smoothed
     }
+
+    /// Run one simulcast controller tick.
+    ///
+    /// Returns a 3-element array of [`LayerTarget`] in order low → mid → high.
+    /// A layer is marked `active = true` when the current video budget can
+    /// sustain it (including all lower layers).
+    pub fn tick_simulcast(&self, now_ms: u32) -> [LayerTarget; 3] {
+        use crate::simulcast::SimulcastLayer;
+
+        let (_audio_budget, video_budget) = self.allocate();
+
+        let mut result = [
+            LayerTarget {
+                layer: SimulcastLayer::LOW,
+                active: false,
+            },
+            LayerTarget {
+                layer: SimulcastLayer::MID,
+                active: false,
+            },
+            LayerTarget {
+                layer: SimulcastLayer::HIGH,
+                active: false,
+            },
+        ];
+
+        // Cumulative bitrate required to sustain layers up to index i.
+        let cumulative = [
+            SimulcastLayer::LOW.bitrate_kbps,
+            SimulcastLayer::LOW.bitrate_kbps + SimulcastLayer::MID.bitrate_kbps,
+            SimulcastLayer::total_bitrate_kbps(),
+        ];
+
+        for (i, target) in result.iter_mut().enumerate() {
+            target.active = video_budget >= cumulative[i];
+        }
+
+        // Update internal smoothing state using the highest active layer's
+        // bitrate as the representative value.
+        let highest_active = result
+            .iter()
+            .rposition(|t| t.active)
+            .map(|i| cumulative[i])
+            .unwrap_or(0);
+        let raw = if highest_active > 0 {
+            self.derive_target(highest_active)
+        } else {
+            VideoTarget::DISABLED
+        };
+
+        let prev = self.last_tick_ms.swap(now_ms, Relaxed);
+        let dt_ms = if prev == 0 {
+            1000
+        } else {
+            now_ms.saturating_sub(prev)
+        };
+        let smoothed = self.smooth(raw, dt_ms);
+        *self.last_target.lock().unwrap() = smoothed;
+
+        result
+    }
 }
 
 #[cfg(test)]
@@ -431,5 +494,49 @@ mod tests {
         assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::Normal);
         ctrl.set_mode(PriorityMode::Balanced);
         assert_eq!(ctrl.encoder_mode(), crate::EncoderMode::Normal);
+    }
+
+    #[test]
+    fn simulcast_all_layers_at_4mbps() {
+        // 4 Mbps → ~3600 kbps video budget after audio floor.
+        let bwe = dummy_bwe(4_000_000);
+        let ctrl = VideoQualityController::new(bwe);
+        let layers = ctrl.tick_simulcast(0);
+        assert!(layers[0].active, "low should be active");
+        assert!(layers[1].active, "mid should be active");
+        assert!(layers[2].active, "high should be active");
+    }
+
+    #[test]
+    fn simulcast_low_mid_only_at_1mbps() {
+        // 1 Mbps → ~900 kbps video budget. High needs 3250 total.
+        let bwe = dummy_bwe(1_000_000);
+        let ctrl = VideoQualityController::new(bwe);
+        let layers = ctrl.tick_simulcast(0);
+        assert!(layers[0].active, "low should be active");
+        assert!(layers[1].active, "mid should be active");
+        assert!(!layers[2].active, "high should be inactive");
+    }
+
+    #[test]
+    fn simulcast_low_only_at_200kbps() {
+        // 200 kbps → ~180 kbps video budget. Mid needs 750 total.
+        let bwe = dummy_bwe(200_000);
+        let ctrl = VideoQualityController::new(bwe);
+        let layers = ctrl.tick_simulcast(0);
+        assert!(layers[0].active, "low should be active");
+        assert!(!layers[1].active, "mid should be inactive");
+        assert!(!layers[2].active, "high should be inactive");
+    }
+
+    #[test]
+    fn simulcast_no_video_at_20kbps() {
+        // 20 kbps → ~18 kbps total. Below audio floor.
+        let bwe = dummy_bwe(20_000);
+        let ctrl = VideoQualityController::new(bwe);
+        let layers = ctrl.tick_simulcast(0);
+        assert!(!layers[0].active, "low should be inactive");
+        assert!(!layers[1].active, "mid should be inactive");
+        assert!(!layers[2].active, "high should be inactive");
     }
 }

@@ -12,6 +12,7 @@ pub mod encoder_mode;
 pub mod framer;
 pub mod mediacodec;
 pub mod nack;
+pub mod simulcast;
 pub mod videotoolbox;
 
 pub use controller::{VideoQualityController, VideoTarget};
@@ -22,6 +23,7 @@ pub use encoder_mode::EncoderMode;
 pub use framer::{FramedPacket, H264Framer};
 pub use mediacodec::{MediaCodecDecoder, MediaCodecEncoder, MediaCodecHevcDecoder, MediaCodecHevcEncoder};
 pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
+pub use simulcast::{LayerPacket, LayerTarget, SimulcastEncoder, SimulcastLayer};
 pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder, VideoToolboxHevcEncoder};
 
 #[cfg(test)]
