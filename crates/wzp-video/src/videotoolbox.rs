@@ -652,8 +652,11 @@ impl VideoDecoder for VideoToolboxHevcDecoder {
     }
 }
 
+/// Type alias for HEVC parameter-set triple returned by `extract_vps_sps_pps`.
+type HevcParameterSets = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// Parse an Annex-B access unit and return the first VPS, SPS and PPS found (HEVC).
-fn extract_vps_sps_pps(annex_b: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+fn extract_vps_sps_pps(annex_b: &[u8]) -> HevcParameterSets {
     let nals = split_annex_b(annex_b);
     let mut vps = None;
     let mut sps = None;
