@@ -1648,6 +1648,69 @@ Detailed task breakdown deferred. Skeleton:
 
 ---
 
+## T6.2 — Tier F video scorer (keyframe periodicity, I/P ratio, BWE responsiveness)
+
+- **PRD:** `PRD-relay-conformance.md`
+- **Effort:** 3 d
+- **Files:**
+  - `crates/wzp-relay/src/video_scorer.rs` (new)
+  - `crates/wzp-relay/src/lib.rs` (add `pub mod video_scorer;`)
+  - `crates/wzp-relay/src/room.rs` (documented call site, no wiring yet)
+
+### Context
+
+Parallel to `audio_scorer.rs` (T5.7). The video scorer observes video packet streams and produces a `legitimacy ∈ [0, 1]` score over a 5–15 s window. It reuses the unified `crate::verdict::Verdict` from T5.7.1 (`Legitimate`, `Suspect`, `Abusive`).
+
+**Feeding point:** `run_participant_plain` / `run_participant_trunked` in `room.rs`, immediately after the existing `conformance.observe()` call (around line 1248). Frequency: once per incoming packet whose `MediaHeader.media_type == MediaType::Video`. The scorer is **not wired in this task** — only created and unit-tested. Wiring is T6.2-follow-up or T6.x integration scope.
+
+### Steps
+
+1. Create `crates/wzp-relay/src/video_scorer.rs`:
+   ```rust
+   use std::collections::VecDeque;
+   use std::time::{Duration, Instant};
+   use wzp_proto::{MediaHeader, MediaType};
+   use crate::verdict::Verdict;
+
+   pub struct VideoScorer {
+       keyframe_iat_samples: VecDeque<Duration>,
+       last_keyframe_at: Option<Instant>,
+       i_frame_count: u32,
+       p_frame_count: u32,
+       bwe_samples: VecDeque<(Instant, u32)>, // (timestamp, bwe_kbps)
+       window_start: Instant,
+       window_bytes: u64,
+   }
+   ```
+2. **Keyframe periodicity** — `keyframe_regularity()`: compute CoV of inter-arrival times between packets with `header.is_keyframe()`. Legitimate streams have low variance (encoder-driven GOP). Abusive streams have random or missing keyframes. Returns `Option<f64>` in [0, 1] where 1 = perfectly regular.
+3. **I/P ratio** — `ip_ratio()`: count `is_keyframe()` (I) vs non-keyframe (P) over the observation window. Legitimate H.264/H.265 has I:P ≈ 1:29 to 1:119 (GOP 30–120). Abusive all-I-frame streams have ratio > 1:5. Returns `Option<f64>`.
+4. **BWE responsiveness** — `bwe_responsiveness()`: compare sender bitrate against the last downstream BWE reported via `TransportFeedback` (or `BandwidthEstimator`). If BWE drops > 30 % but sender bitrate stays within 10 % of previous window → unresponsive. Returns `Option<f64>`.
+5. `legitimacy()` — weighted combination:
+   - keyframe regularity: 0.35 weight
+   - I/P ratio sanity: 0.35 weight
+   - BWE responsiveness: 0.30 weight
+   - Clamp to [0, 1] with `score.clamp(0.0, 1.0)`.
+6. `verdict()` — map score to `Verdict` using same thresholds as audio scorer (≥ 0.7 Legitimate, ≥ 0.3 Suspect, else Abusive).
+7. In `lib.rs`, add `pub mod video_scorer;` after `pub mod audio_scorer;`.
+8. In `room.rs`, add a `// TODO(T6.2-follow-up): feed video packets to VideoScorer here` comment on the line after `conformance.observe()` (around line 1262) so the wiring point is documented.
+
+### Verify
+
+```bash
+cargo test -p wzp-relay video_scorer
+```
+
+### Done when
+
+Unit tests cover at minimum:
+- `video_scorer_legitimate_traffic` — regular GOP (every 30 frames), sane I/P ratio, responsive BWE. Expect `Verdict::Legitimate`.
+- `video_scorer_abusive_no_keyframes` — no keyframes at all for 5 s. Expect score < 0.3 → `Abusive`.
+- `video_scorer_abusive_bwe_unresponsive` — BWE drops 50 % but bitrate unchanged. Expect `Suspect` or `Abusive`.
+- `video_scorer_ip_ratio_out_of_range` — all-I-frame stream (I:P = 1:1). Expect `Abusive`.
+- Plus 4–7 additional tests mirroring T5.7 breadth (insufficient samples, ignores audio packets, mixed traffic, window expiry, etc.). **Target: 8–10 tests total.**
+
+---
+
 # Working agreements
 
 - **One commit per task.** Message: `T<id>: <one-line summary>`.
@@ -1717,10 +1780,10 @@ Statuses (in order of progression):
 | T5.5 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.5-report.md) | Approved. `SimulcastEncoder` + `tick_simulcast()` + 10 tests. Commit `2f1a9f7`. Cosmetic: report lists wrong resolutions (claims 320×180/640×360/1280×720; code uses 480×270/960×540/1920×1080). Code is correct. |
 | T5.6 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.6-report.md) | Approved. `ReceiverState` with atomic fields, 3 s hysteresis, per-(room,participant) isolation, 7 tests. Commit `2bbb664`. |
 | T5.7 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.7-report.md) | Approved. Tier F audio scorer: IAT CoV + silence fraction + bitrate ratio + Q-flag CV + payload bimodality, 11 tests. Commit `5fda5ec` + clippy `ffded2a`. Spawned T5.7.1 (unify `Verdict` across audio_scorer + response_policy). |
-| T5.7.1 | Pending Review | Kimi Code CLI | 2026-05-12T12:20Z | 2026-05-12T12:30Z | [report](reports/T5.7.1-report.md) | Unified `Verdict` enum into `wzp_relay::verdict::Verdict {Legitimate, Suspect, Abusive}`. Dropped `RepeatAbusive` as redundant input variant. 127 tests pass. |
+| T5.7.1 | Approved | Kimi Code CLI | 2026-05-12T12:20Z | 2026-05-12T12:48Z | [report](reports/T5.7.1-report.md) | Approved. Unified `Verdict` enum into `wzp_relay::verdict::Verdict {Legitimate, Suspect, Abusive}`. Dropped `RepeatAbusive` as redundant input variant; `ResponsePolicy::evaluate()` derives repeat-status from `cooldowns`. 127 tests pass. Actual commit is `d3b2da6` (report header says `04fb302` — fabricated). Stale `RepeatAbusive` line at `response_policy.rs:7` (module doc) — cosmetic, not worth a follow-up. |
 | T5.8 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.8-report.md) | Approved. `ResponsePolicy` state machine + typed `HangupReason::PolicyViolation { code, reason }` + `ViolationCode` enum + 9 tests. Commit `dbbab0d` + clippy `ffded2a`. |
 | T6.1 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T6.2 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T6.2 | Pending Review | Kimi Code CLI | 2026-05-12T12:30Z | 2026-05-12T12:45Z | — | Expanded skeleton into concrete task block with Files/Steps/Verify/Done-when. Plan commit pending approval. |
 | T6.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 
 ## Review queue (human)
@@ -1743,5 +1806,6 @@ Items currently waiting on the reviewer:
 - T5.7 — Tier F audio scorer — report: reports/T5.7-report.md
 - T5.8 — Tier G response policy — report: reports/T5.8-report.md
 - T5.7.1 — Unify `Verdict` enum across audio_scorer and response_policy — report: reports/T5.7.1-report.md
+- T6.2 — Tier F video scorer plan (expanded skeleton) — report: TASKS.md block
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
