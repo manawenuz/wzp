@@ -49,25 +49,33 @@ static INIT_LOGGING: Once = Once::new();
 /// Safe to call multiple times — only the first call takes effect.
 fn init_logging() {
     INIT_LOGGING.call_once(|| {
-        // Wrap in catch_unwind — sharded_slab allocation inside
-        // tracing_subscriber::registry() can crash on some Android
-        // devices if scudo malloc fails during early initialization.
-        let _ = std::panic::catch_unwind(|| {
-            use tracing_subscriber::layer::SubscriberExt;
-            use tracing_subscriber::util::SubscriberInitExt;
-            use tracing_subscriber::EnvFilter;
-            if let Ok(layer) = tracing_android::layer("wzp_android") {
-                // Filter: INFO for our crates, WARN for everything else.
-                // The jni crate emits VERBOSE logs for every method lookup
-                // (~10 lines per JNI call, 100+ calls/sec) which floods logcat
-                // and causes the system to kill the app.
-                let filter = EnvFilter::new("warn,wzp_android=info,wzp_proto=info,wzp_transport=info,wzp_codec=info,wzp_fec=info,wzp_crypto=info");
-                let _ = tracing_subscriber::registry()
-                    .with(layer)
-                    .with(filter)
-                    .try_init();
-            }
-        });
+        #[cfg(target_os = "android")]
+        {
+            // Wrap in catch_unwind — sharded_slab allocation inside
+            // tracing_subscriber::registry() can crash on some Android
+            // devices if scudo malloc fails during early initialization.
+            let _ = std::panic::catch_unwind(|| {
+                use tracing_subscriber::layer::SubscriberExt;
+                use tracing_subscriber::util::SubscriberInitExt;
+                use tracing_subscriber::EnvFilter;
+                if let Ok(layer) = tracing_android::layer("wzp_android") {
+                    // Filter: INFO for our crates, WARN for everything else.
+                    // The jni crate emits VERBOSE logs for every method lookup
+                    // (~10 lines per JNI call, 100+ calls/sec) which floods logcat
+                    // and causes the system to kill the app.
+                    let filter = EnvFilter::new("warn,wzp_android=info,wzp_proto=info,wzp_transport=info,wzp_codec=info,wzp_fec=info,wzp_crypto=info");
+                    let _ = tracing_subscriber::registry()
+                        .with(layer)
+                        .with(filter)
+                        .try_init();
+                }
+            });
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            // On non-Android targets tracing-android is unavailable.
+            let _ = tracing_subscriber::fmt::try_init();
+        }
     });
 }
 

@@ -9,5 +9,8 @@ rust-version.workspace = true
 bytes = { workspace = true }
 tracing = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+shiguredo_video_toolbox = "2026.1"
+
 [dev-dependencies]
 rand = "0.8"

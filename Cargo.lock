@@ -5205,6 +5205,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shiguredo_video_toolbox"
+version = "2026.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200357d99d8d88d9bcee25fb8a8be6cb0663548e0614481f2e4e5b4148afdd0b"
+dependencies = [
+ "bindgen",
+ "log",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7916,6 +7926,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "rand 0.8.6",
+ "shiguredo_video_toolbox",
  "tracing",
 ]
 

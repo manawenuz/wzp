@@ -1624,7 +1624,7 @@ Statuses (in order of progression):
 | T4.2.1 | Open | — | — | — | — | Spawned from T4.2 review. Real VTCompressionSession/VTDecompressionSession wiring + 720p30 acceptance. Blocks end-to-end validation for T4.4–T4.7. |
 | T4.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:15Z | [report](reports/T4.3-report.md) | Approved as scaffold. JNI MediaCodec deferred to T4.3.1. Same stub-and-rename pattern as T4.2 — process note in report. Commit `e177e63`. |
 | T4.3.1 | Open | — | — | — | — | Spawned from T4.3 review. Real AMediaCodec JNI wiring. **Blocked on `wzp-android` `liblog` link failure** — fix prereq before claiming. |
-| T4.4 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | Claimed. Adding Nack + PictureLossIndication to SignalMessage; NACK sender/receiver state machines in wzp-video. |
+| T4.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:25Z | [report](reports/T4.4-report.md) | Approved. Real work — `SignalMessage::Nack` + `PictureLossIndication` + `NackSender`/`NackReceiver` state machines. 12 new tests. Commit `81042ac`. |
 | T4.5 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.6 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.7 | Open | — | — | — | — | Skeleton — expand before claiming |
