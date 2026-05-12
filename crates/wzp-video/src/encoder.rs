@@ -38,6 +38,12 @@ pub trait VideoEncoder: Send {
 
     /// Returns true if the given encoded packet is a keyframe.
     fn is_keyframe(&self, packet: &[u8]) -> bool;
+
+    /// Apply a new quality target (bitrate, resolution, fps).
+    ///
+    /// Default implementation is a no-op; platform encoders override to
+    /// reconfigure the underlying session.
+    fn set_target(&mut self, _target: &crate::VideoTarget) {}
 }
 
 /// Raw video frame input for encoding.

@@ -7929,6 +7929,7 @@ dependencies = [
  "rand 0.8.6",
  "shiguredo_video_toolbox",
  "tracing",
+ "wzp-proto",
 ]
 
 [[package]]

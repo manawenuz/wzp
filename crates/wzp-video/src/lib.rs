@@ -4,6 +4,7 @@
 //! packetization (NAL fragmentation / reassembly).  Platform encoders and
 //! decoders land in T4.2/T4.3.
 
+pub mod controller;
 pub mod decoder;
 pub mod depacketizer;
 pub mod encoder;
@@ -12,6 +13,7 @@ pub mod mediacodec;
 pub mod nack;
 pub mod videotoolbox;
 
+pub use controller::{VideoQualityController, VideoTarget};
 pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
 pub use encoder::{VideoEncoder, VideoError, VideoFrame};

@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 bytes = { workspace = true }
 tracing = { workspace = true }
+wzp-proto = { path = "../wzp-proto" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shiguredo_video_toolbox = "2026.1"
