@@ -1712,7 +1712,7 @@ Statuses (in order of progression):
 | T5.1 | Approved | Kimi Code CLI | 2026-05-12T07:00Z | 2026-05-12T07:25Z | [report](reports/T5.1-report.md) | Approved. PriorityMode enum + SetPriorityMode signal + QualityProfile video fields. Commit `c8d1239`. Spawned T5.1.1 for round-trip / default tests. |
 | T5.1.1 | Open | — | — | — | — | Spawned from T5.1. Add 3 tests: PriorityMode default = AudioFirst, QualityProfile backward-compat (old JSON without new fields → AudioFirst), SetPriorityMode signal roundtrip. ~15 min. |
 | T5.2 | Approved | Kimi Code CLI | 2026-05-12T07:25Z | 2026-05-12T08:00Z | [report](reports/T5.2-report.md) | Approved. VideoQualityController + 4 PriorityMode gates + 8 unit tests + 2× smoothing. Commit `2e0bdc5`. |
-| T5.3 | Pending Review | Kimi Code CLI | 2026-05-12T18:00Z | 2026-05-12T18:10Z | [report](reports/T5.3-report.md) | EncoderMode enum (Normal / SlideFallback) + VideoEncoder::set_mode() trait method + VideoQualityController::encoder_mode() detection at 150 kbps SD floor. |
+| T5.3 | Approved | Kimi Code CLI | 2026-05-12T08:00Z | 2026-05-12T08:10Z | [report](reports/T5.3-report.md) | Approved. EncoderMode::SlideFallback at SD floor (150 kbps) for ScreenShare. 3 tests. Commit `c48cb6f`. |
 | T5.4 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.5 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.6 | Open | — | — | — | — | Skeleton — expand before claiming |
