@@ -1183,6 +1183,29 @@ pub enum SignalMessage {
         /// Receiver-side arrival time of the latest packet (microseconds since epoch).
         recv_time_us: u64,
     },
+
+    /// Negative acknowledgement — request retransmission of specific packets.
+    /// Sent by the receiver when it detects gaps and RTT is low enough
+    /// that retransmission will arrive before decode deadline.
+    Nack {
+        /// NACK format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// Which media stream has the gap.
+        stream_id: u8,
+        /// Missing sequence numbers.
+        seqs: Vec<u32>,
+    },
+
+    /// Picture Loss Indication — decoder can't proceed, needs a fresh keyframe.
+    /// Used instead of Nack when RTT is too high for retransmission to help.
+    PictureLossIndication {
+        /// PLI format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// Which media stream needs the keyframe.
+        stream_id: u8,
+    },
 }
 
 /// How the callee responds to a direct call.
@@ -2675,6 +2698,83 @@ mod tests {
             } => {
                 assert_eq!(version, 2, "explicit version is preserved");
                 assert_eq!(timestamp_ms, 5678);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn nack_roundtrip() {
+        let original = SignalMessage::Nack {
+            version: 1,
+            stream_id: 7,
+            seqs: vec![42, 43, 44],
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::Nack {
+                version,
+                stream_id,
+                seqs,
+            } => {
+                assert_eq!(version, 1);
+                assert_eq!(stream_id, 7);
+                assert_eq!(seqs, vec![42, 43, 44]);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(decoded, SignalMessage::Nack { .. }));
+    }
+
+    #[test]
+    fn nack_default_version() {
+        let json = r#"{"Nack": {"stream_id": 3, "seqs": [10, 11]}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Nack { version, .. } => {
+                assert_eq!(version, 1, "serde default makes omitted version 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn picture_loss_indication_roundtrip() {
+        let original = SignalMessage::PictureLossIndication {
+            version: 1,
+            stream_id: 5,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::PictureLossIndication { version, stream_id } => {
+                assert_eq!(version, 1);
+                assert_eq!(stream_id, 5);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(
+            decoded,
+            SignalMessage::PictureLossIndication { .. }
+        ));
+    }
+
+    #[test]
+    fn picture_loss_indication_default_version() {
+        let json = r#"{"PictureLossIndication": {"stream_id": 2}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::PictureLossIndication { version, .. } => {
+                assert_eq!(version, 1, "serde default makes omitted version 1");
             }
             _ => panic!("wrong variant"),
         }

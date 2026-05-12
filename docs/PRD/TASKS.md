@@ -1427,6 +1427,73 @@ cargo build -p wzp-video
 
 ---
 
+## T4.3.1 — Wire real MediaCodec JNI bridge (Android)
+
+- **Parent:** T4.3 (Approved — scaffold only)
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 5 d (gated on Android build environment working)
+- **Files:**
+  - `crates/wzp-video/src/mediacodec.rs`
+  - `crates/wzp-android/src/video/mod.rs` (new — Kotlin/JNI side may live here)
+  - `android/app/src/main/java/com/wzp/video/` (new — MediaCodec Kotlin glue if needed)
+
+### Prerequisite
+**The `wzp-android` build environment must work first.** Current `liblog` link failure must be resolved. This task is **Blocked** until that prerequisite is fixed; agents should not claim this task until the build env is confirmed working with `build-tauri-android.sh --init`.
+
+### Context
+T4.3 shipped the API surface but stubbed both `encode()` and `decode()` even on Android. This task fills in the real JNI MediaCodec wiring. **This is the task that satisfies the original PRD-video-v1 T4.3 acceptance.**
+
+Current TODOs at `crates/wzp-video/src/mediacodec.rs:39` (encoder) and `:91` (decoder).
+
+### Steps
+
+1. **Decide on JNI surface.** Two options — pick one and document:
+   - **(A) Direct ndk-sys `AMediaCodec`** (NDK r24+, no Java↔native bouncing). Pure Rust with `ndk-sys` crate dep. Simpler, but requires NDK API ≥ 21.
+   - **(B) Java MediaCodec via JNI bridge** (call into Kotlin/Java glue that owns MediaCodec lifecycle). Slower (JNI calls per buffer) but matches existing `wzp-android` pattern.
+   - Recommended: **(A)** for the encode/decode hot path, **(B)** only if surface-texture path is required.
+
+2. **Encoder configure.**
+   - `AMediaCodec_createEncoderByType("video/avc")`.
+   - `AMediaFormat` keys: `KEY_MIME="video/avc"`, `KEY_WIDTH`, `KEY_HEIGHT`, `KEY_BIT_RATE = bitrate_bps`, `KEY_FRAME_RATE = 30`, `KEY_I_FRAME_INTERVAL = 1` (1 s ≈ 30 frames at 30 fps), `KEY_COLOR_FORMAT = COLOR_FormatYUV420Flexible` (or NV12 / I420 — choose and document).
+   - `AMediaCodec_configure` with surface=NULL for byte-buffer mode (or attach a surface for the surface-texture path).
+   - `AMediaCodec_start`.
+
+3. **Encoder per-frame loop.**
+   - `AMediaCodec_dequeueInputBuffer(timeout_us=10_000)`.
+   - Copy `VideoFrame.data` (NV12/I420) into input buffer.
+   - `AMediaCodec_queueInputBuffer(presentation_us=timestamp_ms*1000, flags=0)`.
+   - `AMediaCodec_dequeueOutputBuffer` in a loop — collect Annex-B output. Note: MediaCodec emits AVCC by default; you may need to convert AVCC → Annex-B (replace 4-byte length prefix with `0x000001`) or set `KEY_PREPEND_HEADER_TO_SYNC_FRAMES=1`.
+   - Return assembled Annex-B `Vec<u8>`.
+
+4. **Decoder mirror.** Same `AMediaCodec` pattern but `createDecoderByType("video/avc")`, parse SPS/PPS from incoming access unit on first frame to build CSD, feed input, drain output buffer → `VideoFrame`.
+
+5. **Keyframe request.** `AMediaCodec_setParameters` with `PARAMETER_KEY_REQUEST_SYNC_FRAME = 0`.
+
+6. **Test.** New `crates/wzp-video/tests/encode_decode_android.rs` gated `#[cfg(target_os = "android")]`:
+   - Run only when invoked from the Android test runner (instrumented test) or via emulator.
+   - Synthetic 640×360 NV12 frame; encode 30 frames; assert at least one IDR in first 5; round-trip through depacketizer + decoder.
+   - Skip with `#[ignore]` if MediaCodec init fails (e.g., on non-MediaCodec-capable emulator).
+
+7. **Manual Android↔macOS test.** Wire both T4.2.1 (macOS real encoder) and T4.3.1 (Android real encoder) into a CLI test harness. Record latency + CPU on a real Android device and on M1.
+
+### Verify
+
+```bash
+# On the Android builder (Hetzner remote):
+./scripts/build-tauri-android.sh --init
+# Then on the device:
+adb shell am instrument -w -e class com.wzp.video.MediaCodecTests com.wzp/com.wzp.video.TestRunner
+```
+
+### Done when
+- `cargo build -p wzp-video --target aarch64-linux-android` (or via cargo-ndk) succeeds.
+- Android↔macOS unidirectional H.264 call works manually (record measurement in report).
+- Encode CPU on a mid-tier Android device < 15 % of one core at 720p30 (PRD-video-v1 line).
+
+### Out of scope
+- iOS (use T4.2.1's VideoToolbox path).
+- Per-receiver simulcast layer selection (T5.5/T5.6).
+
 ---
 
 ## T4.4 — `SignalMessage::Nack` variant + RTT-gated NACK loop
@@ -1555,8 +1622,9 @@ Statuses (in order of progression):
 | T4.1 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T07:22Z | [report](reports/T4.1-report.md) | Approved. wzp-video crate + H.264 NAL framer/depacketizer (RFC 6184 FU-A). Commit `490d2d3`. Wave 4 opened. |
 | T4.2 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:10Z | [report](reports/T4.2-report.md) | Approved as scaffold (API surface + `is_keyframe`). Original PRD acceptance moved to T4.2.1 — `encode`/`decode` are stubs. Process note in report. Commit `3356ba9`. |
 | T4.2.1 | Open | — | — | — | — | Spawned from T4.2 review. Real VTCompressionSession/VTDecompressionSession wiring + 720p30 acceptance. Blocks end-to-end validation for T4.4–T4.7. |
-| T4.3 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | Rule #7 violated (started before T4.2 approval). Tighten. |
-| T4.4 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:15Z | [report](reports/T4.3-report.md) | Approved as scaffold. JNI MediaCodec deferred to T4.3.1. Same stub-and-rename pattern as T4.2 — process note in report. Commit `e177e63`. |
+| T4.3.1 | Open | — | — | — | — | Spawned from T4.3 review. Real AMediaCodec JNI wiring. **Blocked on `wzp-android` `liblog` link failure** — fix prereq before claiming. |
+| T4.4 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | Claimed. Adding Nack + PictureLossIndication to SignalMessage; NACK sender/receiver state machines in wzp-video. |
 | T4.5 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.6 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.7 | Open | — | — | — | — | Skeleton — expand before claiming |

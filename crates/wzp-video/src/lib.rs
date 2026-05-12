@@ -9,12 +9,14 @@ pub mod depacketizer;
 pub mod encoder;
 pub mod framer;
 pub mod mediacodec;
+pub mod nack;
 pub mod videotoolbox;
 
 pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
 pub use encoder::{VideoEncoder, VideoError, VideoFrame};
 pub use framer::{FramedPacket, H264Framer};
+pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
 pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxEncoder};
 
 #[cfg(test)]

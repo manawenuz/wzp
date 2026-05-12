@@ -11,7 +11,7 @@
 //! 5. Connects QUIC to relay for media
 
 use serde::{Deserialize, Serialize};
-use wzp_proto::packet::{SignalMessage, default_signal_version};
+use wzp_proto::packet::SignalMessage;
 
 /// featherChat CallSignal types (mirrors warzone-protocol::message::CallSignalType).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +141,9 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         | SignalMessage::QualityCapability { .. } => CallSignalType::Offer, // quality negotiation
         SignalMessage::PresenceList { .. } => CallSignalType::Offer, // lobby presence
         SignalMessage::QualityDirective { .. } => CallSignalType::Offer, // relay-initiated
+        SignalMessage::Nack { .. } | SignalMessage::PictureLossIndication { .. } => {
+            CallSignalType::Offer
+        } // relay-initiated (video loss recovery)
     }
 }
 
@@ -148,6 +151,7 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
 mod tests {
     use super::*;
     use wzp_proto::QualityProfile;
+    use wzp_proto::default_signal_version;
 
     #[test]
     fn payload_roundtrip() {
