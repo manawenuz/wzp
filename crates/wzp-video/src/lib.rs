@@ -6,6 +6,7 @@
 
 pub mod av1_obu;
 pub mod controller;
+#[cfg(not(target_os = "android"))]
 pub mod dav1d;
 pub mod decoder;
 pub mod depacketizer;
@@ -16,11 +17,13 @@ pub mod framer;
 pub mod mediacodec;
 pub mod nack;
 pub mod simulcast;
+#[cfg(not(target_os = "android"))]
 pub mod svt_av1;
 pub mod videotoolbox;
 
 pub use av1_obu::{Av1Depacketizer, Av1ObuFramer, is_keyframe_obu};
 pub use controller::{VideoQualityController, VideoTarget};
+#[cfg(not(target_os = "android"))]
 pub use dav1d::Dav1dDecoder;
 pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
@@ -34,6 +37,7 @@ pub use mediacodec::{
 };
 pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
 pub use simulcast::{LayerPacket, LayerTarget, SimulcastEncoder, SimulcastLayer};
+#[cfg(not(target_os = "android"))]
 pub use svt_av1::SvtAv1Encoder;
 pub use videotoolbox::{
     VideoToolboxAv1Decoder, VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder,

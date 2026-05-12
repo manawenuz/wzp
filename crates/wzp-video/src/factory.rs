@@ -68,11 +68,20 @@ pub fn create_video_encoder(
             }
         }
         CodecId::Av1Main => {
-            // SVT-AV1 is the universal SW fallback.
-            // macOS VideoToolbox has no AV1 encode. Android MediaCodec AV1
-            // encode requires API 29+ and may not be available on all devices.
+            // SVT-AV1 is the universal SW fallback for non-Android targets.
+            // On Android, MediaCodec AV1 (`video/av01`) is the only available
+            // path — shiguredo_svt_av1 does not build for aarch64-linux-android.
             let _ = bitrate_bps; // SvtAv1Encoder currently hard-codes bitrate
-            Ok(Box::new(crate::svt_av1::SvtAv1Encoder::new(width, height)?))
+            #[cfg(target_os = "android")]
+            {
+                let _ = (width, height);
+                #[allow(clippy::needless_return)]
+                return Err(VideoError::NotInitialized);
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                Ok(Box::new(crate::svt_av1::SvtAv1Encoder::new(width, height)?))
+            }
         }
         _ => Err(VideoError::InvalidInput("not a video codec".into())),
     }
@@ -131,7 +140,9 @@ pub fn create_video_decoder(
             }
         }
         CodecId::Av1Main => {
-            // Try platform HW decoders first, then fall back to dav1d.
+            // Try platform HW decoders first, then fall back to dav1d on
+            // non-Android targets. On Android, MediaCodec is the only path —
+            // shiguredo_dav1d does not build for aarch64-linux-android.
             #[cfg(target_os = "macos")]
             {
                 if let Ok(dec) = crate::videotoolbox::VideoToolboxAv1Decoder::new(width, height) {
@@ -140,11 +151,13 @@ pub fn create_video_decoder(
             }
             #[cfg(target_os = "android")]
             {
-                if let Ok(dec) = crate::mediacodec::MediaCodecAv1Decoder::new(width, height) {
-                    return Ok(Box::new(dec));
-                }
+                return crate::mediacodec::MediaCodecAv1Decoder::new(width, height)
+                    .map(|d| Box::new(d) as Box<dyn VideoDecoder>);
             }
-            Ok(Box::new(crate::dav1d::Dav1dDecoder::new()?))
+            #[cfg(not(target_os = "android"))]
+            {
+                Ok(Box::new(crate::dav1d::Dav1dDecoder::new()?))
+            }
         }
         _ => Err(VideoError::InvalidInput("not a video codec".into())),
     }
@@ -157,18 +170,30 @@ mod tests {
     #[test]
     fn av1_encoder_factory_creates_svt_av1() {
         let enc = create_video_encoder(CodecId::Av1Main, 640, 480, 2_000_000);
+        #[cfg(target_os = "android")]
+        assert!(
+            matches!(enc, Err(VideoError::NotInitialized)),
+            "AV1 SW encoder is unavailable on Android (no shiguredo_svt_av1)"
+        );
+        #[cfg(not(target_os = "android"))]
         assert!(
             enc.is_ok(),
-            "AV1 encoder factory should succeed on all platforms"
+            "AV1 encoder factory should succeed on non-Android platforms"
         );
     }
 
     #[test]
     fn av1_decoder_factory_creates_decoder() {
         let dec = create_video_decoder(CodecId::Av1Main, 640, 480);
+        #[cfg(target_os = "android")]
+        assert!(
+            matches!(dec, Err(VideoError::NotInitialized)),
+            "AV1 decoder requires MediaCodec on Android; non-Android device returns NotInitialized"
+        );
+        #[cfg(not(target_os = "android"))]
         assert!(
             dec.is_ok(),
-            "AV1 decoder factory should succeed on all platforms"
+            "AV1 decoder factory should succeed on non-Android (dav1d SW fallback)"
         );
     }
 
