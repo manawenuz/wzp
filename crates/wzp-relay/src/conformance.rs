@@ -1,4 +1,4 @@
-//! Relay conformance metering — Tier A/B/C/D enforcement.
+//! Relay conformance metering — Tier A/B/C/D/E enforcement.
 //!
 //! Each participant gets a [`ConformanceMeter`] that tracks per-second
 //! traffic against the declared codec's nominal bitrate ceiling.
@@ -23,6 +23,60 @@ pub enum Violation {
     TimestampDrift,
     /// Sustained payload size exceeds 2× the typical bound for the declared codec (Tier D).
     PayloadSizeExceeded,
+    /// Per-session token-bucket rate cap exceeded (Tier E).
+    RateCapExceeded,
+}
+
+/// Simple token bucket for per-session rate capping (Tier E).
+///
+/// Tokens represent bytes.  The bucket refills at `refill_per_sec` bytes per
+/// second, up to `capacity`.  A packet is allowed only if the bucket holds
+/// enough tokens for its size.
+pub struct TokenBucket {
+    capacity: u64,
+    tokens: f64,
+    refill_per_sec: u64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    /// Create a new bucket with the given byte capacity and refill rate.
+    pub fn new(capacity: u64, refill_per_sec: u64) -> Self {
+        Self {
+            capacity,
+            tokens: capacity as f64,
+            refill_per_sec,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Per-session audio cap: 256 kbps with 30 s @ 2× burst.
+    /// Capacity = 30 s × 64 KB/s = 1_920_000 bytes.
+    pub fn for_audio_session() -> Self {
+        let refill_per_sec = 256_000 / 8; // 32_000 bytes/sec
+        let capacity = refill_per_sec * 30 * 2; // 1_920_000 bytes
+        Self::new(capacity, refill_per_sec)
+    }
+
+    /// Attempt to consume `bytes` from the bucket.
+    ///
+    /// Refills based on elapsed time since the last call, then deducts the
+    /// cost.  Returns `Ok(())` if enough tokens were available, `Err(())`
+    /// otherwise.
+    pub fn try_consume(&mut self, bytes: u64, now: Instant) -> Result<(), ()> {
+        let elapsed = now.duration_since(self.last_refill);
+        self.last_refill = now;
+        self.tokens += elapsed.as_secs_f64() * self.refill_per_sec as f64;
+        if self.tokens > self.capacity as f64 {
+            self.tokens = self.capacity as f64;
+        }
+        if self.tokens >= bytes as f64 {
+            self.tokens -= bytes as f64;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 
 /// Per-participant traffic conformance meter.
@@ -34,6 +88,8 @@ pub struct ConformanceMeter {
     drift_window: VecDeque<(u32, u32)>,
     /// EWMA of payload size for Tier D sanity checks.
     ewma_payload_size: f64,
+    /// Optional token bucket for Tier E per-session rate cap.
+    token_bucket: Option<TokenBucket>,
 }
 
 impl ConformanceMeter {
@@ -44,7 +100,15 @@ impl ConformanceMeter {
             packets_in_window: 0,
             drift_window: VecDeque::with_capacity(DRIFT_WINDOW_SIZE),
             ewma_payload_size: 0.0,
+            token_bucket: None,
         }
+    }
+
+    /// Create a meter with a Tier E token bucket for per-session rate capping.
+    pub fn with_token_bucket(bucket: TokenBucket) -> Self {
+        let mut meter = Self::new();
+        meter.token_bucket = Some(bucket);
+        meter
     }
 
     /// Inspect an incoming media packet and accumulate it against the
@@ -111,6 +175,14 @@ impl ConformanceMeter {
         let bound = payload_size_bound(header.codec_id);
         if self.ewma_payload_size > (bound * 2) as f64 {
             return Err(Violation::PayloadSizeExceeded);
+        }
+
+        // Tier E — per-session token-bucket rate cap.
+        if let Some(ref mut bucket) = self.token_bucket {
+            let packet_size = (MediaHeader::WIRE_SIZE + payload_len) as u64;
+            if bucket.try_consume(packet_size, now).is_err() {
+                return Err(Violation::RateCapExceeded);
+            }
         }
 
         Ok(())
@@ -387,5 +459,81 @@ mod tests {
                 "150-byte Opus24k payloads should stay within Tier D limit"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Tier E — token-bucket rate cap
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn token_bucket_small_burst_ok() {
+        let mut bucket = TokenBucket::new(100_000, 32_000);
+        let now = Instant::now();
+        // 50 KB burst fits inside 100 KB capacity.
+        assert!(bucket.try_consume(50_000, now).is_ok());
+    }
+
+    #[test]
+    fn token_bucket_large_burst_fails() {
+        let mut bucket = TokenBucket::new(100_000, 32_000);
+        let now = Instant::now();
+        // 1 MB exceeds 100 KB capacity.
+        assert!(bucket.try_consume(1_000_000, now).is_err());
+    }
+
+    #[test]
+    fn token_bucket_refills_over_time() {
+        let mut bucket = TokenBucket::new(100_000, 32_000);
+        let t0 = Instant::now();
+        // Drain the bucket.
+        assert!(bucket.try_consume(100_000, t0).is_ok());
+        // Immediately try again — should fail.
+        assert!(bucket.try_consume(10_000, t0).is_err());
+        // Wait 1 second — bucket refills 32_000 bytes.
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(bucket.try_consume(30_000, t1).is_ok());
+        // 40_000 is more than the 32_000 refilled.
+        assert!(bucket.try_consume(40_000, t1).is_err());
+    }
+
+    #[test]
+    fn token_bucket_sustained_rate_balanced() {
+        let mut bucket = TokenBucket::new(1_000_000, 32_000);
+        let t0 = Instant::now();
+        // Send 32 KB every second for 5 seconds — exactly at refill rate.
+        // The bucket should never empty because each second it refills
+        // exactly what was consumed.
+        for i in 0..5 {
+            let t = t0 + Duration::from_secs(i);
+            assert!(
+                bucket.try_consume(32_000, t).is_ok(),
+                "32 KB/s sustained should stay within bucket limit"
+            );
+        }
+    }
+
+    #[test]
+    fn conformance_tier_e_integration() {
+        // Use Opus64k (high bitrate ceiling + high payload bound) so Tiers
+        // A/B/D never fire on the small bursts used here.  Only Tier E.
+        let mut meter = ConformanceMeter::with_token_bucket(TokenBucket::new(1_000, 500));
+        let header = make_header(CodecId::Opus64k);
+        let now = Instant::now();
+
+        // Two 500-byte (wire) packets = 1_000 bytes — exactly the bucket cap.
+        assert!(
+            meter
+                .observe(&header, 500 - MediaHeader::WIRE_SIZE, now)
+                .is_ok()
+        );
+        assert!(
+            meter
+                .observe(&header, 500 - MediaHeader::WIRE_SIZE, now)
+                .is_ok()
+        );
+
+        // Third packet exceeds the 1_000-byte cap.
+        let result = meter.observe(&header, 10, now);
+        assert_eq!(result, Err(Violation::RateCapExceeded));
     }
 }

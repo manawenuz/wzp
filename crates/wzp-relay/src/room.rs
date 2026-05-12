@@ -758,6 +758,7 @@ pub async fn run_participant(
     debug_tap: Option<DebugTap>,
     federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
     federation_room_hash: Option<[u8; 8]>,
+    is_authenticated: bool,
 ) {
     if trunking_enabled {
         run_participant_trunked(
@@ -767,6 +768,7 @@ pub async fn run_participant(
             transport,
             metrics,
             session_id,
+            is_authenticated,
         )
         .await;
     } else {
@@ -780,6 +782,7 @@ pub async fn run_participant(
             debug_tap,
             federation_tx,
             federation_room_hash,
+            is_authenticated,
         )
         .await;
     }
@@ -796,6 +799,7 @@ async fn run_participant_plain(
     debug_tap: Option<DebugTap>,
     federation_tx: Option<tokio::sync::mpsc::Sender<FederationMediaOut>>,
     federation_room_hash: Option<[u8; 8]>,
+    is_authenticated: bool,
 ) {
     let addr = transport.connection().remote_address();
     let mut packets_forwarded = 0u64;
@@ -804,7 +808,13 @@ async fn run_participant_plain(
     let mut max_forward_ms = 0u64;
     let mut send_errors = 0u64;
     let mut last_log_instant = std::time::Instant::now();
-    let mut conformance = ConformanceMeter::new();
+    let mut conformance = if is_authenticated {
+        ConformanceMeter::with_token_bucket(crate::conformance::TokenBucket::for_audio_session())
+    } else {
+        // Anonymous participants get the same per-session audio cap.
+        // Monthly quota (1 GB vs 50 GB) is tracked separately.
+        ConformanceMeter::with_token_bucket(crate::conformance::TokenBucket::for_audio_session())
+    };
 
     let mut tap_stats = if debug_tap.as_ref().map_or(false, |t| t.matches(&room_name)) {
         Some(TapStats::new())
@@ -1029,6 +1039,7 @@ async fn run_participant_trunked(
     transport: Arc<wzp_transport::QuinnTransport>,
     metrics: Arc<RelayMetrics>,
     session_id: &str,
+    _is_authenticated: bool,
 ) {
     use std::collections::HashMap;
 
@@ -1039,7 +1050,8 @@ async fn run_participant_trunked(
     let mut max_forward_ms = 0u64;
     let mut send_errors = 0u64;
     let mut last_log_instant = std::time::Instant::now();
-    let mut conformance = ConformanceMeter::new();
+    let mut conformance =
+        ConformanceMeter::with_token_bucket(crate::conformance::TokenBucket::for_audio_session());
 
     info!(
         room = %room_name,

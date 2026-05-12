@@ -2027,6 +2027,7 @@ async fn main() -> anyhow::Result<()> {
                     debug_tap,
                     federation_tx,
                     federation_room_hash,
+                    authenticated_fp.is_some(),
                 )
                 .await;
 

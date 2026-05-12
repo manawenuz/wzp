@@ -1322,8 +1322,8 @@ Statuses (in order of progression):
 | T3.1 | Approved | Kimi Code CLI | 2026-05-11T20:55Z | 2026-05-11T21:05Z | [report](reports/T3.1-report.md) | Approved. DashMap<String, Arc<RwLock<Room>>>; W13 resolved. One commit per task this time — good. Two minor process notes in report. |
 | T3.2 | Approved | Kimi Code CLI | 2026-05-11T21:15Z | 2026-05-11T21:25Z | [report](reports/T3.2-report.md) | Approved. timestamp_ms monotonic across rekey, documented + tested. Commit `1b4f7b0`. |
 | T3.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:08Z | [report](reports/T3.3-report.md) | Approved. W12 SignalMessage versioning. Commit `f7f413e`. |
-| T3.4 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T3.4-report.md) | — |
-| T3.5 | Open | — | — | — | — | — |
+| T3.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:24Z | [report](reports/T3.4-report.md) | Approved. Tier D payload-size EWMA + per-codec bound table. Commit `017c371`. Clean process. |
+| T3.5 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | — |
 | T4.1 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
