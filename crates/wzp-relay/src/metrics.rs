@@ -405,6 +405,7 @@ impl RelayMetrics {
                 Violation::BitrateExceeded => "A",
                 Violation::PacketRateExceeded => "B",
                 Violation::TimestampDrift => "C",
+                Violation::PayloadSizeExceeded => "D",
             };
             let codec_id = format!("{:?}", header.codec_id);
             let verdict = format!("{:?}", v);

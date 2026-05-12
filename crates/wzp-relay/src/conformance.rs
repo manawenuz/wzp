@@ -1,4 +1,4 @@
-//! Relay conformance metering — Tier A/B/C enforcement.
+//! Relay conformance metering — Tier A/B/C/D enforcement.
 //!
 //! Each participant gets a [`ConformanceMeter`] that tracks per-second
 //! traffic against the declared codec's nominal bitrate ceiling.
@@ -21,6 +21,8 @@ pub enum Violation {
     PacketRateExceeded,
     /// Timestamp jumped backwards or forwards suspiciously (Tier C).
     TimestampDrift,
+    /// Sustained payload size exceeds 2× the typical bound for the declared codec (Tier D).
+    PayloadSizeExceeded,
 }
 
 /// Per-participant traffic conformance meter.
@@ -30,6 +32,8 @@ pub struct ConformanceMeter {
     packets_in_window: u64,
     /// Rolling (seq, timestamp) pairs for drift detection.
     drift_window: VecDeque<(u32, u32)>,
+    /// EWMA of payload size for Tier D sanity checks.
+    ewma_payload_size: f64,
 }
 
 impl ConformanceMeter {
@@ -39,6 +43,7 @@ impl ConformanceMeter {
             bytes_in_window: 0,
             packets_in_window: 0,
             drift_window: VecDeque::with_capacity(DRIFT_WINDOW_SIZE),
+            ewma_payload_size: 0.0,
         }
     }
 
@@ -99,6 +104,15 @@ impl ConformanceMeter {
             }
         }
 
+        // Tier D — payload-size sanity (EWMA).
+        let alpha = 0.05; // ~20-packet smoothing
+        self.ewma_payload_size =
+            alpha * payload_len as f64 + (1.0 - alpha) * self.ewma_payload_size;
+        let bound = payload_size_bound(header.codec_id);
+        if self.ewma_payload_size > (bound * 2) as f64 {
+            return Err(Violation::PayloadSizeExceeded);
+        }
+
         Ok(())
     }
 }
@@ -129,6 +143,24 @@ pub fn max_pps(codec: CodecId) -> u32 {
         return 0;
     }
     (1000 / fd) * 3
+}
+
+/// Typical per-codec payload size bound in bytes (Tier D).
+///
+/// These are empirical upper bounds for a single audio frame at the codec's
+/// nominal configuration.  The EWMA must not exceed 2× this value.
+pub fn payload_size_bound(codec: CodecId) -> usize {
+    match codec {
+        CodecId::Opus64k => 320,
+        CodecId::Opus48k => 240,
+        CodecId::Opus32k => 200,
+        CodecId::Opus24k => 160,
+        CodecId::Opus16k => 100,
+        CodecId::Opus6k => 90,
+        CodecId::Codec2_3200 => 30,
+        CodecId::Codec2_1200 => 30,
+        CodecId::ComfortNoise => 16,
+    }
 }
 
 #[cfg(test)]
@@ -197,17 +229,18 @@ mod tests {
         let header = make_header(CodecId::Opus24k);
 
         // Fill the window to just under the limit.
+        // Use 300-byte payloads (under Tier D 2× bound of 320 for Opus24k).
         let t0 = Instant::now();
-        for _ in 0..10 {
-            assert!(meter.observe(&header, 1000, t0).is_ok());
+        for _ in 0..32 {
+            assert!(meter.observe(&header, 300, t0).is_ok());
         }
-        // 10 * (header wire size + 1000) ≈ 10 * 1034 = 10_340 bytes < 10_350
+        // 32 * (header wire size + 300) ≈ 32 * 316 = 10_112 bytes < 10_350
 
         // Same packets 1.1 seconds later should be fine because the window
         // rolls over.
         let t1 = t0 + Duration::from_millis(1_100);
-        for _ in 0..10 {
-            assert!(meter.observe(&header, 1000, t1).is_ok());
+        for _ in 0..32 {
+            assert!(meter.observe(&header, 300, t1).is_ok());
         }
     }
 
@@ -311,5 +344,48 @@ mod tests {
         // Single packet with wild timestamp — should not trigger drift.
         let header = make_header_with_seq_ts(CodecId::Opus24k, 0, 999_999);
         assert!(meter.observe(&header, 10, now).is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // Tier D — payload-size sanity
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn conformance_tier_d() {
+        let mut meter = ConformanceMeter::new();
+        let header = make_header(CodecId::Codec2_1200);
+        let now = Instant::now();
+
+        // Codec2_1200 bound = 30 bytes.  2× bound = 60 bytes.
+        // Feed 1400-byte payloads — EWMA should cross 60 within a few packets.
+        let mut flagged = false;
+        for _ in 0..200 {
+            if meter.observe(&header, 1400, now).is_err() {
+                flagged = true;
+                break;
+            }
+        }
+        assert!(
+            flagged,
+            "expected PayloadSizeExceeded for 1400-byte Codec2_1200 payloads"
+        );
+    }
+
+    #[test]
+    fn payload_size_normal_stays_within_bound() {
+        let mut meter = ConformanceMeter::new();
+        let header = make_header(CodecId::Opus24k);
+        let now = Instant::now();
+
+        // Opus24k bound = 160 bytes.  2× bound = 320 bytes.
+        // Feed 150-byte payloads — well within the 2× limit.
+        // Limit to 10 packets so the 1-second bitrate window (10_350 bytes)
+        // is not exhausted: 10 * (16 + 150) = 1_660 < 10_350.
+        for _ in 0..10 {
+            assert!(
+                meter.observe(&header, 150, now).is_ok(),
+                "150-byte Opus24k payloads should stay within Tier D limit"
+            );
+        }
     }
 }
