@@ -1936,8 +1936,20 @@ async fn main() -> anyhow::Result<()> {
                         Some(&participant_fp),
                         caller_alias.as_deref(),
                     ) {
-                        Ok((id, update, senders)) => {
+                        Ok((id, update, senders, cached_keyframes)) => {
                             metrics.active_rooms.set(room_mgr.list().len() as i64);
+
+                            // Replay cached keyframes to the new participant before live
+                            // traffic starts.  This eliminates black-screen-on-join when
+                            // the cache is warm.
+                            for kf in cached_keyframes {
+                                for pkt in kf {
+                                    if let Err(e) = transport.send_media(&pkt).await {
+                                        warn!(%addr, participant = id, "keyframe replay send error: {e}");
+                                        break;
+                                    }
+                                }
+                            }
 
                             // Merge federated participants into RoomUpdate if this is a global room
                             let merged_update = if let Some(ref fm) = federation_mgr {
