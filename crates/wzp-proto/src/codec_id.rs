@@ -251,7 +251,8 @@ mod tests {
     #[test]
     fn quality_profile_backward_compat_old_json() {
         // Old JSON emitted before T5.1 has no priority_mode or video fields.
-        let old_json = r#"{"codec":"Opus24k","fec_ratio":0.2,"frame_duration_ms":20,"frames_per_block":5}"#;
+        let old_json =
+            r#"{"codec":"Opus24k","fec_ratio":0.2,"frame_duration_ms":20,"frames_per_block":5}"#;
         let parsed: QualityProfile = serde_json::from_str(old_json).unwrap();
         assert_eq!(parsed.priority_mode, PriorityMode::AudioFirst);
         assert_eq!(parsed.video_bitrate_kbps, None);

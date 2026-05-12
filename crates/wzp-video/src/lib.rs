@@ -21,10 +21,14 @@ pub use depacketizer::H264Depacketizer;
 pub use encoder::{VideoEncoder, VideoError, VideoFrame};
 pub use encoder_mode::EncoderMode;
 pub use framer::{FramedPacket, H264Framer};
-pub use mediacodec::{MediaCodecDecoder, MediaCodecEncoder, MediaCodecHevcDecoder, MediaCodecHevcEncoder};
+pub use mediacodec::{
+    MediaCodecDecoder, MediaCodecEncoder, MediaCodecHevcDecoder, MediaCodecHevcEncoder,
+};
 pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
 pub use simulcast::{LayerPacket, LayerTarget, SimulcastEncoder, SimulcastLayer};
-pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder, VideoToolboxHevcEncoder};
+pub use videotoolbox::{
+    VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder, VideoToolboxHevcEncoder,
+};
 
 #[cfg(test)]
 mod tests {

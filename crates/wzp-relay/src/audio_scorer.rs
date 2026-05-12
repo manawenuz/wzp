@@ -215,7 +215,11 @@ impl AudioScorer {
         if self.iat_samples.len() < 10 {
             return None;
         }
-        let mean = self.iat_samples.iter().map(|d| d.as_secs_f64()).sum::<f64>()
+        let mean = self
+            .iat_samples
+            .iter()
+            .map(|d| d.as_secs_f64())
+            .sum::<f64>()
             / self.iat_samples.len() as f64;
         if mean == 0.0 {
             return None;
@@ -257,7 +261,11 @@ impl AudioScorer {
         if self.q_intervals.len() < 3 {
             return None;
         }
-        let mean = self.q_intervals.iter().map(|d| d.as_secs_f64()).sum::<f64>()
+        let mean = self
+            .q_intervals
+            .iter()
+            .map(|d| d.as_secs_f64())
+            .sum::<f64>()
             / self.q_intervals.len() as f64;
         if mean == 0.0 {
             return None;

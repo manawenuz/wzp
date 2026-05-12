@@ -60,12 +60,7 @@ impl ResponsePolicy {
     ///
     /// `fingerprint` is the participant's identity string (or IP as fallback).
     /// `code` is the specific violation type that triggered the verdict.
-    pub fn evaluate(
-        &mut self,
-        fingerprint: &str,
-        code: ViolationCode,
-        verdict: Verdict,
-    ) -> Action {
+    pub fn evaluate(&mut self, fingerprint: &str, code: ViolationCode, verdict: Verdict) -> Action {
         match verdict {
             Verdict::Legitimate => Action::Allow,
             Verdict::Suspect => Action::Throttle,
@@ -202,9 +197,10 @@ mod tests {
         let _ = policy.evaluate("alice", ViolationCode::Bitrate, Verdict::Abusive);
         assert_eq!(policy.len(), 1);
         // Manually expire by moving cooldown back
-        policy
-            .cooldowns
-            .insert(("alice".to_string(), ViolationCode::Bitrate), Instant::now() - Duration::from_secs(90000));
+        policy.cooldowns.insert(
+            ("alice".to_string(), ViolationCode::Bitrate),
+            Instant::now() - Duration::from_secs(90000),
+        );
         policy.prune();
         assert!(policy.is_empty());
     }

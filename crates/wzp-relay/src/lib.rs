@@ -7,12 +7,11 @@
 //! It operates on FEC-protected packets, managing loss recovery and adaptive
 //! quality transitions.
 
+pub mod audio_scorer;
 pub mod auth;
 pub mod call_registry;
 pub mod config;
-pub mod audio_scorer;
 pub mod conformance;
-pub mod response_policy;
 pub mod event_log;
 pub mod federation;
 pub mod handshake;
@@ -21,6 +20,7 @@ pub mod pipeline;
 pub mod presence;
 pub mod probe;
 pub mod relay_link;
+pub mod response_policy;
 pub mod room;
 pub mod route;
 pub mod session_mgr;

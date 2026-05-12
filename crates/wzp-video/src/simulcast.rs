@@ -164,7 +164,6 @@ impl SimulcastEncoder {
         }
         mask
     }
-
 }
 
 #[cfg(test)]
@@ -193,7 +192,9 @@ mod tests {
         }
     }
 
-    fn dummy_factory(stream_counter: &mut u8) -> impl FnMut(u32, u32, u32) -> Result<Box<dyn VideoEncoder>, VideoError> + '_ {
+    fn dummy_factory(
+        stream_counter: &mut u8,
+    ) -> impl FnMut(u32, u32, u32) -> Result<Box<dyn VideoEncoder>, VideoError> + '_ {
         move |_w, _h, _br| {
             let enc = DummyEncoder {
                 stream_id: *stream_counter,

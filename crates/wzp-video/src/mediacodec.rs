@@ -593,7 +593,9 @@ impl VideoDecoder for MediaCodecHevcDecoder {
                 format.set_buffer("csd-2", &pps);
 
                 let codec = MediaCodec::from_decoder_type("video/hevc").ok_or_else(|| {
-                    VideoError::PlatformError("AMediaCodec_createDecoderByType (HEVC) failed".into())
+                    VideoError::PlatformError(
+                        "AMediaCodec_createDecoderByType (HEVC) failed".into(),
+                    )
                 })?;
 
                 codec

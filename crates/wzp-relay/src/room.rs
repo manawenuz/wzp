@@ -274,7 +274,9 @@ impl ReceiverState {
         }
 
         // Same candidate — check if hysteresis elapsed.
-        let elapsed = now.saturating_duration_since(self.candidate_since).as_millis() as u64;
+        let elapsed = now
+            .saturating_duration_since(self.candidate_since)
+            .as_millis() as u64;
         if elapsed >= LAYER_SWITCH_HYSTERESIS_MS {
             self.selected_layer = suggested;
         }
@@ -879,11 +881,7 @@ impl RoomManager {
     /// Return the selected simulcast layer (0/1/2) for a receiver.
     ///
     /// Defaults to layer 0 (low) if no state has been recorded yet.
-    pub fn selected_layer(
-        &self,
-        room_name: &str,
-        receiver_id: ParticipantId,
-    ) -> u8 {
+    pub fn selected_layer(&self, room_name: &str, receiver_id: ParticipantId) -> u8 {
         self.receiver_states
             .get(&(room_name.to_string(), receiver_id))
             .map(|s| s.selected_layer)
@@ -1963,7 +1961,10 @@ mod tests {
         let mut rs = ReceiverState::new();
         let t0 = std::time::Instant::now();
         rs.update(4000, 0, t0);
-        assert_eq!(rs.selected_layer, 2, ">3 Mbps + 0% loss → high layer immediately");
+        assert_eq!(
+            rs.selected_layer, 2,
+            ">3 Mbps + 0% loss → high layer immediately"
+        );
     }
 
     #[test]
@@ -1985,12 +1986,18 @@ mod tests {
         // Drop to low-bandwidth — should not switch immediately
         let t1 = t0 + std::time::Duration::from_millis(100);
         rs.update(100, 0, t1);
-        assert_eq!(rs.selected_layer, 2, "hysteresis prevents immediate downgrade");
+        assert_eq!(
+            rs.selected_layer, 2,
+            "hysteresis prevents immediate downgrade"
+        );
 
         // After 3 s — switch should happen
         let t2 = t0 + std::time::Duration::from_millis(3100);
         rs.update(100, 0, t2);
-        assert_eq!(rs.selected_layer, 0, "after 3 s hysteresis, downgrade occurs");
+        assert_eq!(
+            rs.selected_layer, 0,
+            "after 3 s hysteresis, downgrade occurs"
+        );
     }
 
     #[test]

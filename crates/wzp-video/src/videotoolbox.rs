@@ -7,8 +7,8 @@ use crate::encoder::{VideoEncoder, VideoError, VideoFrame};
 mod imp {
     pub use shiguredo_video_toolbox::{
         CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
-        EncoderConfig, FrameData, H264EncoderConfig, H264EntropyMode, H264Profile, HevcEncoderConfig,
-        HevcProfile, PixelFormat,
+        EncoderConfig, FrameData, H264EncoderConfig, H264EntropyMode, H264Profile,
+        HevcEncoderConfig, HevcProfile, PixelFormat,
     };
 }
 
