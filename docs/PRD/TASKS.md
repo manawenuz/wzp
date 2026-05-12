@@ -1320,7 +1320,7 @@ Statuses (in order of progression):
 | T2.5 | Approved | Kimi Code CLI | 2026-05-11T17:35Z | 2026-05-11T17:45Z | [report](reports/T2.5-report.md) | Substance good (Tier B+C); bundled in 54c1a35 — see T2.6 report. |
 | T2.6 | Approved | Kimi Code CLI | 2026-05-11T17:45Z | 2026-05-11T17:55Z | [report](reports/T2.6-report.md) | Substance good (Prom metrics); bundled in 54c1a35. Consolidated reviewer notes here. |
 | T3.1 | Approved | Kimi Code CLI | 2026-05-11T20:55Z | 2026-05-11T21:05Z | [report](reports/T3.1-report.md) | Approved. DashMap<String, Arc<RwLock<Room>>>; W13 resolved. One commit per task this time — good. Two minor process notes in report. |
-| T3.2 | Committed | Kimi Code CLI | 2026-05-11T21:15Z | 2026-05-11T21:25Z | [report](reports/T3.2-report.md) | timestamp_ms monotonic across rekey; doc + test. |
+| T3.2 | Pending Review | Kimi Code CLI | 2026-05-11T21:15Z | 2026-05-11T21:25Z | [report](reports/T3.2-report.md) | timestamp_ms monotonic across rekey; doc + test. |
 | T3.3 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T3.3-report.md) | — |
 | T3.4 | Open | — | — | — | — | — |
 | T3.5 | Open | — | — | — | — | — |
@@ -1350,6 +1350,7 @@ Items currently waiting on the reviewer:
 - T1.8 — Per-stream anti-replay window with configurable size — report: reports/T1.8-report.md
 - T2.1 — Add `SignalMessage::TransportFeedback` — report: reports/T2.1-report.md
 - T2.2 — `BandwidthEstimator` in `wzp-proto::bandwidth` — report: reports/T2.2-report.md
+- T3.2 — Document timestamp_ms monotonic across rekey — report: reports/T3.2-report.md
 - T3.3 — SignalMessage version field — report: reports/T3.3-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
