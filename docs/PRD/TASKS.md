@@ -1710,14 +1710,14 @@ Statuses (in order of progression):
 | T4.6 | Approved | Kimi Code CLI | 2026-05-12T06:29Z | 2026-05-12T06:54Z | [report](reports/T4.6-report.md) | Approved. SFU keyframe cache via DashMap, two-phase buffer, 200 KB cap. Zero new tests — line drawn for future stateful work. Commit `828fbea`. |
 | T4.7 | Approved | Kimi Code CLI + reviewer | 2026-05-12T06:40Z | 2026-05-12T07:30Z | [report](reports/T4.7-report.md) | Approved. Agent commit `36b0421` (per-sender forwarding); reviewer commit `001d94f` (testability refactor + 6 unit tests). 93 → 99 wzp-relay lib tests. |
 | T5.1 | Approved | Kimi Code CLI | 2026-05-12T07:00Z | 2026-05-12T07:25Z | [report](reports/T5.1-report.md) | Approved. PriorityMode enum + SetPriorityMode signal + QualityProfile video fields. Commit `c8d1239`. Spawned T5.1.1 for round-trip / default tests. |
-| T5.1.1 | Open | — | — | — | — | Spawned from T5.1. Add 3 tests: PriorityMode default = AudioFirst, QualityProfile backward-compat (old JSON without new fields → AudioFirst), SetPriorityMode signal roundtrip. ~15 min. |
+| T5.1.1 | Pending Review | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:38Z | [report](reports/T5.1.1-report.md) | 3 follow-up tests for T5.1: default PriorityMode, backward-compat JSON, SetPriorityMode roundtrip. Commit `e34c40d`. |
 | T5.2 | Approved | Kimi Code CLI | 2026-05-12T07:25Z | 2026-05-12T08:00Z | [report](reports/T5.2-report.md) | Approved. VideoQualityController + 4 PriorityMode gates + 8 unit tests + 2× smoothing. Commit `2e0bdc5`. |
 | T5.3 | Approved | Kimi Code CLI | 2026-05-12T08:00Z | 2026-05-12T08:10Z | [report](reports/T5.3-report.md) | Approved. EncoderMode::SlideFallback at SD floor (150 kbps) for ScreenShare. 3 tests. Commit `c48cb6f`. |
-| T5.4 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T5.5 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T5.6 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T5.7 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T5.8 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T5.4 | Pending Review | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:38Z | [report](reports/T5.4-report.md) | H.265 encoder/decoder wrappers (VideoToolbox + MediaCodec), CodecId::H265Main. Commit `b197651`. |
+| T5.5 | Pending Review | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:38Z | [report](reports/T5.5-report.md) | 3-layer simulcast at sender (SimulcastEncoder + tick_simulcast). Commit `2f1a9f7`. |
+| T5.6 | Pending Review | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:38Z | [report](reports/T5.6-report.md) | Per-receiver simulcast layer selection at SFU (ReceiverState + hysteresis). Commit `2bbb664`. |
+| T5.7 | Pending Review | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:38Z | [report](reports/T5.7-report.md) | Tier F audio scorer (IAT CoV, silence fraction, bitrate, Q-flag, bimodality). Commit `5fda5ec`. |
+| T5.8 | Pending Review | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:38Z | [report](reports/T5.8-report.md) | Tier G response policy (Verdict, ResponsePolicy, typed Hangup::PolicyViolation). Commit `dbbab0d`. |
 | T6.1 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T6.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T6.3 | Open | — | — | — | — | Skeleton — expand before claiming |
@@ -1735,5 +1735,11 @@ Items currently waiting on the reviewer:
 - T3.5 — Tier E per-session token bucket — report: reports/T3.5-report.md
 - T4.1 — wzp-video crate scaffold + H.264 NAL framer + depacketizer — report: reports/T4.1-report.md
 - T4.2 — VideoToolbox H.264 encoder/decoder traits (macOS, MVP) — report: reports/T4.2-report.md
+- T5.1.1 — PriorityMode default + backward-compat JSON + SetPriorityMode roundtrip — report: reports/T5.1.1-report.md
+- T5.4 — H.265 encoder/decoder wrappers (VideoToolbox + MediaCodec) — report: reports/T5.4-report.md
+- T5.5 — 3-layer simulcast at sender — report: reports/T5.5-report.md
+- T5.6 — Per-receiver layer selection at SFU — report: reports/T5.6-report.md
+- T5.7 — Tier F audio scorer — report: reports/T5.7-report.md
+- T5.8 — Tier G response policy — report: reports/T5.8-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
