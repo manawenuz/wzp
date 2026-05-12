@@ -10,6 +10,7 @@
 pub mod auth;
 pub mod call_registry;
 pub mod config;
+pub mod audio_scorer;
 pub mod conformance;
 pub mod event_log;
 pub mod federation;
