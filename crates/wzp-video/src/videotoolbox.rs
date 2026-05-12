@@ -652,6 +652,99 @@ impl VideoDecoder for VideoToolboxHevcDecoder {
     }
 }
 
+/// macOS VideoToolbox AV1 decoder (decode-only; M3+).
+pub struct VideoToolboxAv1Decoder {
+    #[cfg(target_os = "macos")]
+    inner: Option<Decoder>,
+    #[cfg(target_os = "macos")]
+    width: u32,
+    #[cfg(target_os = "macos")]
+    height: u32,
+    #[cfg(not(target_os = "macos"))]
+    _width: u32,
+    #[cfg(not(target_os = "macos"))]
+    _height: u32,
+}
+
+impl VideoToolboxAv1Decoder {
+    pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
+        #[cfg(target_os = "macos")]
+        {
+            let config = DecoderConfig {
+                codec: DecoderCodec::Av1 { width, height },
+                pixel_format: PixelFormat::I420,
+            };
+            match Decoder::new(config) {
+                Ok(decoder) => Ok(Self {
+                    inner: Some(decoder),
+                    width,
+                    height,
+                }),
+                Err(shiguredo_video_toolbox::Error::UnsupportedCodec { .. }) => {
+                    // AV1 decode not supported on this platform (e.g. M1/M2).
+                    Ok(Self {
+                        inner: None,
+                        width,
+                        height,
+                    })
+                }
+                Err(e) => Err(VideoError::PlatformError(format!(
+                    "AV1 decoder create failed: {e}"
+                ))),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (width, height);
+            Ok(Self {
+                _width: width,
+                _height: height,
+            })
+        }
+    }
+}
+
+impl VideoDecoder for VideoToolboxAv1Decoder {
+    fn decode(&mut self, access_unit: &[u8]) -> Result<Option<VideoFrame>, VideoError> {
+        #[cfg(target_os = "macos")]
+        {
+            if access_unit.is_empty() {
+                return Ok(None);
+            }
+            let decoder = self.inner.as_mut().ok_or(VideoError::NotInitialized)?;
+            let decoded = decoder
+                .decode(access_unit)
+                .map_err(|e| VideoError::PlatformError(format!("decode failed: {e}")))?;
+            match decoded {
+                Some(DecodedFrame::I420(frame)) => {
+                    let y = frame.y_plane();
+                    let u = frame.u_plane();
+                    let v = frame.v_plane();
+                    let mut data = Vec::with_capacity(y.len() + u.len() + v.len());
+                    data.extend_from_slice(y);
+                    data.extend_from_slice(u);
+                    data.extend_from_slice(v);
+                    Ok(Some(VideoFrame {
+                        width: self.width,
+                        height: self.height,
+                        data,
+                        timestamp_ms: 0,
+                    }))
+                }
+                Some(DecodedFrame::Nv12(_)) => Err(VideoError::PlatformError(
+                    "unexpected NV12 output from decoder".to_string(),
+                )),
+                None => Ok(None),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = access_unit;
+            Err(VideoError::NotInitialized)
+        }
+    }
+}
+
 /// Type alias for HEVC parameter-set triple returned by `extract_vps_sps_pps`.
 type HevcParameterSets = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -791,5 +884,13 @@ mod tests {
         assert_eq!(vps, Some(vec![0x40, 0x01, 0x0C, 0x01]));
         assert_eq!(sps, Some(vec![0x42, 0x01, 0x01, 0x01]));
         assert_eq!(pps, Some(vec![0x44, 0x01, 0xC1, 0x72]));
+    }
+
+    // ---- AV1 ----
+
+    #[test]
+    fn av1_decoder_instantiates() {
+        let dec = VideoToolboxAv1Decoder::new(1280, 720);
+        assert!(dec.is_ok());
     }
 }

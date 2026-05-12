@@ -236,7 +236,7 @@ pub fn payload_size_bound(codec: CodecId) -> usize {
         CodecId::Codec2_3200 => 30,
         CodecId::Codec2_1200 => 30,
         CodecId::ComfortNoise => 16,
-        CodecId::H264Baseline | CodecId::H265Main => 1400,
+        CodecId::H264Baseline | CodecId::H265Main | CodecId::Av1Main => 1400,
     }
 }
 

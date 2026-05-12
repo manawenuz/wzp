@@ -7,6 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+shiguredo_dav1d = "2026.1.0"
+shiguredo_svt_av1 = "2026.1.0"
 tracing = { workspace = true }
 wzp-proto = { path = "../wzp-proto" }
 

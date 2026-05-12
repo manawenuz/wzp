@@ -4,7 +4,9 @@
 //! packetization (NAL fragmentation / reassembly).  Platform encoders and
 //! decoders land in T4.2/T4.3/T5.4.
 
+pub mod av1_obu;
 pub mod controller;
+pub mod dav1d;
 pub mod decoder;
 pub mod depacketizer;
 pub mod encoder;
@@ -13,19 +15,24 @@ pub mod framer;
 pub mod mediacodec;
 pub mod nack;
 pub mod simulcast;
+pub mod svt_av1;
 pub mod videotoolbox;
 
+pub use av1_obu::{Av1Depacketizer, Av1ObuFramer, is_keyframe_obu};
 pub use controller::{VideoQualityController, VideoTarget};
+pub use dav1d::Dav1dDecoder;
 pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
 pub use encoder::{VideoEncoder, VideoError, VideoFrame};
 pub use encoder_mode::EncoderMode;
 pub use framer::{FramedPacket, H264Framer};
 pub use mediacodec::{
-    MediaCodecDecoder, MediaCodecEncoder, MediaCodecHevcDecoder, MediaCodecHevcEncoder,
+    MediaCodecAv1Decoder, MediaCodecAv1Encoder, MediaCodecDecoder, MediaCodecEncoder,
+    MediaCodecHevcDecoder, MediaCodecHevcEncoder,
 };
 pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
 pub use simulcast::{LayerPacket, LayerTarget, SimulcastEncoder, SimulcastLayer};
+pub use svt_av1::SvtAv1Encoder;
 pub use videotoolbox::{
     VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder, VideoToolboxHevcEncoder,
 };

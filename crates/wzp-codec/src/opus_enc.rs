@@ -90,7 +90,8 @@ pub fn dred_duration_for(codec: CodecId) -> u8 {
         | CodecId::Codec2_3200
         | CodecId::ComfortNoise
         | CodecId::H264Baseline
-        | CodecId::H265Main => 0,
+        | CodecId::H265Main
+        | CodecId::Av1Main => 0,
     }
 }
 

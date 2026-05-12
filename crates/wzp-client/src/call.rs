@@ -656,7 +656,7 @@ impl CallDecoder {
             },
             CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
             CodecId::ComfortNoise => QualityProfile::GOOD,
-            CodecId::H264Baseline | CodecId::H265Main => {
+            CodecId::H264Baseline | CodecId::H265Main | CodecId::Av1Main => {
                 panic!("video codec passed to audio decoder")
             }
         }

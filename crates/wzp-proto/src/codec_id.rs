@@ -30,8 +30,9 @@ pub enum CodecId {
     // Reserved for video codecs; implementations land in PRD-video-multicodec.
     // 10 => H264 main
     // 11 => H265 main
-    // 12 => AV1
     // 13 => VP9
+    /// AV1 main profile (video).
+    Av1Main = 12,
     /// H.265 main profile (video).
     H265Main = 11,
 }
@@ -49,7 +50,7 @@ impl CodecId {
             Self::Codec2_3200 => 3_200,
             Self::Codec2_1200 => 1_200,
             Self::ComfortNoise => 0,
-            Self::H264Baseline | Self::H265Main => 2_000_000,
+            Self::H264Baseline | Self::H265Main | Self::Av1Main => 2_000_000,
         }
     }
 
@@ -61,7 +62,7 @@ impl CodecId {
             Self::Codec2_3200 => 20,
             Self::Codec2_1200 => 40,
             Self::ComfortNoise => 20,
-            Self::H264Baseline | Self::H265Main => 33,
+            Self::H264Baseline | Self::H265Main | Self::Av1Main => 33,
         }
     }
 
@@ -76,7 +77,7 @@ impl CodecId {
             | Self::Opus64k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
             Self::ComfortNoise => 48_000,
-            Self::H264Baseline | Self::H265Main => 48_000,
+            Self::H264Baseline | Self::H265Main | Self::Av1Main => 48_000,
         }
     }
 
@@ -94,6 +95,7 @@ impl CodecId {
             8 => Some(Self::Opus64k),
             9 => Some(Self::H264Baseline),
             11 => Some(Self::H265Main),
+            12 => Some(Self::Av1Main),
             _ => None,
         }
     }
@@ -105,7 +107,7 @@ impl CodecId {
 
     /// Returns true if this is a video codec variant.
     pub const fn is_video(self) -> bool {
-        matches!(self, Self::H264Baseline | Self::H265Main)
+        matches!(self, Self::H264Baseline | Self::H265Main | Self::Av1Main)
     }
 
     /// Returns true if this is an Opus variant.
@@ -234,7 +236,7 @@ mod tests {
 
     #[test]
     fn codec_id_unknown_values_rejected() {
-        for v in [10u8, 12, 13].iter().copied().chain(14u8..=255) {
+        for v in [10u8, 13].iter().copied().chain(14u8..=255) {
             assert!(CodecId::from_wire(v).is_none(), "v={v}");
         }
     }
@@ -246,6 +248,15 @@ mod tests {
         assert!(CodecId::H265Main.is_video());
         assert_eq!(CodecId::H265Main.bitrate_bps(), 2_000_000);
         assert_eq!(CodecId::H265Main.frame_duration_ms(), 33);
+    }
+
+    #[test]
+    fn av1_main_roundtrips() {
+        assert_eq!(CodecId::Av1Main.to_wire(), 12);
+        assert_eq!(CodecId::from_wire(12), Some(CodecId::Av1Main));
+        assert!(CodecId::Av1Main.is_video());
+        assert_eq!(CodecId::Av1Main.bitrate_bps(), 2_000_000);
+        assert_eq!(CodecId::Av1Main.frame_duration_ms(), 33);
     }
 
     #[test]
