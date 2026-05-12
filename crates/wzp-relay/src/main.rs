@@ -2028,20 +2028,29 @@ async fn main() -> anyhow::Result<()> {
                     (None, None)
                 };
 
-                room::run_participant(
+                let media_handle = tokio::spawn(room::run_participant(
                     room_mgr.clone(),
-                    room_name,
+                    room_name.clone(),
                     participant_id,
                     transport.clone(),
                     metrics.clone(),
-                    &session_id_str,
+                    session_id_str.clone(),
                     trunking_enabled,
                     debug_tap,
                     federation_tx,
                     federation_room_hash,
                     authenticated_fp.is_some(),
-                )
-                .await;
+                ));
+                let signal_handle = tokio::spawn(room::run_participant_signals(
+                    room_mgr.clone(),
+                    room_name.clone(),
+                    participant_id,
+                    transport.clone(),
+                ));
+                tokio::select! {
+                    _ = media_handle => {},
+                    _ = signal_handle => {},
+                }
 
                 // Participant disconnected — clean up presence + per-session metrics
                 if let Some(ref fp) = authenticated_fp {

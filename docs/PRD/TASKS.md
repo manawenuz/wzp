@@ -1707,9 +1707,9 @@ Statuses (in order of progression):
 | T4.3.1.1 | Deferred (reviewer-owned) | — | — | — | — | Requires Android build pipeline + physical device. Agent does not have access. Reviewer will run on the Hetzner Android builder once Wave 4/5 land. Do NOT claim. |
 | T4.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:25Z | [report](reports/T4.4-report.md) | Approved. Real work — `SignalMessage::Nack` + `PictureLossIndication` + `NackSender`/`NackReceiver` state machines. 12 new tests. Commit `81042ac`. |
 | T4.5 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:35Z | [report](reports/T4.5-report.md) | Approved. Keyframe-aware FEC ratio boost (default 0.5) via trait default + `AdaptiveFec` wiring. 3 new tests. Commit `4e174fe`. |
-| T4.6 | Pending Review | Kimi Code CLI | 2026-05-12T16:29Z | 2026-05-12T16:40Z | [report](reports/T4.6-report.md) | SFU keyframe cache per (room, sender, stream). Replayed to new joiners before live traffic. |
-| T4.7 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T5.1 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.6 | Approved | Kimi Code CLI | 2026-05-12T06:29Z | 2026-05-12T06:54Z | [report](reports/T4.6-report.md) | Approved. SFU keyframe cache via DashMap, two-phase buffer, 200 KB cap. Zero new tests — line drawn for future stateful work. Commit `828fbea`. |
+| T4.7 | Changes Requested | Kimi Code CLI | 2026-05-12T06:40Z | — | [report](reports/T4.7-report.md) | Blocked on T4.6 "next stateful feature without tests = CR" line. Refactor `should_forward_pli(...,  now: Instant)` + 3 unit tests. Substance review in chat. |
+| T5.1 | Open | — | — | — | — | Skeleton — expand before claiming. Do NOT claim until T4.7 is Approved. |
 | T5.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.4 | Open | — | — | — | — | Skeleton — expand before claiming |
