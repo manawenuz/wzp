@@ -12,6 +12,7 @@ pub mod call_registry;
 pub mod config;
 pub mod audio_scorer;
 pub mod conformance;
+pub mod response_policy;
 pub mod event_log;
 pub mod federation;
 pub mod handshake;

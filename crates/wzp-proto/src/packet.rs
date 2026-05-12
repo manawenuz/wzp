@@ -1256,7 +1256,7 @@ pub fn default_signal_version() -> u8 {
     1
 }
 
-/// Reasons for ending a call.
+/// Typed reason for a call hangup.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HangupReason {
     Normal,
@@ -1269,6 +1269,30 @@ pub enum HangupReason {
         /// Versions the server is willing to speak.
         server_supported: Vec<u8>,
     },
+    /// Relay conformance policy violation (Tier G).
+    PolicyViolation {
+        /// Machine-readable violation code.
+        code: ViolationCode,
+        /// Human-readable explanation.
+        reason: String,
+    },
+}
+
+/// Machine-readable policy-violation codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ViolationCode {
+    /// Tier A — sustained bitrate exceeded codec ceiling.
+    Bitrate,
+    /// Tier B — packet rate exceeded safety limit.
+    PacketRate,
+    /// Tier C — timestamp drift.
+    TimestampDrift,
+    /// Tier D — payload size anomaly.
+    PayloadSize,
+    /// Tier E — per-session rate cap.
+    RateCap,
+    /// Tier F — behavioural entropy score below threshold.
+    Entropy,
 }
 
 #[cfg(test)]
