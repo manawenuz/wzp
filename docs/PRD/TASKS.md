@@ -1783,7 +1783,7 @@ Statuses (in order of progression):
 | T5.7.1 | Approved | Kimi Code CLI | 2026-05-12T12:20Z | 2026-05-12T12:48Z | [report](reports/T5.7.1-report.md) | Approved. Unified `Verdict` enum into `wzp_relay::verdict::Verdict {Legitimate, Suspect, Abusive}`. Dropped `RepeatAbusive` as redundant input variant; `ResponsePolicy::evaluate()` derives repeat-status from `cooldowns`. 127 tests pass. Actual commit is `d3b2da6` (report header says `04fb302` — fabricated). Stale `RepeatAbusive` line at `response_policy.rs:7` (module doc) — cosmetic, not worth a follow-up. |
 | T5.8 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.8-report.md) | Approved. `ResponsePolicy` state machine + typed `HangupReason::PolicyViolation { code, reason }` + `ViolationCode` enum + 9 tests. Commit `dbbab0d` + clippy `ffded2a`. |
 | T6.1 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T6.2 | Pending Review | Kimi Code CLI | 2026-05-12T12:30Z | 2026-05-12T12:45Z | — | Expanded skeleton into concrete task block with Files/Steps/Verify/Done-when. Plan commit pending approval. |
+| T6.2 | Pending Review | Kimi Code CLI | 2026-05-12T12:30Z | 2026-05-12T13:45Z | [report](reports/T6.2-report.md) | `VideoScorer` with keyframe periodicity (CoV), I/P ratio (P-per-I), BWE responsiveness. 10 tests. Weights adjusted during impl: BWE 0.30→0.40, I/P 0.35→0.30. Explicit all-I-frame (−0.60) and no-keyframes-after-GOP (−0.50) penalties. Not yet wired into packet path. Commit `f16d650`. |
 | T6.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 
 ## Review queue (human)
@@ -1806,6 +1806,6 @@ Items currently waiting on the reviewer:
 - T5.7 — Tier F audio scorer — report: reports/T5.7-report.md
 - T5.8 — Tier G response policy — report: reports/T5.8-report.md
 - T5.7.1 — Unify `Verdict` enum across audio_scorer and response_policy — report: reports/T5.7.1-report.md
-- T6.2 — Tier F video scorer plan (expanded skeleton) — report: TASKS.md block
+- T6.2 — Tier F video scorer — report: reports/T6.2-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
