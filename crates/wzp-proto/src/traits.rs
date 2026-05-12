@@ -61,6 +61,22 @@ pub trait FecEncoder: Send + Sync {
     /// Add a source symbol (one audio frame) to the current block.
     fn add_source_symbol(&mut self, data: &[u8]) -> Result<(), FecError>;
 
+    /// Add a source symbol and mark whether it belongs to a keyframe.
+    ///
+    /// When the block contains at least one keyframe source symbol,
+    /// [`generate_repair`] uses the configured keyframe ratio instead of the
+    /// nominal ratio.
+    ///
+    /// Default implementation delegates to [`add_source_symbol`] and ignores
+    /// the keyframe flag.
+    fn add_source_symbol_with_keyframe(
+        &mut self,
+        data: &[u8],
+        _is_keyframe: bool,
+    ) -> Result<(), FecError> {
+        self.add_source_symbol(data)
+    }
+
     /// Generate repair symbols for the current block.
     ///
     /// `ratio` is the repair overhead (e.g., 0.5 = 50% more symbols than source).

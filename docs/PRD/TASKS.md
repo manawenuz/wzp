@@ -124,6 +124,14 @@ These apply to every task. They are NOT repeated in each task block. Violating t
 16. **Don't take destructive actions.** Specifically: never `git reset --hard`, `git push --force`, drop database tables, delete branches, or touch CI configs without the reviewer asking. If you think you need to, stop and ask in your report.
 17. **Auto mode is not a license to skip these.** Even when the harness is set to autonomous execution, the workflow (report → Pending Review → wait for Approved) is mandatory.
 
+### Environment-blocked tasks → file Blocked, do not ship stubs
+
+You operate on a macOS host without an Android device or NDK build pipeline. For any task that requires Android-target compilation, an Android emulator/device, or Hetzner remote-builder access:
+
+- **Do not "wrote it but couldn't test it" the deliverable.** A file with `#[cfg(target_os = "android")]` AMediaCodec code that has never been compiled for an Android target is not a completed task — it's an aspirational PR.
+- **File a `Blocked` report** with whatever partial work made sense (e.g., trait surface, codec-agnostic helpers, cfg-gating fixes for non-Android builds). The reviewer will either pick up the Android validation themselves or close the task as `Deferred (reviewer-owned)`.
+- Existing Deferred-but-reviewer-owned tasks today: **T4.3.1.1** (Android MediaCodec target-compile + device instrumentation). Skip past it.
+
 ### When to stop and ask
 
 Stop and write a report with status `Blocked` (not `Pending Review`) if any of these happen:
@@ -1496,6 +1504,77 @@ adb shell am instrument -w -e class com.wzp.video.MediaCodecTests com.wzp/com.wz
 
 ---
 
+## T4.3.1.1 — Validate Android-target compile + run MediaCodec on device
+
+- **Parent:** T4.3.1 (Approved — Android code present but unverified)
+- **PRD:** `PRD-video-v1.md`
+- **Effort:** 1–2 d (mostly waiting on Android builder + device access)
+- **Files:**
+  - `crates/wzp-video/src/mediacodec.rs` (fix any compile errors that surface on the Android target)
+  - `crates/wzp-video/tests/encode_decode_android.rs` (new — `#[cfg(target_os = "android")]` instrumented test)
+  - `android/app/src/androidTest/java/com/wzp/video/MediaCodecTest.kt` (new — invokes the Rust JNI test entry point)
+
+### Prerequisite
+The Android build pipeline must be functional. Use `build-tauri-android.sh --init` per the project memory. Trigger from the Hetzner remote builder (188.245.59.196) if needed.
+
+### Context
+T4.3.1 shipped `AMediaCodec`-based Rust code behind `#[cfg(target_os = "android")]` but **the agent could not compile or test it on their macOS host**. The code is structurally similar to T4.2.1's working VideoToolbox code, but plausibility is not verification. This task is the actual verification step that should have been part of T4.3.1.
+
+### Steps
+
+1. **Verify the target build compiles.** From the Hetzner remote or local NDK-equipped machine:
+   ```bash
+   cargo build -p wzp-video --target aarch64-linux-android
+   ```
+   Capture full stderr. If anything errors, fix the smallest possible thing in `crates/wzp-video/src/mediacodec.rs` to make it compile (record the diff in the report). Common likely failures:
+   - `ndk` crate API differences between version `0.9` and whatever's actually resolvable.
+   - Missing imports if `#[cfg]` gates weren't comprehensive.
+   - Pixel-format constants that don't exist on the current `ndk` version.
+
+2. **Add the instrumented test.** Create `crates/wzp-video/tests/encode_decode_android.rs`:
+   ```rust
+   #![cfg(target_os = "android")]
+   use wzp_video::{MediaCodecEncoder, MediaCodecDecoder, VideoFrame};
+
+   #[test]
+   fn encode_decode_roundtrip_android() {
+       // 30 synthetic 640×360 I420 gradient frames → encode → decode → assert dimensions
+       // mirror T4.2.1's encode_decode_macos.rs structure
+   }
+   ```
+   Mirror the macOS test in `tests/encode_decode_macos.rs` closely so the two are comparable.
+
+3. **Run the test on a real device.** Connect via `adb`, deploy the test APK (`cargo apk` or via Gradle if `android/` Gradle build is set up), and run:
+   ```bash
+   adb shell am instrument -w com.wzp.video.test/androidx.test.runner.AndroidJUnitRunner
+   ```
+   Capture the result.
+
+4. **Measure CPU at 720p30.** Encode 60 s of 1280×720 frames; record `getrusage()` / `top -p <pid>` CPU%. PRD acceptance: < 15 % of one core on a mid-tier Android device.
+
+5. **Manual Android↔macOS interop.** Run the macOS T4.2.1 encoder, send a bitstream over QUIC datagrams (mock if the relay isn't wired yet), decode on Android. Confirm visual round-trip. Record device model + Android version in the report.
+
+### Verify
+
+```bash
+# On Android builder:
+cargo build -p wzp-video --target aarch64-linux-android
+# After APK is on device:
+adb shell am instrument -w -e class com.wzp.video.MediaCodecTest com.wzp.video.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+### Done when
+- `cargo build -p wzp-video --target aarch64-linux-android` succeeds (record any fixes needed in the report).
+- Instrumented `encode_decode_roundtrip_android` test passes on at least one real device.
+- 720p30 CPU measurement documented. Target < 15 % of one core; if higher, document why and propose mitigation (e.g., surface-input path, format negotiation).
+- Manual Android↔macOS interop: visual decode of the same stream on both ends.
+
+### Out of scope
+- Surface-texture zero-copy path (defer to a later UX/battery-focused task).
+- Decoder pixel-format negotiation (NV12 / NV21 / vendor tiled) — call out in the report which format MediaCodec actually emits on the test device.
+
+---
+
 ## T4.4 — `SignalMessage::Nack` variant + RTT-gated NACK loop
 
 - **PRD:** `PRD-video-v1.md`
@@ -1590,7 +1669,8 @@ Statuses (in order of progression):
 - `Pending Review` — agent has finished, report filed, awaiting human
 - `Changes Requested` — reviewer pushed back; back to agent
 - `Approved` — reviewer signed off; task is closed
-- `Skipped` — explicitly deferred or made redundant by another task
+- `Skipped` — made redundant by another task or scoped out
+- `Deferred (reviewer-owned)` — agent does not have the environment / access to complete this; the reviewer (human) will pick it up later. **Agents must not claim Deferred tasks.** Move on to the next claimable one.
 
 | Task | Status | Agent | Started (UTC) | Completed (UTC) | Report | Reviewer notes |
 |---|---|---|---|---|---|---|
@@ -1623,9 +1703,10 @@ Statuses (in order of progression):
 | T4.2 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:10Z | [report](reports/T4.2-report.md) | Approved as scaffold (API surface + `is_keyframe`). Original PRD acceptance moved to T4.2.1 — `encode`/`decode` are stubs. Process note in report. Commit `3356ba9`. |
 | T4.2.1 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:52Z | [report](reports/T4.2.1-report.md) | Approved. First real H.264 encoder/decoder via `shiguredo_video_toolbox`. 30-frame round-trip test passes. MSRV bump to 1.88 on macOS. CPU bench TODO. Commit `410c2a4`. |
 | T4.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:15Z | [report](reports/T4.3-report.md) | Approved as scaffold. JNI MediaCodec deferred to T4.3.1. Same stub-and-rename pattern as T4.2 — process note in report. Commit `e177e63`. |
-| T4.3.1 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | Build env unblocked (liblog gated to Android). Implementing AMediaCodec via `ndk` crate; Android path uncompiled on macOS host. |
+| T4.3.1 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:04Z | [report](reports/T4.3.1-report.md) | Approved (partial). liblog fix real; AMediaCodec code present but unverified on Android target. Spawned T4.3.1.1 to do the actual validation. Commit `397f9d2`. |
+| T4.3.1.1 | Deferred (reviewer-owned) | — | — | — | — | Requires Android build pipeline + physical device. Agent does not have access. Reviewer will run on the Hetzner Android builder once Wave 4/5 land. Do NOT claim. |
 | T4.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:25Z | [report](reports/T4.4-report.md) | Approved. Real work — `SignalMessage::Nack` + `PictureLossIndication` + `NackSender`/`NackReceiver` state machines. 12 new tests. Commit `81042ac`. |
-| T4.5 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.5 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T16:29Z | [report](reports/T4.5-report.md) | Keyframe-aware FEC ratio boost. 3 new tests. Audio callers unaffected via default trait impl. |
 | T4.6 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.7 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.1 | Open | — | — | — | — | Skeleton — expand before claiming |

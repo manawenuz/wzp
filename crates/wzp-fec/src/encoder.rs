@@ -23,6 +23,11 @@ pub struct RaptorQFecEncoder {
     source_symbols: Vec<Vec<u8>>,
     /// Symbol size used for encoding (all symbols padded to this size).
     symbol_size: u16,
+    /// True if at least one source symbol in the current block is a keyframe.
+    has_keyframe: bool,
+    /// Repair ratio to use when the block contains a keyframe.
+    /// If zero, the nominal ratio passed to [`generate_repair`] is used.
+    keyframe_ratio: f32,
 }
 
 impl RaptorQFecEncoder {
@@ -36,7 +41,24 @@ impl RaptorQFecEncoder {
             frames_per_block,
             source_symbols: Vec::with_capacity(frames_per_block),
             symbol_size,
+            has_keyframe: false,
+            keyframe_ratio: 0.0,
         }
+    }
+
+    /// Set the repair ratio to use for blocks that contain at least one
+    /// keyframe source symbol.
+    ///
+    /// When `keyframe_ratio > 0.0` and [`has_keyframe`](Self::has_keyframe)
+    /// is true, [`generate_repair`](FecEncoder::generate_repair) uses this
+    /// ratio instead of the nominal ratio passed by the caller.
+    pub fn set_keyframe_ratio(&mut self, ratio: f32) {
+        self.keyframe_ratio = ratio.max(0.0);
+    }
+
+    /// Returns true if the current block contains a keyframe source symbol.
+    pub fn has_keyframe(&self) -> bool {
+        self.has_keyframe
     }
 
     /// Create with default symbol size (256 bytes).
@@ -74,10 +96,28 @@ impl FecEncoder for RaptorQFecEncoder {
         Ok(())
     }
 
+    fn add_source_symbol_with_keyframe(
+        &mut self,
+        data: &[u8],
+        is_keyframe: bool,
+    ) -> Result<(), FecError> {
+        self.add_source_symbol(data)?;
+        if is_keyframe {
+            self.has_keyframe = true;
+        }
+        Ok(())
+    }
+
     fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u8, Vec<u8>)>, FecError> {
         if self.source_symbols.is_empty() {
             return Ok(vec![]);
         }
+
+        let effective_ratio = if self.has_keyframe && self.keyframe_ratio > 0.0 {
+            self.keyframe_ratio
+        } else {
+            ratio
+        };
 
         let block_data = self.build_block_data();
         let config =
@@ -85,7 +125,7 @@ impl FecEncoder for RaptorQFecEncoder {
         let encoder = SourceBlockEncoder::new(self.block_id, &config, &block_data);
 
         let num_source = self.source_symbols.len() as u32;
-        let num_repair = ((num_source as f32) * ratio).ceil() as u32;
+        let num_repair = ((num_source as f32) * effective_ratio).ceil() as u32;
         if num_repair == 0 {
             return Ok(vec![]);
         }
@@ -109,6 +149,7 @@ impl FecEncoder for RaptorQFecEncoder {
         let completed = self.block_id;
         self.block_id = self.block_id.wrapping_add(1);
         self.source_symbols.clear();
+        self.has_keyframe = false;
         Ok(completed)
     }
 
@@ -209,5 +250,55 @@ mod tests {
         }
         // After 256 blocks, wraps back to 0
         assert_eq!(enc.current_block_id(), 0);
+    }
+
+    #[test]
+    fn keyframe_boost_uses_higher_ratio() {
+        // Non-keyframe block with nominal ratio 0.2 → ceil(5 * 0.2) = 1 repair.
+        let mut enc_normal = RaptorQFecEncoder::with_defaults(5);
+        enc_normal.set_keyframe_ratio(0.8);
+        for i in 0..5 {
+            enc_normal
+                .add_source_symbol_with_keyframe(&[i as u8; 100], false)
+                .unwrap();
+        }
+        let normal_repair = enc_normal.generate_repair(0.2).unwrap();
+        assert_eq!(normal_repair.len(), 1);
+
+        // Keyframe block with same nominal ratio but boost to 0.8 → ceil(5 * 0.8) = 4 repairs.
+        let mut enc_key = RaptorQFecEncoder::with_defaults(5);
+        enc_key.set_keyframe_ratio(0.8);
+        for i in 0..5 {
+            enc_key
+                .add_source_symbol_with_keyframe(&[i as u8; 100], i == 2)
+                .unwrap();
+        }
+        let keyframe_repair = enc_key.generate_repair(0.2).unwrap();
+        assert_eq!(keyframe_repair.len(), 4);
+    }
+
+    #[test]
+    fn non_keyframe_block_uses_nominal_ratio() {
+        let mut enc = RaptorQFecEncoder::with_defaults(5);
+        enc.set_keyframe_ratio(0.8);
+
+        for i in 0..5 {
+            enc.add_source_symbol_with_keyframe(&[i as u8; 100], false)
+                .unwrap();
+        }
+
+        let repair = enc.generate_repair(0.2).unwrap();
+        assert_eq!(repair.len(), 1); // ceil(5 * 0.2) = 1
+    }
+
+    #[test]
+    fn finalize_clears_keyframe_flag() {
+        let mut enc = RaptorQFecEncoder::with_defaults(2);
+        enc.add_source_symbol_with_keyframe(&[0u8; 10], true)
+            .unwrap();
+        assert!(enc.has_keyframe());
+
+        enc.finalize_block().unwrap();
+        assert!(!enc.has_keyframe());
     }
 }
