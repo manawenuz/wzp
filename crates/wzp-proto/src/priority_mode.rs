@@ -22,3 +22,13 @@ pub enum PriorityMode {
     /// Proportional split (~15 % audio, ~85 % video).
     Balanced,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priority_mode_default_is_audio_first() {
+        assert_eq!(PriorityMode::default(), PriorityMode::AudioFirst);
+    }
+}

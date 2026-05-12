@@ -1274,6 +1274,7 @@ pub enum HangupReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PriorityMode;
 
     #[test]
     fn quality_report_from_path_stats_basic() {
@@ -2787,5 +2788,27 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn set_priority_mode_roundtrip() {
+        let original = SignalMessage::SetPriorityMode {
+            version: 1,
+            mode: PriorityMode::Balanced,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::SetPriorityMode { version, mode } => {
+                assert_eq!(version, 1);
+                assert_eq!(mode, PriorityMode::Balanced);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(decoded, SignalMessage::SetPriorityMode { .. }));
     }
 }
