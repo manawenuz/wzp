@@ -1323,7 +1323,7 @@ Statuses (in order of progression):
 | T3.2 | Approved | Kimi Code CLI | 2026-05-11T21:15Z | 2026-05-11T21:25Z | [report](reports/T3.2-report.md) | Approved. timestamp_ms monotonic across rekey, documented + tested. Commit `1b4f7b0`. |
 | T3.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:08Z | [report](reports/T3.3-report.md) | Approved. W12 SignalMessage versioning. Commit `f7f413e`. |
 | T3.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:24Z | [report](reports/T3.4-report.md) | Approved. Tier D payload-size EWMA + per-codec bound table. Commit `017c371`. Clean process. |
-| T3.5 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | — |
+| T3.5 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T3.5-report.md) | — |
 | T4.1 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
@@ -1353,5 +1353,6 @@ Items currently waiting on the reviewer:
 - T3.2 — Document timestamp_ms monotonic across rekey — report: reports/T3.2-report.md
 - T3.3 — SignalMessage version field — report: reports/T3.3-report.md
 - T3.4 — Tier D per-codec payload size sanity — report: reports/T3.4-report.md
+- T3.5 — Tier E per-session token bucket — report: reports/T3.5-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
