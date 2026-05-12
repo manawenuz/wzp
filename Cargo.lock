@@ -7925,6 +7925,7 @@ name = "wzp-video"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ndk 0.9.0",
  "rand 0.8.6",
  "shiguredo_video_toolbox",
  "tracing",
