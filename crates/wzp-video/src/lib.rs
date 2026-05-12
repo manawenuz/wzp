@@ -4,11 +4,17 @@
 //! packetization (NAL fragmentation / reassembly).  Platform encoders and
 //! decoders land in T4.2/T4.3.
 
+pub mod decoder;
 pub mod depacketizer;
+pub mod encoder;
 pub mod framer;
+pub mod videotoolbox;
 
+pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
+pub use encoder::{VideoEncoder, VideoError, VideoFrame};
 pub use framer::{FramedPacket, H264Framer};
+pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxEncoder};
 
 #[cfg(test)]
 mod tests {

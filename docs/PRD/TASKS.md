@@ -1285,8 +1285,44 @@ Synthetic H.264 access units (single NAL, multi-NAL, and oversized NAL requiring
 - **Files:**
   - `crates/wzp-video/src/encoder.rs`
   - `crates/wzp-video/src/decoder.rs`
+  - `crates/wzp-video/src/videotoolbox.rs`
 
-Skeleton — expand before claiming.
+### Context
+
+T4.1 created the `wzp-video` crate with framer/depacketizer. T4.2 adds the macOS platform layer: `VideoEncoder` and `VideoDecoder` traits plus a VideoToolbox implementation. "Minimum viable" means the API compiles on macOS, can be instantiated, and has the correct shape for T4.4–T4.7 to call into.
+
+### Steps
+
+1. Add `video-toolbox` crate dependency (safe Rust bindings to Apple VideoToolbox).
+2. Define `VideoEncoder` trait in `encoder.rs`:
+   ```rust
+   pub trait VideoEncoder: Send {
+       fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, VideoError>;
+       fn request_keyframe(&mut self);
+       fn is_keyframe(&self, packet: &[u8]) -> bool;
+   }
+   ```
+3. Define `VideoDecoder` trait in `decoder.rs`:
+   ```rust
+   pub trait VideoDecoder: Send {
+       fn decode(&mut self, packet: &[u8]) -> Result<Option<VideoFrame>, VideoError>;
+   }
+   ```
+4. Implement `VideoToolboxEncoder` and `VideoToolboxDecoder` in `videotoolbox.rs` (macOS only, gated by `#[cfg(target_os = "macos")]`).
+5. Add compile-guarded stubs for non-macOS targets.
+
+### Verify
+
+```bash
+cargo test -p wzp-video videotoolbox
+cargo build -p wzp-video
+```
+
+### Done when
+
+`wzp-video` compiles on macOS with `VideoToolboxEncoder`/`VideoToolboxDecoder` structs present and instantiable.
+
+---
 
 ---
 
@@ -1426,8 +1462,8 @@ Statuses (in order of progression):
 | T3.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:08Z | [report](reports/T3.3-report.md) | Approved. W12 SignalMessage versioning. Commit `f7f413e`. |
 | T3.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:24Z | [report](reports/T3.4-report.md) | Approved. Tier D payload-size EWMA + per-codec bound table. Commit `017c371`. Clean process. |
 | T3.5 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T02:46Z | [report](reports/T3.5-report.md) | Approved. Tier E TokenBucket (256 kbps/1.92 MB burst), observe-only. Commit `f1b86e0`. Wave 3 complete. |
-| T4.1 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T4.1-report.md) | — |
-| T4.2 | Open | — | — | — | — | Skeleton — expand before claiming |
+| T4.1 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T07:22Z | [report](reports/T4.1-report.md) | Approved. wzp-video crate + H.264 NAL framer/depacketizer (RFC 6184 FU-A). Commit `490d2d3`. Wave 4 opened. |
+| T4.2 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | — |
 | T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.4 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.5 | Open | — | — | — | — | Skeleton — expand before claiming |
