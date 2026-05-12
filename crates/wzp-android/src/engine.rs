@@ -977,6 +977,7 @@ async fn run_call(
                                     fec_ratio: 0.5,
                                     frame_duration_ms: 20,
                                     frames_per_block: 5,
+                                    ..QualityProfile::GOOD
                                 },
                                 other => QualityProfile {
                                     codec: other,

@@ -79,6 +79,7 @@ fn resolve_quality(quality: &str) -> Option<QualityProfile> {
             fec_ratio: 0.5,
             frame_duration_ms: 20,
             frames_per_block: 5,
+            ..QualityProfile::GOOD
         }),
         "studio-32k" => Some(QualityProfile::STUDIO_32K),
         "studio-48k" => Some(QualityProfile::STUDIO_48K),
@@ -119,6 +120,7 @@ fn codec_to_profile(codec: CodecId) -> QualityProfile {
             fec_ratio: 0.5,
             frame_duration_ms: 20,
             frames_per_block: 5,
+            ..QualityProfile::GOOD
         },
         other => QualityProfile {
             codec: other,

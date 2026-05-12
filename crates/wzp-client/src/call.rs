@@ -641,6 +641,7 @@ impl CallDecoder {
                 fec_ratio: 0.3,
                 frame_duration_ms: 20,
                 frames_per_block: 5,
+                ..QualityProfile::GOOD
             },
             CodecId::Opus6k => QualityProfile::DEGRADED,
             CodecId::Opus32k => QualityProfile::STUDIO_32K,
@@ -651,6 +652,7 @@ impl CallDecoder {
                 fec_ratio: 0.5,
                 frame_duration_ms: 20,
                 frames_per_block: 5,
+                ..QualityProfile::GOOD
             },
             CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
             CodecId::ComfortNoise => QualityProfile::GOOD,

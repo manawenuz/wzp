@@ -19,6 +19,7 @@ pub mod error;
 pub mod jitter;
 pub mod media_type;
 pub mod packet;
+pub mod priority_mode;
 pub mod quality;
 pub mod session;
 pub mod traits;
@@ -34,6 +35,7 @@ pub use packet::{
     MediaPacket, MiniFrameContext, MiniFrameContextV2, MiniHeader, MiniHeaderV2, PresenceUser,
     QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, default_signal_version,
 };
+pub use priority_mode::PriorityMode;
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;

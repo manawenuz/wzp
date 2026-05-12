@@ -76,6 +76,10 @@ mod codec2_tests {
             fec_ratio: 0.5,
             frame_duration_ms: 20,
             frames_per_block: 5,
+            priority_mode: wzp_proto::PriorityMode::AudioFirst,
+            video_bitrate_kbps: None,
+            video_resolution: None,
+            video_fps: None,
         }
     }
 

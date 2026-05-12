@@ -1197,6 +1197,15 @@ pub enum SignalMessage {
         seqs: Vec<u32>,
     },
 
+    /// Mid-call priority-mode override (PRD-video-quality-priority T5.1).
+    SetPriorityMode {
+        /// Signal format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// New priority mode to apply.
+        mode: crate::PriorityMode,
+    },
+
     /// Picture Loss Indication — decoder can't proceed, needs a fresh keyframe.
     /// Used instead of Nack when RTT is too high for retransmission to help.
     PictureLossIndication {

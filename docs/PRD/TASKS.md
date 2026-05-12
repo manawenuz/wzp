@@ -1708,8 +1708,8 @@ Statuses (in order of progression):
 | T4.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T05:25Z | [report](reports/T4.4-report.md) | Approved. Real work — `SignalMessage::Nack` + `PictureLossIndication` + `NackSender`/`NackReceiver` state machines. 12 new tests. Commit `81042ac`. |
 | T4.5 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:35Z | [report](reports/T4.5-report.md) | Approved. Keyframe-aware FEC ratio boost (default 0.5) via trait default + `AdaptiveFec` wiring. 3 new tests. Commit `4e174fe`. |
 | T4.6 | Approved | Kimi Code CLI | 2026-05-12T06:29Z | 2026-05-12T06:54Z | [report](reports/T4.6-report.md) | Approved. SFU keyframe cache via DashMap, two-phase buffer, 200 KB cap. Zero new tests — line drawn for future stateful work. Commit `828fbea`. |
-| T4.7 | Changes Requested | Kimi Code CLI | 2026-05-12T06:40Z | — | [report](reports/T4.7-report.md) | Blocked on T4.6 "next stateful feature without tests = CR" line. Refactor `should_forward_pli(...,  now: Instant)` + 3 unit tests. Substance review in chat. |
-| T5.1 | Open | — | — | — | — | Skeleton — expand before claiming. Do NOT claim until T4.7 is Approved. |
+| T4.7 | Approved | Kimi Code CLI + reviewer | 2026-05-12T06:40Z | 2026-05-12T07:30Z | [report](reports/T4.7-report.md) | Approved. Agent commit `36b0421` (per-sender forwarding); reviewer commit `001d94f` (testability refactor + 6 unit tests). 93 → 99 wzp-relay lib tests. |
+| T5.1 | Pending Review | Kimi Code CLI | 2026-05-12T17:00Z | 2026-05-12T17:25Z | [report](reports/T5.1-report.md) | PriorityMode enum + SetPriorityMode signal variant. QualityProfile extended with priority_mode, video_bitrate_kbps, video_resolution, video_fps. |
 | T5.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T5.4 | Open | — | — | — | — | Skeleton — expand before claiming |

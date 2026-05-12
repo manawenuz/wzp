@@ -35,6 +35,7 @@ fn profile_from_int(value: jint) -> QualityProfile {
             fec_ratio: 0.5,
             frame_duration_ms: 20,
             frames_per_block: 5,
+            ..QualityProfile::GOOD
         },
         4 => QualityProfile::STUDIO_32K, // Opus 32k
         5 => QualityProfile::STUDIO_48K, // Opus 48k

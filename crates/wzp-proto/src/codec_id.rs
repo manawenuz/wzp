@@ -130,6 +130,18 @@ pub struct QualityProfile {
     pub frame_duration_ms: u8,
     /// Number of source frames per FEC block.
     pub frames_per_block: u8,
+    /// Bandwidth-allocation priority between audio and video.
+    #[serde(default)]
+    pub priority_mode: crate::PriorityMode,
+    /// Target video bitrate in kbps (set by quality controller, not handshake).
+    #[serde(default)]
+    pub video_bitrate_kbps: Option<u32>,
+    /// Target video resolution as (width, height).
+    #[serde(default)]
+    pub video_resolution: Option<(u16, u16)>,
+    /// Target video frame rate.
+    #[serde(default)]
+    pub video_fps: Option<u8>,
 }
 
 impl QualityProfile {
@@ -139,6 +151,10 @@ impl QualityProfile {
         fec_ratio: 0.2,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Degraded conditions: Opus 6kbps, moderate FEC.
@@ -147,6 +163,10 @@ impl QualityProfile {
         fec_ratio: 0.5,
         frame_duration_ms: 40,
         frames_per_block: 10,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Catastrophic conditions: Codec2 1.2kbps, heavy FEC.
@@ -155,6 +175,10 @@ impl QualityProfile {
         fec_ratio: 1.0,
         frame_duration_ms: 40,
         frames_per_block: 8,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Studio low: Opus 32kbps, minimal FEC.
@@ -163,6 +187,10 @@ impl QualityProfile {
         fec_ratio: 0.1,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Studio: Opus 48kbps, minimal FEC.
@@ -171,6 +199,10 @@ impl QualityProfile {
         fec_ratio: 0.1,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Studio high: Opus 64kbps, minimal FEC.
@@ -179,6 +211,10 @@ impl QualityProfile {
         fec_ratio: 0.1,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Estimated total bandwidth in kbps including FEC overhead.
