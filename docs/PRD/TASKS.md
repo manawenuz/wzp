@@ -1426,7 +1426,7 @@ Statuses (in order of progression):
 | T3.3 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:08Z | [report](reports/T3.3-report.md) | Approved. W12 SignalMessage versioning. Commit `f7f413e`. |
 | T3.4 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T06:24Z | [report](reports/T3.4-report.md) | Approved. Tier D payload-size EWMA + per-codec bound table. Commit `017c371`. Clean process. |
 | T3.5 | Approved | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-12T02:46Z | [report](reports/T3.5-report.md) | Approved. Tier E TokenBucket (256 kbps/1.92 MB burst), observe-only. Commit `f1b86e0`. Wave 3 complete. |
-| T4.1 | In Progress | Kimi Code CLI | 2026-05-11T16:29Z | — | — | — |
+| T4.1 | Pending Review | Kimi Code CLI | 2026-05-11T16:29Z | 2026-05-11T16:29Z | [report](reports/T4.1-report.md) | — |
 | T4.2 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 | T4.4 | Open | — | — | — | — | Skeleton — expand before claiming |
@@ -1456,5 +1456,6 @@ Items currently waiting on the reviewer:
 - T3.3 — SignalMessage version field — report: reports/T3.3-report.md
 - T3.4 — Tier D per-codec payload size sanity — report: reports/T3.4-report.md
 - T3.5 — Tier E per-session token bucket — report: reports/T3.5-report.md
+- T4.1 — wzp-video crate scaffold + H.264 NAL framer + depacketizer — report: reports/T4.1-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
