@@ -1648,6 +1648,93 @@ Detailed task breakdown deferred. Skeleton:
 
 ---
 
+## T6.1 — AV1 encoder/decoder with HW probe + SVT-AV1 SW fallback
+
+- **PRD:** `PRD-video-multicodec.md`
+- **Effort:** 5 d
+- **Files:**
+  - `crates/wzp-proto/src/codec_id.rs` — add `Av1Main = 12`
+  - `crates/wzp-video/src/av1_obu.rs` — new `Av1ObuFramer` / `Av1Depacketizer` (OBU parsing, not NAL)
+  - `crates/wzp-video/src/svt_av1.rs` — SW encoder wrapper (`shiguredo_svt_av1`)
+  - `crates/wzp-video/src/dav1d.rs` — SW decoder wrapper (`shiguredo_dav1d`)
+  - `crates/wzp-video/src/videotoolbox.rs` — AV1 decode via `DecoderCodec::Av1` (macOS, M3+)
+  - `crates/wzp-video/src/mediacodec.rs` — AV1 encode/decode via `video/av01` (Android 10+)
+  - `crates/wzp-video/Cargo.toml` — add `shiguredo_dav1d`, `shiguredo_svt_av1` deps
+  - `crates/wzp-video/src/lib.rs` — re-export new types
+  - `crates/wzp-codec/src/opus_enc.rs`, `wzp-client/src/call.rs`, `wzp-relay/src/conformance.rs` — add `Av1Main` match arms
+
+### Context
+
+AV1 uses **OBU (Open Bitstream Unit)** framing, not NAL. The existing `H264Framer`/`H264Depacketizer` cannot be reused directly. A minimal `Av1ObuFramer` parses the 1-byte OBU header (`obu_type`, `has_size_field`, `extension_flag`) and extracts OBU payloads. Keyframe detection inspects the `OBU_FRAME_HEADER` or `OBU_FRAME` payload for `frame_type == KEY_FRAME`.
+
+**CodecId allocation:** `Av1Main = 12` (next free slot after `H265Main = 11`).
+
+**SW library choice:** `shiguredo_dav1d` (decode) + `shiguredo_svt_av1` (encode).
+
+| Dimension | dav1d + SVT-AV1 | aom (alternative) |
+|---|---|---|
+| Decode speed | Fastest (dav1d is reference fast decoder) | Slower |
+| Encode quality | Production-grade (SVT-AV1 is Netflix/Intel reference) | Good, but slower |
+| Binary size | Two libs, ~2–3 MB each | One lib, ~3–4 MB |
+| Build complexity | dav1d = prebuilt binaries; SVT-AV1 = prebuilt or source-build | shiguredo_aom is canary, less stable |
+| License | Both BSD-2-Clause | BSD-2-Clause |
+
+**Decision:** dav1d + SVT-AV1. Matches the PRD's "SVT-AV1 SW fallback" wording and follows the project's existing shiguredo ecosystem (`shiguredo_video_toolbox` is already used). aom is rejected because `shiguredo_aom` is canary and slower at both roles.
+
+**Hardware probe strategy:**
+
+- **macOS** — VideoToolbox AV1 **decode only** (M3+). `DecoderCodec::Av1 { width, height }` returns `Error::UnsupportedCodec` on M1/M2. **No AV1 encode via VideoToolbox** → macOS encode always uses SVT-AV1.
+- **Android** — MediaCodec AV1 (`video/av01`). Encode and decode supported on Android 10+ (API 29+). Project `minSdk = 26`, so on API 26–28 devices AV1 HW is unavailable → SW fallback. Probe at runtime with `MediaCodecList`.
+- **Fallback path** — SVT-AV1 (encode) + dav1d (decode) on all platforms. Compiled everywhere; HW wrappers are `cfg`-gated.
+
+### Steps
+
+1. **CodecId** — add `Av1Main = 12`, update `bitrate_bps()`, `frame_duration_ms()`, `sample_rate_hz()`, `is_video()`, `from_wire()`, and any exhaustive match expressions in `wzp-codec`, `wzp-client`, `wzp-relay`.
+2. **OBU framer** — create `crates/wzp-video/src/av1_obu.rs`:
+   ```rust
+   pub struct ObuHeader { pub obu_type: u8, pub has_size_field: bool, pub extension_flag: bool }
+   pub fn split_obus(data: &[u8]) -> Vec<(ObuHeader, Vec<u8>)>;
+   pub fn is_keyframe_obu(data: &[u8]) -> bool; // inspects OBU_FRAME_HEADER / OBU_FRAME
+   ```
+3. **SW decoder** — `crates/wzp-video/src/dav1d.rs`:
+   - `Dav1dDecoder` wrapping `shiguredo_dav1d::Decoder`
+   - Lazy init on first OBU sequence header
+   - `decode(&[u8]) -> Result<DecodedFrame, VideoError>`
+4. **SW encoder** — `crates/wzp-video/src/svt_av1.rs`:
+   - `SvtAv1Encoder` wrapping `shiguredo_svt_av1::Encoder`
+   - Config: 1280×720@30, 2 Mbps, GOP 120
+   - `encode(&FrameData) -> Result<Vec<u8>, VideoError>` (outputs OBUs)
+5. **macOS HW decoder** — extend `videotoolbox.rs`:
+   - `VideoToolboxAv1Decoder` using `DecoderCodec::Av1 { width, height }`
+   - Returns `VideoError::NotInitialized` if `Error::UnsupportedCodec`
+6. **Android HW** — extend `mediacodec.rs`:
+   - `MediaCodecAv1Encoder` / `MediaCodecAv1Decoder` using `video/av01`
+   - Non-Android targets return `VideoError::NotInitialized`
+7. **Re-exports** — update `wzp-video/src/lib.rs`.
+8. **Fix exhaustive matches** — add `Av1Main` arms in `wzp-codec`, `wzp-client`, `wzp-relay`.
+
+### Verify
+
+```bash
+cargo test -p wzp-video -- av1
+cargo test -p wzp-proto -- av1
+cargo build --workspace
+```
+
+### Done when
+
+- `Av1Main = 12` roundtrips through `to_wire`/`from_wire`.
+- `Av1ObuFramer` splits a synthetic OBU stream correctly and `is_keyframe_obu` detects keyframes.
+- SW encode-decode roundtrip test passes on the build host (macOS ARM64):
+  - Encode 10 frames via `SvtAv1Encoder` → OBU stream
+  - Decode same stream via `Dav1dDecoder` → assert 10 frames out
+- macOS HW decode test: `VideoToolboxAv1Decoder::new()` returns `Ok` on M3+, `Err(NotInitialized)` on M1/M2 (or on CI if no HW).
+- Android HW test: returns `NotInitialized` on non-Android target (same pattern as H.265).
+- `cargo clippy -p wzp-video --all-targets -- -D warnings` and `cargo fmt --all -- --check` pass.
+- **T6.1.1 deferred note:** If Android MediaCodec AV1 validation requires a physical device (like T4.3.1.1), spawn a deferred follow-up instead of blocking the commit.
+
+---
+
 ## T6.2 — Tier F video scorer (keyframe periodicity, I/P ratio, BWE responsiveness)
 
 - **PRD:** `PRD-relay-conformance.md`
@@ -1687,8 +1774,8 @@ Parallel to `audio_scorer.rs` (T5.7). The video scorer observes video packet str
 4. **BWE responsiveness** — `bwe_responsiveness()`: compare sender bitrate against the last downstream BWE reported via `TransportFeedback` (or `BandwidthEstimator`). If BWE drops > 30 % but sender bitrate stays within 10 % of previous window → unresponsive. Returns `Option<f64>`.
 5. `legitimacy()` — weighted combination:
    - keyframe regularity: 0.35 weight
-   - I/P ratio sanity: 0.35 weight
-   - BWE responsiveness: 0.30 weight
+   - I/P ratio sanity: 0.30 weight (was 0.35 — bumped BWE during T6.2 implementation)
+   - BWE responsiveness: 0.40 weight (was 0.30 — see T6.2 deviation)
    - Clamp to [0, 1] with `score.clamp(0.0, 1.0)`.
 6. `verdict()` — map score to `Verdict` using same thresholds as audio scorer (≥ 0.7 Legitimate, ≥ 0.3 Suspect, else Abusive).
 7. In `lib.rs`, add `pub mod video_scorer;` after `pub mod audio_scorer;`.
@@ -1782,8 +1869,8 @@ Statuses (in order of progression):
 | T5.7 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.7-report.md) | Approved. Tier F audio scorer: IAT CoV + silence fraction + bitrate ratio + Q-flag CV + payload bimodality, 11 tests. Commit `5fda5ec` + clippy `ffded2a`. Spawned T5.7.1 (unify `Verdict` across audio_scorer + response_policy). |
 | T5.7.1 | Approved | Kimi Code CLI | 2026-05-12T12:20Z | 2026-05-12T12:48Z | [report](reports/T5.7.1-report.md) | Approved. Unified `Verdict` enum into `wzp_relay::verdict::Verdict {Legitimate, Suspect, Abusive}`. Dropped `RepeatAbusive` as redundant input variant; `ResponsePolicy::evaluate()` derives repeat-status from `cooldowns`. 127 tests pass. Actual commit is `d3b2da6` (report header says `04fb302` — fabricated). Stale `RepeatAbusive` line at `response_policy.rs:7` (module doc) — cosmetic, not worth a follow-up. |
 | T5.8 | Approved | Kimi Code CLI | 2026-05-12T11:15Z | 2026-05-12T11:41Z | [report](reports/T5.8-report.md) | Approved. `ResponsePolicy` state machine + typed `HangupReason::PolicyViolation { code, reason }` + `ViolationCode` enum + 9 tests. Commit `dbbab0d` + clippy `ffded2a`. |
-| T6.1 | Open | — | — | — | — | Skeleton — expand before claiming |
-| T6.2 | Pending Review | Kimi Code CLI | 2026-05-12T12:30Z | 2026-05-12T13:45Z | [report](reports/T6.2-report.md) | `VideoScorer` with keyframe periodicity (CoV), I/P ratio (P-per-I), BWE responsiveness. 10 tests. Weights adjusted during impl: BWE 0.30→0.40, I/P 0.35→0.30. Explicit all-I-frame (−0.60) and no-keyframes-after-GOP (−0.50) penalties. Not yet wired into packet path. Commit `f16d650`. |
+| T6.1 | Pending Review | Kimi Code CLI | 2026-05-12T14:00Z | 2026-05-12T14:20Z | — | Expanded skeleton into concrete task block. SW lib choice: dav1d+SVT-AV1 (rejected aom). OBU framer new file. HW probe: macOS decode M3+, Android encode/decode API 29+. T6.1.1 deferred for Android device validation. |
+| T6.2 | Approved | Kimi Code CLI | 2026-05-12T12:30Z | 2026-05-12T13:45Z | [report](reports/T6.2-report.md) | Approved. `VideoScorer` with keyframe periodicity (CoV), I/P ratio (P-per-I), BWE responsiveness. 10 tests, 127→137 wzp-relay. Weights deviation declared honestly (BWE 0.30→0.40, I/P 0.35→0.30) + explicit all-I-frame (−0.60) and no-keyframes-after-GOP (−0.50) penalties. Not yet wired into packet path; TODO marker at `room.rs:1263`. Commit `f16d650`. **Report fabricates "Updated TASKS.md in same commit" — actual commit doesn't touch TASKS.md; reviewer fixed the weight drift in a follow-up edit.** |
 | T6.3 | Open | — | — | — | — | Skeleton — expand before claiming |
 
 ## Review queue (human)
@@ -1806,6 +1893,7 @@ Items currently waiting on the reviewer:
 - T5.7 — Tier F audio scorer — report: reports/T5.7-report.md
 - T5.8 — Tier G response policy — report: reports/T5.8-report.md
 - T5.7.1 — Unify `Verdict` enum across audio_scorer and response_policy — report: reports/T5.7.1-report.md
+- T6.1 — AV1 encoder/decoder plan (expanded skeleton) — report: TASKS.md block
 - T6.2 — Tier F video scorer — report: reports/T6.2-report.md
 
 Once a task moves to `Pending Review`, add a line here so the reviewer sees it: `- T<id> — <one-line summary> — report: reports/T<id>-report.md`. The reviewer removes the line when they mark it `Approved` (or moves it back to the agent on `Changes Requested`).
