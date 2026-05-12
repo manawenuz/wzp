@@ -1,4 +1,4 @@
-//! Android MediaCodec H.264 encoder / decoder (Android only).
+//! Android MediaCodec H.264 / H.265 encoder / decoder (Android only).
 //!
 //! On Android targets this uses the `ndk` crate's safe bindings around
 //! `AMediaCodec`.  On non-Android targets all methods return
@@ -350,6 +350,346 @@ impl VideoDecoder for MediaCodecDecoder {
     }
 }
 
+// ============================================================================
+// H.265 / HEVC
+// ============================================================================
+
+/// Android MediaCodec H.265 encoder.
+///
+/// On non-Android targets this is a compile-safe placeholder.
+pub struct MediaCodecHevcEncoder {
+    #[cfg(target_os = "android")]
+    codec: MediaCodec,
+    #[cfg(target_os = "android")]
+    width: u32,
+    #[cfg(target_os = "android")]
+    height: u32,
+    force_keyframe: bool,
+    #[cfg(not(target_os = "android"))]
+    _width: u32,
+    #[cfg(not(target_os = "android"))]
+    _height: u32,
+    #[cfg(not(target_os = "android"))]
+    _bitrate_bps: u32,
+}
+
+impl MediaCodecHevcEncoder {
+    pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
+        #[cfg(target_os = "android")]
+        {
+            let mut format = MediaFormat::new();
+            format.set_str("mime", "video/hevc");
+            format.set_i32("width", width as i32);
+            format.set_i32("height", height as i32);
+            format.set_i32("bitrate", bitrate_bps as i32);
+            format.set_i32("frame-rate", 30);
+            format.set_i32("i-frame-interval", 1);
+            format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
+
+            let codec = MediaCodec::from_encoder_type("video/hevc").ok_or_else(|| {
+                VideoError::PlatformError("AMediaCodec_createEncoderByType (HEVC) failed".into())
+            })?;
+
+            codec
+                .configure(&format, None, MediaCodecDirection::Encoder)
+                .map_err(|e| VideoError::PlatformError(format!("configure failed: {e}")))?;
+
+            codec
+                .start()
+                .map_err(|e| VideoError::PlatformError(format!("start failed: {e}")))?;
+
+            Ok(Self {
+                codec,
+                width,
+                height,
+                force_keyframe: false,
+            })
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = (width, height, bitrate_bps);
+            Err(VideoError::NotInitialized)
+        }
+    }
+}
+
+impl VideoEncoder for MediaCodecHevcEncoder {
+    fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, VideoError> {
+        #[cfg(target_os = "android")]
+        {
+            let y_size = (self.width * self.height) as usize;
+            let uv_size = y_size / 4;
+            let expected = y_size + uv_size * 2;
+            if frame.data.len() < expected {
+                return Err(VideoError::InvalidInput(format!(
+                    "I420 frame too small: {} bytes, expected {expected}",
+                    frame.data.len()
+                )));
+            }
+
+            let mut annex_b = self.drain_output()?;
+
+            match self
+                .codec
+                .dequeue_input_buffer(std::time::Duration::from_millis(10))
+            {
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
+                    let idx = buffer.index();
+                    if let Some(input_buf) = self.codec.input_buffer(idx) {
+                        let to_copy = frame.data.len().min(input_buf.len());
+                        input_buf[..to_copy].copy_from_slice(&frame.data[..to_copy]);
+
+                        let flags = if self.force_keyframe {
+                            ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32
+                        } else {
+                            0
+                        };
+
+                        self.codec
+                            .queue_input_buffer_by_index(
+                                idx,
+                                0,
+                                to_copy,
+                                frame.timestamp_ms as u64 * 1000,
+                                flags,
+                            )
+                            .map_err(|e| {
+                                VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
+                            })?;
+                    }
+                }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
+                Err(e) => {
+                    return Err(VideoError::PlatformError(format!(
+                        "dequeue_input_buffer failed: {e}"
+                    )));
+                }
+            }
+
+            annex_b.extend_from_slice(&self.drain_output()?);
+            Ok(annex_b)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = frame;
+            Err(VideoError::NotInitialized)
+        }
+    }
+
+    fn request_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
+    fn is_keyframe(&self, packet: &[u8]) -> bool {
+        if packet.len() < 2 {
+            return false;
+        }
+        let nal_type = (packet[0] >> 1) & 0x3F;
+        nal_type == 19 || nal_type == 20
+    }
+}
+
+#[cfg(target_os = "android")]
+impl MediaCodecHevcEncoder {
+    fn drain_output(&mut self) -> Result<Vec<u8>, VideoError> {
+        let mut output = Vec::new();
+        loop {
+            match self
+                .codec
+                .dequeue_output_buffer(std::time::Duration::from_millis(0))
+            {
+                Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
+                    let idx = buffer.index();
+                    if let Some(data) = self.codec.output_buffer(idx) {
+                        let info = buffer.info();
+                        let is_keyframe = (info.flags()
+                            & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32))
+                            != 0;
+                        if is_keyframe {
+                            self.force_keyframe = false;
+                        }
+                        output.extend_from_slice(&avcc_to_annexb(data));
+                    }
+                    self.codec
+                        .release_output_buffer_by_index(idx, false)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!("release_output_buffer failed: {e}"))
+                        })?;
+                }
+                Ok(
+                    ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
+                ) => continue,
+                Ok(
+                    ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputBuffersChanged,
+                ) => continue,
+                Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::TryAgainLater) => break,
+                Err(e) => {
+                    return Err(VideoError::PlatformError(format!(
+                        "dequeue_output_buffer failed: {e}"
+                    )));
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+
+/// Android MediaCodec H.265 decoder.
+///
+/// On non-Android targets this is a compile-safe placeholder.
+pub struct MediaCodecHevcDecoder {
+    #[cfg(target_os = "android")]
+    codec: Option<MediaCodec>,
+    #[cfg(target_os = "android")]
+    width: u32,
+    #[cfg(target_os = "android")]
+    height: u32,
+    #[cfg(not(target_os = "android"))]
+    _width: u32,
+    #[cfg(not(target_os = "android"))]
+    _height: u32,
+}
+
+impl MediaCodecHevcDecoder {
+    pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
+        #[cfg(target_os = "android")]
+        {
+            Ok(Self {
+                codec: None,
+                width,
+                height,
+            })
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = (width, height);
+            Err(VideoError::NotInitialized)
+        }
+    }
+}
+
+impl VideoDecoder for MediaCodecHevcDecoder {
+    fn decode(&mut self, access_unit: &[u8]) -> Result<Option<VideoFrame>, VideoError> {
+        #[cfg(target_os = "android")]
+        {
+            if access_unit.is_empty() {
+                return Ok(None);
+            }
+
+            // Lazily create decoder when we see VPS/SPS/PPS.
+            if self.codec.is_none() {
+                let (vps, sps, pps) = extract_vps_sps_pps(access_unit);
+                let (vps, sps, pps) = match (vps, sps, pps) {
+                    (Some(v), Some(s), Some(p)) => (v, s, p),
+                    _ => return Ok(None),
+                };
+
+                let mut format = MediaFormat::new();
+                format.set_str("mime", "video/hevc");
+                format.set_i32("width", self.width as i32);
+                format.set_i32("height", self.height as i32);
+                format.set_buffer("csd-0", &vps);
+                format.set_buffer("csd-1", &sps);
+                format.set_buffer("csd-2", &pps);
+
+                let codec = MediaCodec::from_decoder_type("video/hevc").ok_or_else(|| {
+                    VideoError::PlatformError("AMediaCodec_createDecoderByType (HEVC) failed".into())
+                })?;
+
+                codec
+                    .configure(&format, None, MediaCodecDirection::Decoder)
+                    .map_err(|e| {
+                        VideoError::PlatformError(format!("decoder configure failed: {e}"))
+                    })?;
+
+                codec
+                    .start()
+                    .map_err(|e| VideoError::PlatformError(format!("decoder start failed: {e}")))?;
+
+                self.codec = Some(codec);
+            }
+
+            let codec = self.codec.as_mut().ok_or(VideoError::NotInitialized)?;
+
+            match codec.dequeue_input_buffer(std::time::Duration::from_millis(10)) {
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
+                    let idx = buffer.index();
+                    if let Some(input_buf) = codec.input_buffer(idx) {
+                        let to_copy = access_unit.len().min(input_buf.len());
+                        input_buf[..to_copy].copy_from_slice(&access_unit[..to_copy]);
+                        codec
+                            .queue_input_buffer_by_index(idx, 0, to_copy, 0, 0)
+                            .map_err(|e| {
+                                VideoError::PlatformError(format!(
+                                    "decoder queue_input_buffer failed: {e}"
+                                ))
+                            })?;
+                    }
+                }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
+                Err(e) => {
+                    return Err(VideoError::PlatformError(format!(
+                        "decoder dequeue_input_buffer failed: {e}"
+                    )));
+                }
+            }
+
+            match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
+                Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
+                    let idx = buffer.index();
+                    let data = codec.output_buffer(idx).unwrap_or(&[]).to_vec();
+                    codec
+                        .release_output_buffer_by_index(idx, false)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!(
+                                "decoder release_output_buffer failed: {e}"
+                            ))
+                        })?;
+
+                    Ok(Some(VideoFrame {
+                        width: self.width,
+                        height: self.height,
+                        data,
+                        timestamp_ms: 0,
+                    }))
+                }
+                Ok(_) => Ok(None),
+                Err(e) => Err(VideoError::PlatformError(format!(
+                    "decoder dequeue_output_buffer failed: {e}"
+                ))),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = access_unit;
+            Err(VideoError::NotInitialized)
+        }
+    }
+}
+
+/// Parse an Annex-B access unit and return the first VPS, SPS and PPS found (HEVC).
+#[allow(dead_code)]
+fn extract_vps_sps_pps(annex_b: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    let nals = split_annex_b(annex_b);
+    let mut vps = None;
+    let mut sps = None;
+    let mut pps = None;
+    for nal in nals {
+        if nal.len() < 2 {
+            continue;
+        }
+        let nal_type = (nal[0] >> 1) & 0x3F;
+        if nal_type == 32 && vps.is_none() {
+            vps = Some(nal.to_vec());
+        } else if nal_type == 33 && sps.is_none() {
+            sps = Some(nal.to_vec());
+        } else if nal_type == 34 && pps.is_none() {
+            pps = Some(nal.to_vec());
+        }
+    }
+    (vps, sps, pps)
+}
+
 /// Convert an AVCC blob (4-byte big-endian length prefixes) to Annex-B
 /// (4-byte start codes `0x00 0x00 0x00 0x01`).
 #[allow(dead_code)]
@@ -476,5 +816,42 @@ mod tests {
             0x3C, 0x80,
         ];
         assert_eq!(annex_b, expected);
+    }
+
+    #[test]
+    fn hevc_mediacodec_encoder_returns_not_initialized_on_non_android() {
+        let enc = MediaCodecHevcEncoder::new(1280, 720, 2_000_000);
+        assert!(matches!(enc, Err(VideoError::NotInitialized)));
+    }
+
+    #[test]
+    fn hevc_mediacodec_decoder_returns_not_initialized_on_non_android() {
+        let dec = MediaCodecHevcDecoder::new(1280, 720);
+        assert!(matches!(dec, Err(VideoError::NotInitialized)));
+    }
+
+    #[test]
+    fn hevc_is_keyframe_detects_idr() {
+        let enc = MediaCodecHevcEncoder {
+            #[cfg(target_os = "android")]
+            codec: unreachable!(),
+            #[cfg(target_os = "android")]
+            width: 1280,
+            #[cfg(target_os = "android")]
+            height: 720,
+            force_keyframe: false,
+            #[cfg(not(target_os = "android"))]
+            _width: 1280,
+            #[cfg(not(target_os = "android"))]
+            _height: 720,
+            #[cfg(not(target_os = "android"))]
+            _bitrate_bps: 2_000_000,
+        };
+        // NAL type 19 (IDR_W_RADL): first byte = 0b0_010011_0 = 0x26
+        assert!(enc.is_keyframe(&[0x26, 0x01]));
+        // NAL type 20 (IDR_N_LP): first byte = 0b0_010100_0 = 0x28
+        assert!(enc.is_keyframe(&[0x28, 0x01]));
+        // NAL type 1 (TRAIL_R)
+        assert!(!enc.is_keyframe(&[0x02, 0x01]));
     }
 }

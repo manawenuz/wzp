@@ -32,6 +32,8 @@ pub enum CodecId {
     // 11 => H265 main
     // 12 => AV1
     // 13 => VP9
+    /// H.265 main profile (video).
+    H265Main = 11,
 }
 
 impl CodecId {
@@ -47,7 +49,7 @@ impl CodecId {
             Self::Codec2_3200 => 3_200,
             Self::Codec2_1200 => 1_200,
             Self::ComfortNoise => 0,
-            Self::H264Baseline => 2_000_000,
+            Self::H264Baseline | Self::H265Main => 2_000_000,
         }
     }
 
@@ -59,7 +61,7 @@ impl CodecId {
             Self::Codec2_3200 => 20,
             Self::Codec2_1200 => 40,
             Self::ComfortNoise => 20,
-            Self::H264Baseline => 33,
+            Self::H264Baseline | Self::H265Main => 33,
         }
     }
 
@@ -74,7 +76,7 @@ impl CodecId {
             | Self::Opus64k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
             Self::ComfortNoise => 48_000,
-            Self::H264Baseline => 48_000,
+            Self::H264Baseline | Self::H265Main => 48_000,
         }
     }
 
@@ -91,6 +93,7 @@ impl CodecId {
             7 => Some(Self::Opus48k),
             8 => Some(Self::Opus64k),
             9 => Some(Self::H264Baseline),
+            11 => Some(Self::H265Main),
             _ => None,
         }
     }
@@ -102,7 +105,7 @@ impl CodecId {
 
     /// Returns true if this is a video codec variant.
     pub const fn is_video(self) -> bool {
-        matches!(self, Self::H264Baseline)
+        matches!(self, Self::H264Baseline | Self::H265Main)
     }
 
     /// Returns true if this is an Opus variant.
@@ -226,12 +229,33 @@ impl QualityProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::CodecId;
+    use super::{CodecId, QualityProfile};
+    use crate::PriorityMode;
 
     #[test]
     fn codec_id_unknown_values_rejected() {
-        for v in 10u8..=255 {
+        for v in [10u8, 12, 13].iter().copied().chain(14u8..=255) {
             assert!(CodecId::from_wire(v).is_none(), "v={v}");
         }
+    }
+
+    #[test]
+    fn h265_main_roundtrips() {
+        assert_eq!(CodecId::H265Main.to_wire(), 11);
+        assert_eq!(CodecId::from_wire(11), Some(CodecId::H265Main));
+        assert!(CodecId::H265Main.is_video());
+        assert_eq!(CodecId::H265Main.bitrate_bps(), 2_000_000);
+        assert_eq!(CodecId::H265Main.frame_duration_ms(), 33);
+    }
+
+    #[test]
+    fn quality_profile_backward_compat_old_json() {
+        // Old JSON emitted before T5.1 has no priority_mode or video fields.
+        let old_json = r#"{"codec":"Opus24k","fec_ratio":0.2,"frame_duration_ms":20,"frames_per_block":5}"#;
+        let parsed: QualityProfile = serde_json::from_str(old_json).unwrap();
+        assert_eq!(parsed.priority_mode, PriorityMode::AudioFirst);
+        assert_eq!(parsed.video_bitrate_kbps, None);
+        assert_eq!(parsed.video_resolution, None);
+        assert_eq!(parsed.video_fps, None);
     }
 }

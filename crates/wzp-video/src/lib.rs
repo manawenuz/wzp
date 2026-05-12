@@ -1,8 +1,8 @@
-//! WZP video pipeline — H.264 baseline framer and depacketizer.
+//! WZP video pipeline — H.264 / H.265 framer and depacketizer.
 //!
 //! This crate lives alongside `wzp-codec` and handles video-specific
 //! packetization (NAL fragmentation / reassembly).  Platform encoders and
-//! decoders land in T4.2/T4.3.
+//! decoders land in T4.2/T4.3/T5.4.
 
 pub mod controller;
 pub mod decoder;
@@ -20,8 +20,9 @@ pub use depacketizer::H264Depacketizer;
 pub use encoder::{VideoEncoder, VideoError, VideoFrame};
 pub use encoder_mode::EncoderMode;
 pub use framer::{FramedPacket, H264Framer};
+pub use mediacodec::{MediaCodecDecoder, MediaCodecEncoder, MediaCodecHevcDecoder, MediaCodecHevcEncoder};
 pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
-pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxEncoder};
+pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder, VideoToolboxHevcEncoder};
 
 #[cfg(test)]
 mod tests {

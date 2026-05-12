@@ -1,4 +1,4 @@
-//! Apple VideoToolbox H.264 encoder / decoder (macOS only).
+//! Apple VideoToolbox H.264 / H.265 encoder / decoder (macOS only).
 
 use crate::decoder::VideoDecoder;
 use crate::encoder::{VideoEncoder, VideoError, VideoFrame};
@@ -7,7 +7,8 @@ use crate::encoder::{VideoEncoder, VideoError, VideoFrame};
 mod imp {
     pub use shiguredo_video_toolbox::{
         CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
-        EncoderConfig, FrameData, H264EncoderConfig, H264EntropyMode, H264Profile, PixelFormat,
+        EncoderConfig, FrameData, H264EncoderConfig, H264EntropyMode, H264Profile, HevcEncoderConfig,
+        HevcProfile, PixelFormat,
     };
 }
 
@@ -384,6 +385,295 @@ impl VideoDecoder for VideoToolboxDecoder {
     }
 }
 
+// ============================================================================
+// H.265 / HEVC
+// ============================================================================
+
+/// macOS VideoToolbox H.265 encoder.
+pub struct VideoToolboxHevcEncoder {
+    #[cfg(target_os = "macos")]
+    inner: Encoder,
+    force_keyframe: bool,
+    #[cfg(not(target_os = "macos"))]
+    _width: u32,
+    #[cfg(not(target_os = "macos"))]
+    _height: u32,
+    #[cfg(not(target_os = "macos"))]
+    _bitrate_bps: u32,
+}
+
+impl VideoToolboxHevcEncoder {
+    pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
+        #[cfg(target_os = "macos")]
+        {
+            let config = EncoderConfig {
+                width,
+                height,
+                codec: CodecConfig::Hevc(HevcEncoderConfig {
+                    profile: HevcProfile::Main,
+                    allow_open_gop: false,
+                }),
+                pixel_format: PixelFormat::I420,
+                average_bitrate: Some(bitrate_bps as u64),
+                fps_numerator: 30,
+                fps_denominator: 1,
+                prioritize_encoding_speed_over_quality: true,
+                real_time: true,
+                maximize_power_efficiency: false,
+                allow_frame_reordering: false,
+                allow_temporal_compression: false,
+                max_key_frame_interval: std::num::NonZeroU32::new(30),
+                max_key_frame_interval_duration: None,
+                max_frame_delay_count: std::num::NonZeroU32::new(1),
+            };
+            let inner = Encoder::new(config).map_err(|e| {
+                VideoError::PlatformError(format!("VTCompressionSessionCreate (HEVC) failed: {e}"))
+            })?;
+            Ok(Self {
+                inner,
+                force_keyframe: false,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (width, height, bitrate_bps);
+            Ok(Self {
+                _width: width,
+                _height: height,
+                _bitrate_bps: bitrate_bps,
+                force_keyframe: false,
+            })
+        }
+    }
+}
+
+impl VideoEncoder for VideoToolboxHevcEncoder {
+    fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, VideoError> {
+        #[cfg(target_os = "macos")]
+        {
+            let width = frame.width as usize;
+            let height = frame.height as usize;
+            let y_size = width * height;
+            let uv_size = y_size / 4;
+            let expected = y_size + uv_size * 2;
+
+            if frame.data.len() < expected {
+                return Err(VideoError::InvalidInput(format!(
+                    "I420 frame too small: {} bytes, expected {expected}",
+                    frame.data.len()
+                )));
+            }
+
+            let y = &frame.data[0..y_size];
+            let u = &frame.data[y_size..y_size + uv_size];
+            let v = &frame.data[y_size + uv_size..y_size + uv_size * 2];
+
+            let frame_data = FrameData::I420 { y, u, v };
+            let options = EncodeOptions {
+                force_key_frame: self.force_keyframe,
+            };
+
+            self.inner
+                .encode(&frame_data, &options)
+                .map_err(|e| VideoError::PlatformError(format!("encode failed: {e}")))?;
+
+            let mut annex_b = Vec::new();
+            let mut emitted_keyframe = false;
+            while let Some(encoded) = self
+                .inner
+                .next_frame()
+                .map_err(|e| VideoError::PlatformError(format!("next_frame failed: {e}")))?
+            {
+                if encoded.keyframe {
+                    emitted_keyframe = true;
+                }
+                for vps in &encoded.vps_list {
+                    annex_b.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                    annex_b.extend_from_slice(vps);
+                }
+                for sps in &encoded.sps_list {
+                    annex_b.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                    annex_b.extend_from_slice(sps);
+                }
+                for pps in &encoded.pps_list {
+                    annex_b.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                    annex_b.extend_from_slice(pps);
+                }
+                annex_b.extend_from_slice(&avcc_to_annexb(&encoded.data));
+            }
+
+            if emitted_keyframe {
+                self.force_keyframe = false;
+            }
+
+            Ok(annex_b)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = frame;
+            Err(VideoError::NotInitialized)
+        }
+    }
+
+    fn request_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
+    fn is_keyframe(&self, packet: &[u8]) -> bool {
+        if packet.len() < 2 {
+            return false;
+        }
+        let nal_type = (packet[0] >> 1) & 0x3F;
+        // NAL type 19 = IDR_W_RADL, 20 = IDR_N_LP.
+        nal_type == 19 || nal_type == 20
+    }
+}
+
+/// macOS VideoToolbox H.265 decoder.
+pub struct VideoToolboxHevcDecoder {
+    #[cfg(target_os = "macos")]
+    inner: Option<Decoder>,
+    #[cfg(target_os = "macos")]
+    width: u32,
+    #[cfg(target_os = "macos")]
+    height: u32,
+    #[cfg(not(target_os = "macos"))]
+    _width: u32,
+    #[cfg(not(target_os = "macos"))]
+    _height: u32,
+}
+
+impl VideoToolboxHevcDecoder {
+    pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Self {
+                inner: None,
+                width,
+                height,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (width, height);
+            Ok(Self {
+                _width: width,
+                _height: height,
+            })
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ensure_decoder(&mut self, vps: &[u8], sps: &[u8], pps: &[u8]) -> Result<(), VideoError> {
+        let needs_create = self.inner.is_none();
+        let needs_update = if let Some(dec) = &mut self.inner {
+            let codec = DecoderCodec::Hevc {
+                vps,
+                sps,
+                pps,
+                nalu_len_bytes: 4,
+            };
+            dec.update_format(codec).is_err()
+        } else {
+            false
+        };
+
+        if needs_create || needs_update {
+            let config = DecoderConfig {
+                codec: DecoderCodec::Hevc {
+                    vps,
+                    sps,
+                    pps,
+                    nalu_len_bytes: 4,
+                },
+                pixel_format: PixelFormat::I420,
+            };
+            self.inner = Some(
+                Decoder::new(config)
+                    .map_err(|e| VideoError::PlatformError(format!("decoder create: {e}")))?,
+            );
+        }
+        Ok(())
+    }
+}
+
+impl VideoDecoder for VideoToolboxHevcDecoder {
+    fn decode(&mut self, access_unit: &[u8]) -> Result<Option<VideoFrame>, VideoError> {
+        #[cfg(target_os = "macos")]
+        {
+            if access_unit.is_empty() {
+                return Ok(None);
+            }
+
+            let (vps, sps, pps) = extract_vps_sps_pps(access_unit);
+
+            if let (Some(v), Some(s), Some(p)) = (&vps, &sps, &pps) {
+                self.ensure_decoder(v, s, p)?;
+            }
+
+            let decoder = self.inner.as_mut().ok_or(VideoError::NotInitialized)?;
+
+            let avcc = annexb_to_avcc(access_unit);
+            if avcc.is_empty() {
+                return Ok(None);
+            }
+
+            let decoded = decoder
+                .decode(&avcc)
+                .map_err(|e| VideoError::PlatformError(format!("decode failed: {e}")))?;
+
+            match decoded {
+                Some(DecodedFrame::I420(frame)) => {
+                    let y = frame.y_plane();
+                    let u = frame.u_plane();
+                    let v = frame.v_plane();
+                    let mut data = Vec::with_capacity(y.len() + u.len() + v.len());
+                    data.extend_from_slice(y);
+                    data.extend_from_slice(u);
+                    data.extend_from_slice(v);
+                    Ok(Some(VideoFrame {
+                        width: self.width,
+                        height: self.height,
+                        data,
+                        timestamp_ms: 0,
+                    }))
+                }
+                Some(DecodedFrame::Nv12(_)) => Err(VideoError::PlatformError(
+                    "unexpected NV12 output from decoder".to_string(),
+                )),
+                None => Ok(None),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = access_unit;
+            Err(VideoError::NotInitialized)
+        }
+    }
+}
+
+/// Parse an Annex-B access unit and return the first VPS, SPS and PPS found (HEVC).
+fn extract_vps_sps_pps(annex_b: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    let nals = split_annex_b(annex_b);
+    let mut vps = None;
+    let mut sps = None;
+    let mut pps = None;
+    for nal in nals {
+        if nal.len() < 2 {
+            continue;
+        }
+        let nal_type = (nal[0] >> 1) & 0x3F;
+        if nal_type == 32 && vps.is_none() {
+            vps = Some(nal.to_vec());
+        } else if nal_type == 33 && sps.is_none() {
+            sps = Some(nal.to_vec());
+        } else if nal_type == 34 && pps.is_none() {
+            pps = Some(nal.to_vec());
+        }
+    }
+    (vps, sps, pps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +738,55 @@ mod tests {
         let (sps, pps) = extract_sps_pps(&au);
         assert_eq!(sps, Some(vec![0x67, 0x42, 0xC0, 0x1E]));
         assert_eq!(pps, Some(vec![0x68, 0xCE, 0x3C, 0x80]));
+    }
+
+    // ---- H.265 / HEVC ----
+
+    #[test]
+    fn hevc_encoder_instantiates() {
+        let enc = VideoToolboxHevcEncoder::new(1280, 720, 2_000_000);
+        assert!(enc.is_ok());
+    }
+
+    #[test]
+    fn hevc_decoder_instantiates() {
+        let dec = VideoToolboxHevcDecoder::new(1280, 720);
+        assert!(dec.is_ok());
+    }
+
+    #[test]
+    fn hevc_is_keyframe_detects_idr() {
+        let enc = VideoToolboxHevcEncoder::new(1280, 720, 2_000_000).unwrap();
+        // NAL type 19 (IDR_W_RADL): first byte = 0b0_010011_0 = 0x26
+        assert!(enc.is_keyframe(&[0x26, 0x01]));
+        // NAL type 20 (IDR_N_LP): first byte = 0b0_010100_0 = 0x28
+        assert!(enc.is_keyframe(&[0x28, 0x01]));
+        // NAL type 1 (TRAIL_R): first byte = 0b0_000001_0 = 0x02
+        assert!(!enc.is_keyframe(&[0x02, 0x01]));
+    }
+
+    #[test]
+    fn hevc_request_keyframe_sets_flag() {
+        let mut enc = VideoToolboxHevcEncoder::new(1280, 720, 2_000_000).unwrap();
+        assert!(!enc.force_keyframe);
+        enc.request_keyframe();
+        assert!(enc.force_keyframe);
+    }
+
+    #[test]
+    fn extract_vps_sps_pps_finds_hevc_params() {
+        // VPS (type 32): first byte = 0b0_100000_0 = 0x40
+        // SPS (type 33): first byte = 0b0_100001_0 = 0x42
+        // PPS (type 34): first byte = 0b0_100010_0 = 0x44
+        let au = vec![
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01, // VPS
+            0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01, 0x01, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xC1, 0x72, // PPS
+            0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xAF, 0x09, // IDR
+        ];
+        let (vps, sps, pps) = extract_vps_sps_pps(&au);
+        assert_eq!(vps, Some(vec![0x40, 0x01, 0x0C, 0x01]));
+        assert_eq!(sps, Some(vec![0x42, 0x01, 0x01, 0x01]));
+        assert_eq!(pps, Some(vec![0x44, 0x01, 0xC1, 0x72]));
     }
 }

@@ -656,8 +656,8 @@ impl CallDecoder {
             },
             CodecId::Codec2_1200 => QualityProfile::CATASTROPHIC,
             CodecId::ComfortNoise => QualityProfile::GOOD,
-            CodecId::H264Baseline => {
-                panic!("H264Baseline is a video codec; audio decoder called with video profile")
+            CodecId::H264Baseline | CodecId::H265Main => {
+                panic!("video codec passed to audio decoder")
             }
         }
     }
