@@ -1,0 +1,14 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Pre-existing historical findings already on fj/main and github/main. The two PASTE_AUTH tokens in scripts/build.sh and scripts/build-linux-notify.sh are real — rotate if those endpoints still authenticate; this allowlist only silences the pre-push hook, it does not remove the exposure."
+commits = [
+  # wzp-crypto module doc: false positive on "SHA-256(Ed25519 pub)[:16]"
+  "51e893590c1b9fa49e9f6ae5c96c26deb58f353b",
+  # build.sh PASTE_AUTH (paste.tbs.amn.gg)
+  "bd6733b2e5d76b5259020f1c30a5223a9773b6aa",
+  # build-linux-notify Authorization header (paste.dk.manko.yoga)
+  "6d776097c83bc6fbe3f3565e080513d8af93b550",
+  "7751439e2bca9eacf2c30929c8124a4eb6136df2",
+]
