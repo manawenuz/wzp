@@ -683,19 +683,32 @@ impl CallEngine {
             "connect:audio_start_start",
             serde_json::json!({ "t_ms": t_pre_audio }),
         );
-        let audio_start_result = tokio::task::spawn_blocking(crate::wzp_native::audio_start)
-            .await
-            .map_err(|e| {
-                crate::emit_call_debug(
-                    &app,
-                    "connect:audio_start_panic",
-                    serde_json::json!({
-                        "t_ms": call_t0.elapsed().as_millis(),
-                        "error": e.to_string(),
-                    }),
-                );
-                anyhow::anyhow!("audio_start task panic: {e}")
-            })?;
+        let audio_start_task = tokio::task::spawn_blocking(crate::wzp_native::audio_start);
+        let audio_start_result =
+            match tokio::time::timeout(std::time::Duration::from_secs(8), audio_start_task).await {
+                Ok(join_result) => join_result.map_err(|e| {
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:audio_start_panic",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "error": e.to_string(),
+                        }),
+                    );
+                    anyhow::anyhow!("audio_start task panic: {e}")
+                })?,
+                Err(_) => {
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:audio_start_timeout",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "timeout_ms": 8000,
+                        }),
+                    );
+                    return Err(anyhow::anyhow!("wzp_native_audio_start timed out after 8s"));
+                }
+            };
         if let Err(code) = audio_start_result {
             crate::emit_call_debug(
                 &app,

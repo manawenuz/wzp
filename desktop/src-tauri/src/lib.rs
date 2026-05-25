@@ -59,13 +59,15 @@ fn set_call_debug_logs_internal(on: bool) {
     CALL_DEBUG_LOGS.store(on, Ordering::Relaxed);
 }
 
-/// Emit a `call-debug-log` event to the JS side IF the flag is on.
+/// Emit a `call-debug-log` event to the JS side.
 /// Also mirrors to `tracing::info!` so logcat keeps its copy
-/// regardless of the flag — the toggle only controls the GUI
-/// overlay, not the underlying Android log stream.
+/// regardless of the flag. Connect/register steps are always emitted
+/// because they are needed to diagnose failed joins after app data is
+/// cleared and the GUI debug toggle is back to its default false value.
 pub(crate) fn emit_call_debug(app: &tauri::AppHandle, step: &str, details: serde_json::Value) {
     tracing::info!(step, ?details, "call-debug");
-    if !call_debug_logs_enabled() {
+    let force_emit = step.starts_with("connect:") || step.starts_with("register_signal:");
+    if !force_emit && !call_debug_logs_enabled() {
         return;
     }
     let payload = serde_json::json!({

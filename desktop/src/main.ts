@@ -195,11 +195,24 @@ function errorMessage(e: unknown): string {
   return String(e);
 }
 
-function connectWithTimeout(args: Record<string, unknown>, timeoutMs = 15000) {
+function connectDebugSummary(entry: CallDebugEntry | null): string {
+  if (!entry) return "no native connect event received";
+  const details = entry.details && typeof entry.details === "object"
+    ? JSON.stringify(entry.details)
+    : String(entry.details ?? "");
+  return `${entry.step}${details ? ` ${details}` : ""}`;
+}
+
+let lastConnectDebug: CallDebugEntry | null = null;
+
+function connectWithTimeout(args: Record<string, unknown>, timeoutMs = 45000) {
+  lastConnectDebug = null;
   return Promise.race([
     invoke("connect", args),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("connect timed out (15s) - check audio permissions")), timeoutMs)
+      setTimeout(() => reject(new Error(
+        `connect timed out (${Math.round(timeoutMs / 1000)}s); last native step: ${connectDebugSummary(lastConnectDebug)}`
+      )), timeoutMs)
     ),
   ]);
 }
@@ -221,6 +234,7 @@ const CALL_DEBUG_MAX = 200;
 listen("call-debug-log", (event: any) => {
   const entry: CallDebugEntry = event.payload;
   callDebugBuffer.push(entry);
+  if (entry.step?.startsWith("connect:")) lastConnectDebug = entry;
   if (callDebugBuffer.length > CALL_DEBUG_MAX) callDebugBuffer.shift();
   renderCallDebugLog();
 });
