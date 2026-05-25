@@ -39,6 +39,9 @@ pub struct MediaCodecEncoder {
 /// Android color format constant: YUV 4:2:0 planar (I420).
 #[cfg(target_os = "android")]
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
+/// Android color format constant: YUV 4:2:0 semiplanar (usually NV12).
+#[cfg(target_os = "android")]
+const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
 /// Android MediaCodec CBR bitrate mode (MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR).
 #[cfg(target_os = "android")]
 const BITRATE_MODE_CBR: i32 = 2;
@@ -184,7 +187,7 @@ impl MediaCodecEncoder {
                     if is_keyframe {
                         self.force_keyframe = false;
                     }
-                    let data = buffer.buffer().to_vec();
+                    let data = output_buffer_payload(&buffer)?;
                     output.extend_from_slice(&avcc_to_annexb(&data));
                     self.codec
                         .release_output_buffer(buffer, false)
@@ -194,7 +197,10 @@ impl MediaCodecEncoder {
                 }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
-                ) => continue,
+                ) => {
+                    log_media_codec_format("h264_encoder_output", &self.codec);
+                    continue;
+                }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputBuffersChanged,
                 ) => continue,
@@ -269,6 +275,7 @@ impl VideoDecoder for MediaCodecDecoder {
                 format.set_str("mime", "video/avc");
                 format.set_i32("width", self.width as i32);
                 format.set_i32("height", self.height as i32);
+                format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
                 format.set_buffer("csd-0", &sps);
                 format.set_buffer("csd-1", &pps);
 
@@ -321,20 +328,24 @@ impl VideoDecoder for MediaCodecDecoder {
             // Drain output.
             match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let data = buffer.buffer().to_vec();
-                    codec
-                        .release_output_buffer(buffer, false)
-                        .map_err(|e| {
-                            VideoError::PlatformError(format!(
-                                "decoder release_output_buffer failed: {e}"
-                            ))
-                        })?;
+                    let data = decoded_i420_payload(codec, &buffer, self.width, self.height)?;
+                    codec.release_output_buffer(buffer, false).map_err(|e| {
+                        VideoError::PlatformError(format!(
+                            "decoder release_output_buffer failed: {e}"
+                        ))
+                    })?;
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
                         data,
                         timestamp_ms: 0,
                     }))
+                }
+                Ok(
+                    ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
+                ) => {
+                    log_media_codec_format("h264_decoder_output", codec);
+                    Ok(None)
                 }
                 Ok(_) => Ok(None),
                 Err(e) => Err(VideoError::PlatformError(format!(
@@ -618,7 +629,7 @@ impl MediaCodecHevcEncoder {
                     if is_keyframe {
                         self.force_keyframe = false;
                     }
-                    let data = buffer.buffer().to_vec();
+                    let data = output_buffer_payload(&buffer)?;
                     output.extend_from_slice(&avcc_to_annexb(&data));
                     self.codec
                         .release_output_buffer(buffer, false)
@@ -628,7 +639,10 @@ impl MediaCodecHevcEncoder {
                 }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
-                ) => continue,
+                ) => {
+                    log_media_codec_format("hevc_encoder_output", &self.codec);
+                    continue;
+                }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputBuffersChanged,
                 ) => continue,
@@ -660,7 +674,7 @@ impl MediaCodecAv1Encoder {
                         self.force_keyframe = false;
                     }
                     // AV1 output from MediaCodec is already in OBU format.
-                    let data = buffer.buffer().to_vec();
+                    let data = output_buffer_payload(&buffer)?;
                     output.extend_from_slice(&data);
                     self.codec
                         .release_output_buffer(buffer, false)
@@ -672,7 +686,10 @@ impl MediaCodecAv1Encoder {
                 }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
-                ) => continue,
+                ) => {
+                    log_media_codec_format("av1_encoder_output", &self.codec);
+                    continue;
+                }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputBuffersChanged,
                 ) => continue,
@@ -745,6 +762,7 @@ impl VideoDecoder for MediaCodecHevcDecoder {
                 format.set_str("mime", "video/hevc");
                 format.set_i32("width", self.width as i32);
                 format.set_i32("height", self.height as i32);
+                format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
                 format.set_buffer("csd-0", &vps);
                 format.set_buffer("csd-1", &sps);
                 format.set_buffer("csd-2", &pps);
@@ -798,20 +816,24 @@ impl VideoDecoder for MediaCodecHevcDecoder {
 
             match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let data = buffer.buffer().to_vec();
-                    codec
-                        .release_output_buffer(buffer, false)
-                        .map_err(|e| {
-                            VideoError::PlatformError(format!(
-                                "decoder release_output_buffer failed: {e}"
-                            ))
-                        })?;
+                    let data = decoded_i420_payload(codec, &buffer, self.width, self.height)?;
+                    codec.release_output_buffer(buffer, false).map_err(|e| {
+                        VideoError::PlatformError(format!(
+                            "decoder release_output_buffer failed: {e}"
+                        ))
+                    })?;
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
                         data,
                         timestamp_ms: 0,
                     }))
+                }
+                Ok(
+                    ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
+                ) => {
+                    log_media_codec_format("hevc_decoder_output", codec);
+                    Ok(None)
                 }
                 Ok(_) => Ok(None),
                 Err(e) => Err(VideoError::PlatformError(format!(
@@ -884,6 +906,7 @@ impl VideoDecoder for MediaCodecAv1Decoder {
                 format.set_str("mime", "video/av01");
                 format.set_i32("width", self.width as i32);
                 format.set_i32("height", self.height as i32);
+                format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
                 format.set_buffer("csd-0", &seq_header);
 
                 let codec = MediaCodec::from_decoder_type("video/av01").ok_or_else(|| {
@@ -933,20 +956,24 @@ impl VideoDecoder for MediaCodecAv1Decoder {
 
             match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let data = buffer.buffer().to_vec();
-                    codec
-                        .release_output_buffer(buffer, false)
-                        .map_err(|e| {
-                            VideoError::PlatformError(format!(
-                                "AV1 decoder release_output_buffer failed: {e}"
-                            ))
-                        })?;
+                    let data = decoded_i420_payload(codec, &buffer, self.width, self.height)?;
+                    codec.release_output_buffer(buffer, false).map_err(|e| {
+                        VideoError::PlatformError(format!(
+                            "AV1 decoder release_output_buffer failed: {e}"
+                        ))
+                    })?;
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
                         data,
                         timestamp_ms: 0,
                     }))
+                }
+                Ok(
+                    ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
+                ) => {
+                    log_media_codec_format("av1_decoder_output", codec);
+                    Ok(None)
                 }
                 Ok(_) => Ok(None),
                 Err(e) => Err(VideoError::PlatformError(format!(
@@ -960,6 +987,203 @@ impl VideoDecoder for MediaCodecAv1Decoder {
             Err(VideoError::NotInitialized)
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn output_buffer_payload(
+    buffer: &ndk::media::media_codec::OutputBuffer<'_>,
+) -> Result<Vec<u8>, VideoError> {
+    let info = buffer.info();
+    let offset = usize::try_from(info.offset()).map_err(|_| {
+        VideoError::PlatformError(format!(
+            "negative MediaCodec output offset: {}",
+            info.offset()
+        ))
+    })?;
+    let size = usize::try_from(info.size()).map_err(|_| {
+        VideoError::PlatformError(format!("negative MediaCodec output size: {}", info.size()))
+    })?;
+    let end = offset.checked_add(size).ok_or_else(|| {
+        VideoError::PlatformError(format!(
+            "MediaCodec output range overflow: offset={offset} size={size}"
+        ))
+    })?;
+    let raw = buffer.buffer();
+    if end > raw.len() {
+        return Err(VideoError::PlatformError(format!(
+            "MediaCodec output range outside buffer: offset={offset} size={size} buffer_len={}",
+            raw.len()
+        )));
+    }
+    Ok(raw[offset..end].to_vec())
+}
+
+#[cfg(target_os = "android")]
+fn decoded_i420_payload(
+    codec: &MediaCodec,
+    buffer: &ndk::media::media_codec::OutputBuffer<'_>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, VideoError> {
+    let payload = output_buffer_payload(buffer)?;
+    let format = codec.output_format();
+    let color_format = format
+        .i32("color-format")
+        .unwrap_or(COLOR_FORMAT_YUV420_PLANAR);
+    let stride = positive_format_usize(&format, "stride").unwrap_or(width as usize);
+    let slice_height = positive_format_usize(&format, "slice-height").unwrap_or(height as usize);
+
+    match color_format {
+        COLOR_FORMAT_YUV420_PLANAR => yuv420_planar_to_tight_i420(
+            &payload,
+            width as usize,
+            height as usize,
+            stride,
+            slice_height,
+        ),
+        COLOR_FORMAT_YUV420_SEMIPLANAR => yuv420_semiplanar_to_tight_i420(
+            &payload,
+            width as usize,
+            height as usize,
+            stride,
+            slice_height,
+        ),
+        _ => {
+            let expected = i420_len(width as usize, height as usize)?;
+            if payload.len() < expected {
+                return Err(VideoError::PlatformError(format!(
+                    "unsupported MediaCodec color format {color_format} produced {} bytes, expected at least {expected}",
+                    payload.len()
+                )));
+            }
+            let mut data = payload;
+            data.truncate(expected);
+            Ok(data)
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn positive_format_usize(format: &MediaFormat, key: &str) -> Option<usize> {
+    let value = format.i32(key)?;
+    (value > 0).then_some(value as usize)
+}
+
+#[cfg(target_os = "android")]
+fn log_media_codec_format(label: &str, codec: &MediaCodec) {
+    let format = codec.output_format();
+    tracing::info!(
+        target: "wzp_video::mediacodec",
+        label,
+        color_format = format.i32("color-format"),
+        width = format.i32("width"),
+        height = format.i32("height"),
+        stride = format.i32("stride"),
+        slice_height = format.i32("slice-height"),
+        crop_left = format.i32("crop-left"),
+        crop_right = format.i32("crop-right"),
+        crop_top = format.i32("crop-top"),
+        crop_bottom = format.i32("crop-bottom"),
+        "MediaCodec output format changed"
+    );
+}
+
+#[cfg(target_os = "android")]
+fn i420_len(width: usize, height: usize) -> Result<usize, VideoError> {
+    width
+        .checked_mul(height)
+        .and_then(|y| y.checked_add(y / 2))
+        .ok_or_else(|| {
+            VideoError::InvalidInput(format!("invalid I420 dimensions {width}x{height}"))
+        })
+}
+
+#[cfg(target_os = "android")]
+fn yuv420_planar_to_tight_i420(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    slice_height: usize,
+) -> Result<Vec<u8>, VideoError> {
+    let y_size = width * height;
+    let chroma_width = width / 2;
+    let chroma_height = height / 2;
+    let chroma_stride = stride / 2;
+    let chroma_slice_height = slice_height / 2;
+    let padded_y_size = stride * slice_height;
+    let padded_chroma_size = chroma_stride * chroma_slice_height;
+    let required = padded_y_size + padded_chroma_size * 2;
+    if src.len() < required {
+        return Err(VideoError::PlatformError(format!(
+            "planar YUV buffer too small: {} < {required} (stride={stride}, slice_height={slice_height})",
+            src.len()
+        )));
+    }
+
+    let mut out = vec![0u8; i420_len(width, height)?];
+    for row in 0..height {
+        let src_start = row * stride;
+        let dst_start = row * width;
+        out[dst_start..dst_start + width].copy_from_slice(&src[src_start..src_start + width]);
+    }
+
+    let src_u = padded_y_size;
+    let src_v = src_u + padded_chroma_size;
+    let dst_u = y_size;
+    let dst_v = dst_u + chroma_width * chroma_height;
+    for row in 0..chroma_height {
+        let src_row = row * chroma_stride;
+        let dst_row = row * chroma_width;
+        out[dst_u + dst_row..dst_u + dst_row + chroma_width]
+            .copy_from_slice(&src[src_u + src_row..src_u + src_row + chroma_width]);
+        out[dst_v + dst_row..dst_v + dst_row + chroma_width]
+            .copy_from_slice(&src[src_v + src_row..src_v + src_row + chroma_width]);
+    }
+
+    Ok(out)
+}
+
+#[cfg(target_os = "android")]
+fn yuv420_semiplanar_to_tight_i420(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    slice_height: usize,
+) -> Result<Vec<u8>, VideoError> {
+    let y_size = width * height;
+    let chroma_width = width / 2;
+    let chroma_height = height / 2;
+    let padded_y_size = stride * slice_height;
+    let required = padded_y_size + stride * chroma_height;
+    if src.len() < required {
+        return Err(VideoError::PlatformError(format!(
+            "semiplanar YUV buffer too small: {} < {required} (stride={stride}, slice_height={slice_height})",
+            src.len()
+        )));
+    }
+
+    let mut out = vec![0u8; i420_len(width, height)?];
+    for row in 0..height {
+        let src_start = row * stride;
+        let dst_start = row * width;
+        out[dst_start..dst_start + width].copy_from_slice(&src[src_start..src_start + width]);
+    }
+
+    let dst_u = y_size;
+    let dst_v = dst_u + chroma_width * chroma_height;
+    for row in 0..chroma_height {
+        let src_row = padded_y_size + row * stride;
+        let dst_row = row * chroma_width;
+        for col in 0..chroma_width {
+            let pair = src_row + col * 2;
+            out[dst_u + dst_row + col] = src[pair];
+            out[dst_v + dst_row + col] = src[pair + 1];
+        }
+    }
+
+    Ok(out)
 }
 
 /// Type alias for HEVC parameter-set triple returned by `extract_vps_sps_pps`.
@@ -1176,8 +1400,8 @@ mod tests {
     #[test]
     fn avcc_to_annexb_passes_through_annexb() {
         let annex_b = vec![
-            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x1E,
-            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21,
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x1E, 0x00, 0x00, 0x00, 0x01, 0x65, 0x88,
+            0x84, 0x21,
         ];
 
         assert_eq!(avcc_to_annexb(&annex_b), annex_b);
