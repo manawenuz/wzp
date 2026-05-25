@@ -492,8 +492,26 @@ vdSpkBtn.addEventListener("click", async () => {
 // ── Camera (Blocker 4 + 5) ────────────────────────────────────────
 const camCaptureCanvas = document.createElement("canvas");
 const camCaptureCtx = camCaptureCanvas.getContext("2d")!;
+const CAMERA_SEND_WIDTH = 1280;
+const CAMERA_SEND_HEIGHT = 720;
 let cameraCaptureFrameNo = 0;
 let cameraPushFailures = 0;
+
+function drawCameraFrameForSend() {
+  const vw = vdLocalVideo.videoWidth || camCaptureCanvas.width;
+  const vh = vdLocalVideo.videoHeight || camCaptureCanvas.height;
+  if (!vw || !vh) return;
+
+  const scale = Math.max(CAMERA_SEND_WIDTH / vw, CAMERA_SEND_HEIGHT / vh);
+  const dw = vw * scale;
+  const dh = vh * scale;
+  const dx = (CAMERA_SEND_WIDTH - dw) / 2;
+  const dy = (CAMERA_SEND_HEIGHT - dh) / 2;
+
+  camCaptureCtx.fillStyle = "#000";
+  camCaptureCtx.fillRect(0, 0, CAMERA_SEND_WIDTH, CAMERA_SEND_HEIGHT);
+  camCaptureCtx.drawImage(vdLocalVideo, dx, dy, dw, dh);
+}
 
 async function startCamera() {
   if (cameraActive) return;
@@ -509,11 +527,13 @@ async function startCamera() {
 
     const track = cameraStream.getVideoTracks()[0];
     const settings = track.getSettings();
-    camCaptureCanvas.width = settings.width ?? 640;
-    camCaptureCanvas.height = settings.height ?? 360;
+    camCaptureCanvas.width = CAMERA_SEND_WIDTH;
+    camCaptureCanvas.height = CAMERA_SEND_HEIGHT;
     debugLog("camera:get_user_media_ok", {
-      width: camCaptureCanvas.width,
-      height: camCaptureCanvas.height,
+      width: settings.width ?? null,
+      height: settings.height ?? null,
+      send_width: camCaptureCanvas.width,
+      send_height: camCaptureCanvas.height,
       frameRate: settings.frameRate ?? null,
       deviceId: settings.deviceId ? "present" : null,
       facingMode: settings.facingMode ?? null,
@@ -530,7 +550,7 @@ async function startCamera() {
       if (!cameraActive) return;
       cameraCaptureFrameNo++;
       try {
-        camCaptureCtx.drawImage(vdLocalVideo, 0, 0, camCaptureCanvas.width, camCaptureCanvas.height);
+        drawCameraFrameForSend();
         const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
         const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
         if (cameraCaptureFrameNo === 1 || cameraCaptureFrameNo % 150 === 0) {
