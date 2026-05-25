@@ -322,21 +322,28 @@ for ARCH in $ARCHS; do
     cargo tauri android build ${PROFILE_FLAG} --target "$TARGET" --apk
 
     # ─── Workaround: Tauri CLI 2.10.x does not copy frontendDist to the
-    # Android assets folder (gen/android/app/src/main/assets/). The Rust
-    # build step writes tauri.conf.json there correctly, but index.html
-    # and the JS/CSS assets are never transferred, causing the WebView to
-    # fail with "Asset not found: index.html" at runtime.
+    # Android assets folder. The Rust build step writes tauri.conf.json
+    # there correctly, but index.html and the JS/CSS assets are never
+    # transferred, causing the WebView to fail with "Asset not found:
+    # index.html" at runtime.
     #
-    # Fix: copy dist/ into the assets folder and re-run Gradle so the APK
-    # picks up the frontend. Gradle is incremental here (no Java/Kotlin
-    # changed) so this extra pass takes < 30s.
-    ANDROID_ASSETS="gen/android/app/src/main/assets"
-    if [ ! -f "$ANDROID_ASSETS/index.html" ]; then
-        echo ">>> frontend assets missing from Android project — copying dist/ and repackaging"
-        mkdir -p "$ANDROID_ASSETS"
-        cp -r /build/source/desktop/dist/. "$ANDROID_ASSETS/"
-        echo ">>> re-running Gradle assembleUniversalRelease"
-        (cd gen/android && ./gradlew assembleUniversalRelease 2>&1 | tail -15)
+    # Fix: inject the missing files directly into the unsigned APK (which
+    # is just a ZIP file). The existing zipalign + apksigner step below
+    # handles realignment and signing, so this produces a valid APK.
+    # Re-running Gradle is NOT used here because the Gradle Rust build
+    # task (BuildTask.kt) calls `cargo tauri android android-studio-script`
+    # which requires the full Tauri CLI environment and fails standalone.
+    UNSIGNED_APK_PATH="gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+    if [ -f "$UNSIGNED_APK_PATH" ] && ! unzip -l "$UNSIGNED_APK_PATH" 2>/dev/null | grep -q "assets/index.html"; then
+        echo ">>> frontend assets missing from APK — patching unsigned APK directly"
+        PATCH_DIR="/tmp/apk-frontend-patch-$$"
+        rm -rf "$PATCH_DIR"
+        mkdir -p "$PATCH_DIR/assets"
+        cp -r /build/source/desktop/dist/. "$PATCH_DIR/assets/"
+        (cd "$PATCH_DIR" && zip -r /build/source/desktop/src-tauri/"$UNSIGNED_APK_PATH" assets/)
+        rm -rf "$PATCH_DIR"
+        echo ">>> APK patched: $(ls -lh "$UNSIGNED_APK_PATH" | awk '{print $5}')"
+        echo ">>> assets in APK: $(unzip -l "$UNSIGNED_APK_PATH" | grep 'assets/' | wc -l) entries"
     fi
 
     # Copy produced APK with arch suffix
