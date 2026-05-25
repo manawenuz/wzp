@@ -465,6 +465,9 @@ function leaveVoice() {
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
   stopCamera();
   remoteVideoActive = false;
+  remoteFrameCount = 0;
+  vdRemoteCounter.textContent = "0 frames received";
+  vdRemotePlaceholder.classList.remove("hidden");
   vdVideoStrip.classList.add("hidden");
   remoteCtx.clearRect(0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
 }
@@ -535,6 +538,9 @@ vdCamBtn.addEventListener("click", () => {
 
 // ── Remote video display (Blocker 5) ─────────────────────────────
 const remoteCtx = vdRemoteVideo.getContext("2d")!;
+const vdRemotePlaceholder = document.getElementById("vd-remote-placeholder")!;
+const vdRemoteCounter = document.getElementById("vd-remote-counter")!;
+let remoteFrameCount = 0;
 
 listen("video:frame", (event: any) => {
   const { width, height, jpeg_b64 } = event.payload;
@@ -542,8 +548,11 @@ listen("video:frame", (event: any) => {
 
   remoteVideoActive = true;
   vdVideoStrip.classList.remove("hidden");
+  vdRemotePlaceholder.classList.add("hidden");
   vdRemoteVideo.width = width ?? vdRemoteVideo.width;
   vdRemoteVideo.height = height ?? vdRemoteVideo.height;
+  remoteFrameCount++;
+  if (remoteFrameCount === 1) console.log("first remote video frame:", width, "x", height);
 
   const img = new Image();
   img.onload = () => {

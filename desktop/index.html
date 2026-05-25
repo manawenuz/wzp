@@ -105,11 +105,16 @@
             </div>
           </div>
           <div id="vd-stats" class="vd-stats"></div>
-          <!-- Video strip: remote (canvas) + local preview (video element) -->
-          <div id="vd-video-strip" class="vd-video-strip hidden">
-            <canvas id="vd-remote-video" class="vd-video-tile" width="320" height="180"></canvas>
-            <video  id="vd-local-video"  class="vd-video-tile" autoplay muted playsinline></video>
+        </div>
+
+        <!-- ═════ Video stage — full-screen overlay above drawer ═════ -->
+        <div id="vd-video-strip" class="vd-video-stage hidden">
+          <canvas id="vd-remote-video" class="vd-remote-stage" width="1280" height="720"></canvas>
+          <div id="vd-remote-placeholder" class="vd-remote-placeholder">
+            <div class="vd-placeholder-text">Waiting for remote video…</div>
+            <div id="vd-remote-counter" class="vd-placeholder-sub">0 frames received</div>
           </div>
+          <video id="vd-local-video" class="vd-local-pip" autoplay muted playsinline></video>
         </div>
       </div>
 
