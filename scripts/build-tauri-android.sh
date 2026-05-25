@@ -15,8 +15,8 @@ set -euo pipefail
 #   - Output: desktop/src-tauri/gen/android/.../*.apk
 #
 # Usage:
-#   ./scripts/build-tauri-android.sh                  # full pipeline (debug, arm64 only)
-#   ./scripts/build-tauri-android.sh --release        # release APK
+#   ./scripts/build-tauri-android.sh                  # full pipeline (release, arm64 only)
+#   ./scripts/build-tauri-android.sh --debug          # debug APK (faster, no optimisation)
 #   ./scripts/build-tauri-android.sh --no-pull        # skip git fetch
 #   ./scripts/build-tauri-android.sh --rust           # force-clean rust target
 #   ./scripts/build-tauri-android.sh --init           # also run `cargo tauri android init`
@@ -38,7 +38,7 @@ SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=
 REBUILD_RUST=0
 DO_PULL=1
 DO_INIT=0
-BUILD_RELEASE=0
+BUILD_RELEASE=1
 BUILD_ARCH="arm64"
 NEXT_IS_ARCH=0
 for arg in "$@"; do
@@ -52,7 +52,7 @@ for arg in "$@"; do
         --pull)     DO_PULL=1 ;;
         --no-pull)  DO_PULL=0 ;;
         --init)     DO_INIT=1 ;;
-        --release)  BUILD_RELEASE=1 ;;
+        --debug)    BUILD_RELEASE=0 ;;
         --arch)     NEXT_IS_ARCH=1 ;;
         -h|--help)
             sed -n '3,32p' "$0"

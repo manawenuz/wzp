@@ -105,20 +105,15 @@ docker run --rm --user 1000:1000 \
 set -euo pipefail
 cd /build/source
 
-echo ">>> Building relay + client + web + bench..."
-cargo build --release --bin wzp-relay --bin wzp-client --bin wzp-web --bin wzp-bench 2>&1 | tail -5
-
-echo ">>> Building audio client..."
-cargo build --release --bin wzp-client --features audio 2>&1 | tail -3
-cp target/release/wzp-client target/release/wzp-client-audio
-cargo build --release --bin wzp-client 2>&1 | tail -3
+echo ">>> Building relay + web..."
+cargo build --release --bin wzp-relay --bin wzp-web 2>&1 | tail -5
 
 echo ">>> Binaries:"
-ls -lh target/release/wzp-relay target/release/wzp-client target/release/wzp-client-audio target/release/wzp-web target/release/wzp-bench
+ls -lh target/release/wzp-relay target/release/wzp-web
 
 echo ">>> Packaging..."
 tar czf /tmp/wzp-linux-x86_64.tar.gz \
-    -C target/release wzp-relay wzp-client wzp-client-audio wzp-web wzp-bench
+    -C target/release wzp-relay wzp-web
 
 echo "BINARIES_BUILT"
 '
@@ -131,7 +126,7 @@ TARBALL="$BASE_DIR/data/cache-linux/target/release/../../../wzp-linux-x86_64.tar
 docker run --rm \
     -v "$BASE_DIR/data/cache-linux/target:/build/target" \
     wzp-android-builder bash -c \
-    "cp /build/target/release/wzp-relay /build/target/release/wzp-client /build/target/release/wzp-client-audio /build/target/release/wzp-web /build/target/release/wzp-bench /tmp/ && tar czf /tmp/wzp-linux-x86_64.tar.gz -C /tmp wzp-relay wzp-client wzp-client-audio wzp-web wzp-bench && cat /tmp/wzp-linux-x86_64.tar.gz" \
+    "cp /build/target/release/wzp-relay /build/target/release/wzp-web /tmp/ && tar czf /tmp/wzp-linux-x86_64.tar.gz -C /tmp wzp-relay wzp-web && cat /tmp/wzp-linux-x86_64.tar.gz" \
     > /tmp/wzp-linux-x86_64.tar.gz
 
 URL=$(curl -s -F "file=@/tmp/wzp-linux-x86_64.tar.gz" -H "Authorization: $rusty_auth_token" "$rusty_address")
