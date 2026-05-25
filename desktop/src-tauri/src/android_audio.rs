@@ -96,6 +96,35 @@ pub fn set_audio_mode_communication() -> Result<(), String> {
     Ok(())
 }
 
+/// Run `set_audio_mode_communication` on Tauri's main thread, where the
+/// Android context is initialized. Calling it from arbitrary Tokio blocking
+/// workers panics inside `ndk_context::android_context()`.
+pub async fn set_audio_mode_communication_on_main(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let result = std::panic::catch_unwind(set_audio_mode_communication)
+            .map_err(|panic| {
+                if let Some(s) = panic.downcast_ref::<&str>() {
+                    format!("panic: {s}")
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    format!("panic: {s}")
+                } else {
+                    "panic: unknown".to_string()
+                }
+            })
+            .and_then(|r| r);
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("run_on_main_thread: {e}"))?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+        .await
+        .map_err(|_| "set_audio_mode_communication timed out after 2s".to_string())?
+        .map_err(|_| "set_audio_mode_communication result channel closed".to_string())?
+}
+
 /// Restore `AudioManager.MODE_NORMAL`. Call when a VoIP call ends.
 pub fn set_audio_mode_normal() -> Result<(), String> {
     let (vm, activity) = jvm_and_activity()?;
