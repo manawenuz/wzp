@@ -48,6 +48,9 @@ const BITRATE_MODE_CBR: i32 = 2;
 /// AMediaCodec keyframe buffer flag.
 #[cfg(target_os = "android")]
 const AMEDIACODEC_BUFFER_FLAG_KEY_FRAME: u32 = 1;
+/// MediaCodec encoder parameter key for forcing the next output frame to be a sync frame.
+#[cfg(target_os = "android")]
+const MEDIA_CODEC_REQUEST_SYNC_FRAME: &str = "request-sync";
 
 // AMediaCodec is thread-safe; the NonNull inside MediaCodec suppresses auto-Send.
 #[cfg(target_os = "android")]
@@ -117,12 +120,11 @@ impl VideoEncoder for MediaCodecEncoder {
                 .dequeue_input_buffer(std::time::Duration::from_millis(10))
             {
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
-                    let flags = if self.force_keyframe {
-                        AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
-                    } else {
-                        0
-                    };
-                    let input = i420_to_nv12(&frame.data, self.width as usize, self.height as usize)?;
+                    if self.force_keyframe {
+                        self.request_sync_frame();
+                    }
+                    let input =
+                        i420_to_nv12(&frame.data, self.width as usize, self.height as usize)?;
                     let to_copy = {
                         let buf = buffer.buffer_mut();
                         let n = input.len().min(buf.len());
@@ -132,7 +134,7 @@ impl VideoEncoder for MediaCodecEncoder {
                         n
                     };
                     self.codec
-                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, flags)
+                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, 0)
                         .map_err(|e| {
                             VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
                         })?;
@@ -174,6 +176,14 @@ impl VideoEncoder for MediaCodecEncoder {
 
 #[cfg(target_os = "android")]
 impl MediaCodecEncoder {
+    fn request_sync_frame(&self) {
+        let mut params = MediaFormat::new();
+        params.set_i32(MEDIA_CODEC_REQUEST_SYNC_FRAME, 0);
+        if let Err(e) = self.codec.set_parameters(params) {
+            tracing::warn!(error = %e, "AMediaCodec request sync frame failed");
+        }
+    }
+
     /// Drain all available output buffers and convert from AVCC to Annex-B.
     fn drain_output(&mut self) -> Result<Vec<u8>, VideoError> {
         let mut output = Vec::new();

@@ -19,7 +19,7 @@ shiguredo_svt_av1 = "2026.1.0"
 shiguredo_video_toolbox = "2026.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
-ndk = { version = "0.9", features = ["media"] }
+ndk = { version = "0.9", features = ["api-level-26", "media"] }
 
 [dev-dependencies]
 rand = "0.8"
