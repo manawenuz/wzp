@@ -99,12 +99,12 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::LossRecoveryUpdate { .. } => CallSignalType::Offer, // reuse (telemetry)
         SignalMessage::Ping { .. } | SignalMessage::Pong { .. } => CallSignalType::Offer,
         SignalMessage::AuthToken { .. } => CallSignalType::Offer,
-        SignalMessage::Hold => CallSignalType::Hold,
-        SignalMessage::Unhold => CallSignalType::Unhold,
-        SignalMessage::Mute => CallSignalType::Mute,
-        SignalMessage::Unmute => CallSignalType::Unmute,
+        SignalMessage::Hold { .. } => CallSignalType::Hold,
+        SignalMessage::Unhold { .. } => CallSignalType::Unhold,
+        SignalMessage::Mute { .. } => CallSignalType::Mute,
+        SignalMessage::Unmute { .. } => CallSignalType::Unmute,
         SignalMessage::Transfer { .. } => CallSignalType::Transfer,
-        SignalMessage::TransferAck => CallSignalType::Offer, // reuse
+        SignalMessage::TransferAck { .. } => CallSignalType::Offer, // reuse
         SignalMessage::PresenceUpdate { .. } => CallSignalType::Offer, // reuse
         SignalMessage::RouteQuery { .. } => CallSignalType::Offer, // reuse
         SignalMessage::TransportFeedback { .. } => CallSignalType::Offer, // reuse (BWE)
@@ -199,19 +199,19 @@ mod tests {
         ));
 
         assert!(matches!(
-            signal_to_call_type(&SignalMessage::Hold),
+            signal_to_call_type(&SignalMessage::Hold { version: default_signal_version() }),
             CallSignalType::Hold
         ));
         assert!(matches!(
-            signal_to_call_type(&SignalMessage::Unhold),
+            signal_to_call_type(&SignalMessage::Unhold { version: default_signal_version() }),
             CallSignalType::Unhold
         ));
         assert!(matches!(
-            signal_to_call_type(&SignalMessage::Mute),
+            signal_to_call_type(&SignalMessage::Mute { version: default_signal_version() }),
             CallSignalType::Mute
         ));
         assert!(matches!(
-            signal_to_call_type(&SignalMessage::Unmute),
+            signal_to_call_type(&SignalMessage::Unmute { version: default_signal_version() }),
             CallSignalType::Unmute
         ));
 

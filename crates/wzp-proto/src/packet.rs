@@ -669,13 +669,25 @@ pub enum SignalMessage {
     },
 
     /// Put the call on hold (stop sending media, keep session alive).
-    Hold,
+    Hold {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Resume a held call.
-    Unhold,
+    Unhold {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Mute request from the remote side (server-initiated mute, like IAX2 QUELCH).
-    Mute,
+    Mute {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Unmute request from the remote side (like IAX2 UNQUELCH).
-    Unmute,
+    Unmute {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Transfer the call to another peer.
     Transfer {
         #[serde(default = "default_signal_version")]
@@ -685,7 +697,10 @@ pub enum SignalMessage {
         relay_addr: Option<String>,
     },
     /// Acknowledge a transfer request.
-    TransferAck,
+    TransferAck {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
 
     /// Presence update from a peer relay (gossip protocol).
     /// Sent periodically over probe connections to share which fingerprints
@@ -1729,7 +1744,7 @@ mod tests {
                 version: default_signal_version(),
                 timestamp_ms: 12345,
             },
-            SignalMessage::Hold,
+            SignalMessage::Hold { version: default_signal_version() },
             SignalMessage::Hangup {
                 version: default_signal_version(),
                 reason: HangupReason::Normal,
@@ -1750,28 +1765,28 @@ mod tests {
 
     #[test]
     fn hold_unhold_serialize() {
-        let hold = SignalMessage::Hold;
+        let hold = SignalMessage::Hold { version: default_signal_version() };
         let json = serde_json::to_string(&hold).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Hold));
+        assert!(matches!(decoded, SignalMessage::Hold { .. }));
 
-        let unhold = SignalMessage::Unhold;
+        let unhold = SignalMessage::Unhold { version: default_signal_version() };
         let json = serde_json::to_string(&unhold).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Unhold));
+        assert!(matches!(decoded, SignalMessage::Unhold { .. }));
     }
 
     #[test]
     fn mute_unmute_serialize() {
-        let mute = SignalMessage::Mute;
+        let mute = SignalMessage::Mute { version: default_signal_version() };
         let json = serde_json::to_string(&mute).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Mute));
+        assert!(matches!(decoded, SignalMessage::Mute { .. }));
 
-        let unmute = SignalMessage::Unmute;
+        let unmute = SignalMessage::Unmute { version: default_signal_version() };
         let json = serde_json::to_string(&unmute).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Unmute));
+        assert!(matches!(decoded, SignalMessage::Unmute { .. }));
     }
 
     #[test]
@@ -1818,10 +1833,10 @@ mod tests {
 
     #[test]
     fn transfer_ack_serialize() {
-        let ack = SignalMessage::TransferAck;
+        let ack = SignalMessage::TransferAck { version: default_signal_version() };
         let json = serde_json::to_string(&ack).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::TransferAck));
+        assert!(matches!(decoded, SignalMessage::TransferAck { .. }));
     }
 
     #[test]
