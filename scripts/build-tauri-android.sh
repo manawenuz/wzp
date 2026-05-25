@@ -342,8 +342,8 @@ for ARCH in $ARCHS; do
         cp -r /build/source/desktop/dist/. "$PATCH_DIR/assets/"
         (cd "$PATCH_DIR" && zip -r /build/source/desktop/src-tauri/"$UNSIGNED_APK_PATH" assets/)
         rm -rf "$PATCH_DIR"
-        echo ">>> APK patched: $(ls -lh "$UNSIGNED_APK_PATH" | awk '{print $5}')"
-        echo ">>> assets in APK: $(unzip -l "$UNSIGNED_APK_PATH" | grep 'assets/' | wc -l) entries"
+        echo ">>> APK patched: $(ls -lh "$UNSIGNED_APK_PATH" | awk "{print \$5}")"
+        echo ">>> assets in APK: $(unzip -l "$UNSIGNED_APK_PATH" | grep "assets/" | wc -l) entries"
     fi
 
     # Copy produced APK with arch suffix
