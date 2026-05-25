@@ -16,9 +16,18 @@ class MainActivity : TauriActivity() {
     private const val AUDIO_PERMISSIONS_REQUEST = 4242
     private val REQUIRED_AUDIO_PERMISSIONS = arrayOf(
       Manifest.permission.RECORD_AUDIO,
-      Manifest.permission.MODIFY_AUDIO_SETTINGS
+      Manifest.permission.MODIFY_AUDIO_SETTINGS,
+      Manifest.permission.CAMERA
     )
   }
+
+  // NOTE: granting CAMERA at the Android system layer is necessary but NOT
+  // sufficient for video on Android. Tauri/Wry's internal WebChromeClient
+  // does not currently grant `getUserMedia` permission requests, so the
+  // browser-layer getUserMedia call still fails even after the OS grants
+  // CAMERA. Fixing this needs either a Tauri plugin that overrides the
+  // WebChromeClient, or a native Camera2/CameraX capture path that bypasses
+  // the WebView. Tracked as a follow-up.
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()

@@ -615,10 +615,12 @@ impl CallEngine {
                 video_codec = ?hs.video_codec,
                 "first-join diag: connected to relay, handshake complete"
             );
-            Arc::new(wzp_client::encrypted_transport::EncryptingTransport::new(
-                transport,
-                hs.session,
-            ))
+            // NOTE: see comment in CallEngine::start (~line 1585) — we intentionally
+            // do NOT wrap with EncryptingTransport. The pairwise client↔relay session
+            // key can't be used end-to-end without MLS or relay re-encryption.
+            drop(hs.session);
+            let _ = hs.video_codec;
+            transport
         } else {
             info!(
                 t_ms = call_t0.elapsed().as_millis(),
@@ -1584,6 +1586,12 @@ impl CallEngine {
         // accept_handshake handler. See the android branch's
         // comment for the full rationale.
         let quinn_transport = transport.clone();
+        // NOTE: EncryptingTransport is intentionally NOT wrapping the transport here.
+        // The client↔relay handshake derives a pairwise session key, but the relay
+        // forwards media without decrypt+re-encrypt — so a recipient with a different
+        // pairwise key cannot decrypt the sender's ciphertext. True E2E for the SFU
+        // model needs MLS group keys (or hop-by-hop relay re-encryption); until that
+        // PRD lands, media goes plaintext-over-QUIC-TLS to the relay.
         let (_negotiated_video_codec, transport): (_, Arc<dyn wzp_proto::MediaTransport>) =
             if !is_direct_p2p {
                 let hs =
@@ -1594,13 +1602,8 @@ impl CallEngine {
                             e
                         })?;
                 info!(video_codec = ?hs.video_codec, "handshake complete");
-                let enc = Arc::new(
-                    wzp_client::encrypted_transport::EncryptingTransport::new(
-                        transport,
-                        hs.session,
-                    ),
-                );
-                (hs.video_codec, enc)
+                drop(hs.session);
+                (hs.video_codec, transport)
             } else {
                 info!("direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
                 (None, transport)
