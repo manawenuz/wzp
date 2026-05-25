@@ -605,10 +605,12 @@ const remoteCtx = vdRemoteVideo.getContext("2d")!;
 const vdRemotePlaceholder = document.getElementById("vd-remote-placeholder")!;
 const vdRemoteCounter = document.getElementById("vd-remote-counter")!;
 let remoteFrameCount = 0;
+let remoteFrameSerial = 0;
 
 listen("video:frame", (event: any) => {
   const { width, height, jpeg_b64 } = event.payload;
   if (!jpeg_b64) return;
+  const frameSerial = ++remoteFrameSerial;
 
   remoteVideoActive = true;
   vdVideoStrip.classList.remove("hidden");
@@ -620,6 +622,7 @@ listen("video:frame", (event: any) => {
 
   const img = new Image();
   img.onload = () => {
+    if (frameSerial !== remoteFrameSerial) return;
     remoteCtx.drawImage(img, 0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
   };
   img.src = `data:image/jpeg;base64,${jpeg_b64}`;

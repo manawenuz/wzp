@@ -181,6 +181,22 @@ fn should_log_video_sample(frame_no: u64, is_keyframe: bool) -> bool {
     frame_no <= 5 || is_keyframe || frame_no % 30 == 0
 }
 
+fn is_startup_black_i420(data: &[u8], width: u32, height: u32) -> bool {
+    let y_size = width as usize * height as usize;
+    let uv_size = y_size / 4;
+    if data.len() < y_size + uv_size * 2 {
+        return false;
+    }
+
+    let y = &data[..y_size];
+    let u = &data[y_size..y_size + uv_size];
+    let v = &data[y_size + uv_size..y_size + uv_size * 2];
+    let y_nonblack = y.iter().any(|&b| b > 3);
+    let u_chroma = u.iter().any(|&b| !(124..=132).contains(&b));
+    let v_chroma = v.iter().any(|&b| !(124..=132).contains(&b));
+    !y_nonblack && !u_chroma && !v_chroma
+}
+
 /// Resolve a quality string from the UI to a QualityProfile.
 /// Returns None for "auto" (use default adaptive behavior).
 fn resolve_quality(quality: &str) -> Option<QualityProfile> {
@@ -689,7 +705,10 @@ impl CallEngine {
         // through the signal channel (DirectCallOffer/Answer carry
         // identity_pub + ephemeral_pub + signature).
         let quinn_transport = transport.clone();
-        let (_negotiated_video_codec, transport): (Option<wzp_proto::CodecId>, Arc<dyn wzp_proto::MediaTransport>) = if !is_direct_p2p {
+        let (_negotiated_video_codec, transport): (
+            Option<wzp_proto::CodecId>,
+            Arc<dyn wzp_proto::MediaTransport>,
+        ) = if !is_direct_p2p {
             crate::emit_call_debug(
                 &app,
                 "connect:handshake_start",
@@ -1114,9 +1133,7 @@ impl CallEngine {
                         snap.lost_packets,
                         snap.loss_pct,
                     );
-                    if let Some(tuning) =
-                        dred_tuner.update(win_loss, snap.rtt_ms, pq.jitter_ms)
-                    {
+                    if let Some(tuning) = dred_tuner.update(win_loss, snap.rtt_ms, pq.jitter_ms) {
                         encoder.apply_dred_tuning(tuning);
                         if wzp_codec::dred_verbose_logs() {
                             info!(
@@ -1306,9 +1323,7 @@ impl CallEngine {
                                     }),
                                 );
                             }
-                            if let Some((codec_id, is_kf, frame)) =
-                                video_reassembler.push(&pkt)
-                            {
+                            if let Some((codec_id, is_kf, frame)) = video_reassembler.push(&pkt) {
                                 video_reassembled_samples += 1;
                                 if !video_first_reassembled_logged {
                                     video_first_reassembled_logged = true;
@@ -1352,7 +1367,9 @@ impl CallEngine {
                                             "platform": "android",
                                         }),
                                     );
-                                    match wzp_video::factory::create_video_decoder(codec_id, 1280, 720) {
+                                    match wzp_video::factory::create_video_decoder(
+                                        codec_id, 1280, 720,
+                                    ) {
                                         Ok(d) => {
                                             info!(codec = ?codec_id, "video decoder created (android)");
                                             crate::emit_call_debug(
@@ -1415,7 +1432,8 @@ impl CallEngine {
                                                     }),
                                                 );
                                             }
-                                            if should_log_video_sample(video_decoded_samples, is_kf) {
+                                            if should_log_video_sample(video_decoded_samples, is_kf)
+                                            {
                                                 crate::emit_call_debug(
                                                     &recv_app,
                                                     "video:decoded_frame_sample",
@@ -1882,36 +1900,36 @@ impl CallEngine {
                         "platform": "android",
                     }),
                 );
-                let mut encoder = match wzp_video::factory::create_video_encoder(
-                    vid_codec, 1280, 720, 1_500_000,
-                ) {
-                    Ok(e) => {
-                        crate::emit_call_debug(
-                            &vid_app,
-                            "video:encoder_started",
-                            serde_json::json!({
-                                "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                "codec": format!("{:?}", vid_codec),
-                                "platform": "android",
-                            }),
-                        );
-                        e
-                    }
-                    Err(e) => {
-                        error!("video encoder init failed (android): {e}");
-                        crate::emit_call_debug(
-                            &vid_app,
-                            "video:encoder_init_failed",
-                            serde_json::json!({
-                                "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                "codec": format!("{:?}", vid_codec),
-                                "platform": "android",
-                                "error": e.to_string(),
-                            }),
-                        );
-                        return;
-                    }
-                };
+                let mut encoder =
+                    match wzp_video::factory::create_video_encoder(vid_codec, 1280, 720, 1_500_000)
+                    {
+                        Ok(e) => {
+                            crate::emit_call_debug(
+                                &vid_app,
+                                "video:encoder_started",
+                                serde_json::json!({
+                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", vid_codec),
+                                    "platform": "android",
+                                }),
+                            );
+                            e
+                        }
+                        Err(e) => {
+                            error!("video encoder init failed (android): {e}");
+                            crate::emit_call_debug(
+                                &vid_app,
+                                "video:encoder_init_failed",
+                                serde_json::json!({
+                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", vid_codec),
+                                    "platform": "android",
+                                    "error": e.to_string(),
+                                }),
+                            );
+                            return;
+                        }
+                    };
                 let mut seq: u32 = 0;
                 let mut frames_since_keyframe: u32 = 0;
                 let mut first_send_logged = false;
@@ -1919,6 +1937,7 @@ impl CallEngine {
                 let mut camera_frames: u64 = 0;
                 let mut empty_encodes: u64 = 0;
                 let mut encoded_frame_samples: u64 = 0;
+                let mut skipped_startup_black_frames: u64 = 0;
                 let mut wait_ticks: u64 = 0;
                 encoder.request_keyframe();
                 crate::emit_call_debug(
@@ -1995,6 +2014,30 @@ impl CallEngine {
                         }
                     };
 
+                    if !first_send_logged
+                        && skipped_startup_black_frames < 30
+                        && is_startup_black_i420(&frame.data, frame.width, frame.height)
+                    {
+                        skipped_startup_black_frames += 1;
+                        encoder.request_keyframe();
+                        if skipped_startup_black_frames == 1
+                            || skipped_startup_black_frames % 10 == 0
+                        {
+                            crate::emit_call_debug(
+                                &vid_app,
+                                "video:startup_black_frame_skipped",
+                                serde_json::json!({
+                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", vid_codec),
+                                    "camera_frames": camera_frames,
+                                    "skipped": skipped_startup_black_frames,
+                                    "platform": "android",
+                                }),
+                            );
+                        }
+                        continue;
+                    }
+
                     if frames_since_keyframe >= 150 {
                         encoder.request_keyframe();
                         crate::emit_call_debug(
@@ -2050,7 +2093,11 @@ impl CallEngine {
                     let is_keyframe = encoder.is_keyframe(&encoded);
                     let ts_ms = vid_t0.elapsed().as_millis() as u32;
                     let pkts = wzp_video::transport::packetize_video_frame(
-                        &encoded, vid_codec, is_keyframe, &mut seq, ts_ms,
+                        &encoded,
+                        vid_codec,
+                        is_keyframe,
+                        &mut seq,
+                        ts_ms,
                     );
                     if encoded_frame_samples < 5 {
                         encoded_frame_samples += 1;
@@ -2495,9 +2542,7 @@ impl CallEngine {
                         snap.lost_packets,
                         snap.loss_pct,
                     );
-                    if let Some(tuning) =
-                        dred_tuner.update(win_loss, snap.rtt_ms, pq.jitter_ms)
-                    {
+                    if let Some(tuning) = dred_tuner.update(win_loss, snap.rtt_ms, pq.jitter_ms) {
                         encoder.apply_dred_tuning(tuning);
                     }
                 }
@@ -2613,9 +2658,7 @@ impl CallEngine {
                                     }),
                                 );
                             }
-                            if let Some((codec_id, is_kf, frame)) =
-                                video_reassembler.push(&pkt)
-                            {
+                            if let Some((codec_id, is_kf, frame)) = video_reassembler.push(&pkt) {
                                 video_reassembled_samples += 1;
                                 if !video_first_reassembled_logged {
                                     video_first_reassembled_logged = true;
@@ -2660,7 +2703,9 @@ impl CallEngine {
                                             "platform": "desktop",
                                         }),
                                     );
-                                    match wzp_video::factory::create_video_decoder(codec_id, 1280, 720) {
+                                    match wzp_video::factory::create_video_decoder(
+                                        codec_id, 1280, 720,
+                                    ) {
                                         Ok(d) => {
                                             info!(codec = ?codec_id, "video decoder created");
                                             crate::emit_call_debug(
@@ -2726,7 +2771,8 @@ impl CallEngine {
                                                     }),
                                                 );
                                             }
-                                            if should_log_video_sample(video_decoded_samples, is_kf) {
+                                            if should_log_video_sample(video_decoded_samples, is_kf)
+                                            {
                                                 crate::emit_call_debug(
                                                     &recv_app,
                                                     "video:decoded_frame_sample",
@@ -2807,10 +2853,7 @@ impl CallEngine {
                                     }
                                 }
                                 // Evict stale partial frames every ~10 frames received.
-                                video_reassembler.evict_stale(
-                                    pkt.header.timestamp,
-                                    5_000,
-                                );
+                                video_reassembler.evict_stale(pkt.header.timestamp, 5_000);
                             }
                             continue; // video packet handled — skip audio path
                         }
@@ -3039,36 +3082,36 @@ impl CallEngine {
                         "platform": "desktop",
                     }),
                 );
-                let mut encoder = match wzp_video::factory::create_video_encoder(
-                    vid_codec, 1280, 720, 1_500_000,
-                ) {
-                    Ok(e) => {
-                        crate::emit_call_debug(
-                            &vid_app,
-                            "video:encoder_started",
-                            serde_json::json!({
-                                "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                "codec": format!("{:?}", vid_codec),
-                                "platform": "desktop",
-                            }),
-                        );
-                        e
-                    }
-                    Err(e) => {
-                        error!("video encoder init failed: {e}");
-                        crate::emit_call_debug(
-                            &vid_app,
-                            "video:encoder_init_failed",
-                            serde_json::json!({
-                                "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                "codec": format!("{:?}", vid_codec),
-                                "platform": "desktop",
-                                "error": e.to_string(),
-                            }),
-                        );
-                        return;
-                    }
-                };
+                let mut encoder =
+                    match wzp_video::factory::create_video_encoder(vid_codec, 1280, 720, 1_500_000)
+                    {
+                        Ok(e) => {
+                            crate::emit_call_debug(
+                                &vid_app,
+                                "video:encoder_started",
+                                serde_json::json!({
+                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", vid_codec),
+                                    "platform": "desktop",
+                                }),
+                            );
+                            e
+                        }
+                        Err(e) => {
+                            error!("video encoder init failed: {e}");
+                            crate::emit_call_debug(
+                                &vid_app,
+                                "video:encoder_init_failed",
+                                serde_json::json!({
+                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", vid_codec),
+                                    "platform": "desktop",
+                                    "error": e.to_string(),
+                                }),
+                            );
+                            return;
+                        }
+                    };
                 let mut seq: u32 = 0;
                 let mut frames_since_keyframe: u32 = 0;
                 let mut first_send_logged = false;
@@ -3076,6 +3119,7 @@ impl CallEngine {
                 let mut camera_frames: u64 = 0;
                 let mut empty_encodes: u64 = 0;
                 let mut encoded_frame_samples: u64 = 0;
+                let mut skipped_startup_black_frames: u64 = 0;
                 let mut wait_ticks: u64 = 0;
                 encoder.request_keyframe();
                 crate::emit_call_debug(
@@ -3152,6 +3196,30 @@ impl CallEngine {
                         }
                     };
 
+                    if !first_send_logged
+                        && skipped_startup_black_frames < 30
+                        && is_startup_black_i420(&frame.data, frame.width, frame.height)
+                    {
+                        skipped_startup_black_frames += 1;
+                        encoder.request_keyframe();
+                        if skipped_startup_black_frames == 1
+                            || skipped_startup_black_frames % 10 == 0
+                        {
+                            crate::emit_call_debug(
+                                &vid_app,
+                                "video:startup_black_frame_skipped",
+                                serde_json::json!({
+                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                    "codec": format!("{:?}", vid_codec),
+                                    "camera_frames": camera_frames,
+                                    "skipped": skipped_startup_black_frames,
+                                    "platform": "desktop",
+                                }),
+                            );
+                        }
+                        continue;
+                    }
+
                     if frames_since_keyframe >= 150 {
                         encoder.request_keyframe();
                         crate::emit_call_debug(
@@ -3207,7 +3275,11 @@ impl CallEngine {
                     let is_keyframe = encoder.is_keyframe(&encoded);
                     let ts_ms = vid_t0.elapsed().as_millis() as u32;
                     let pkts = wzp_video::transport::packetize_video_frame(
-                        &encoded, vid_codec, is_keyframe, &mut seq, ts_ms,
+                        &encoded,
+                        vid_codec,
+                        is_keyframe,
+                        &mut seq,
+                        ts_ms,
                     );
                     if encoded_frame_samples < 5 {
                         encoded_frame_samples += 1;
@@ -3382,7 +3454,6 @@ impl Drop for CallEngine {
         self.running.store(false, Ordering::SeqCst);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
