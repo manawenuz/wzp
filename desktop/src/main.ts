@@ -263,6 +263,10 @@ function renderCallDebugLog() {
   sCallDebugLogEl.scrollTop = sCallDebugLogEl.scrollHeight;
 }
 
+function debugLog(step: string, details: any = {}) {
+  invoke("call_debug_log", { step, details }).catch(() => {});
+}
+
 // ── Quality slider ────────────────────────────────────────────────
 const QUALITY_STEPS = ["studio-64k", "studio-48k", "studio-32k", "auto", "good", "degraded", "codec2-3200", "catastrophic"];
 const QUALITY_LABELS = ["Studio 64k", "Studio 48k", "Studio 32k", "Auto", "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"];
@@ -488,14 +492,18 @@ vdSpkBtn.addEventListener("click", async () => {
 // ── Camera (Blocker 4 + 5) ────────────────────────────────────────
 const camCaptureCanvas = document.createElement("canvas");
 const camCaptureCtx = camCaptureCanvas.getContext("2d")!;
+let cameraCaptureFrameNo = 0;
+let cameraPushFailures = 0;
 
 async function startCamera() {
   if (cameraActive) return;
+  const constraints = {
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+    audio: false,
+  };
+  debugLog("camera:get_user_media_start", { constraints });
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
-      audio: false,
-    });
+    cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
     vdLocalVideo.srcObject = cameraStream;
     vdVideoStrip.classList.remove("hidden");
 
@@ -503,25 +511,61 @@ async function startCamera() {
     const settings = track.getSettings();
     camCaptureCanvas.width = settings.width ?? 640;
     camCaptureCanvas.height = settings.height ?? 360;
+    debugLog("camera:get_user_media_ok", {
+      width: camCaptureCanvas.width,
+      height: camCaptureCanvas.height,
+      frameRate: settings.frameRate ?? null,
+      deviceId: settings.deviceId ? "present" : null,
+      facingMode: settings.facingMode ?? null,
+    });
 
     cameraActive = true;
+    cameraCaptureFrameNo = 0;
+    cameraPushFailures = 0;
     vdCamIcon.textContent = "Cam ✓";
     vdCamBtn.classList.add("active");
 
     // Capture loop at ~15 fps
     cameraFrameTimer = window.setInterval(async () => {
       if (!cameraActive) return;
-      camCaptureCtx.drawImage(vdLocalVideo, 0, 0, camCaptureCanvas.width, camCaptureCanvas.height);
-      const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
-      const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
-      try { await invoke("push_camera_frame", { jpeg_b64: b64 }); } catch { /* call not active */ }
+      cameraCaptureFrameNo++;
+      try {
+        camCaptureCtx.drawImage(vdLocalVideo, 0, 0, camCaptureCanvas.width, camCaptureCanvas.height);
+        const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
+        const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+        if (cameraCaptureFrameNo === 1 || cameraCaptureFrameNo % 150 === 0) {
+          debugLog("camera:capture_frame", {
+            frame_no: cameraCaptureFrameNo,
+            width: camCaptureCanvas.width,
+            height: camCaptureCanvas.height,
+            jpeg_b64_len: b64.length,
+          });
+        }
+        await invoke("push_camera_frame", { jpegB64: b64 });
+      } catch (e: any) {
+        cameraPushFailures++;
+        if (cameraPushFailures === 1 || cameraPushFailures % 30 === 0) {
+          debugLog("camera:push_failed", {
+            frame_no: cameraCaptureFrameNo,
+            failures: cameraPushFailures,
+            error: errorMessage(e),
+          });
+        }
+      }
     }, 67); // 67 ms ≈ 15 fps
-  } catch (e) {
+  } catch (e: any) {
     console.warn("camera access denied or unavailable:", e);
+    debugLog("camera:get_user_media_failed", {
+      name: e?.name ?? null,
+      message: e?.message ?? String(e),
+    });
   }
 }
 
 function stopCamera() {
+  if (cameraActive) {
+    debugLog("camera:stopped", { frames: cameraCaptureFrameNo });
+  }
   cameraActive = false;
   if (cameraFrameTimer != null) { window.clearInterval(cameraFrameTimer); cameraFrameTimer = null; }
   if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }

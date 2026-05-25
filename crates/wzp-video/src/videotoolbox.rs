@@ -160,9 +160,11 @@ impl VideoEncoder for VideoToolboxEncoder {
         if packet.is_empty() {
             return false;
         }
-        let nal_type = packet[0] & 0x1F;
-        // NAL type 5 = IDR slice (keyframe).
-        nal_type == 5
+        let nals = split_annex_b(packet);
+        if nals.is_empty() {
+            return (packet[0] & 0x1F) == 5;
+        }
+        nals.iter().any(|nal| !nal.is_empty() && (nal[0] & 0x1F) == 5)
     }
 }
 
@@ -791,6 +793,11 @@ mod tests {
         let enc = VideoToolboxEncoder::new(1280, 720, 2_000_000).unwrap();
         assert!(enc.is_keyframe(&[0x65, 0x01, 0x02]));
         assert!(!enc.is_keyframe(&[0x41, 0x01, 0x02]));
+        assert!(enc.is_keyframe(&[
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x01, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x68, 0x02, // PPS
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x03, // IDR
+        ]));
     }
 
     #[test]

@@ -177,9 +177,9 @@ fn missing_fragment_blocks_reassembly() {
 #[test]
 fn video_codec_selection_semantics() {
     // The relay's selection rule is: first codec offered by the caller.
-    let offered = vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main];
+    let offered = vec![CodecId::H264Baseline];
     let chosen = offered.into_iter().next();
-    assert_eq!(chosen, Some(CodecId::Av1Main));
+    assert_eq!(chosen, Some(CodecId::H264Baseline));
 
     // When no codecs are offered, video is audio-only.
     let empty: Vec<CodecId> = vec![];

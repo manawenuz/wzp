@@ -177,9 +177,9 @@ mod tests {
 
     #[test]
     fn video_codec_picks_first_offered() {
-        let codecs = vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main];
+        let codecs = vec![CodecId::H264Baseline];
         let chosen: Option<CodecId> = codecs.into_iter().next();
-        assert_eq!(chosen, Some(CodecId::Av1Main));
+        assert_eq!(chosen, Some(CodecId::H264Baseline));
     }
 
     #[test]

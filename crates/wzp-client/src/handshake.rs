@@ -8,6 +8,8 @@ use wzp_proto::{
     CodecId, HangupReason, MediaTransport, QualityProfile, SignalMessage, default_signal_version,
 };
 
+const SUPPORTED_VIDEO_CODECS: &[CodecId] = &[CodecId::H264Baseline];
+
 /// Result of a successful client-side handshake.
 pub struct HandshakeResult {
     pub session: Box<dyn CryptoSession>,
@@ -102,7 +104,7 @@ pub async fn perform_handshake(
         alias: alias.map(|s| s.to_string()),
         protocol_version: 2,
         supported_versions: vec![2],
-        video_codecs: vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main],
+        video_codecs: SUPPORTED_VIDEO_CODECS.to_vec(),
     };
     transport
         .send_signal(&offer)
@@ -189,16 +191,17 @@ mod tests {
         let mut kx2 = WarzoneKeyExchange::from_identity_seed(&[0x66; 32]);
         kx2.generate_ephemeral();
         let session2 = kx2.derive_session(&[0u8; 32]).unwrap();
-        let hs2 = HandshakeResult { session: session2, video_codec: Some(CodecId::Av1Main) };
-        assert_eq!(hs2.video_codec, Some(CodecId::Av1Main));
+        let hs2 = HandshakeResult {
+            session: session2,
+            video_codec: Some(CodecId::H264Baseline),
+        };
+        assert_eq!(hs2.video_codec, Some(CodecId::H264Baseline));
     }
 
     #[test]
-    fn offer_contains_three_video_codecs() {
-        // The offer sent in perform_handshake always includes the three codecs
-        // declared in order: AV1 > H264 > H265.  Verify via the const list.
-        let offered = vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main];
-        assert_eq!(offered.len(), 3);
-        assert_eq!(offered[0], CodecId::Av1Main, "AV1 must be preferred");
+    fn offer_contains_h264_only() {
+        // Keep room video on the common denominator until Android AV1/HEVC
+        // send paths are proven in-device.
+        assert_eq!(SUPPORTED_VIDEO_CODECS, &[CodecId::H264Baseline]);
     }
 }

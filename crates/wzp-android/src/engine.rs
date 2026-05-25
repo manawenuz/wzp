@@ -538,7 +538,7 @@ async fn run_call(
         alias: alias.map(|s| s.to_string()),
         protocol_version: 2,
         supported_versions: vec![2],
-        video_codecs: vec![],
+        video_codecs: vec![CodecId::H264Baseline],
     };
     transport.send_signal(&offer).await?;
     info!("CallOffer sent, waiting for CallAnswer...");

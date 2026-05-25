@@ -31,7 +31,7 @@ use engine::CallEngine;
 
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
@@ -49,6 +49,11 @@ use wzp_proto::{MediaTransport, default_signal_version};
 // Mirrors the existing `wzp_codec::dred_verbose_logs` pattern.
 
 static CALL_DEBUG_LOGS: AtomicBool = AtomicBool::new(false);
+static CAMERA_PUSH_FRAMES: AtomicU64 = AtomicU64::new(0);
+static CAMERA_PUSH_DROPS: AtomicU64 = AtomicU64::new(0);
+static CAMERA_PUSH_NO_ENGINE: AtomicU64 = AtomicU64::new(0);
+static CAMERA_PUSH_NO_SENDER: AtomicU64 = AtomicU64::new(0);
+static CAMERA_PUSH_DECODE_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn call_debug_logs_enabled() -> bool {
@@ -79,6 +84,18 @@ pub(crate) fn emit_call_debug(app: &tauri::AppHandle, step: &str, details: serde
         "details": details,
     });
     let _ = app.emit("call-debug-log", payload);
+}
+
+#[tauri::command]
+fn call_debug_log(app: tauri::AppHandle, step: String, details: serde_json::Value) {
+    if step == "camera:get_user_media_start" {
+        CAMERA_PUSH_FRAMES.store(0, Ordering::Relaxed);
+        CAMERA_PUSH_DROPS.store(0, Ordering::Relaxed);
+        CAMERA_PUSH_NO_ENGINE.store(0, Ordering::Relaxed);
+        CAMERA_PUSH_NO_SENDER.store(0, Ordering::Relaxed);
+        CAMERA_PUSH_DECODE_ERRORS.store(0, Ordering::Relaxed);
+    }
+    emit_call_debug(&app, &step, details);
 }
 
 /// Short git hash captured at compile time by build.rs.
@@ -152,20 +169,66 @@ fn rgb_to_i420(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// The frontend calls this at ~15 fps from a canvas.toDataURL() capture loop.
 #[tauri::command]
 async fn push_camera_frame(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     jpeg_b64: String,
 ) -> Result<(), String> {
     use base64::Engine as _;
-    let jpeg_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&jpeg_b64)
-        .map_err(|e| e.to_string())?;
+    let jpeg_bytes = match base64::engine::general_purpose::STANDARD.decode(&jpeg_b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let errs = CAMERA_PUSH_DECODE_ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+            if errs == 1 || errs % 30 == 0 {
+                emit_call_debug(
+                    &app,
+                    "camera:jpeg_base64_decode_failed",
+                    serde_json::json!({
+                        "errors": errs,
+                        "error": e.to_string(),
+                        "b64_len": jpeg_b64.len(),
+                    }),
+                );
+            }
+            return Err(e.to_string());
+        }
+    };
 
-    let dyn_img = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
-        .map_err(|e| e.to_string())?;
+    let dyn_img = match image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg) {
+        Ok(img) => img,
+        Err(e) => {
+            let errs = CAMERA_PUSH_DECODE_ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+            if errs == 1 || errs % 30 == 0 {
+                emit_call_debug(
+                    &app,
+                    "camera:jpeg_decode_failed",
+                    serde_json::json!({
+                        "errors": errs,
+                        "error": e.to_string(),
+                        "jpeg_bytes": jpeg_bytes.len(),
+                    }),
+                );
+            }
+            return Err(e.to_string());
+        }
+    };
     let rgb_img = dyn_img.to_rgb8();
     let w = rgb_img.width() as usize;
     let h = rgb_img.height() as usize;
     let yuv = rgb_to_i420(rgb_img.as_raw(), w, h);
+    let frame_no = CAMERA_PUSH_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if frame_no == 1 || frame_no % 150 == 0 {
+        emit_call_debug(
+            &app,
+            "camera:frame_received",
+            serde_json::json!({
+                "frame_no": frame_no,
+                "width": w,
+                "height": h,
+                "jpeg_bytes": jpeg_bytes.len(),
+                "yuv_bytes": yuv.len(),
+            }),
+        );
+    }
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -182,7 +245,52 @@ async fn push_camera_frame(
     let engine = state.engine.lock().await;
     if let Some(ref eng) = *engine {
         if let Some(ref tx) = eng.camera_tx {
-            let _ = tx.try_send(frame); // drop frame if send task is saturated
+            match tx.try_send(frame) {
+                Ok(()) => {
+                    if frame_no == 1 || frame_no % 150 == 0 {
+                        emit_call_debug(
+                            &app,
+                            "camera:frame_queued",
+                            serde_json::json!({ "frame_no": frame_no }),
+                        );
+                    }
+                }
+                Err(e) => {
+                    let drops = CAMERA_PUSH_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if drops == 1 || drops % 30 == 0 {
+                        emit_call_debug(
+                            &app,
+                            "camera:frame_drop",
+                            serde_json::json!({
+                                "frame_no": frame_no,
+                                "drops": drops,
+                                "reason": e.to_string(),
+                            }),
+                        );
+                    }
+                }
+            }
+        } else {
+            let count = CAMERA_PUSH_NO_SENDER.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == 1 || count % 150 == 0 {
+                emit_call_debug(
+                    &app,
+                    "camera:no_video_sender",
+                    serde_json::json!({
+                        "count": count,
+                        "hint": "video was not negotiated or the encoder task failed before camera_tx was installed",
+                    }),
+                );
+            }
+        }
+    } else {
+        let count = CAMERA_PUSH_NO_ENGINE.fetch_add(1, Ordering::Relaxed) + 1;
+        if count == 1 || count % 150 == 0 {
+            emit_call_debug(
+                &app,
+                "camera:no_call_engine",
+                serde_json::json!({ "count": count }),
+            );
         }
     }
     Ok(())
@@ -3396,6 +3504,7 @@ pub fn run() {
             get_dred_verbose_logs,
             set_call_debug_logs,
             get_call_debug_logs,
+            call_debug_log,
             push_camera_frame,
         ])
         .run(tauri::generate_context!())
