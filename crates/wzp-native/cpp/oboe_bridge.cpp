@@ -404,12 +404,14 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
     {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         int poll_count = 0;
+        bool streams_started = false;
         while (std::chrono::steady_clock::now() < deadline) {
             auto cap_state = g_capture_stream->getState();
             auto play_state = g_playout_stream->getState();
             if (cap_state == oboe::StreamState::Started &&
                 play_state == oboe::StreamState::Started) {
                 LOGI("both streams Started after %d polls", poll_count);
+                streams_started = true;
                 break;
             }
             poll_count++;
@@ -420,6 +422,18 @@ int wzp_oboe_start(const WzpOboeConfig* config, const WzpOboeRings* rings) {
              (int)g_capture_stream->getState(),
              (int)g_playout_stream->getState(),
              poll_count);
+        if (!streams_started) {
+            LOGE("Timed out waiting for Oboe streams to reach Started state");
+            g_running.store(false, std::memory_order_release);
+            g_rings_valid.store(false, std::memory_order_release);
+            g_capture_stream->requestStop();
+            g_playout_stream->requestStop();
+            g_capture_stream->close();
+            g_playout_stream->close();
+            g_capture_stream.reset();
+            g_playout_stream.reset();
+            return -6;
+        }
     }
 
     LOGI("Oboe started: sr=%d burst=%d ch=%d",

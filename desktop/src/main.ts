@@ -186,6 +186,24 @@ function showToast(msg: string, durationMs = 3500) {
   (el as any)._timer = setTimeout(() => { el!.style.opacity = "0"; }, durationMs);
 }
 
+function errorMessage(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && "message" in e) {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === "string") return msg;
+  }
+  return String(e);
+}
+
+function connectWithTimeout(args: Record<string, unknown>, timeoutMs = 15000) {
+  return Promise.race([
+    invoke("connect", args),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("connect timed out (15s) - check audio permissions")), timeoutMs)
+    ),
+  ]);
+}
+
 // Known users in the room (from RoomUpdate or signal presence)
 interface LobbyUser {
   fingerprint: string;
@@ -335,23 +353,17 @@ joinVoiceBtn.addEventListener("click", async () => {
   joinVoiceBtn.textContent = "Connecting…";
   (joinVoiceBtn as HTMLButtonElement).disabled = true;
   try {
-    const connectRace = Promise.race([
-      invoke("connect", {
-        relay: relay.address,
-        room: s.room || "general",
-        alias: s.alias || "",
-        osAec: s.osAec,
-        quality: s.quality || "auto",
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject("connect timed out (15s) — check audio permissions"), 15000)
-      ),
-    ]);
-    await connectRace;
+    await connectWithTimeout({
+      relay: relay.address,
+      room: s.room || "general",
+      alias: s.alias || "",
+      osAec: s.osAec,
+      quality: s.quality || "auto",
+    });
     enterVoice(false);
   } catch (e: any) {
     console.error("connect failed:", e);
-    showToast(`Join failed: ${e}`);
+    showToast(`Join failed: ${errorMessage(e)}`);
   } finally {
     connectPending = false;
     joinVoiceBtn.textContent = origText;
@@ -517,7 +529,7 @@ listen("signal-event", (event: any) => {
         connectPending = true;
         const s = loadSettings();
         try {
-          await invoke("connect", {
+          await connectWithTimeout({
             relay: data.relay_addr,
             room: data.room,
             alias: s.alias || "",
@@ -532,7 +544,7 @@ listen("signal-event", (event: any) => {
           enterVoice(true);
         } catch (e: any) {
           console.error("connect failed:", e);
-          showToast(`Call failed to connect: ${e}`);
+          showToast(`Call failed to connect: ${errorMessage(e)}`);
         } finally {
           connectPending = false;
         }
