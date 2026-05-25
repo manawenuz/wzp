@@ -101,12 +101,15 @@ pub async fn perform_handshake(
         .await
         .map_err(HandshakeError::Transport)?;
 
-    // 5. Wait for CallAnswer
-    let answer = transport
-        .recv_signal()
-        .await
-        .map_err(HandshakeError::Transport)?
-        .ok_or(HandshakeError::ConnectionClosed)?;
+    // 5. Wait for CallAnswer — 10s timeout guards against relay not responding.
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        transport.recv_signal(),
+    )
+    .await
+    .map_err(|_| HandshakeError::Transport(wzp_proto::TransportError::Timeout { ms: 10_000 }))?
+    .map_err(HandshakeError::Transport)?
+    .ok_or(HandshakeError::ConnectionClosed)?;
 
     let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile) =
         match answer {

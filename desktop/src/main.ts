@@ -331,7 +331,9 @@ joinVoiceBtn.addEventListener("click", async () => {
   const s = loadSettings();
   if (!relay) { showToast("No relay configured"); return; }
   connectPending = true;
-  joinVoiceBtn.classList.add("hidden");
+  const origText = joinVoiceBtn.textContent;
+  joinVoiceBtn.textContent = "Connecting…";
+  (joinVoiceBtn as HTMLButtonElement).disabled = true;
   try {
     await invoke("connect", {
       relay: relay.address,
@@ -344,9 +346,10 @@ joinVoiceBtn.addEventListener("click", async () => {
   } catch (e: any) {
     console.error("connect failed:", e);
     showToast(`Join failed: ${e}`);
-    joinVoiceBtn.classList.remove("hidden");
   } finally {
     connectPending = false;
+    joinVoiceBtn.textContent = origText;
+    (joinVoiceBtn as HTMLButtonElement).disabled = false;
   }
 });
 
