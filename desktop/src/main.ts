@@ -335,13 +335,19 @@ joinVoiceBtn.addEventListener("click", async () => {
   joinVoiceBtn.textContent = "Connecting…";
   (joinVoiceBtn as HTMLButtonElement).disabled = true;
   try {
-    await invoke("connect", {
-      relay: relay.address,
-      room: s.room || "general",
-      alias: s.alias || "",
-      osAec: s.osAec,
-      quality: s.quality || "auto",
-    });
+    const connectRace = Promise.race([
+      invoke("connect", {
+        relay: relay.address,
+        room: s.room || "general",
+        alias: s.alias || "",
+        osAec: s.osAec,
+        quality: s.quality || "auto",
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject("connect timed out (15s) — check audio permissions"), 15000)
+      ),
+    ]);
+    await connectRace;
     enterVoice(false);
   } catch (e: any) {
     console.error("connect failed:", e);

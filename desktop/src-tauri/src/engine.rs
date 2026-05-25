@@ -601,8 +601,15 @@ impl CallEngine {
             }
         }
 
+        // Run audio_start on a blocking thread — wzp_oboe_start is a
+        // sync FFI call that can stall waiting for the Android audio
+        // HAL. Calling it directly blocks the tokio worker thread,
+        // which freezes all async tasks including our own timeouts.
         let t_pre_audio = call_t0.elapsed().as_millis();
-        if let Err(code) = crate::wzp_native::audio_start() {
+        let audio_start_result = tokio::task::spawn_blocking(crate::wzp_native::audio_start)
+            .await
+            .map_err(|e| anyhow::anyhow!("audio_start task panic: {e}"))?;
+        if let Err(code) = audio_start_result {
             return Err(anyhow::anyhow!(
                 "wzp_native_audio_start failed: code {code}"
             ));
