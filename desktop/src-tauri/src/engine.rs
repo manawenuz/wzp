@@ -93,6 +93,90 @@ fn index_to_profile(idx: u8) -> Option<QualityProfile> {
     }
 }
 
+fn bytes_prefix_hex(data: &[u8], max_len: usize) -> String {
+    data.iter()
+        .take(max_len)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn annexb_nal_sample(data: &[u8], max_nals: usize) -> serde_json::Value {
+    let mut nal_types = Vec::new();
+    let mut start_offsets = Vec::new();
+    let mut i = 0usize;
+    while i + 3 < data.len() && nal_types.len() < max_nals {
+        let sc_len = if data[i..].starts_with(&[0, 0, 1]) {
+            3
+        } else if i + 4 <= data.len() && data[i..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else {
+            i += 1;
+            continue;
+        };
+        let nal_start = i + sc_len;
+        if nal_start < data.len() {
+            start_offsets.push(i);
+            nal_types.push(data[nal_start] & 0x1f);
+        }
+        i = nal_start.saturating_add(1);
+    }
+
+    serde_json::json!({
+        "prefix_hex": bytes_prefix_hex(data, 48),
+        "annexb_start_offsets": start_offsets,
+        "h264_nal_types": nal_types,
+    })
+}
+
+fn plane_stats(plane: &[u8]) -> serde_json::Value {
+    if plane.is_empty() {
+        return serde_json::json!({
+            "len": 0,
+            "min": null,
+            "max": null,
+            "mean": null,
+            "prefix_hex": "",
+        });
+    }
+    let mut min = u8::MAX;
+    let mut max = u8::MIN;
+    let mut sum: u64 = 0;
+    for &b in plane {
+        min = min.min(b);
+        max = max.max(b);
+        sum += b as u64;
+    }
+    serde_json::json!({
+        "len": plane.len(),
+        "min": min,
+        "max": max,
+        "mean": (sum as f64 / plane.len() as f64),
+        "prefix_hex": bytes_prefix_hex(plane, 24),
+    })
+}
+
+fn i420_sample(data: &[u8], width: u32, height: u32) -> serde_json::Value {
+    let y_size = width as usize * height as usize;
+    let uv_size = y_size / 4;
+    if data.len() < y_size + uv_size * 2 {
+        return serde_json::json!({
+            "valid_i420": false,
+            "data_len": data.len(),
+            "expected_len": y_size + uv_size * 2,
+            "prefix_hex": bytes_prefix_hex(data, 48),
+        });
+    }
+    serde_json::json!({
+        "valid_i420": true,
+        "data_len": data.len(),
+        "expected_len": y_size + uv_size * 2,
+        "y": plane_stats(&data[..y_size]),
+        "u": plane_stats(&data[y_size..y_size + uv_size]),
+        "v": plane_stats(&data[y_size + uv_size..y_size + uv_size * 2]),
+    })
+}
+
 /// Resolve a quality string from the UI to a QualityProfile.
 /// Returns None for "auto" (use default adaptive behavior).
 fn resolve_quality(quality: &str) -> Option<QualityProfile> {
@@ -1186,6 +1270,7 @@ impl CallEngine {
             let mut video_first_reassembled_logged = false;
             let mut video_reassembled_samples: u64 = 0;
             let mut video_first_decoded_logged = false;
+            let mut video_decoded_samples: u64 = 0;
             let mut video_decoder_buffering_count: u64 = 0;
 
             loop {
@@ -1213,6 +1298,7 @@ impl CallEngine {
                                         "codec": format!("{:?}", pkt.header.codec_id),
                                         "payload_bytes": pkt.payload.len(),
                                         "stream_id": pkt.header.stream_id,
+                                        "packet_sample": annexb_nal_sample(&pkt.payload, 4),
                                     }),
                                 );
                             }
@@ -1231,6 +1317,7 @@ impl CallEngine {
                                             "is_keyframe": is_kf,
                                             "frame_bytes": frame.len(),
                                             "platform": "android",
+                                            "encoded_sample": annexb_nal_sample(&frame, 8),
                                         }),
                                     );
                                 }
@@ -1245,6 +1332,7 @@ impl CallEngine {
                                             "frame_bytes": frame.len(),
                                             "frame_no": video_reassembled_samples,
                                             "platform": "android",
+                                            "encoded_sample": annexb_nal_sample(&frame, 8),
                                         }),
                                     );
                                 }
@@ -1293,6 +1381,7 @@ impl CallEngine {
                                 if let Some(ref mut dec) = video_decoder {
                                     match dec.decode(&frame) {
                                         Ok(Some(yuv_frame)) => {
+                                            video_decoded_samples += 1;
                                             let jpeg_b64 = crate::i420_to_jpeg_b64(
                                                 &yuv_frame.data,
                                                 yuv_frame.width,
@@ -1312,6 +1401,32 @@ impl CallEngine {
                                                         "yuv_bytes": yuv_frame.data.len(),
                                                         "jpeg_ok": jpeg_ok,
                                                         "platform": "android",
+                                                        "i420_sample": i420_sample(
+                                                            &yuv_frame.data,
+                                                            yuv_frame.width,
+                                                            yuv_frame.height,
+                                                        ),
+                                                    }),
+                                                );
+                                            }
+                                            if video_decoded_samples <= 5 {
+                                                crate::emit_call_debug(
+                                                    &recv_app,
+                                                    "video:decoded_frame_sample",
+                                                    serde_json::json!({
+                                                        "t_ms": recv_t0.elapsed().as_millis() as u64,
+                                                        "codec": format!("{:?}", codec_id),
+                                                        "frame_no": video_decoded_samples,
+                                                        "width": yuv_frame.width,
+                                                        "height": yuv_frame.height,
+                                                        "yuv_bytes": yuv_frame.data.len(),
+                                                        "jpeg_ok": jpeg_ok,
+                                                        "platform": "android",
+                                                        "i420_sample": i420_sample(
+                                                            &yuv_frame.data,
+                                                            yuv_frame.width,
+                                                            yuv_frame.height,
+                                                        ),
                                                     }),
                                                 );
                                             }
@@ -1831,6 +1946,7 @@ impl CallEngine {
                                         "height": f.height,
                                         "data_bytes": f.data.len(),
                                         "platform": "android",
+                                        "i420_sample": i420_sample(&f.data, f.width, f.height),
                                     }),
                                 );
                             }
@@ -1929,6 +2045,8 @@ impl CallEngine {
                                 "is_keyframe": is_keyframe,
                                 "sample_no": encoded_frame_samples,
                                 "platform": "android",
+                                "encoded_sample": annexb_nal_sample(&encoded, 8),
+                                "first_packet_sample": pkts.first().map(|pkt| annexb_nal_sample(&pkt.payload, 4)),
                             }),
                         );
                     }
@@ -1946,6 +2064,8 @@ impl CallEngine {
                                 "encoded_bytes": encoded.len(),
                                 "stream_id": pkts[0].header.stream_id,
                                 "is_keyframe": is_keyframe,
+                                "encoded_sample": annexb_nal_sample(&encoded, 8),
+                                "first_packet_sample": annexb_nal_sample(&pkts[0].payload, 4),
                             }),
                         );
                     }
@@ -2432,6 +2552,7 @@ impl CallEngine {
             let mut video_first_reassembled_logged = false;
             let mut video_reassembled_samples: u64 = 0;
             let mut video_first_decoded_logged = false;
+            let mut video_decoded_samples: u64 = 0;
             let mut video_decoder_buffering_count: u64 = 0;
             let mut decoded_frames: u64 = 0;
             let mut decode_errs: u64 = 0;
@@ -2464,6 +2585,7 @@ impl CallEngine {
                                         "codec": format!("{:?}", pkt.header.codec_id),
                                         "payload_bytes": pkt.payload.len(),
                                         "stream_id": pkt.header.stream_id,
+                                        "packet_sample": annexb_nal_sample(&pkt.payload, 4),
                                     }),
                                 );
                             }
@@ -2482,6 +2604,7 @@ impl CallEngine {
                                             "is_keyframe": is_kf,
                                             "frame_bytes": frame.len(),
                                             "platform": "desktop",
+                                            "encoded_sample": annexb_nal_sample(&frame, 8),
                                         }),
                                     );
                                 }
@@ -2496,6 +2619,7 @@ impl CallEngine {
                                             "frame_bytes": frame.len(),
                                             "frame_no": video_reassembled_samples,
                                             "platform": "desktop",
+                                            "encoded_sample": annexb_nal_sample(&frame, 8),
                                         }),
                                     );
                                 }
@@ -2545,6 +2669,7 @@ impl CallEngine {
                                 if let Some(ref mut dec) = video_decoder {
                                     match dec.decode(&frame) {
                                         Ok(Some(yuv_frame)) => {
+                                            video_decoded_samples += 1;
                                             recv_fr.fetch_add(1, Ordering::Relaxed);
                                             // Emit video frame to WebView for rendering.
                                             // Always-on (not gated on debug flag) so the UI can show video.
@@ -2567,6 +2692,32 @@ impl CallEngine {
                                                         "yuv_bytes": yuv_frame.data.len(),
                                                         "jpeg_ok": jpeg_ok,
                                                         "platform": "desktop",
+                                                        "i420_sample": i420_sample(
+                                                            &yuv_frame.data,
+                                                            yuv_frame.width,
+                                                            yuv_frame.height,
+                                                        ),
+                                                    }),
+                                                );
+                                            }
+                                            if video_decoded_samples <= 5 {
+                                                crate::emit_call_debug(
+                                                    &recv_app,
+                                                    "video:decoded_frame_sample",
+                                                    serde_json::json!({
+                                                        "t_ms": recv_t0.elapsed().as_millis() as u64,
+                                                        "codec": format!("{:?}", codec_id),
+                                                        "frame_no": video_decoded_samples,
+                                                        "width": yuv_frame.width,
+                                                        "height": yuv_frame.height,
+                                                        "yuv_bytes": yuv_frame.data.len(),
+                                                        "jpeg_ok": jpeg_ok,
+                                                        "platform": "desktop",
+                                                        "i420_sample": i420_sample(
+                                                            &yuv_frame.data,
+                                                            yuv_frame.width,
+                                                            yuv_frame.height,
+                                                        ),
                                                     }),
                                                 );
                                             }
@@ -2932,6 +3083,7 @@ impl CallEngine {
                                         "height": f.height,
                                         "data_bytes": f.data.len(),
                                         "platform": "desktop",
+                                        "i420_sample": i420_sample(&f.data, f.width, f.height),
                                     }),
                                 );
                             }
@@ -3030,6 +3182,8 @@ impl CallEngine {
                                 "is_keyframe": is_keyframe,
                                 "sample_no": encoded_frame_samples,
                                 "platform": "desktop",
+                                "encoded_sample": annexb_nal_sample(&encoded, 8),
+                                "first_packet_sample": pkts.first().map(|pkt| annexb_nal_sample(&pkt.payload, 4)),
                             }),
                         );
                     }
@@ -3047,6 +3201,8 @@ impl CallEngine {
                                 "encoded_bytes": encoded.len(),
                                 "stream_id": pkts[0].header.stream_id,
                                 "is_keyframe": is_keyframe,
+                                "encoded_sample": annexb_nal_sample(&encoded, 8),
+                                "first_packet_sample": annexb_nal_sample(&pkts[0].payload, 4),
                             }),
                         );
                     }
