@@ -56,6 +56,30 @@ fn audio_manager<'local>(
     Ok(am)
 }
 
+fn has_permission(permission: &str) -> Result<bool, String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let permission = env
+        .new_string(permission)
+        .map_err(|e| format!("new_string(permission): {e}"))?;
+    let result = env
+        .call_method(
+            &activity,
+            "checkSelfPermission",
+            "(Ljava/lang/String;)I",
+            &[JValue::Object(&permission)],
+        )
+        .and_then(|v| v.i())
+        .map_err(|e| format!("checkSelfPermission: {e}"))?;
+    Ok(result == 0)
+}
+
+pub fn has_record_audio_permission() -> Result<bool, String> {
+    has_permission("android.permission.RECORD_AUDIO")
+}
+
 /// Set `AudioManager.MODE_IN_COMMUNICATION`. Call when a VoIP call starts.
 /// This tells the audio policy to route through the communication device
 /// path (earpiece/BT SCO) instead of the media path (speaker/BT A2DP).

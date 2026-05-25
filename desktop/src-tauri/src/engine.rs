@@ -544,13 +544,43 @@ impl CallEngine {
         // through the signal channel (DirectCallOffer/Answer carry
         // identity_pub + ephemeral_pub + signature).
         if !is_direct_p2p {
-            let _session =
-                wzp_client::handshake::perform_handshake(&*transport, &seed.0, Some(&alias))
-                    .await
-                    .map_err(|e| {
-                        error!("perform_handshake failed: {e}");
-                        e
-                    })?;
+            crate::emit_call_debug(
+                &app,
+                "connect:handshake_start",
+                serde_json::json!({
+                    "t_ms": call_t0.elapsed().as_millis(),
+                    "room": room,
+                    "remote": transport.remote_address().to_string(),
+                }),
+            );
+            let _session = match wzp_client::handshake::perform_handshake(
+                &*transport,
+                &seed.0,
+                Some(&alias),
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(e) => {
+                    error!("perform_handshake failed: {e}");
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:handshake_failed",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "error": e.to_string(),
+                        }),
+                    );
+                    return Err(e.into());
+                }
+            };
+            crate::emit_call_debug(
+                &app,
+                "connect:handshake_done",
+                serde_json::json!({
+                    "t_ms": call_t0.elapsed().as_millis(),
+                }),
+            );
             info!(
                 t_ms = call_t0.elapsed().as_millis(),
                 "first-join diag: connected to relay, handshake complete"
@@ -567,7 +597,19 @@ impl CallEngine {
         // startup. `wzp_native::audio_start()` brings up the capture +
         // playout streams; send/recv tasks below pull/push PCM through
         // the extern "C" bridge rings.
-        if !crate::wzp_native::is_loaded() {
+        let native_loaded = crate::wzp_native::is_loaded();
+        crate::emit_call_debug(
+            &app,
+            "connect:android_audio_preflight",
+            serde_json::json!({
+                "t_ms": call_t0.elapsed().as_millis(),
+                "wzp_native_loaded": native_loaded,
+                "record_audio_permission": crate::android_audio::has_record_audio_permission()
+                    .map(|v| serde_json::json!(v))
+                    .unwrap_or_else(|e| serde_json::json!({ "error": e })),
+            }),
+        );
+        if !native_loaded {
             return Err(anyhow::anyhow!(
                 "wzp-native not loaded — dlopen failed at startup"
             ));
@@ -584,7 +626,17 @@ impl CallEngine {
         // running stop first (no-op on cold start when not yet
         // started), we get the same "fresh rebuild" behavior on
         // every call.
+        crate::emit_call_debug(
+            &app,
+            "connect:audio_stop_start",
+            serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
+        );
         crate::wzp_native::audio_stop();
+        crate::emit_call_debug(
+            &app,
+            "connect:audio_stop_done",
+            serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
+        );
         // Brief pause to let Android's audio routing + AudioManager
         // settle after the stop. 50ms is enough for the driver to
         // release the audio session; shorter risks the new start
@@ -596,8 +648,28 @@ impl CallEngine {
         // (music drops from BT A2DP to earpiece, etc.).
         #[cfg(target_os = "android")]
         {
-            if let Err(e) = crate::android_audio::set_audio_mode_communication() {
-                tracing::warn!("set_audio_mode_communication failed: {e}");
+            crate::emit_call_debug(
+                &app,
+                "connect:audio_mode_start",
+                serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
+            );
+            match crate::android_audio::set_audio_mode_communication() {
+                Ok(()) => crate::emit_call_debug(
+                    &app,
+                    "connect:audio_mode_done",
+                    serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
+                ),
+                Err(e) => {
+                    tracing::warn!("set_audio_mode_communication failed: {e}");
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:audio_mode_failed",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "error": e,
+                        }),
+                    );
+                }
             }
         }
 
@@ -606,10 +678,33 @@ impl CallEngine {
         // HAL. Calling it directly blocks the tokio worker thread,
         // which freezes all async tasks including our own timeouts.
         let t_pre_audio = call_t0.elapsed().as_millis();
+        crate::emit_call_debug(
+            &app,
+            "connect:audio_start_start",
+            serde_json::json!({ "t_ms": t_pre_audio }),
+        );
         let audio_start_result = tokio::task::spawn_blocking(crate::wzp_native::audio_start)
             .await
-            .map_err(|e| anyhow::anyhow!("audio_start task panic: {e}"))?;
+            .map_err(|e| {
+                crate::emit_call_debug(
+                    &app,
+                    "connect:audio_start_panic",
+                    serde_json::json!({
+                        "t_ms": call_t0.elapsed().as_millis(),
+                        "error": e.to_string(),
+                    }),
+                );
+                anyhow::anyhow!("audio_start task panic: {e}")
+            })?;
         if let Err(code) = audio_start_result {
+            crate::emit_call_debug(
+                &app,
+                "connect:audio_start_failed",
+                serde_json::json!({
+                    "t_ms": call_t0.elapsed().as_millis(),
+                    "code": code,
+                }),
+            );
             return Err(anyhow::anyhow!(
                 "wzp_native_audio_start failed: code {code}"
             ));
@@ -632,6 +727,14 @@ impl CallEngine {
             t_ms = t_audio_start_done,
             audio_start_ms = t_audio_start_done.saturating_sub(t_pre_audio),
             "first-join diag: wzp-native audio started (with stop+prime cycle)"
+        );
+        crate::emit_call_debug(
+            &app,
+            "connect:audio_start_done",
+            serde_json::json!({
+                "t_ms": t_audio_start_done,
+                "audio_start_ms": t_audio_start_done.saturating_sub(t_pre_audio),
+            }),
         );
 
         let running = Arc::new(AtomicBool::new(true));

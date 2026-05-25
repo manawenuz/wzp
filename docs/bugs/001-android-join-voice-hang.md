@@ -25,6 +25,8 @@ Working-tree diagnostic changes applied during this investigation:
 
 - `crates/wzp-native/cpp/oboe_bridge.cpp`: return `-6` if both streams do not reach `Started` before the 2s poll deadline. This turns Oboe false-success into a visible Rust/JS error.
 - `desktop/src/main.ts`: shared `connectWithTimeout()` for room joins and direct-call auto-connect; shared `errorMessage()` for useful toast text.
+- `desktop/src-tauri/src/engine.rs`: emit `connect:handshake_*`, `connect:android_audio_preflight`, `connect:audio_*` markers around each Android-only join step.
+- `desktop/src-tauri/src/lib.rs`: emit `connect:reuse_endpoint` so we can see whether the room join is sharing the signal QUIC endpoint.
 
 Next Android repro should distinguish:
 
@@ -32,6 +34,7 @@ Next Android repro should distinguish:
 |---|---|
 | `Join failed: wzp_native_audio_start failed: code -2` | mic permission / capture open failure |
 | `Join failed: wzp_native_audio_start failed: code -6` | Oboe streams opened/requested start, but HAL never transitioned both to `Started` |
+| `Join failed: transport: timeout after 10000ms` or similar after `connect:handshake_start` | QUIC connected, but relay media handshake did not return `CallAnswer` |
 | `Join failed: connect timed out (15s) - check audio permissions` | Tauri command did not resolve to JS; collect Rust/Tauri logs around `connect:call_engine_starting` |
 
 ---
@@ -156,6 +159,11 @@ Key log lines to look for:
 
 | Log line | Diagnosis |
 |----------|-----------|
+| `connect:reuse_endpoint` | Whether media is sharing the existing signal endpoint |
+| `connect:handshake_start` followed by 10s timeout | Relay media handshake is stuck before Android audio starts |
+| `connect:handshake_done` | Network/relay handshake succeeded; continue to audio diagnostics |
+| `connect:android_audio_preflight` | Shows `wzp-native` load state and RECORD_AUDIO permission |
+| `connect:audio_start_start` with no done/failed | Native Oboe call is hanging |
 | `wzp_oboe_start: already running` | Issue A — g_running not cleared |
 | `Failed to open capture stream: ErrorPermissionDenied` | Issue B — mic permission delay |
 | `Failed to start capture` / `Failed to start playout` | Oboe HAL error, code -4 or -5 |

@@ -772,6 +772,18 @@ async fn connect(
     if reuse_endpoint.is_some() && pre_connected_transport.is_none() {
         tracing::info!("connect: reusing existing signal endpoint for media connection");
     }
+    emit_call_debug(
+        &app,
+        "connect:reuse_endpoint",
+        serde_json::json!({
+            "has_reuse_endpoint": reuse_endpoint.is_some(),
+            "reuse_local_addr": reuse_endpoint
+                .as_ref()
+                .and_then(|ep| ep.local_addr().ok())
+                .map(|addr| addr.to_string()),
+            "has_pre_connected_transport": pre_connected_transport.is_some(),
+        }),
+    );
 
     let app_clone = app.clone();
     // Log transport details for debugging direct P2P media issues
