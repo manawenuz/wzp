@@ -17,5 +17,7 @@
     -->
     <key>NSMicrophoneUsageDescription</key>
     <string>WarzonePhone needs microphone access to transmit your voice during calls.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>WarzonePhone needs camera access for video calls.</string>
 </dict>
 </plist>

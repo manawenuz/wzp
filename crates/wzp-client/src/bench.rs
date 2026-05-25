@@ -151,7 +151,7 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
     let mut total_repair_bytes = 0usize;
 
     for block_idx in 0..num_blocks {
-        let block_id = (block_idx % 256) as u8;
+        let block_id = (block_idx % 65536) as u16;
 
         // Create fresh encoder and decoder for each block
         let mut fec_enc = RaptorQFecEncoder::new(frames_per_block, 256);

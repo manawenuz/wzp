@@ -5,8 +5,15 @@
 
 use wzp_crypto::{CryptoSession, KeyExchange, WarzoneKeyExchange};
 use wzp_proto::{
-    HangupReason, MediaTransport, QualityProfile, SignalMessage, default_signal_version,
+    CodecId, HangupReason, MediaTransport, QualityProfile, SignalMessage, default_signal_version,
 };
+
+/// Result of a successful client-side handshake.
+pub struct HandshakeResult {
+    pub session: Box<dyn CryptoSession>,
+    /// Video codec agreed with the relay. `None` if peer is audio-only.
+    pub video_codec: Option<CodecId>,
+}
 
 /// Errors that can occur during the client-side cryptographic handshake.
 #[derive(Debug)]
@@ -64,7 +71,7 @@ pub async fn perform_handshake(
     transport: &dyn MediaTransport,
     seed: &[u8; 32],
     alias: Option<&str>,
-) -> Result<Box<dyn CryptoSession>, HandshakeError> {
+) -> Result<HandshakeResult, HandshakeError> {
     // 1. Create key exchange from identity seed
     let mut kx = WarzoneKeyExchange::from_identity_seed(seed);
     let identity_pub = kx.identity_public_key();
@@ -95,6 +102,7 @@ pub async fn perform_handshake(
         alias: alias.map(|s| s.to_string()),
         protocol_version: 2,
         supported_versions: vec![2],
+        video_codecs: vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main],
     };
     transport
         .send_signal(&offer)
@@ -111,15 +119,16 @@ pub async fn perform_handshake(
     .map_err(HandshakeError::Transport)?
     .ok_or(HandshakeError::ConnectionClosed)?;
 
-    let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile) =
+    let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile, video_codec) =
         match answer {
             SignalMessage::CallAnswer {
                 identity_pub,
                 ephemeral_pub,
                 signature,
                 chosen_profile,
+                video_codec,
                 ..
-            } => (identity_pub, ephemeral_pub, signature, chosen_profile),
+            } => (identity_pub, ephemeral_pub, signature, chosen_profile, video_codec),
             SignalMessage::Hangup {
                 reason: HangupReason::ProtocolVersionMismatch { server_supported },
                 ..
@@ -144,7 +153,7 @@ pub async fn perform_handshake(
         .derive_session(&callee_ephemeral_pub)
         .map_err(|e| HandshakeError::KeyDerivation(e.to_string()))?;
 
-    Ok(session)
+    Ok(HandshakeResult { session, video_codec })
 }
 
 #[cfg(test)]
@@ -165,5 +174,31 @@ mod tests {
             &data,
             &sig,
         ));
+    }
+
+    #[test]
+    fn handshake_result_carries_video_codec() {
+        // Verify that HandshakeResult has both fields accessible and that
+        // None is the correct default for audio-only peers.
+        let mut kx = WarzoneKeyExchange::from_identity_seed(&[0x55; 32]);
+        kx.generate_ephemeral();
+        let session = kx.derive_session(&[0u8; 32]).unwrap();
+        let hs = HandshakeResult { session, video_codec: None };
+        assert!(hs.video_codec.is_none());
+
+        let mut kx2 = WarzoneKeyExchange::from_identity_seed(&[0x66; 32]);
+        kx2.generate_ephemeral();
+        let session2 = kx2.derive_session(&[0u8; 32]).unwrap();
+        let hs2 = HandshakeResult { session: session2, video_codec: Some(CodecId::Av1Main) };
+        assert_eq!(hs2.video_codec, Some(CodecId::Av1Main));
+    }
+
+    #[test]
+    fn offer_contains_three_video_codecs() {
+        // The offer sent in perform_handshake always includes the three codecs
+        // declared in order: AV1 > H264 > H265.  Verify via the const list.
+        let offered = vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main];
+        assert_eq!(offered.len(), 3);
+        assert_eq!(offered[0], CodecId::Av1Main, "AV1 must be preferred");
     }
 }

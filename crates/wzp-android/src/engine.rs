@@ -538,6 +538,7 @@ async fn run_call(
         alias: alias.map(|s| s.to_string()),
         protocol_version: 2,
         supported_versions: vec![2],
+        video_codecs: vec![],
     };
     transport.send_signal(&offer).await?;
     info!("CallOffer sent, waiting for CallAnswer...");
@@ -948,8 +949,8 @@ async fn run_call(
                     }
 
                     let is_repair = pkt.header.is_repair();
-                    let pkt_block = pkt.header.fec_block as u8;
-                    let pkt_symbol = pkt.header.fec_block >> 8;
+                    let pkt_block = pkt.header.fec_block;
+                    let pkt_symbol = (pkt.header.fec_block >> 8) as u16;
                     let pkt_is_opus = pkt.header.codec_id.is_opus();
 
                     // Phase 2: Opus packets bypass RaptorQ entirely — DRED

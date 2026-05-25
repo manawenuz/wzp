@@ -87,7 +87,7 @@ async fn handshake_succeeds() {
     let callee_handle =
         tokio::spawn(async move { accept_handshake(server_t.as_ref(), &callee_seed).await });
 
-    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
+    let caller_hs = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
         .expect("perform_handshake should succeed");
 
@@ -102,7 +102,7 @@ async fn handshake_succeeds() {
     let plaintext = b"hello warzone";
 
     let mut ciphertext = Vec::new();
-    let mut caller_session = caller_session;
+    let mut caller_session = caller_hs.session;
     let mut callee_session = callee_session;
 
     caller_session
@@ -156,6 +156,7 @@ async fn handshake_rejects_v1_protocol_version() {
         alias: None,
         protocol_version: 1,
         supported_versions: vec![1, 2],
+        video_codecs: vec![],
     };
 
     client_transport
@@ -221,7 +222,7 @@ async fn handshake_verifies_identity() {
     let callee_handle =
         tokio::spawn(async move { accept_handshake(server_t.as_ref(), &callee_seed).await });
 
-    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
+    let caller_hs = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
         .expect("handshake must succeed even with different identities");
 
@@ -235,7 +236,7 @@ async fn handshake_verifies_identity() {
     let plaintext = b"identity verified";
 
     let mut ct = Vec::new();
-    let mut caller_session = caller_session;
+    let mut caller_session = caller_hs.session;
     let mut callee_session = callee_session;
 
     caller_session
@@ -301,7 +302,7 @@ async fn auth_then_handshake() {
         .await
         .expect("send AuthToken");
 
-    let caller_session = perform_handshake(client_transport.as_ref(), &caller_seed, None)
+    let caller_hs = perform_handshake(client_transport.as_ref(), &caller_seed, None)
         .await
         .expect("perform_handshake after auth");
 
@@ -315,7 +316,7 @@ async fn auth_then_handshake() {
     let plaintext = b"post-auth payload";
 
     let mut ct = Vec::new();
-    let mut caller_session = caller_session;
+    let mut caller_session = caller_hs.session;
     let mut callee_session = callee_session;
 
     caller_session
@@ -373,6 +374,7 @@ async fn handshake_rejects_bad_signature() {
         alias: None,
         protocol_version: 2,
         supported_versions: vec![2],
+        video_codecs: vec![],
     };
 
     client_transport

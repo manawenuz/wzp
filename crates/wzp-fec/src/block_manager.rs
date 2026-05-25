@@ -29,9 +29,9 @@ pub enum DecoderBlockState {
 /// Manages encoder-side block tracking.
 pub struct EncoderBlockManager {
     /// Current block ID being built.
-    current_id: u8,
+    current_id: u16,
     /// State of known blocks.
-    blocks: HashMap<u8, EncoderBlockState>,
+    blocks: HashMap<u16, EncoderBlockState>,
 }
 
 impl EncoderBlockManager {
@@ -45,7 +45,7 @@ impl EncoderBlockManager {
     }
 
     /// Get the next block ID (advances the current building block).
-    pub fn next_block_id(&mut self) -> u8 {
+    pub fn next_block_id(&mut self) -> u16 {
         let old = self.current_id;
         // Mark old block as pending.
         self.blocks.insert(old, EncoderBlockState::Pending);
@@ -57,23 +57,23 @@ impl EncoderBlockManager {
     }
 
     /// Current block ID being built.
-    pub fn current_id(&self) -> u8 {
+    pub fn current_id(&self) -> u16 {
         self.current_id
     }
 
     /// Mark a block as fully sent.
-    pub fn mark_sent(&mut self, block_id: u8) {
+    pub fn mark_sent(&mut self, block_id: u16) {
         self.blocks.insert(block_id, EncoderBlockState::Sent);
     }
 
     /// Mark a block as acknowledged by the peer.
-    pub fn mark_acknowledged(&mut self, block_id: u8) {
+    pub fn mark_acknowledged(&mut self, block_id: u16) {
         self.blocks
             .insert(block_id, EncoderBlockState::Acknowledged);
     }
 
     /// Get the state of a block.
-    pub fn state(&self, block_id: u8) -> Option<EncoderBlockState> {
+    pub fn state(&self, block_id: u16) -> Option<EncoderBlockState> {
         self.blocks.get(&block_id).copied()
     }
 
@@ -93,9 +93,9 @@ impl Default for EncoderBlockManager {
 /// Manages decoder-side block tracking.
 pub struct DecoderBlockManager {
     /// State of known blocks.
-    blocks: HashMap<u8, DecoderBlockState>,
+    blocks: HashMap<u16, DecoderBlockState>,
     /// Set of completed block IDs.
-    completed: HashSet<u8>,
+    completed: HashSet<u16>,
 }
 
 impl DecoderBlockManager {
@@ -107,43 +107,43 @@ impl DecoderBlockManager {
     }
 
     /// Register that we are receiving symbols for a block.
-    pub fn touch(&mut self, block_id: u8) {
+    pub fn touch(&mut self, block_id: u16) {
         self.blocks
             .entry(block_id)
             .or_insert(DecoderBlockState::Assembling);
     }
 
     /// Mark a block as successfully decoded.
-    pub fn mark_complete(&mut self, block_id: u8) {
+    pub fn mark_complete(&mut self, block_id: u16) {
         self.blocks.insert(block_id, DecoderBlockState::Complete);
         self.completed.insert(block_id);
     }
 
     /// Mark a block as expired.
-    pub fn mark_expired(&mut self, block_id: u8) {
+    pub fn mark_expired(&mut self, block_id: u16) {
         self.blocks.insert(block_id, DecoderBlockState::Expired);
         self.completed.remove(&block_id);
     }
 
     /// Check if a block has been fully decoded.
-    pub fn is_block_complete(&self, block_id: u8) -> bool {
+    pub fn is_block_complete(&self, block_id: u16) -> bool {
         self.completed.contains(&block_id)
     }
 
     /// Get the state of a block.
-    pub fn state(&self, block_id: u8) -> Option<DecoderBlockState> {
+    pub fn state(&self, block_id: u16) -> Option<DecoderBlockState> {
         self.blocks.get(&block_id).copied()
     }
 
     /// Expire all blocks older than the given block_id (using wrapping distance).
-    pub fn expire_before(&mut self, block_id: u8) {
-        let to_expire: Vec<u8> = self
+    pub fn expire_before(&mut self, block_id: u16) {
+        let to_expire: Vec<u16> = self
             .blocks
             .keys()
             .copied()
             .filter(|&id| {
                 let distance = block_id.wrapping_sub(id);
-                distance > 0 && distance <= 128
+                distance > 0 && distance <= 32768
             })
             .collect();
 
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn decoder_expire_before() {
         let mut mgr = DecoderBlockManager::new();
-        for i in 0..5u8 {
+        for i in 0..5u16 {
             mgr.touch(i);
         }
         mgr.mark_complete(1);
@@ -231,11 +231,11 @@ mod tests {
     #[test]
     fn next_block_id_wraps() {
         let mut mgr = EncoderBlockManager::new();
-        // Start at 0, advance to 255 then wrap
-        for _ in 0..255 {
+        // Start at 0, advance to u16::MAX then wrap
+        for _ in 0..65535 {
             mgr.next_block_id();
         }
-        assert_eq!(mgr.current_id(), 255);
+        assert_eq!(mgr.current_id(), u16::MAX);
         let next = mgr.next_block_id();
         assert_eq!(next, 0);
     }

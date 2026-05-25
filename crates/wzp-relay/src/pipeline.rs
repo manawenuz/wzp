@@ -110,7 +110,7 @@ impl RelayPipeline {
         // Feed packet into FEC decoder
         let header = &packet.header;
         let _ = self.fec_decoder.add_symbol(
-            (header.fec_block & 0xFF) as u8,
+            header.fec_block,
             header.fec_block >> 8,
             header.is_repair(),
             &packet.payload,
@@ -118,7 +118,7 @@ impl RelayPipeline {
 
         // Try to decode the FEC block
         let mut output = Vec::new();
-        if let Ok(Some(frames)) = self.fec_decoder.try_decode((header.fec_block & 0xFF) as u8) {
+        if let Ok(Some(frames)) = self.fec_decoder.try_decode(header.fec_block) {
             debug!(
                 block = header.fec_block,
                 frames = frames.len(),

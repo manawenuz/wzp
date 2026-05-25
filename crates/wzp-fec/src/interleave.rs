@@ -3,7 +3,7 @@
 //! rather than one block fatally.
 
 /// A symbol ready for transmission: (block_id, symbol_index, is_repair, data).
-pub type Symbol = (u8, u8, bool, Vec<u8>);
+pub type Symbol = (u16, u16, bool, Vec<u8>);
 
 /// Temporal interleaver that mixes symbols across multiple FEC blocks.
 pub struct Interleaver {
@@ -64,13 +64,13 @@ mod tests {
         let interleaver = Interleaver::with_default_depth();
 
         let block_a: Vec<Symbol> = (0..3)
-            .map(|i| (0u8, i as u8, false, vec![0xA0 + i as u8]))
+            .map(|i| (0u16, i as u16, false, vec![0xA0 + i as u8]))
             .collect();
         let block_b: Vec<Symbol> = (0..3)
-            .map(|i| (1u8, i as u8, false, vec![0xB0 + i as u8]))
+            .map(|i| (1u16, i as u16, false, vec![0xB0 + i as u8]))
             .collect();
         let block_c: Vec<Symbol> = (0..3)
-            .map(|i| (2u8, i as u8, false, vec![0xC0 + i as u8]))
+            .map(|i| (2u16, i as u16, false, vec![0xC0 + i as u8]))
             .collect();
 
         let result = interleaver.interleave(&[block_a, block_b, block_c]);
@@ -96,10 +96,10 @@ mod tests {
         let interleaver = Interleaver::new(2);
 
         let block_a: Vec<Symbol> = (0..3)
-            .map(|i| (0u8, i as u8, false, vec![0xA0 + i as u8]))
+            .map(|i| (0u16, i as u16, false, vec![0xA0 + i as u8]))
             .collect();
         let block_b: Vec<Symbol> = (0..1)
-            .map(|i| (1u8, i as u8, false, vec![0xB0 + i as u8]))
+            .map(|i| (1u16, i as u16, false, vec![0xB0 + i as u8]))
             .collect();
 
         let result = interleaver.interleave(&[block_a, block_b]);
@@ -128,7 +128,7 @@ mod tests {
         let blocks: Vec<Vec<Symbol>> = (0..3)
             .map(|b| {
                 (0..6)
-                    .map(|i| (b as u8, i as u8, false, vec![b as u8; 10]))
+                    .map(|i| (b as u16, i as u16, false, vec![b as u8; 10]))
                     .collect()
             })
             .collect();

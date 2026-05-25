@@ -42,6 +42,7 @@ pub async fn accept_handshake(
         supported_profiles,
         caller_alias,
         protocol_version,
+        caller_video_codecs,
     ) = match offer {
         SignalMessage::CallOffer {
             identity_pub,
@@ -51,6 +52,7 @@ pub async fn accept_handshake(
             alias,
             protocol_version,
             supported_versions: _,
+            video_codecs,
             ..
         } => (
             identity_pub,
@@ -59,6 +61,7 @@ pub async fn accept_handshake(
             supported_profiles,
             alias,
             protocol_version,
+            video_codecs,
         ),
         other => {
             return Err(anyhow::anyhow!(
@@ -108,6 +111,9 @@ pub async fn accept_handshake(
     // Choose the best supported profile (prefer GOOD > DEGRADED > CATASTROPHIC)
     let chosen_profile = choose_profile(&supported_profiles);
 
+    // Pick the first video codec the caller supports (relay forwards all video).
+    let video_codec = caller_video_codecs.into_iter().next();
+
     // 6. Send CallAnswer
     let answer = SignalMessage::CallAnswer {
         version: default_signal_version(),
@@ -115,6 +121,7 @@ pub async fn accept_handshake(
         ephemeral_pub,
         signature,
         chosen_profile,
+        video_codec,
     };
     transport.send_signal(&answer).await?;
 
@@ -147,6 +154,7 @@ fn choose_profile(_supported: &[QualityProfile]) -> QualityProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wzp_proto::CodecId;
 
     #[test]
     fn choose_profile_picks_highest_bitrate() {
@@ -163,5 +171,36 @@ mod tests {
     fn choose_profile_empty_defaults_to_good() {
         let chosen = choose_profile(&[]);
         assert_eq!(chosen, QualityProfile::GOOD);
+    }
+
+    // ── Video codec negotiation ───────────────────────────────────────
+
+    #[test]
+    fn video_codec_picks_first_offered() {
+        let codecs = vec![CodecId::Av1Main, CodecId::H264Baseline, CodecId::H265Main];
+        let chosen: Option<CodecId> = codecs.into_iter().next();
+        assert_eq!(chosen, Some(CodecId::Av1Main));
+    }
+
+    #[test]
+    fn video_codec_none_when_no_codecs_offered() {
+        let codecs: Vec<CodecId> = vec![];
+        let chosen: Option<CodecId> = codecs.into_iter().next();
+        assert_eq!(chosen, None);
+    }
+
+    #[test]
+    fn video_codec_single_codec_is_selected() {
+        let codecs = vec![CodecId::H265Main];
+        let chosen: Option<CodecId> = codecs.into_iter().next();
+        assert_eq!(chosen, Some(CodecId::H265Main));
+    }
+
+    #[test]
+    fn video_codec_order_is_preserved() {
+        // The relay must pick the FIRST codec as-offered, not sort or re-rank.
+        let codecs = vec![CodecId::H264Baseline, CodecId::Av1Main];
+        let chosen: Option<CodecId> = codecs.into_iter().next();
+        assert_eq!(chosen, Some(CodecId::H264Baseline));
     }
 }

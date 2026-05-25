@@ -16,6 +16,7 @@ pub mod factory;
 pub mod framer;
 pub mod mediacodec;
 pub mod nack;
+pub mod transport;
 pub mod simulcast;
 #[cfg(target_os = "macos")]
 pub mod svt_av1;

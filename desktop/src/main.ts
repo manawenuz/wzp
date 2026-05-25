@@ -79,6 +79,11 @@ const vdMicIcon = document.getElementById("vd-mic-icon")!;
 const vdSpkBtn = document.getElementById("vd-spk-btn")!;
 const vdSpkIcon = document.getElementById("vd-spk-icon")!;
 const vdEndBtn = document.getElementById("vd-end-btn")!;
+const vdCamBtn = document.getElementById("vd-cam-btn")!;
+const vdCamIcon = document.getElementById("vd-cam-icon")!;
+const vdVideoStrip = document.getElementById("vd-video-strip")!;
+const vdRemoteVideo = document.getElementById("vd-remote-video") as HTMLCanvasElement;
+const vdLocalVideo = document.getElementById("vd-local-video") as HTMLVideoElement;
 const vdDirectInfo = document.getElementById("vd-direct-info")!;
 const vdDcIdenticon = document.getElementById("vd-dc-identicon")!;
 const vdDcName = document.getElementById("vd-dc-name")!;
@@ -169,6 +174,12 @@ let inVoice = false;
 let connectPending = false; // guard against double-tap while connect is in-flight
 let directCallPeer: { fingerprint: string; alias: string | null } | null = null;
 let pendingCallId: string | null = null;
+
+// Video / camera state
+let cameraActive = false;
+let cameraStream: MediaStream | null = null;
+let cameraFrameTimer: number | null = null;
+let remoteVideoActive = false;
 
 function showToast(msg: string, durationMs = 3500) {
   let el = document.getElementById("wzp-toast");
@@ -420,6 +431,10 @@ function leaveVoice() {
   joinVoiceBtn.classList.remove("hidden");
   vdLevelBar.style.width = "0%";
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+  stopCamera();
+  remoteVideoActive = false;
+  vdVideoStrip.classList.add("hidden");
+  remoteCtx.clearRect(0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
 }
 
 // Drawer controls
@@ -433,6 +448,76 @@ vdMicBtn.addEventListener("click", async () => {
 });
 vdSpkBtn.addEventListener("click", async () => {
   try { await invoke("toggle_speaker"); } catch {}
+});
+
+// ── Camera (Blocker 4 + 5) ────────────────────────────────────────
+const camCaptureCanvas = document.createElement("canvas");
+const camCaptureCtx = camCaptureCanvas.getContext("2d")!;
+
+async function startCamera() {
+  if (cameraActive) return;
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    vdLocalVideo.srcObject = cameraStream;
+    vdVideoStrip.classList.remove("hidden");
+
+    const track = cameraStream.getVideoTracks()[0];
+    const settings = track.getSettings();
+    camCaptureCanvas.width = settings.width ?? 640;
+    camCaptureCanvas.height = settings.height ?? 360;
+
+    cameraActive = true;
+    vdCamIcon.textContent = "Cam ✓";
+    vdCamBtn.classList.add("active");
+
+    // Capture loop at ~15 fps
+    cameraFrameTimer = window.setInterval(async () => {
+      if (!cameraActive) return;
+      camCaptureCtx.drawImage(vdLocalVideo, 0, 0, camCaptureCanvas.width, camCaptureCanvas.height);
+      const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
+      const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      try { await invoke("push_camera_frame", { jpeg_b64: b64 }); } catch { /* call not active */ }
+    }, 67); // 67 ms ≈ 15 fps
+  } catch (e) {
+    console.warn("camera access denied or unavailable:", e);
+  }
+}
+
+function stopCamera() {
+  cameraActive = false;
+  if (cameraFrameTimer != null) { window.clearInterval(cameraFrameTimer); cameraFrameTimer = null; }
+  if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+  vdLocalVideo.srcObject = null;
+  vdCamIcon.textContent = "Cam";
+  vdCamBtn.classList.remove("active");
+  // Hide strip only if remote video is also gone
+  if (!remoteVideoActive) vdVideoStrip.classList.add("hidden");
+}
+
+vdCamBtn.addEventListener("click", () => {
+  if (cameraActive) { stopCamera(); } else { startCamera(); }
+});
+
+// ── Remote video display (Blocker 5) ─────────────────────────────
+const remoteCtx = vdRemoteVideo.getContext("2d")!;
+
+listen("video:frame", (event: any) => {
+  const { width, height, jpeg_b64 } = event.payload;
+  if (!jpeg_b64) return;
+
+  remoteVideoActive = true;
+  vdVideoStrip.classList.remove("hidden");
+  vdRemoteVideo.width = width ?? vdRemoteVideo.width;
+  vdRemoteVideo.height = height ?? vdRemoteVideo.height;
+
+  const img = new Image();
+  img.onload = () => {
+    remoteCtx.drawImage(img, 0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
+  };
+  img.src = `data:image/jpeg;base64,${jpeg_b64}`;
 });
 
 // ── Poll status ───────────────────────────────────────────────────
@@ -831,6 +916,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "m") vdMicBtn.click();
   if (e.key === "q") vdEndBtn.click();
   if (e.key === "s") vdSpkBtn.click();
+  if (e.key === "v") vdCamBtn.click();
   if (e.key === "," && (e.metaKey || e.ctrlKey)) { e.preventDefault(); openSettings(); }
 });
 

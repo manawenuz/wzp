@@ -574,6 +574,10 @@ pub enum SignalMessage {
         /// Protocol versions this client supports (default [2]).
         #[serde(default = "default_supported_versions")]
         supported_versions: Vec<u8>,
+        /// Video codecs supported by the caller, in preference order.
+        /// Absent on old clients (treated as video-incapable).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        video_codecs: Vec<crate::CodecId>,
     },
 
     /// Call acceptance (analogous to Warzone's WireMessage::CallAnswer).
@@ -588,6 +592,10 @@ pub enum SignalMessage {
         signature: Vec<u8>,
         /// Chosen quality profile.
         chosen_profile: crate::QualityProfile,
+        /// Video codec chosen by the callee (None = video declined or peer incapable).
+        /// Absent on old clients (treated as no video).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_codec: Option<crate::CodecId>,
     },
 
     /// ICE candidate for NAT traversal.

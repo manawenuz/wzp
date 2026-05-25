@@ -91,7 +91,7 @@ async fn full_handshake_both_sides_derive_same_session() {
         wzp_relay::handshake::accept_handshake(relay_transport_clone.as_ref(), &relay_seed),
     );
 
-    let mut client_session = client_result.expect("client handshake should succeed");
+    let client_hs = client_result.expect("client handshake should succeed");
     let (mut relay_session, chosen_profile, _caller_fp, _caller_alias) =
         relay_result.expect("relay handshake should succeed");
 
@@ -122,6 +122,7 @@ async fn full_handshake_both_sides_derive_same_session() {
     let header = make_hdr(0);
     let plaintext = b"hello from client to relay";
 
+    let mut client_session = client_hs.session;
     let mut ciphertext = Vec::new();
     client_session
         .encrypt(&header, plaintext, &mut ciphertext)
@@ -180,6 +181,7 @@ async fn handshake_rejects_tampered_signature() {
             alias: None,
             protocol_version: 2,
             supported_versions: vec![2],
+            video_codecs: vec![],
         };
         client_transport_clone
             .send_signal(&offer)

@@ -306,6 +306,22 @@ body {
   padding: 2px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* Video strip in voice drawer */
+.vd-video-strip {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0 2px;
+  overflow-x: auto;
+}
+.vd-video-tile {
+  width: 160px;
+  height: 90px;
+  border-radius: 6px;
+  background: #000;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
 /* Incoming call banner */
 .incoming-banner {
   position: fixed;

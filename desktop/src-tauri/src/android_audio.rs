@@ -99,9 +99,7 @@ pub fn set_audio_mode_communication() -> Result<(), String> {
 /// Run `set_audio_mode_communication` on Tauri's main thread, where the
 /// Android context is initialized. Calling it from arbitrary Tokio blocking
 /// workers panics inside `ndk_context::android_context()`.
-pub async fn set_audio_mode_communication_on_main(
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn set_audio_mode_communication_on_main(app: tauri::AppHandle) -> Result<(), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         let result = std::panic::catch_unwind(set_audio_mode_communication)

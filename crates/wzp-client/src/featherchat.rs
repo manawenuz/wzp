@@ -164,6 +164,7 @@ mod tests {
             alias: None,
             protocol_version: 2,
             supported_versions: vec![2],
+            video_codecs: vec![],
         };
 
         let encoded = encode_call_payload(&signal, Some("relay.example.com:4433"), Some("myroom"));
@@ -185,6 +186,7 @@ mod tests {
             alias: None,
             protocol_version: 2,
             supported_versions: vec![2],
+            video_codecs: vec![],
         };
         assert!(matches!(signal_to_call_type(&offer), CallSignalType::Offer));
 

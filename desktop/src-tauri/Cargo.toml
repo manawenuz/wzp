@@ -44,6 +44,9 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# JPEG encoding for video:frame events (I420 → RGB → JPEG for IPC to WebView)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
 
 # WarzonePhone crates — protocol layer is platform-independent
 wzp-proto = { path = "../../crates/wzp-proto" }
@@ -51,6 +54,7 @@ wzp-codec = { path = "../../crates/wzp-codec" }
 wzp-fec = { path = "../../crates/wzp-fec" }
 wzp-crypto = { path = "../../crates/wzp-crypto" }
 wzp-transport = { path = "../../crates/wzp-transport" }
+wzp-video = { path = "../../crates/wzp-video" }
 
 # wzp-client pulls in CPAL on every desktop target and, additionally on
 # macOS, VoiceProcessingIO (coreaudio-rs behind the "vpio" feature). The
@@ -98,6 +102,10 @@ libloading = "0.8"
 # between earpiece and loud speaker without restarting.
 jni = "0.21"
 ndk-context = "0.1"
+
+[dev-dependencies]
+bytes = "1"
+async-trait = "0.1"
 
 [features]
 default = ["custom-protocol"]

@@ -56,7 +56,7 @@ impl NoiseSupressor {
 
             // f32 → i16 with clamping
             for (i, &val) in output.iter().enumerate() {
-                let clamped = val.max(-32768.0).min(32767.0);
+                let clamped = val.clamp(-32768.0, 32767.0);
                 pcm[offset + i] = clamped as i16;
             }
         }

@@ -114,11 +114,7 @@ impl EchoCanceller {
     /// Number of delayed samples available to release.
     fn delay_available(&self) -> usize {
         let buffered = self.delay_write - self.delay_read;
-        if buffered > self.delay_samples {
-            buffered - self.delay_samples
-        } else {
-            0
-        }
+        buffered.saturating_sub(self.delay_samples)
     }
 
     /// Process a near-end (microphone) frame, removing the estimated echo.
@@ -161,8 +157,8 @@ impl EchoCanceller {
         let mut sum_near_sq: f64 = 0.0;
         let mut sum_err_sq: f64 = 0.0;
 
-        for i in 0..n {
-            let near_f = nearend[i] as f32;
+        for (i, sample) in nearend.iter_mut().enumerate() {
+            let near_f = *sample as f32;
 
             // Position of far-end "now" for this near-end sample.
             let base = (self.far_pos + fl * ((n / fl) + 2) + i - n) % fl;
@@ -190,7 +186,7 @@ impl EchoCanceller {
             }
 
             let out = error.clamp(-32768.0, 32767.0);
-            nearend[i] = out as i16;
+            *sample = out as i16;
 
             sum_near_sq += (near_f as f64).powi(2);
             sum_err_sq += (out as f64).powi(2);

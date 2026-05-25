@@ -122,6 +122,7 @@ fn wzp_signal_serializes_into_fc_callsignal_payload() {
         alias: None,
         protocol_version: 2,
         supported_versions: vec![2],
+        video_codecs: vec![],
     };
 
     // Encode as featherChat CallSignal payload
@@ -186,6 +187,7 @@ fn wzp_answer_round_trips_through_fc_callsignal() {
         ephemeral_pub: [20u8; 32],
         signature: vec![30u8; 64],
         chosen_profile: wzp_proto::QualityProfile::DEGRADED,
+        video_codec: None,
     };
 
     let payload = wzp_client::featherchat::encode_call_payload(&answer, None, None);
@@ -309,6 +311,7 @@ fn all_signal_types_map_correctly() {
                 alias: None,
                 protocol_version: 2,
                 supported_versions: vec![2],
+                video_codecs: vec![],
             },
             "Offer",
         ),
@@ -319,6 +322,7 @@ fn all_signal_types_map_correctly() {
                 ephemeral_pub: [0; 32],
                 signature: vec![],
                 chosen_profile: wzp_proto::QualityProfile::GOOD,
+                video_codec: None,
             },
             "Answer",
         ),

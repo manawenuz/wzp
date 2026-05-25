@@ -84,6 +84,9 @@
               <button id="vd-spk-btn" class="vd-btn" title="Speaker (s)">
                 <span id="vd-spk-icon">Spk</span>
               </button>
+              <button id="vd-cam-btn" class="vd-btn" title="Camera (v)">
+                <span id="vd-cam-icon">Cam</span>
+              </button>
               <button id="vd-end-btn" class="vd-btn vd-end" title="Leave voice (q)">
                 <span>End</span>
               </button>
@@ -98,6 +101,11 @@
             </div>
           </div>
           <div id="vd-stats" class="vd-stats"></div>
+          <!-- Video strip: remote (canvas) + local preview (video element) -->
+          <div id="vd-video-strip" class="vd-video-strip hidden">
+            <canvas id="vd-remote-video" class="vd-video-tile" width="320" height="180"></canvas>
+            <video  id="vd-local-video"  class="vd-video-tile" autoplay muted playsinline></video>
+          </div>
         </div>
       </div>
 

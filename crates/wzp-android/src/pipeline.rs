@@ -137,7 +137,7 @@ impl Pipeline {
         if header.fec_block != 0 {
             let is_repair = header.is_repair();
             if let Err(e) = self.fec_decoder.add_symbol(
-                header.fec_block as u8,
+                header.fec_block,
                 header.fec_block >> 8,
                 is_repair,
                 &packet.payload,

@@ -84,6 +84,213 @@ pub(crate) fn emit_call_debug(app: &tauri::AppHandle, step: &str, details: serde
 /// Short git hash captured at compile time by build.rs.
 const GIT_HASH: &str = env!("WZP_GIT_HASH");
 
+// ─── Video helpers ────────────────────────────────────────────────────────────
+
+/// Convert an I420 frame to a JPEG and base64-encode it for IPC.
+///
+/// Returns `None` if the data is too short or encoding fails.
+/// Called from the video recv task in engine.rs to produce the `jpeg_b64`
+/// field of every `video:frame` Tauri event.
+pub(crate) fn i420_to_jpeg_b64(data: &[u8], width: u32, height: u32) -> Option<String> {
+    use base64::Engine as _;
+    use image::{DynamicImage, ImageBuffer, Rgb};
+
+    let w = width as usize;
+    let h = height as usize;
+    let y_size = w * h;
+    let uv_size = w * h / 4;
+
+    if data.len() < y_size + 2 * uv_size {
+        return None;
+    }
+
+    let mut rgb = vec![0u8; w * h * 3];
+    for row in 0..h {
+        for col in 0..w {
+            let y = data[row * w + col] as f32;
+            let uv_idx = (row / 2) * (w / 2) + col / 2;
+            let u = data[y_size + uv_idx] as f32 - 128.0;
+            let v = data[y_size + uv_size + uv_idx] as f32 - 128.0;
+            let out = (row * w + col) * 3;
+            rgb[out]     = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+            rgb[out + 1] = (y - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
+            rgb[out + 2] = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    let img = DynamicImage::ImageRgb8(ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb)?);
+    let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+    img.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
+/// RGB24 → I420 (planar 4:2:0).  Layout: Y(w×h) | U(w/2×h/2) | V(w/2×h/2).
+fn rgb_to_i420(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let y_size = w * h;
+    let uv_size = (w / 2) * (h / 2);
+    let mut out = vec![0u8; y_size + 2 * uv_size];
+    for row in 0..h {
+        for col in 0..w {
+            let i = (row * w + col) * 3;
+            let r = rgb[i] as f32;
+            let g = rgb[i + 1] as f32;
+            let b = rgb[i + 2] as f32;
+            out[row * w + col] = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
+            if row % 2 == 0 && col % 2 == 0 {
+                let uv = (row / 2) * (w / 2) + col / 2;
+                out[y_size + uv]          = (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
+                out[y_size + uv_size + uv] = (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Tauri command: receive a JPEG frame from the frontend camera (getUserMedia),
+/// decode it, convert to I420, and push into the active call's video send task.
+///
+/// The frontend calls this at ~15 fps from a canvas.toDataURL() capture loop.
+#[tauri::command]
+async fn push_camera_frame(
+    state: tauri::State<'_, Arc<AppState>>,
+    jpeg_b64: String,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    let jpeg_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&jpeg_b64)
+        .map_err(|e| e.to_string())?;
+
+    let dyn_img = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    let rgb_img = dyn_img.to_rgb8();
+    let w = rgb_img.width() as usize;
+    let h = rgb_img.height() as usize;
+    let yuv = rgb_to_i420(rgb_img.as_raw(), w, h);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let frame = wzp_video::encoder::VideoFrame {
+        width: w as u32,
+        height: h as u32,
+        data: yuv,
+        timestamp_ms: ts,
+    };
+
+    let engine = state.engine.lock().await;
+    if let Some(ref eng) = *engine {
+        if let Some(ref tx) = eng.camera_tx {
+            let _ = tx.try_send(frame); // drop frame if send task is saturated
+        }
+    }
+    Ok(())
+}
+
+// ─── Video helper tests ───────────────────────────────────────────────────────
+#[cfg(test)]
+mod video_tests {
+    use super::{i420_to_jpeg_b64, rgb_to_i420};
+    use base64::Engine as _;
+
+    fn solid_rgb_frame(w: usize, h: usize, r: u8, g: u8, b: u8) -> Vec<u8> {
+        let mut rgb = vec![0u8; w * h * 3];
+        for i in 0..w * h {
+            rgb[i * 3]     = r;
+            rgb[i * 3 + 1] = g;
+            rgb[i * 3 + 2] = b;
+        }
+        rgb
+    }
+
+    fn solid_i420(w: usize, h: usize, y: u8, u: u8, v: u8) -> Vec<u8> {
+        let y_size = w * h;
+        let uv_size = w * h / 4;
+        let mut data = vec![y; y_size + 2 * uv_size];
+        data[y_size..y_size + uv_size].fill(u);
+        data[y_size + uv_size..].fill(v);
+        data
+    }
+
+    #[test]
+    fn rgb_to_i420_output_size() {
+        let rgb = solid_rgb_frame(640, 360, 128, 128, 128);
+        let yuv = rgb_to_i420(&rgb, 640, 360);
+        assert_eq!(yuv.len(), 640 * 360 * 3 / 2);
+    }
+
+    #[test]
+    fn rgb_to_i420_pure_green_luma() {
+        // Pure green (0, 255, 0) → Y ≈ 150 (0.587 × 255 ≈ 150).
+        let rgb = solid_rgb_frame(4, 4, 0, 255, 0);
+        let yuv = rgb_to_i420(&rgb, 4, 4);
+        let y = yuv[0];
+        assert!(y >= 140 && y <= 160, "pure-green luma out of range: {y}");
+    }
+
+    #[test]
+    fn rgb_to_i420_grey_is_neutral() {
+        // Mid-grey RGB → U and V should both be near 128.
+        let rgb = solid_rgb_frame(4, 4, 128, 128, 128);
+        let yuv = rgb_to_i420(&rgb, 4, 4);
+        let uv_start = 4 * 4;
+        let u = yuv[uv_start];
+        let v = yuv[uv_start + 4]; // 4 = (4/2)*(4/2)
+        assert!((u as i32 - 128).abs() <= 5, "grey U out of range: {u}");
+        assert!((v as i32 - 128).abs() <= 5, "grey V out of range: {v}");
+    }
+
+    #[test]
+    fn i420_to_jpeg_b64_produces_non_empty_output() {
+        let data = solid_i420(64, 64, 128, 128, 128);
+        let b64 = i420_to_jpeg_b64(&data, 64, 64);
+        assert!(b64.is_some(), "valid I420 must produce Some(b64)");
+        let s = b64.unwrap();
+        assert!(!s.is_empty());
+        // JPEG base64 starts with '/9j/' (FFD8FF marker).
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&s).unwrap();
+        assert_eq!(&decoded[0..2], &[0xFF, 0xD8], "output must start with JPEG SOI marker");
+    }
+
+    #[test]
+    fn i420_to_jpeg_b64_rejects_undersized_buffer() {
+        // Buffer too short: only Y plane, no chroma.
+        let data = vec![128u8; 64 * 64];
+        let b64 = i420_to_jpeg_b64(&data, 64, 64);
+        assert!(b64.is_none(), "truncated buffer must yield None");
+    }
+
+    #[test]
+    fn i420_to_jpeg_b64_color_preservation() {
+        // A red (255, 0, 0) I420 frame should decode to a mostly-red JPEG.
+        // After JPEG lossy compression the exact values drift, so we only
+        // check that the decoded pixel has R > G and R > B.
+        use base64::Engine as _;
+
+        // Convert red RGB → I420.
+        let rgb = solid_rgb_frame(64, 64, 255, 0, 0);
+        let yuv = rgb_to_i420(&rgb, 64, 64);
+
+        let b64 = i420_to_jpeg_b64(&yuv, 64, 64).expect("should produce JPEG");
+        let jpeg = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+
+        let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+        let rgb_img = img.to_rgb8();
+        let px = rgb_img.get_pixel(32, 32);
+        let (r, g, b) = (px[0], px[1], px[2]);
+        assert!(r > g && r > b, "red frame: expected R dominant, got R={r} G={g} B={b}");
+    }
+
+    #[test]
+    fn rgb_i420_conversion_is_deterministic() {
+        let rgb = solid_rgb_frame(8, 8, 200, 100, 50);
+        let yuv1 = rgb_to_i420(&rgb, 8, 8);
+        let yuv2 = rgb_to_i420(&rgb, 8, 8);
+        assert_eq!(yuv1, yuv2, "rgb_to_i420 must be deterministic");
+    }
+}
+
 /// Resolved by `setup()` once we have a Tauri AppHandle. Holds the
 /// platform-correct app data dir (e.g. `/data/data/com.wzp.desktop/files` on
 /// Android, `~/Library/Application Support/com.wzp.desktop` on macOS).
@@ -805,6 +1012,10 @@ async fn connect(
         }),
     );
     let app_for_engine = app.clone();
+    let (active_quality, peer_max_quality) = {
+        let sig = state.signal.lock().await;
+        (sig.active_quality.clone(), sig.peer_max_quality.clone())
+    };
     match CallEngine::start(
         relay,
         room,
@@ -815,6 +1026,8 @@ async fn connect(
         pre_connected_transport,
         is_direct_p2p_agreed,
         app_for_engine,
+        active_quality,
+        peer_max_quality,
         move |event_kind, message| {
             let _ = app_clone.emit(
                 "call-event",
@@ -1157,6 +1370,12 @@ struct SignalState {
     peer_hard_nat_probe: Option<PeerHardNatInfo>,
     /// Phase 8.6: peer's birthday attack ports, if received.
     peer_birthday_ports: Option<PeerBirthdayInfo>,
+    /// Active quality profile for the encoder. Updated by signal upgrade flow.
+    active_quality: Arc<std::sync::Mutex<wzp_proto::QualityProfile>>,
+    /// Peer's reported max quality cap. The encoder clamps to min(active, peer_max).
+    peer_max_quality: Arc<std::sync::Mutex<Option<wzp_proto::QualityProfile>>>,
+    /// Pending outgoing upgrade proposal: (call_id, proposal_id, profile).
+    pending_upgrade: Arc<std::sync::Mutex<Option<(String, String, wzp_proto::QualityProfile)>>>,
 }
 
 /// Parsed data from a peer's HardNatBirthdayStart signal.
@@ -1720,8 +1939,9 @@ fn do_register_signal(
                                 "peer_loss_pct": local_loss_pct, "peer_rtt_ms": local_rtt_ms,
                             }),
                         );
-                        // TODO: auto-accept if our own quality supports it,
-                        // or surface to UI for manual accept/reject
+                        if let Err(e) = handle_upgrade_proposal(&*transport, &call_id, &proposal_id).await {
+                            tracing::warn!("failed to send UpgradeResponse: {e}");
+                        }
                     }
                     Ok(Some(SignalMessage::UpgradeResponse {
                         call_id,
@@ -1739,7 +1959,11 @@ fn do_register_signal(
                                 "accepted": accepted, "reason": reason,
                             }),
                         );
-                        // TODO: if accepted, send UpgradeConfirm + switch encoder
+                        if let Err(e) = handle_upgrade_response(
+                            &*transport, &signal_state, &call_id, &proposal_id, accepted,
+                        ).await {
+                            tracing::warn!("failed to handle UpgradeResponse: {e}");
+                        }
                     }
                     Ok(Some(SignalMessage::UpgradeConfirm {
                         call_id,
@@ -1756,7 +1980,7 @@ fn do_register_signal(
                                 "confirmed_profile": format!("{confirmed_profile:?}"),
                             }),
                         );
-                        // TODO: switch encoder to confirmed_profile at next frame boundary
+                        handle_upgrade_confirm(&signal_state, confirmed_profile).await;
                     }
                     Ok(Some(SignalMessage::QualityCapability {
                         call_id,
@@ -1775,8 +1999,7 @@ fn do_register_signal(
                                 "peer_loss_pct": loss_pct, "peer_rtt_ms": rtt_ms,
                             }),
                         );
-                        // TODO: adjust our encoder to not exceed peer's max_profile
-                        // (asymmetric quality — each side encodes at its own best)
+                        handle_quality_capability(&signal_state, max_profile).await;
                     }
                     Ok(Some(SignalMessage::HardNatBirthdayStart {
                         call_id,
@@ -2505,7 +2728,7 @@ async fn answer_call(
 /// or temporarily unreachable for reflect but the call can still
 /// proceed with STUN-discovered addresses.
 async fn try_reflect_own_addr(state: &Arc<AppState>) -> Result<Option<String>, String> {
-    use wzp_proto::{SignalMessage, default_signal_version};
+    use wzp_proto::SignalMessage;
     let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
     let transport = {
         let mut sig = state.signal.lock().await;
@@ -2592,7 +2815,7 @@ async fn try_stun_fallback(state: &Arc<AppState>) -> Result<Option<String>, Stri
 /// with `new URL(...)` / a regex if needed.
 #[tauri::command]
 async fn get_reflected_address(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
-    use wzp_proto::{SignalMessage, default_signal_version};
+    use wzp_proto::SignalMessage;
     let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
     let transport = {
         let mut sig = state.signal.lock().await;
@@ -2850,11 +3073,232 @@ async fn hangup_call(
 
 // ─── App entry point ─────────────────────────────────────────────────────────
 
+// ─── Quality upgrade flow handlers (testable) ─────────────────────────────
+
+async fn handle_upgrade_proposal(
+    transport: &dyn wzp_proto::MediaTransport,
+    call_id: &str,
+    proposal_id: &str,
+) -> Result<(), wzp_proto::TransportError> {
+    let response = wzp_proto::SignalMessage::UpgradeResponse {
+        version: default_signal_version(),
+        call_id: call_id.to_string(),
+        proposal_id: proposal_id.to_string(),
+        accepted: true,
+        reason: None,
+    };
+    transport.send_signal(&response).await
+}
+
+async fn handle_upgrade_response(
+    transport: &dyn wzp_proto::MediaTransport,
+    signal_state: &Arc<tokio::sync::Mutex<SignalState>>,
+    call_id: &str,
+    proposal_id: &str,
+    accepted: bool,
+) -> Result<(), wzp_proto::TransportError> {
+    if accepted {
+        let maybe_proposal = {
+            let sig = signal_state.lock().await;
+            sig.pending_upgrade.lock().unwrap().take()
+        };
+        if let Some((_cid, pid, profile)) = maybe_proposal {
+            if pid == proposal_id {
+                let confirm = wzp_proto::SignalMessage::UpgradeConfirm {
+                    version: default_signal_version(),
+                    call_id: call_id.to_string(),
+                    proposal_id: proposal_id.to_string(),
+                    confirmed_profile: profile.clone(),
+                };
+                transport.send_signal(&confirm).await?;
+                {
+                    let sig = signal_state.lock().await;
+                    *sig.active_quality.lock().unwrap() = profile;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_upgrade_confirm(
+    signal_state: &Arc<tokio::sync::Mutex<SignalState>>,
+    confirmed_profile: wzp_proto::QualityProfile,
+) {
+    let sig = signal_state.lock().await;
+    *sig.active_quality.lock().unwrap() = confirmed_profile;
+}
+
+async fn handle_quality_capability(
+    signal_state: &Arc<tokio::sync::Mutex<SignalState>>,
+    max_profile: wzp_proto::QualityProfile,
+) {
+    let sig = signal_state.lock().await;
+    *sig.peer_max_quality.lock().unwrap() = Some(max_profile);
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
+    use wzp_proto::{MediaPacket, MediaTransport, PathQuality, SignalMessage, TransportError};
+
+    struct LoopbackTransport {
+        sent: StdMutex<Vec<SignalMessage>>,
+    }
+
+    impl LoopbackTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                sent: StdMutex::new(Vec::new()),
+            })
+        }
+        fn take_sent(&self) -> Vec<SignalMessage> {
+            self.sent.lock().unwrap().drain(..).collect()
+        }
+    }
+
+    #[async_trait]
+    impl MediaTransport for LoopbackTransport {
+        async fn send_media(&self, _packet: &MediaPacket) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn recv_media(&self) -> Result<Option<MediaPacket>, TransportError> {
+            Ok(None)
+        }
+        async fn send_signal(&self, msg: &SignalMessage) -> Result<(), TransportError> {
+            self.sent.lock().unwrap().push(msg.clone());
+            Ok(())
+        }
+        async fn recv_signal(&self) -> Result<Option<SignalMessage>, TransportError> {
+            Ok(None)
+        }
+        fn path_quality(&self) -> PathQuality {
+            PathQuality::default()
+        }
+        async fn close(&self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn empty_signal_state() -> Arc<tokio::sync::Mutex<SignalState>> {
+        Arc::new(tokio::sync::Mutex::new(SignalState {
+            transport: None,
+            endpoint: None,
+            ipv6_endpoint: None,
+            fingerprint: String::new(),
+            signal_status: "idle".into(),
+            incoming_call_id: None,
+            incoming_caller_fp: None,
+            incoming_caller_alias: None,
+            pending_reflect: None,
+            own_reflex_addr: None,
+            desired_relay_addr: None,
+            reconnect_in_progress: false,
+            pending_path_report: None,
+            peer_hard_nat_probe: None,
+            peer_birthday_ports: None,
+            active_quality: Arc::new(std::sync::Mutex::new(wzp_proto::QualityProfile::GOOD)),
+            peer_max_quality: Arc::new(std::sync::Mutex::new(None)),
+            pending_upgrade: Arc::new(std::sync::Mutex::new(None)),
+        }))
+    }
+
+    #[tokio::test]
+    async fn upgrade_proposal_auto_accepts() {
+        let transport = LoopbackTransport::new();
+        handle_upgrade_proposal(&*transport, "c1", "p1").await.unwrap();
+
+        let sent = transport.take_sent();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            SignalMessage::UpgradeResponse {
+                call_id,
+                proposal_id,
+                accepted,
+                reason,
+                ..
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(proposal_id, "p1");
+                assert!(accepted);
+                assert!(reason.is_none());
+            }
+            other => panic!("expected UpgradeResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_response_accepted_sends_confirm_and_updates_quality() {
+        let transport = LoopbackTransport::new();
+        let signal_state = empty_signal_state();
+        {
+            let sig = signal_state.lock().await;
+            *sig.pending_upgrade.lock().unwrap() =
+                Some(("c1".into(), "p1".into(), wzp_proto::QualityProfile::STUDIO_48K));
+        }
+
+        handle_upgrade_response(&*transport, &signal_state, "c1", "p1", true)
+            .await
+            .unwrap();
+
+        let sent = transport.take_sent();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            SignalMessage::UpgradeConfirm {
+                call_id,
+                proposal_id,
+                confirmed_profile,
+                ..
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(proposal_id, "p1");
+                assert_eq!(*confirmed_profile, wzp_proto::QualityProfile::STUDIO_48K);
+            }
+            other => panic!("expected UpgradeConfirm, got {other:?}"),
+        }
+
+        let sig = signal_state.lock().await;
+        assert_eq!(
+            *sig.active_quality.lock().unwrap(),
+            wzp_proto::QualityProfile::STUDIO_48K
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_confirm_updates_active_quality() {
+        let signal_state = empty_signal_state();
+        handle_upgrade_confirm(&signal_state, wzp_proto::QualityProfile::STUDIO_64K).await;
+
+        let sig = signal_state.lock().await;
+        assert_eq!(
+            *sig.active_quality.lock().unwrap(),
+            wzp_proto::QualityProfile::STUDIO_64K
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_capability_updates_peer_max() {
+        let signal_state = empty_signal_state();
+        handle_quality_capability(&signal_state, wzp_proto::QualityProfile::GOOD).await;
+
+        let sig = signal_state.lock().await;
+        assert_eq!(
+            sig.peer_max_quality.lock().unwrap().unwrap(),
+            wzp_proto::QualityProfile::GOOD
+        );
+    }
+}
+
 /// Shared Tauri app builder. Used by the desktop `main.rs` and the mobile
 /// entry point below.
 pub fn run() {
     tracing_subscriber::fmt().init();
 
+    let active_quality = Arc::new(std::sync::Mutex::new(wzp_proto::QualityProfile::GOOD));
+    let peer_max_quality = Arc::new(std::sync::Mutex::new(None));
+    let pending_upgrade = Arc::new(std::sync::Mutex::new(None));
     let state = Arc::new(AppState {
         engine: Mutex::new(None),
         signal: Arc::new(Mutex::new(SignalState {
@@ -2873,6 +3317,9 @@ pub fn run() {
             pending_path_report: None,
             peer_hard_nat_probe: None,
             peer_birthday_ports: None,
+            active_quality: active_quality.clone(),
+            peer_max_quality: peer_max_quality.clone(),
+            pending_upgrade: pending_upgrade.clone(),
         })),
     });
 
@@ -2949,6 +3396,7 @@ pub fn run() {
             get_dred_verbose_logs,
             set_call_debug_logs,
             get_call_debug_logs,
+            push_camera_frame,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarzonePhone");

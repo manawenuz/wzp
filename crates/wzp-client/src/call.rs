@@ -565,7 +565,7 @@ impl CallDecoder {
         // ignored — a graceful mixed-version degradation).
         if !packet.header.codec_id.is_opus() {
             let _ = self.fec_dec.add_symbol(
-                (packet.header.fec_block & 0xFF) as u8,
+                packet.header.fec_block,
                 packet.header.fec_block >> 8,
                 packet.header.is_repair(),
                 &packet.payload,

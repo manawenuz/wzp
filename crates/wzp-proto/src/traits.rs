@@ -85,10 +85,10 @@ pub trait FecEncoder: Send + Sync {
 
     /// Finalize the current block and start a new one.
     /// Returns the block ID of the finalized block.
-    fn finalize_block(&mut self) -> Result<u8, FecError>;
+    fn finalize_block(&mut self) -> Result<u16, FecError>;
 
     /// Current block ID being built.
-    fn current_block_id(&self) -> u8;
+    fn current_block_id(&self) -> u16;
 
     /// Number of source symbols in the current block.
     fn current_block_size(&self) -> usize;
@@ -99,7 +99,7 @@ pub trait FecDecoder: Send + Sync {
     /// Feed a received symbol (source or repair) into the decoder.
     fn add_symbol(
         &mut self,
-        block_id: u8,
+        block_id: u16,
         symbol_index: u16,
         is_repair: bool,
         data: &[u8],
@@ -109,10 +109,10 @@ pub trait FecDecoder: Send + Sync {
     ///
     /// Returns `None` if not yet decodable (insufficient symbols).
     /// Returns `Some(Vec<source_frames>)` on success.
-    fn try_decode(&mut self, block_id: u8) -> Result<Option<Vec<Vec<u8>>>, FecError>;
+    fn try_decode(&mut self, block_id: u16) -> Result<Option<Vec<Vec<u8>>>, FecError>;
 
     /// Drop state for blocks older than `block_id`.
-    fn expire_before(&mut self, block_id: u8);
+    fn expire_before(&mut self, block_id: u16);
 }
 
 // ─── Crypto Traits ───────────────────────────────────────────────────────────

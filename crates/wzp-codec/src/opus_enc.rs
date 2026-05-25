@@ -101,7 +101,7 @@ pub fn dred_duration_for(codec: CodecId) -> u8 {
 /// mode; unset or empty leaves DRED enabled.
 fn read_legacy_fec_env() -> bool {
     match std::env::var(LEGACY_FEC_ENV) {
-        Ok(v) => !v.is_empty() && v != "0" && v.to_ascii_lowercase() != "false",
+        Ok(v) => !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"),
         Err(_) => false,
     }
 }
@@ -252,7 +252,7 @@ impl OpusEncoder {
         let clamped = if self.legacy_fec_mode {
             loss_pct.min(100)
         } else {
-            loss_pct.max(DRED_LOSS_FLOOR_PCT).min(100)
+            loss_pct.clamp(DRED_LOSS_FLOOR_PCT, 100)
         };
         let _ = self.inner.set_packet_loss(clamped);
     }

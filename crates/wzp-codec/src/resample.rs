@@ -48,7 +48,7 @@ fn build_fir_kernel() -> [f64; FIR_TAPS] {
     let fc = CUTOFF_HZ / SAMPLE_RATE; // normalised cutoff (0..0.5)
     let beta_denom = bessel_i0(KAISER_BETA);
 
-    for i in 0..FIR_TAPS {
+    for (i, slot) in kernel.iter_mut().enumerate() {
         // Sinc
         let n = i as f64 - m / 2.0;
         let sinc = if n.abs() < 1e-12 {
@@ -61,7 +61,7 @@ fn build_fir_kernel() -> [f64; FIR_TAPS] {
         let t = 2.0 * i as f64 / m - 1.0; // range [-1, 1]
         let kaiser = bessel_i0(KAISER_BETA * (1.0 - t * t).max(0.0).sqrt()) / beta_denom;
 
-        kernel[i] = sinc * kaiser;
+        *slot = sinc * kaiser;
     }
 
     // Normalise to unity DC gain.
@@ -180,9 +180,7 @@ impl Upsampler8to48 {
         work.extend_from_slice(&self.history);
         for &s in input {
             work.push(s as f64);
-            for _ in 1..RATIO {
-                work.push(0.0);
-            }
+            work.resize(work.len() + (RATIO - 1), 0.0f64);
         }
 
         let out_len = stuffed_len;

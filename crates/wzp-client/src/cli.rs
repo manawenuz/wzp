@@ -388,17 +388,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Crypto handshake — establishes verified identity + session key
-    let session = wzp_client::handshake::perform_handshake(
+    let hs = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
         None, // alias — desktop client doesn't set one yet
     )
     .await?;
-    info!("crypto handshake complete");
+    info!(video_codec = ?hs.video_codec, "crypto handshake complete");
 
     // Wrap the transport so all media I/O goes through AEAD encryption.
     let enc_transport: Arc<dyn wzp_proto::MediaTransport> = Arc::new(
-        wzp_client::encrypted_transport::EncryptingTransport::new(transport.clone(), session),
+        wzp_client::encrypted_transport::EncryptingTransport::new(transport.clone(), hs.session),
     );
 
     if cli.live {
@@ -942,7 +942,7 @@ async fn run_signal_mode(
                             )
                             .await
                             {
-                                Ok(_session) => {
+                                Ok(_hs) => {
                                     info!(
                                         "media connected — sending tone (press Ctrl+C to hang up)"
                                     );

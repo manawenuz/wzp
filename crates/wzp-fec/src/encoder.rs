@@ -15,8 +15,8 @@ const LEN_PREFIX: usize = 2;
 /// RaptorQ-based FEC encoder that groups audio frames into blocks
 /// and generates fountain-code repair symbols.
 pub struct RaptorQFecEncoder {
-    /// Current block ID (wraps at u8).
-    block_id: u8,
+    /// Current block ID (wraps at u16).
+    block_id: u16,
     /// Maximum source symbols per block.
     frames_per_block: usize,
     /// Accumulated source symbols for the current block.
@@ -122,7 +122,7 @@ impl FecEncoder for RaptorQFecEncoder {
         let block_data = self.build_block_data();
         let config =
             ObjectTransmissionInformation::with_defaults(block_data.len() as u64, self.symbol_size);
-        let encoder = SourceBlockEncoder::new(self.block_id, &config, &block_data);
+        let encoder = SourceBlockEncoder::new((self.block_id & 0xFF) as u8, &config, &block_data);
 
         let num_source = self.source_symbols.len() as u32;
         let num_repair = ((num_source as f32) * effective_ratio).ceil() as u32;
@@ -145,7 +145,7 @@ impl FecEncoder for RaptorQFecEncoder {
         Ok(result)
     }
 
-    fn finalize_block(&mut self) -> Result<u8, FecError> {
+    fn finalize_block(&mut self) -> Result<u16, FecError> {
         let completed = self.block_id;
         self.block_id = self.block_id.wrapping_add(1);
         self.source_symbols.clear();
@@ -153,7 +153,7 @@ impl FecEncoder for RaptorQFecEncoder {
         Ok(completed)
     }
 
-    fn current_block_id(&self) -> u8 {
+    fn current_block_id(&self) -> u16 {
         self.block_id
     }
 
@@ -181,7 +181,7 @@ fn build_prefixed_block_data(symbols: &[Vec<u8>], symbol_size: u16) -> Vec<u8> {
 /// Helper: build source `EncodingPacket`s for a given block. Useful for
 /// the decoder tests and interleaving.
 pub fn source_packets_for_block(
-    block_id: u8,
+    block_id: u16,
     symbols: &[Vec<u8>],
     symbol_size: u16,
 ) -> Vec<EncodingPacket> {
@@ -191,21 +191,21 @@ pub fn source_packets_for_block(
         .map(|i| {
             let offset = i * ss;
             let sym_data = data[offset..offset + ss].to_vec();
-            EncodingPacket::new(PayloadId::new(block_id, i as u32), sym_data)
+            EncodingPacket::new(PayloadId::new((block_id & 0xFF) as u8, i as u32), sym_data)
         })
         .collect()
 }
 
 /// Helper: generate repair packets for the given source symbols.
 pub fn repair_packets_for_block(
-    block_id: u8,
+    block_id: u16,
     symbols: &[Vec<u8>],
     symbol_size: u16,
     ratio: f32,
 ) -> Vec<EncodingPacket> {
     let data = build_prefixed_block_data(symbols, symbol_size);
     let config = ObjectTransmissionInformation::with_defaults(data.len() as u64, symbol_size);
-    let encoder = SourceBlockEncoder::new(block_id, &config, &data);
+    let encoder = SourceBlockEncoder::new((block_id & 0xFF) as u8, &config, &data);
     let num_source = symbols.len() as u32;
     let num_repair = ((num_source as f32) * ratio).ceil() as u32;
     encoder.repair_packets(0, num_repair)
@@ -241,15 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn block_id_wraps() {
+    fn block_id_wraps_u16() {
         let mut enc = RaptorQFecEncoder::with_defaults(1);
-        for expected in 0..=255u8 {
+        // Advance 300 blocks and verify no panic + monotonic increment.
+        for expected in 0..300u16 {
             assert_eq!(enc.current_block_id(), expected);
-            enc.add_source_symbol(&[expected; 10]).unwrap();
+            enc.add_source_symbol(&[0u8; 10]).unwrap();
             enc.finalize_block().unwrap();
         }
-        // After 256 blocks, wraps back to 0
-        assert_eq!(enc.current_block_id(), 0);
+        // Explicitly test wrap at u16 boundary.
+        let mut enc2 = RaptorQFecEncoder::with_defaults(1);
+        enc2.block_id = u16::MAX;
+        enc2.add_source_symbol(&[0u8; 10]).unwrap();
+        let id = enc2.finalize_block().unwrap();
+        assert_eq!(id, u16::MAX);
+        assert_eq!(enc2.current_block_id(), 0);
     }
 
     #[test]
