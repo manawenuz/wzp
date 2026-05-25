@@ -62,6 +62,7 @@ const lobbyFp = document.getElementById("lobby-fp")!;
 const lobbyUserList = document.getElementById("lobby-user-list")!;
 const lobbyUserCount = document.getElementById("lobby-user-count")!;
 const joinVoiceBtn = document.getElementById("join-voice-btn")!;
+const joinVideoBtn = document.getElementById("join-video-btn")!;
 const incomingBanner = document.getElementById("incoming-call-banner")!;
 const incomingCallerName = document.getElementById("incoming-caller-name")!;
 const incomingIdenticon = document.getElementById("incoming-identicon")!;
@@ -396,10 +397,40 @@ joinVoiceBtn.addEventListener("click", async () => {
   }
 });
 
+joinVideoBtn.addEventListener("click", async () => {
+  if (inVoice || connectPending) return;
+  const relay = getRelay();
+  const s = loadSettings();
+  if (!relay) { showToast("No relay configured"); return; }
+  connectPending = true;
+  const origText = joinVideoBtn.textContent;
+  joinVideoBtn.textContent = "Connecting…";
+  (joinVideoBtn as HTMLButtonElement).disabled = true;
+  try {
+    await connectWithTimeout({
+      relay: relay.address,
+      room: s.room || "general",
+      alias: s.alias || "",
+      osAec: s.osAec,
+      quality: s.quality || "auto",
+    });
+    enterVoice(false);
+    startCamera();
+  } catch (e: any) {
+    console.error("connect failed:", e);
+    showToast(`Join failed: ${errorMessage(e)}`);
+  } finally {
+    connectPending = false;
+    joinVideoBtn.textContent = origText;
+    (joinVideoBtn as HTMLButtonElement).disabled = false;
+  }
+});
+
 function enterVoice(isDirect: boolean) {
   inVoice = true;
   const s = loadSettings();
   joinVoiceBtn.classList.add("hidden");
+  joinVideoBtn.classList.add("hidden");
   voiceDrawer.classList.remove("hidden");
   vdRoom.textContent = isDirect && directCallPeer
     ? (directCallPeer.alias || directCallPeer.fingerprint.substring(0, 16))
@@ -429,6 +460,7 @@ function leaveVoice() {
   pendingCallId = null;
   voiceDrawer.classList.add("hidden");
   joinVoiceBtn.classList.remove("hidden");
+  joinVideoBtn.classList.remove("hidden");
   vdLevelBar.style.width = "0%";
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
   stopCamera();

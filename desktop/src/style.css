@@ -204,6 +204,16 @@ body {
   padding: 12px 0;
   display: flex;
   justify-content: center;
+  gap: 12px;
+}
+
+.fab-video {
+  background: #3b82f6;
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+}
+
+.fab-video:hover {
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
 }
 
 .fab {
