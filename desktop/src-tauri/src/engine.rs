@@ -43,6 +43,32 @@ const QUALITY_REPORT_INTERVAL: u32 = 50;
 /// Profile index mapping for the AtomicU8 adaptive-quality bridge.
 const PROFILE_NO_CHANGE: u8 = 0xFF;
 
+/// Tracks Quinn's cumulative sent/lost counters so callers can compute
+/// loss over a sliding window instead of since-connection-start. The
+/// cumulative percentage is monotonically biased by handshake-era losses
+/// and never recovers; the windowed percentage reflects current health.
+#[derive(Default)]
+struct LossWindow {
+    prev_sent: u64,
+    prev_lost: u64,
+}
+
+impl LossWindow {
+    /// Returns the loss percentage observed since the last call. Falls back
+    /// to the cumulative value while we don't yet have a delta to compare.
+    fn observe(&mut self, sent_packets: u64, lost_packets: u64, cumulative_pct: f32) -> f32 {
+        let d_sent = sent_packets.saturating_sub(self.prev_sent);
+        let d_lost = lost_packets.saturating_sub(self.prev_lost);
+        self.prev_sent = sent_packets;
+        self.prev_lost = lost_packets;
+        if d_sent >= 20 {
+            (d_lost as f32 / d_sent as f32) * 100.0
+        } else {
+            cumulative_pct
+        }
+    }
+}
+
 fn profile_to_index(p: &QualityProfile) -> u8 {
     match p.codec {
         CodecId::Opus64k => 0,
@@ -843,6 +869,7 @@ impl CallEngine {
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
             let mut frames_since_dred_poll: u32 = 0;
             let mut frames_since_quality_report: u32 = 0;
+            let mut send_loss_window = LossWindow::default();
 
             let mut heartbeat = std::time::Instant::now();
             let mut last_rms: u32;
@@ -983,8 +1010,13 @@ impl CallEngine {
                     frames_since_dred_poll = 0;
                     let snap = quinn_t.quinn_path_stats();
                     let pq = send_t.path_quality();
+                    let win_loss = send_loss_window.observe(
+                        snap.sent_packets,
+                        snap.lost_packets,
+                        snap.loss_pct,
+                    );
                     if let Some(tuning) =
-                        dred_tuner.update(snap.loss_pct, snap.rtt_ms, pq.jitter_ms)
+                        dred_tuner.update(win_loss, snap.rtt_ms, pq.jitter_ms)
                     {
                         encoder.apply_dred_tuning(tuning);
                         if wzp_codec::dred_verbose_logs() {
@@ -992,7 +1024,7 @@ impl CallEngine {
                                 dred_frames = tuning.dred_frames,
                                 dred_ms = tuning.dred_frames as u32 * 10,
                                 expected_loss = tuning.expected_loss_pct,
-                                quinn_loss = format!("{:.1}", snap.loss_pct),
+                                quinn_loss = format!("{:.1}", win_loss),
                                 quinn_rtt = snap.rtt_ms,
                                 jitter = pq.jitter_ms,
                                 spike = dred_tuner.spike_boost_active(),
@@ -1009,8 +1041,13 @@ impl CallEngine {
                     frames_since_quality_report = 0;
                     let snap = quinn_t.quinn_path_stats();
                     let pq = send_t.path_quality();
-                    let report = wzp_proto::QualityReport::from_path_stats(
+                    let win_loss = send_loss_window.observe(
+                        snap.sent_packets,
+                        snap.lost_packets,
                         snap.loss_pct,
+                    );
+                    let report = wzp_proto::QualityReport::from_path_stats(
+                        win_loss,
                         snap.rtt_ms,
                         pq.jitter_ms,
                     );
@@ -1080,6 +1117,7 @@ impl CallEngine {
             let mut dred_recv = DredRecvState::new();
             let mut quality_ctrl = AdaptiveQualityController::new();
             let mut recv_quality_counter: u32 = 0;
+            let mut recv_loss_window = LossWindow::default();
             info!(codec = ?current_codec, t_ms = recv_t0.elapsed().as_millis(), "first-join diag: recv task spawned (android/oboe)");
             // First-join diagnostic latches — see send task above for the
             // sibling capture milestones.
@@ -1300,8 +1338,13 @@ impl CallEngine {
                                 recv_quality_counter = 0;
                                 let snap = quinn_t.quinn_path_stats();
                                 let pq = recv_t.path_quality();
-                                let local_report = wzp_proto::QualityReport::from_path_stats(
+                                let win_loss = recv_loss_window.observe(
+                                    snap.sent_packets,
+                                    snap.lost_packets,
                                     snap.loss_pct,
+                                );
+                                let local_report = wzp_proto::QualityReport::from_path_stats(
+                                    win_loss,
                                     snap.rtt_ms,
                                     pq.jitter_ms,
                                 );
@@ -1876,6 +1919,7 @@ impl CallEngine {
             let mut dred_tuner = wzp_proto::DredTuner::new(config.profile.codec);
             let mut frames_since_dred_poll: u32 = 0;
             let mut frames_since_quality_report: u32 = 0;
+            let mut send_loss_window = LossWindow::default();
             let mut heartbeat = std::time::Instant::now();
             let mut last_rms: u32;
             let mut last_pkt_bytes: usize = 0;
@@ -1973,8 +2017,13 @@ impl CallEngine {
                     frames_since_dred_poll = 0;
                     let snap = quinn_t.quinn_path_stats();
                     let pq = send_t.path_quality();
+                    let win_loss = send_loss_window.observe(
+                        snap.sent_packets,
+                        snap.lost_packets,
+                        snap.loss_pct,
+                    );
                     if let Some(tuning) =
-                        dred_tuner.update(snap.loss_pct, snap.rtt_ms, pq.jitter_ms)
+                        dred_tuner.update(win_loss, snap.rtt_ms, pq.jitter_ms)
                     {
                         encoder.apply_dred_tuning(tuning);
                     }
@@ -1987,8 +2036,13 @@ impl CallEngine {
                     frames_since_quality_report = 0;
                     let snap = quinn_t.quinn_path_stats();
                     let pq = send_t.path_quality();
-                    let report = wzp_proto::QualityReport::from_path_stats(
+                    let win_loss = send_loss_window.observe(
+                        snap.sent_packets,
+                        snap.lost_packets,
                         snap.loss_pct,
+                    );
+                    let report = wzp_proto::QualityReport::from_path_stats(
+                        win_loss,
                         snap.rtt_ms,
                         pq.jitter_ms,
                     );
@@ -2039,6 +2093,7 @@ impl CallEngine {
             let mut dred_recv = DredRecvState::new();
             let mut quality_ctrl = AdaptiveQualityController::new();
             let mut recv_quality_counter: u32 = 0;
+            let mut recv_loss_window = LossWindow::default();
             let mut heartbeat = std::time::Instant::now();
             let mut first_packet_logged = false;
             let mut video_reassembler = wzp_video::transport::VideoReassembler::new();
@@ -2203,8 +2258,13 @@ impl CallEngine {
                                 recv_quality_counter = 0;
                                 let snap = quinn_t.quinn_path_stats();
                                 let pq = recv_t.path_quality();
-                                let local_report = wzp_proto::QualityReport::from_path_stats(
+                                let win_loss = recv_loss_window.observe(
+                                    snap.sent_packets,
+                                    snap.lost_packets,
                                     snap.loss_pct,
+                                );
+                                let local_report = wzp_proto::QualityReport::from_path_stats(
+                                    win_loss,
                                     snap.rtt_ms,
                                     pq.jitter_ms,
                                 );
