@@ -177,6 +177,10 @@ fn i420_sample(data: &[u8], width: u32, height: u32) -> serde_json::Value {
     })
 }
 
+fn should_log_video_sample(frame_no: u64, is_keyframe: bool) -> bool {
+    frame_no <= 5 || is_keyframe || frame_no % 30 == 0
+}
+
 /// Resolve a quality string from the UI to a QualityProfile.
 /// Returns None for "auto" (use default adaptive behavior).
 fn resolve_quality(quality: &str) -> Option<QualityProfile> {
@@ -1321,7 +1325,7 @@ impl CallEngine {
                                         }),
                                     );
                                 }
-                                if video_reassembled_samples <= 5 {
+                                if should_log_video_sample(video_reassembled_samples, is_kf) {
                                     crate::emit_call_debug(
                                         &recv_app,
                                         "video:reassembled_frame",
@@ -1401,6 +1405,8 @@ impl CallEngine {
                                                         "yuv_bytes": yuv_frame.data.len(),
                                                         "jpeg_ok": jpeg_ok,
                                                         "platform": "android",
+                                                        "source_is_keyframe": is_kf,
+                                                        "decoder_debug": dec.debug_snapshot(),
                                                         "i420_sample": i420_sample(
                                                             &yuv_frame.data,
                                                             yuv_frame.width,
@@ -1409,7 +1415,7 @@ impl CallEngine {
                                                     }),
                                                 );
                                             }
-                                            if video_decoded_samples <= 5 {
+                                            if should_log_video_sample(video_decoded_samples, is_kf) {
                                                 crate::emit_call_debug(
                                                     &recv_app,
                                                     "video:decoded_frame_sample",
@@ -1422,6 +1428,8 @@ impl CallEngine {
                                                         "yuv_bytes": yuv_frame.data.len(),
                                                         "jpeg_ok": jpeg_ok,
                                                         "platform": "android",
+                                                        "source_is_keyframe": is_kf,
+                                                        "decoder_debug": dec.debug_snapshot(),
                                                         "i420_sample": i420_sample(
                                                             &yuv_frame.data,
                                                             yuv_frame.width,
@@ -2608,7 +2616,7 @@ impl CallEngine {
                                         }),
                                     );
                                 }
-                                if video_reassembled_samples <= 5 {
+                                if should_log_video_sample(video_reassembled_samples, is_kf) {
                                     crate::emit_call_debug(
                                         &recv_app,
                                         "video:reassembled_frame",
@@ -2692,6 +2700,8 @@ impl CallEngine {
                                                         "yuv_bytes": yuv_frame.data.len(),
                                                         "jpeg_ok": jpeg_ok,
                                                         "platform": "desktop",
+                                                        "source_is_keyframe": is_kf,
+                                                        "decoder_debug": dec.debug_snapshot(),
                                                         "i420_sample": i420_sample(
                                                             &yuv_frame.data,
                                                             yuv_frame.width,
@@ -2700,7 +2710,7 @@ impl CallEngine {
                                                     }),
                                                 );
                                             }
-                                            if video_decoded_samples <= 5 {
+                                            if should_log_video_sample(video_decoded_samples, is_kf) {
                                                 crate::emit_call_debug(
                                                     &recv_app,
                                                     "video:decoded_frame_sample",
@@ -2713,6 +2723,8 @@ impl CallEngine {
                                                         "yuv_bytes": yuv_frame.data.len(),
                                                         "jpeg_ok": jpeg_ok,
                                                         "platform": "desktop",
+                                                        "source_is_keyframe": is_kf,
+                                                        "decoder_debug": dec.debug_snapshot(),
                                                         "i420_sample": i420_sample(
                                                             &yuv_frame.data,
                                                             yuv_frame.width,

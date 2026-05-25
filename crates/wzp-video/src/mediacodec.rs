@@ -359,6 +359,17 @@ impl VideoDecoder for MediaCodecDecoder {
             Err(VideoError::NotInitialized)
         }
     }
+
+    fn debug_snapshot(&self) -> Option<String> {
+        #[cfg(target_os = "android")]
+        {
+            media_codec_debug_snapshot(self.codec.as_ref())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
+        }
+    }
 }
 
 // ============================================================================
@@ -847,6 +858,17 @@ impl VideoDecoder for MediaCodecHevcDecoder {
             Err(VideoError::NotInitialized)
         }
     }
+
+    fn debug_snapshot(&self) -> Option<String> {
+        #[cfg(target_os = "android")]
+        {
+            media_codec_debug_snapshot(self.codec.as_ref())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
+        }
+    }
 }
 
 /// Android MediaCodec AV1 decoder.
@@ -987,6 +1009,35 @@ impl VideoDecoder for MediaCodecAv1Decoder {
             Err(VideoError::NotInitialized)
         }
     }
+
+    fn debug_snapshot(&self) -> Option<String> {
+        #[cfg(target_os = "android")]
+        {
+            media_codec_debug_snapshot(self.codec.as_ref())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn media_codec_debug_snapshot(codec: Option<&MediaCodec>) -> Option<String> {
+    let codec = codec?;
+    let format = codec.output_format();
+    Some(format!(
+        "color_format={:?} width={:?} height={:?} stride={:?} slice_height={:?} crop=({:?},{:?},{:?},{:?})",
+        format.i32("color-format"),
+        format.i32("width"),
+        format.i32("height"),
+        format.i32("stride"),
+        format.i32("slice-height"),
+        format.i32("crop-left"),
+        format.i32("crop-top"),
+        format.i32("crop-right"),
+        format.i32("crop-bottom"),
+    ))
 }
 
 #[cfg(target_os = "android")]
