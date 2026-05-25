@@ -328,6 +328,23 @@ impl ReceiverState {
     }
 }
 
+fn video_route_reason(pkt: &wzp_proto::MediaPacket, selected_layer: u8) -> Option<&'static str> {
+    if pkt.header.stream_id == selected_layer {
+        return Some("selected_layer");
+    }
+
+    // Compatibility for the pre-simulcast single-layer H.264 room-video path.
+    // Older clients used video stream 1 while current clients use stream 0 so
+    // they pass through relay defaults. Forward both H.264 single-layer ids.
+    if pkt.header.codec_id == wzp_proto::CodecId::H264Baseline
+        && (pkt.header.stream_id == 0 || pkt.header.stream_id == 1)
+    {
+        return Some("h264_single_layer_compat");
+    }
+
+    None
+}
+
 /// Unique participant ID within a room.
 pub type ParticipantId = u64;
 
@@ -1369,7 +1386,8 @@ async fn run_participant_plain(
             // traffic pass through unchanged.
             if is_video {
                 let selected = room_mgr.selected_layer(&room_name, *other_id);
-                if pkt.header.stream_id != selected {
+                let route_reason = video_route_reason(&pkt, selected);
+                if route_reason.is_none() {
                     if let Some(ref tap) = debug_tap {
                         if tap.matches(&room_name) {
                             tap.log_video_route(
@@ -1394,7 +1412,7 @@ async fn run_participant_plain(
                             &pkt,
                             selected,
                             true,
-                            "selected_layer",
+                            route_reason.unwrap_or("selected_layer"),
                         );
                     }
                 }
@@ -1680,7 +1698,8 @@ async fn run_participant_trunked(
                 for (other_id, other) in &others {
                     if is_video {
                         let selected = room_mgr.selected_layer(&room_name, *other_id);
-                        if pkt.header.stream_id != selected {
+                        let route_reason = video_route_reason(&pkt, selected);
+                        if route_reason.is_none() {
                             if let Some(ref tap) = debug_tap {
                                 if tap.matches(&room_name) {
                                     tap.log_video_route(
@@ -1705,7 +1724,7 @@ async fn run_participant_trunked(
                                     &pkt,
                                     selected,
                                     true,
-                                    "selected_layer",
+                                    route_reason.unwrap_or("selected_layer"),
                                 );
                             }
                         }
