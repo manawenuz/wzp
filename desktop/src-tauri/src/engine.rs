@@ -591,12 +591,25 @@ impl CallEngine {
                 "first-join diag: direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)"
             );
         }
-        event_cb("connected", &format!("joined room {room}"));
+        // Do not emit the legacy "connected" call-event here. The frontend
+        // ignores it and enters voice only after the command resolves; on
+        // Android this synchronous emit was the only operation between
+        // handshake_done and audio preflight in failing traces.
+        crate::emit_call_debug(
+            &app,
+            "connect:connected_event_skipped",
+            serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
+        );
 
         // Oboe audio via the wzp-native cdylib that was dlopen'd at
         // startup. `wzp_native::audio_start()` brings up the capture +
         // playout streams; send/recv tasks below pull/push PCM through
         // the extern "C" bridge rings.
+        crate::emit_call_debug(
+            &app,
+            "connect:android_audio_preflight_start",
+            serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
+        );
         let native_loaded = crate::wzp_native::is_loaded();
         crate::emit_call_debug(
             &app,
