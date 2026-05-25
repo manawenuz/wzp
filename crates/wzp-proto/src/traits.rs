@@ -81,7 +81,7 @@ pub trait FecEncoder: Send + Sync {
     ///
     /// `ratio` is the repair overhead (e.g., 0.5 = 50% more symbols than source).
     /// Returns `(fec_symbol_index, repair_data)` pairs.
-    fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u8, Vec<u8>)>, FecError>;
+    fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u16, Vec<u8>)>, FecError>;
 
     /// Finalize the current block and start a new one.
     /// Returns the block ID of the finalized block.
@@ -100,7 +100,7 @@ pub trait FecDecoder: Send + Sync {
     fn add_symbol(
         &mut self,
         block_id: u8,
-        symbol_index: u8,
+        symbol_index: u16,
         is_repair: bool,
         data: &[u8],
     ) -> Result<(), FecError>;

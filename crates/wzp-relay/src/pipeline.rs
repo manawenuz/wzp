@@ -111,7 +111,7 @@ impl RelayPipeline {
         let header = &packet.header;
         let _ = self.fec_decoder.add_symbol(
             (header.fec_block & 0xFF) as u8,
-            (header.fec_block >> 8) as u8,
+            header.fec_block >> 8,
             header.is_repair(),
             &packet.payload,
         );

@@ -409,7 +409,7 @@ impl CallEncoder {
                                 fec_ratio: MediaHeader::encode_fec_ratio(self.profile.fec_ratio),
                                 seq: self.seq,
                                 timestamp: self.timestamp_ms,
-                                fec_block: u16::from(self.block_id) | (u16::from(sym_idx) << 8),
+                                fec_block: u16::from(self.block_id) | (sym_idx << 8),
                             },
                             payload: Bytes::from(repair_data),
                             quality_report: None,
@@ -566,7 +566,7 @@ impl CallDecoder {
         if !packet.header.codec_id.is_opus() {
             let _ = self.fec_dec.add_symbol(
                 (packet.header.fec_block & 0xFF) as u8,
-                (packet.header.fec_block >> 8) as u8,
+                packet.header.fec_block >> 8,
                 packet.header.is_repair(),
                 &packet.payload,
             );

@@ -108,7 +108,7 @@ impl FecEncoder for RaptorQFecEncoder {
         Ok(())
     }
 
-    fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u8, Vec<u8>)>, FecError> {
+    fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u16, Vec<u8>)>, FecError> {
         if self.source_symbols.is_empty() {
             return Ok(vec![]);
         }
@@ -133,11 +133,11 @@ impl FecEncoder for RaptorQFecEncoder {
         // Generate repair packets starting from offset 0 (ESIs begin at num_source).
         let repair_packets: Vec<EncodingPacket> = encoder.repair_packets(0, num_repair);
 
-        let result: Vec<(u8, Vec<u8>)> = repair_packets
+        let result: Vec<(u16, Vec<u8>)> = repair_packets
             .into_iter()
             .enumerate()
             .map(|(i, pkt): (usize, EncodingPacket)| {
-                let idx = (num_source as u8).wrapping_add(i as u8);
+                let idx = (num_source as u16).wrapping_add(i as u16);
                 (idx, pkt.data().to_vec())
             })
             .collect();

@@ -170,7 +170,7 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
 
         // Collect all symbols: source + repair
         struct Symbol {
-            index: u8,
+            index: u16,
             is_repair: bool,
             data: Vec<u8>,
         }
@@ -180,7 +180,7 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
             // For add_symbol we need to provide the raw data; the decoder pads internally
             total_source_bytes += sym.len();
             all_symbols.push(Symbol {
-                index: i as u8,
+                index: i as u16,
                 is_repair: false,
                 data: sym.clone(),
             });

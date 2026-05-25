@@ -21,6 +21,8 @@ use wzp_proto::{MediaTransport, default_signal_version};
 use crate::conformance::ConformanceMeter;
 use crate::metrics::RelayMetrics;
 use crate::trunk::TrunkBatcher;
+use crate::verdict::Verdict;
+use crate::video_scorer::VideoScorer;
 
 /// Debug tap: logs packet metadata for matching rooms.
 #[derive(Clone)]
@@ -1194,6 +1196,9 @@ async fn run_participant_plain(
         None
     };
 
+    let mut video_scorer = VideoScorer::new();
+    let mut last_bwe_kbps: Option<u32> = None;
+
     info!(
         room = %room_name,
         participant = participant_id,
@@ -1261,10 +1266,20 @@ async fn run_participant_plain(
             );
         }
 
-        // TODO(T6.2-follow-up): feed video packets to VideoScorer here.
-        // if pkt.header.media_type == MediaType::Video {
-        //     video_scorer.observe(&pkt.header, pkt.payload.len(), now, bwe_kbps);
-        // }
+        // Feed video packets to VideoScorer; drop if verdict is Abusive.
+        if pkt.header.media_type == wzp_proto::MediaType::Video {
+            let now = std::time::Instant::now();
+            video_scorer.observe(&pkt.header, pkt.payload.len(), now, last_bwe_kbps);
+            if let Some(Verdict::Abusive) = video_scorer.verdict() {
+                warn!(
+                    room = %room_name,
+                    participant = participant_id,
+                    seq = pkt.header.seq,
+                    "VideoScorer: Abusive verdict — dropping packet"
+                );
+                continue;
+            }
+        }
 
         // Update per-session quality metrics if a quality report is present
         if let Some(ref report) = pkt.quality_report {
@@ -1274,6 +1289,7 @@ async fn run_participant_plain(
         // Update receiver state from this participant's quality report (if present).
         if let Some(ref report) = pkt.quality_report {
             let bwe_kbps = report.bitrate_cap_kbps as u32;
+            last_bwe_kbps = Some(bwe_kbps);
             room_mgr.update_receiver_state(&room_name, participant_id, bwe_kbps, report.loss_pct);
         }
 
@@ -1454,6 +1470,8 @@ async fn run_participant_trunked(
     let mut last_log_instant = std::time::Instant::now();
     let mut conformance =
         ConformanceMeter::with_token_bucket(crate::conformance::TokenBucket::for_audio_session());
+    let mut video_scorer_trunked = VideoScorer::new();
+    let mut last_bwe_kbps_trunked: Option<u32> = None;
 
     info!(
         room = %room_name,
@@ -1533,9 +1551,25 @@ async fn run_participant_trunked(
                     );
                 }
 
+                // Feed video packets to VideoScorer; drop if verdict is Abusive.
+                if pkt.header.media_type == wzp_proto::MediaType::Video {
+                    let now = std::time::Instant::now();
+                    video_scorer_trunked.observe(&pkt.header, pkt.payload.len(), now, last_bwe_kbps_trunked);
+                    if let Some(Verdict::Abusive) = video_scorer_trunked.verdict() {
+                        warn!(
+                            room = %room_name,
+                            participant = participant_id,
+                            seq = pkt.header.seq,
+                            "VideoScorer: Abusive verdict — dropping packet (trunked)"
+                        );
+                        continue;
+                    }
+                }
+
                 // Update receiver state from this participant's quality report.
                 if let Some(ref report) = pkt.quality_report {
                     let bwe_kbps = report.bitrate_cap_kbps as u32;
+                    last_bwe_kbps_trunked = Some(bwe_kbps);
                     room_mgr.update_receiver_state(&room_name, participant_id, bwe_kbps, report.loss_pct);
                 }
 

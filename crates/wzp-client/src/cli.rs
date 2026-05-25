@@ -388,7 +388,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Crypto handshake — establishes verified identity + session key
-    let _crypto_session = wzp_client::handshake::perform_handshake(
+    let session = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
         None, // alias — desktop client doesn't set one yet
@@ -396,10 +396,15 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     info!("crypto handshake complete");
 
+    // Wrap the transport so all media I/O goes through AEAD encryption.
+    let enc_transport: Arc<dyn wzp_proto::MediaTransport> = Arc::new(
+        wzp_client::encrypted_transport::EncryptingTransport::new(transport.clone(), session),
+    );
+
     if cli.live {
         #[cfg(feature = "audio")]
         {
-            return run_live(transport).await;
+            return run_live(enc_transport).await;
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -423,19 +428,19 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     } else if cli.send_tone_secs.is_some() || cli.send_file.is_some() || cli.record_file.is_some() {
         run_file_mode(
-            transport,
+            enc_transport,
             cli.send_tone_secs,
             cli.send_file,
             cli.record_file,
         )
         .await
     } else {
-        run_silence(transport).await
+        run_silence(enc_transport).await
     }
 }
 
 /// Send silence frames (connectivity test).
-async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
+async fn run_silence(transport: Arc<dyn wzp_proto::MediaTransport>) -> anyhow::Result<()> {
     let config = CallConfig::default();
     let mut encoder = CallEncoder::new(&config);
 
@@ -485,7 +490,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
 
 /// File/tone mode: send a test tone or audio file, and/or record received audio.
 async fn run_file_mode(
-    transport: Arc<wzp_transport::QuinnTransport>,
+    transport: Arc<dyn wzp_proto::MediaTransport>,
     send_tone_secs: Option<u32>,
     send_file: Option<String>,
     record_file: Option<String>,
@@ -674,7 +679,7 @@ async fn run_file_mode(
 
 /// Live mode: capture from mic, encode, send; receive, decode, play.
 #[cfg(feature = "audio")]
-async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
+async fn run_live(transport: Arc<dyn wzp_proto::MediaTransport>) -> anyhow::Result<()> {
     use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 
     let capture = AudioCapture::start()?;

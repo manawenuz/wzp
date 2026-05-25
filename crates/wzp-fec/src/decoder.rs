@@ -73,7 +73,7 @@ impl FecDecoder for RaptorQFecDecoder {
     fn add_symbol(
         &mut self,
         block_id: u8,
-        symbol_index: u8,
+        symbol_index: u16,
         _is_repair: bool,
         data: &[u8],
     ) -> Result<(), FecError> {
@@ -195,7 +195,7 @@ mod tests {
 
         // Feed all source symbols (using the length-prefixed padded data).
         for (i, pkt) in source_pkts.iter().enumerate() {
-            decoder.add_symbol(0, i as u8, false, pkt.data()).unwrap();
+            decoder.add_symbol(0, i as u16, false, pkt.data()).unwrap();
         }
 
         let result = decoder.try_decode(0).unwrap();
@@ -293,10 +293,10 @@ mod tests {
         // Interleave symbols from block 0 and block 1
         for i in 0..FRAMES_PER_BLOCK {
             decoder
-                .add_symbol(0, i as u8, false, pkts_a[i].data())
+                .add_symbol(0, i as u16, false, pkts_a[i].data())
                 .unwrap();
             decoder
-                .add_symbol(1, i as u8, false, pkts_b[i].data())
+                .add_symbol(1, i as u16, false, pkts_b[i].data())
                 .unwrap();
         }
 

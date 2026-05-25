@@ -796,7 +796,7 @@ async fn run_call(
                                         ),
                                         seq: rs,
                                         timestamp: t,
-                                        fec_block: ((sym_idx as u16) << 8) | (block_id as u16),
+                                        fec_block: (sym_idx << 8) | (block_id as u16),
                                     },
                                     payload: Bytes::from(repair_data),
                                     quality_report: None,
@@ -949,7 +949,7 @@ async fn run_call(
 
                     let is_repair = pkt.header.is_repair();
                     let pkt_block = pkt.header.fec_block as u8;
-                    let pkt_symbol = (pkt.header.fec_block >> 8) as u8;
+                    let pkt_symbol = pkt.header.fec_block >> 8;
                     let pkt_is_opus = pkt.header.codec_id.is_opus();
 
                     // Phase 2: Opus packets bypass RaptorQ entirely — DRED

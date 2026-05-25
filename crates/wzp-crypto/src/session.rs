@@ -33,6 +33,8 @@ pub struct ChaChaSession {
     sas_code: Option<u32>,
     /// Per-stream anti-replay windows, keyed by (stream_id, media_type).
     anti_replay: HashMap<(u8, MediaType), AntiReplayWindow>,
+    /// Last timestamp seen in encrypt() — used to assert monotonicity across rekeys.
+    last_encrypt_timestamp: Option<u32>,
 }
 
 impl ChaChaSession {
@@ -55,6 +57,7 @@ impl ChaChaSession {
             pending_rekey_secret: None,
             sas_code: None,
             anti_replay: HashMap::new(),
+            last_encrypt_timestamp: None,
         }
     }
 
@@ -122,6 +125,18 @@ impl CryptoSession for ChaChaSession {
 
         out.extend_from_slice(&ciphertext);
         self.send_seq = self.send_seq.wrapping_add(1); // packet counter for rekey trigger only
+
+        // M5: assert timestamp_ms is non-decreasing across calls (including post-rekey).
+        // Timestamps are u32 and wrap at 2^32 ms (~49 days); allow wrapping.
+        debug_assert!(
+            self.last_encrypt_timestamp
+                .map_or(true, |last| header.timestamp.wrapping_sub(last) < u32::MAX / 2),
+            "encrypt: timestamp must not decrease (last={:?}, now={})",
+            self.last_encrypt_timestamp,
+            header.timestamp,
+        );
+        self.last_encrypt_timestamp = Some(header.timestamp);
+
         Ok(())
     }
 
@@ -189,7 +204,9 @@ impl CryptoSession for ChaChaSession {
             .perform_rekey(peer_ephemeral_pub, secret, total_packets);
         self.install_key(new_key);
 
-        // Reset sequence counters after rekey for nonce uniqueness
+        // Reset sequence counters after rekey for nonce uniqueness.
+        // last_encrypt_timestamp is intentionally NOT reset — spec requires
+        // timestamp_ms to be monotonic across rekeys.
         self.send_seq = 0;
         self.recv_seq = 0;
 

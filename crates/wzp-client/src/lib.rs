@@ -29,6 +29,7 @@ pub mod audio_linux_aec;
 pub mod bench;
 pub mod birthday;
 pub mod call;
+pub mod encrypted_transport;
 pub mod drift_test;
 pub mod dual_path;
 pub mod echo_test;
