@@ -321,6 +321,24 @@ for ARCH in $ARCHS; do
     echo ">>> cargo tauri android build ${PROFILE_FLAG} --target $TARGET --apk"
     cargo tauri android build ${PROFILE_FLAG} --target "$TARGET" --apk
 
+    # ─── Workaround: Tauri CLI 2.10.x does not copy frontendDist to the
+    # Android assets folder (gen/android/app/src/main/assets/). The Rust
+    # build step writes tauri.conf.json there correctly, but index.html
+    # and the JS/CSS assets are never transferred, causing the WebView to
+    # fail with "Asset not found: index.html" at runtime.
+    #
+    # Fix: copy dist/ into the assets folder and re-run Gradle so the APK
+    # picks up the frontend. Gradle is incremental here (no Java/Kotlin
+    # changed) so this extra pass takes < 30s.
+    ANDROID_ASSETS="gen/android/app/src/main/assets"
+    if [ ! -f "$ANDROID_ASSETS/index.html" ]; then
+        echo ">>> frontend assets missing from Android project — copying dist/ and repackaging"
+        mkdir -p "$ANDROID_ASSETS"
+        cp -r /build/source/desktop/dist/. "$ANDROID_ASSETS/"
+        echo ">>> re-running Gradle assembleUniversalRelease"
+        (cd gen/android && ./gradlew assembleUniversalRelease 2>&1 | tail -15)
+    fi
+
     # Copy produced APK with arch suffix
     BUILT_APK=$(find gen/android -name "*.apk" -newer "$APK_OUTPUT_DIR" -type f 2>/dev/null | head -1)
     if [ -z "$BUILT_APK" ]; then
