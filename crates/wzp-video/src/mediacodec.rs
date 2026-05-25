@@ -39,6 +39,16 @@ pub struct MediaCodecEncoder {
 /// Android color format constant: YUV 4:2:0 planar (I420).
 #[cfg(target_os = "android")]
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
+/// Android MediaCodec CBR bitrate mode (MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR).
+#[cfg(target_os = "android")]
+const BITRATE_MODE_CBR: i32 = 2;
+/// AMediaCodec keyframe buffer flag.
+#[cfg(target_os = "android")]
+const AMEDIACODEC_BUFFER_FLAG_KEY_FRAME: u32 = 1;
+
+// AMediaCodec is thread-safe; the NonNull inside MediaCodec suppresses auto-Send.
+#[cfg(target_os = "android")]
+unsafe impl Send for MediaCodecEncoder {}
 
 impl MediaCodecEncoder {
     /// Create a new encoder.
@@ -103,32 +113,25 @@ impl VideoEncoder for MediaCodecEncoder {
                 .codec
                 .dequeue_input_buffer(std::time::Duration::from_millis(10))
             {
-                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(input_buf) = self.codec.input_buffer(idx) {
-                        let to_copy = frame.data.len().min(input_buf.len());
-                        input_buf[..to_copy].copy_from_slice(&frame.data[..to_copy]);
-
-                        let flags = if self.force_keyframe {
-                            // Request a sync frame by setting the key-frame flag.
-                            // The flag is cleared only after we see a keyframe in output.
-                            ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32
-                        } else {
-                            0
-                        };
-
-                        self.codec
-                            .queue_input_buffer_by_index(
-                                idx,
-                                0,
-                                to_copy,
-                                frame.timestamp_ms as u64 * 1000,
-                                flags,
-                            )
-                            .map_err(|e| {
-                                VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
-                            })?;
-                    }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                    let flags = if self.force_keyframe {
+                        AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
+                    } else {
+                        0
+                    };
+                    let to_copy = {
+                        let buf = buffer.buffer_mut();
+                        let n = frame.data.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(frame.data[..n].iter()) {
+                            d.write(s);
+                        }
+                        n
+                    };
+                    self.codec
+                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, flags)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
+                        })?;
                 }
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
                 Err(e) => {
@@ -173,35 +176,25 @@ impl MediaCodecEncoder {
                 .dequeue_output_buffer(std::time::Duration::from_millis(0))
             {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(data) = self.codec.output_buffer(idx) {
-                        // Check if this is a keyframe by looking at buffer flags.
-                        let info = buffer.info();
-                        let is_keyframe = (info.flags()
-                            & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32))
-                            != 0;
-                        if is_keyframe {
-                            self.force_keyframe = false;
-                        }
-                        output.extend_from_slice(&avcc_to_annexb(data));
+                    let is_keyframe =
+                        (buffer.info().flags() & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
+                    if is_keyframe {
+                        self.force_keyframe = false;
                     }
+                    let data = buffer.buffer().to_vec();
+                    output.extend_from_slice(&avcc_to_annexb(&data));
                     self.codec
-                        .release_output_buffer_by_index(idx, false)
+                        .release_output_buffer(buffer, false)
                         .map_err(|e| {
                             VideoError::PlatformError(format!("release_output_buffer failed: {e}"))
                         })?;
                 }
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputFormatChanged,
-                ) => {
-                    // Format change — usually happens once at start.  Continue draining.
-                    continue;
-                }
+                ) => continue,
                 Ok(
                     ndk::media::media_codec::DequeuedOutputBufferInfoResult::OutputBuffersChanged,
-                ) => {
-                    continue;
-                }
+                ) => continue,
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::TryAgainLater) => break,
                 Err(e) => {
                     return Err(VideoError::PlatformError(format!(
@@ -230,6 +223,9 @@ pub struct MediaCodecDecoder {
     #[cfg(not(target_os = "android"))]
     _height: u32,
 }
+
+#[cfg(target_os = "android")]
+unsafe impl Send for MediaCodecDecoder {}
 
 impl MediaCodecDecoder {
     /// Create a new decoder.
@@ -294,19 +290,22 @@ impl VideoDecoder for MediaCodecDecoder {
 
             // Feed input.
             match codec.dequeue_input_buffer(std::time::Duration::from_millis(10)) {
-                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(input_buf) = codec.input_buffer(idx) {
-                        let to_copy = access_unit.len().min(input_buf.len());
-                        input_buf[..to_copy].copy_from_slice(&access_unit[..to_copy]);
-                        codec
-                            .queue_input_buffer_by_index(idx, 0, to_copy, 0, 0)
-                            .map_err(|e| {
-                                VideoError::PlatformError(format!(
-                                    "decoder queue_input_buffer failed: {e}"
-                                ))
-                            })?;
-                    }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                    let to_copy = {
+                        let buf = buffer.buffer_mut();
+                        let n = access_unit.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(access_unit[..n].iter()) {
+                            d.write(s);
+                        }
+                        n
+                    };
+                    codec
+                        .queue_input_buffer(buffer, 0, to_copy, 0, 0)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!(
+                                "decoder queue_input_buffer failed: {e}"
+                            ))
+                        })?;
                 }
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
                 Err(e) => {
@@ -319,16 +318,14 @@ impl VideoDecoder for MediaCodecDecoder {
             // Drain output.
             match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    let data = codec.output_buffer(idx).unwrap_or(&[]).to_vec();
+                    let data = buffer.buffer().to_vec();
                     codec
-                        .release_output_buffer_by_index(idx, false)
+                        .release_output_buffer(buffer, false)
                         .map_err(|e| {
                             VideoError::PlatformError(format!(
                                 "decoder release_output_buffer failed: {e}"
                             ))
                         })?;
-
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
@@ -372,6 +369,9 @@ pub struct MediaCodecHevcEncoder {
     #[cfg(not(target_os = "android"))]
     _bitrate_bps: u32,
 }
+
+#[cfg(target_os = "android")]
+unsafe impl Send for MediaCodecHevcEncoder {}
 
 impl MediaCodecHevcEncoder {
     pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
@@ -433,30 +433,21 @@ impl VideoEncoder for MediaCodecHevcEncoder {
                 .codec
                 .dequeue_input_buffer(std::time::Duration::from_millis(10))
             {
-                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(input_buf) = self.codec.input_buffer(idx) {
-                        let to_copy = frame.data.len().min(input_buf.len());
-                        input_buf[..to_copy].copy_from_slice(&frame.data[..to_copy]);
-
-                        let flags = if self.force_keyframe {
-                            ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32
-                        } else {
-                            0
-                        };
-
-                        self.codec
-                            .queue_input_buffer_by_index(
-                                idx,
-                                0,
-                                to_copy,
-                                frame.timestamp_ms as u64 * 1000,
-                                flags,
-                            )
-                            .map_err(|e| {
-                                VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
-                            })?;
-                    }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                    let flags = if self.force_keyframe { AMEDIACODEC_BUFFER_FLAG_KEY_FRAME } else { 0 };
+                    let to_copy = {
+                        let buf = buffer.buffer_mut();
+                        let n = frame.data.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(frame.data[..n].iter()) {
+                            d.write(s);
+                        }
+                        n
+                    };
+                    self.codec
+                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, flags)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
+                        })?;
                 }
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
                 Err(e) => {
@@ -507,6 +498,9 @@ pub struct MediaCodecAv1Encoder {
     #[cfg(not(target_os = "android"))]
     _bitrate_bps: u32,
 }
+
+#[cfg(target_os = "android")]
+unsafe impl Send for MediaCodecAv1Encoder {}
 
 impl MediaCodecAv1Encoder {
     pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
@@ -561,32 +555,23 @@ impl VideoEncoder for MediaCodecAv1Encoder {
                 .codec
                 .dequeue_input_buffer(std::time::Duration::from_millis(0))
             {
-                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(input_buf) = self.codec.input_buffer(idx) {
-                        let to_copy = frame.data.len().min(input_buf.len());
-                        input_buf[..to_copy].copy_from_slice(&frame.data[..to_copy]);
-
-                        let flags = if self.force_keyframe {
-                            ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32
-                        } else {
-                            0
-                        };
-
-                        self.codec
-                            .queue_input_buffer_by_index(
-                                idx,
-                                0,
-                                to_copy,
-                                frame.timestamp_ms as u64 * 1000,
-                                flags,
-                            )
-                            .map_err(|e| {
-                                VideoError::PlatformError(format!(
-                                    "AV1 encoder queue_input_buffer failed: {e}"
-                                ))
-                            })?;
-                    }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                    let flags = if self.force_keyframe { AMEDIACODEC_BUFFER_FLAG_KEY_FRAME } else { 0 };
+                    let to_copy = {
+                        let buf = buffer.buffer_mut();
+                        let n = frame.data.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(frame.data[..n].iter()) {
+                            d.write(s);
+                        }
+                        n
+                    };
+                    self.codec
+                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, flags)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!(
+                                "AV1 encoder queue_input_buffer failed: {e}"
+                            ))
+                        })?;
                 }
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
                 Err(e) => {
@@ -625,19 +610,15 @@ impl MediaCodecHevcEncoder {
                 .dequeue_output_buffer(std::time::Duration::from_millis(0))
             {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(data) = self.codec.output_buffer(idx) {
-                        let info = buffer.info();
-                        let is_keyframe = (info.flags()
-                            & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32))
-                            != 0;
-                        if is_keyframe {
-                            self.force_keyframe = false;
-                        }
-                        output.extend_from_slice(&avcc_to_annexb(data));
+                    let is_keyframe =
+                        (buffer.info().flags() & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
+                    if is_keyframe {
+                        self.force_keyframe = false;
                     }
+                    let data = buffer.buffer().to_vec();
+                    output.extend_from_slice(&avcc_to_annexb(&data));
                     self.codec
-                        .release_output_buffer_by_index(idx, false)
+                        .release_output_buffer(buffer, false)
                         .map_err(|e| {
                             VideoError::PlatformError(format!("release_output_buffer failed: {e}"))
                         })?;
@@ -670,20 +651,16 @@ impl MediaCodecAv1Encoder {
                 .dequeue_output_buffer(std::time::Duration::from_millis(0))
             {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(data) = self.codec.output_buffer(idx) {
-                        let info = buffer.info();
-                        let is_keyframe = (info.flags()
-                            & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_KEY_FRAME as u32))
-                            != 0;
-                        if is_keyframe {
-                            self.force_keyframe = false;
-                        }
-                        // AV1 output from MediaCodec is already in OBU format.
-                        output.extend_from_slice(data);
+                    let is_keyframe =
+                        (buffer.info().flags() & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
+                    if is_keyframe {
+                        self.force_keyframe = false;
                     }
+                    // AV1 output from MediaCodec is already in OBU format.
+                    let data = buffer.buffer().to_vec();
+                    output.extend_from_slice(&data);
                     self.codec
-                        .release_output_buffer_by_index(idx, false)
+                        .release_output_buffer(buffer, false)
                         .map_err(|e| {
                             VideoError::PlatformError(format!(
                                 "AV1 encoder release_output_buffer failed: {e}"
@@ -723,6 +700,9 @@ pub struct MediaCodecHevcDecoder {
     #[cfg(not(target_os = "android"))]
     _height: u32,
 }
+
+#[cfg(target_os = "android")]
+unsafe impl Send for MediaCodecHevcDecoder {}
 
 impl MediaCodecHevcDecoder {
     pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
@@ -788,19 +768,22 @@ impl VideoDecoder for MediaCodecHevcDecoder {
             let codec = self.codec.as_mut().ok_or(VideoError::NotInitialized)?;
 
             match codec.dequeue_input_buffer(std::time::Duration::from_millis(10)) {
-                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(input_buf) = codec.input_buffer(idx) {
-                        let to_copy = access_unit.len().min(input_buf.len());
-                        input_buf[..to_copy].copy_from_slice(&access_unit[..to_copy]);
-                        codec
-                            .queue_input_buffer_by_index(idx, 0, to_copy, 0, 0)
-                            .map_err(|e| {
-                                VideoError::PlatformError(format!(
-                                    "decoder queue_input_buffer failed: {e}"
-                                ))
-                            })?;
-                    }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                    let to_copy = {
+                        let buf = buffer.buffer_mut();
+                        let n = access_unit.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(access_unit[..n].iter()) {
+                            d.write(s);
+                        }
+                        n
+                    };
+                    codec
+                        .queue_input_buffer(buffer, 0, to_copy, 0, 0)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!(
+                                "decoder queue_input_buffer failed: {e}"
+                            ))
+                        })?;
                 }
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
                 Err(e) => {
@@ -812,16 +795,14 @@ impl VideoDecoder for MediaCodecHevcDecoder {
 
             match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    let data = codec.output_buffer(idx).unwrap_or(&[]).to_vec();
+                    let data = buffer.buffer().to_vec();
                     codec
-                        .release_output_buffer_by_index(idx, false)
+                        .release_output_buffer(buffer, false)
                         .map_err(|e| {
                             VideoError::PlatformError(format!(
                                 "decoder release_output_buffer failed: {e}"
                             ))
                         })?;
-
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
@@ -858,6 +839,9 @@ pub struct MediaCodecAv1Decoder {
     #[cfg(not(target_os = "android"))]
     _height: u32,
 }
+
+#[cfg(target_os = "android")]
+unsafe impl Send for MediaCodecAv1Decoder {}
 
 impl MediaCodecAv1Decoder {
     pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
@@ -919,19 +903,22 @@ impl VideoDecoder for MediaCodecAv1Decoder {
             let codec = self.codec.as_mut().ok_or(VideoError::NotInitialized)?;
 
             match codec.dequeue_input_buffer(std::time::Duration::from_millis(10)) {
-                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    if let Some(input_buf) = codec.input_buffer(idx) {
-                        let to_copy = access_unit.len().min(input_buf.len());
-                        input_buf[..to_copy].copy_from_slice(&access_unit[..to_copy]);
-                        codec
-                            .queue_input_buffer_by_index(idx, 0, to_copy, 0, 0)
-                            .map_err(|e| {
-                                VideoError::PlatformError(format!(
-                                    "AV1 decoder queue_input_buffer failed: {e}"
-                                ))
-                            })?;
-                    }
+                Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                    let to_copy = {
+                        let buf = buffer.buffer_mut();
+                        let n = access_unit.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(access_unit[..n].iter()) {
+                            d.write(s);
+                        }
+                        n
+                    };
+                    codec
+                        .queue_input_buffer(buffer, 0, to_copy, 0, 0)
+                        .map_err(|e| {
+                            VideoError::PlatformError(format!(
+                                "AV1 decoder queue_input_buffer failed: {e}"
+                            ))
+                        })?;
                 }
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::TryAgainLater) => {}
                 Err(e) => {
@@ -943,16 +930,14 @@ impl VideoDecoder for MediaCodecAv1Decoder {
 
             match codec.dequeue_output_buffer(std::time::Duration::from_millis(10)) {
                 Ok(ndk::media::media_codec::DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                    let idx = buffer.index();
-                    let data = codec.output_buffer(idx).unwrap_or(&[]).to_vec();
+                    let data = buffer.buffer().to_vec();
                     codec
-                        .release_output_buffer_by_index(idx, false)
+                        .release_output_buffer(buffer, false)
                         .map_err(|e| {
                             VideoError::PlatformError(format!(
                                 "AV1 decoder release_output_buffer failed: {e}"
                             ))
                         })?;
-
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
