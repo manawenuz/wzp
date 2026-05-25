@@ -617,9 +617,6 @@ impl CallEngine {
             serde_json::json!({
                 "t_ms": call_t0.elapsed().as_millis(),
                 "wzp_native_loaded": native_loaded,
-                "record_audio_permission": crate::android_audio::has_record_audio_permission()
-                    .map(|v| serde_json::json!(v))
-                    .unwrap_or_else(|e| serde_json::json!({ "error": e })),
             }),
         );
         if !native_loaded {
@@ -666,13 +663,15 @@ impl CallEngine {
                 "connect:audio_mode_start",
                 serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
             );
-            match crate::android_audio::set_audio_mode_communication() {
-                Ok(()) => crate::emit_call_debug(
+            let audio_mode_task =
+                tokio::task::spawn_blocking(crate::android_audio::set_audio_mode_communication);
+            match tokio::time::timeout(std::time::Duration::from_secs(2), audio_mode_task).await {
+                Ok(Ok(Ok(()))) => crate::emit_call_debug(
                     &app,
                     "connect:audio_mode_done",
                     serde_json::json!({ "t_ms": call_t0.elapsed().as_millis() }),
                 ),
-                Err(e) => {
+                Ok(Ok(Err(e))) => {
                     tracing::warn!("set_audio_mode_communication failed: {e}");
                     crate::emit_call_debug(
                         &app,
@@ -680,6 +679,26 @@ impl CallEngine {
                         serde_json::json!({
                             "t_ms": call_t0.elapsed().as_millis(),
                             "error": e,
+                        }),
+                    );
+                }
+                Ok(Err(e)) => {
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:audio_mode_panic",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "error": e.to_string(),
+                        }),
+                    );
+                }
+                Err(_) => {
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:audio_mode_timeout",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "timeout_ms": 2000,
                         }),
                     );
                 }
