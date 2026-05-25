@@ -186,6 +186,11 @@ tmux send-keys -t $TMUX_SESSION "cd $BINARY_DIR && ./wzp-relay \$RELAY_ARGS" Ent
 echo "Deploy done on $TARGET"
 DEPLOY
 
+    # Get the running version and notify
+    local DEPLOYED_VER
+    DEPLOYED_VER=$(ssh $DEPLOY_OPTS "$TARGET" "$BINARY_DIR/wzp-relay --version 2>/dev/null | awk '{print \$2}'" || echo "unknown")
+    curl -s -d "wzp-relay deployed to ${TARGET%%:*} — version $DEPLOYED_VER" "$NTFY_TOPIC" > /dev/null 2>&1 || true
+
     log "Deployed to $TARGET"
 }
 

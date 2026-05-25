@@ -166,8 +166,25 @@ function getRelay(): RelayServer | null {
 let myFingerprint = "";
 let statusInterval: number | null = null;
 let inVoice = false;
+let connectPending = false; // guard against double-tap while connect is in-flight
 let directCallPeer: { fingerprint: string; alias: string | null } | null = null;
 let pendingCallId: string | null = null;
+
+function showToast(msg: string, durationMs = 3500) {
+  let el = document.getElementById("wzp-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wzp-toast";
+    el.style.cssText = "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);" +
+      "background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:8px;" +
+      "padding:10px 18px;font-size:13px;z-index:9999;pointer-events:none;opacity:0;transition:opacity .2s";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout((el as any)._timer);
+  (el as any)._timer = setTimeout(() => { el!.style.opacity = "0"; }, durationMs);
+}
 
 // Known users in the room (from RoomUpdate or signal presence)
 interface LobbyUser {
@@ -309,10 +326,12 @@ ctxCallBtn.addEventListener("click", async () => {
 
 // ── Voice join/leave (drawer-based) ───────────────────────────────
 joinVoiceBtn.addEventListener("click", async () => {
-  if (inVoice) return;
+  if (inVoice || connectPending) return;
   const relay = getRelay();
   const s = loadSettings();
-  if (!relay) return;
+  if (!relay) { showToast("No relay configured"); return; }
+  connectPending = true;
+  joinVoiceBtn.classList.add("hidden");
   try {
     await invoke("connect", {
       relay: relay.address,
@@ -324,6 +343,10 @@ joinVoiceBtn.addEventListener("click", async () => {
     enterVoice(false);
   } catch (e: any) {
     console.error("connect failed:", e);
+    showToast(`Join failed: ${e}`);
+    joinVoiceBtn.classList.remove("hidden");
+  } finally {
+    connectPending = false;
   }
 });
 
@@ -481,6 +504,8 @@ listen("signal-event", (event: any) => {
       incomingBanner.classList.add("hidden");
       // Auto-connect to the call
       (async () => {
+        if (connectPending) return;
+        connectPending = true;
         const s = loadSettings();
         try {
           await invoke("connect", {
@@ -498,6 +523,9 @@ listen("signal-event", (event: any) => {
           enterVoice(true);
         } catch (e: any) {
           console.error("connect failed:", e);
+          showToast(`Call failed to connect: ${e}`);
+        } finally {
+          connectPending = false;
         }
       })();
       break;
