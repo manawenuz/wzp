@@ -1,195 +1,98 @@
-# PRD: E2E Media Encryption — Wire EncryptingTransport on Relay Path
+# PRD: E2E Media Encryption (rewrite)
 
-> **Status:** proposed
-> **Resolves:** Security gap — relay-path media travels in QUIC TLS only; WZP application-layer ChaCha20-Poly1305 is negotiated but never applied.
-> **Depends on:** `wzp_client::encrypted_transport::EncryptingTransport` (already implemented).
+> **Status:** proposed (supersedes prior version)
+> **Resolves:** Real end-to-end media encryption between call participants.
+> **Replaces:** The prior version of this PRD described wrapping `QuinnTransport` in `EncryptingTransport` using the pairwise client↔relay session. That approach was implemented (commit `52a6f5e`) and **broke voice between any two clients** because the relay does not decrypt+re-encrypt — see "Why the prior fix failed" below. The wrapping was reverted in commit `e8cab25`.
 
-## Problem
+---
 
-`CallEngine::start` (both the Android path and the desktop path) calls
-`wzp_client::handshake::perform_handshake`, which returns a `HandshakeResult`
-containing a `session: Box<dyn CryptoSession>` (a keyed `ChaChaSession`).
-Both call sites discard the session — only `hs.video_codec` is retained.
+## Why the prior fix failed
 
-All subsequent `send_media` / `recv_media` calls go directly through
-`Arc<wzp_transport::QuinnTransport>`, which provides QUIC TLS (relay sees
-plaintext application data after TLS termination at the relay). The WZP
-application-level AEAD — ChaCha20-Poly1305, keyed per-call, relay-never-sees
-— is never applied.
+`wzp_client::handshake::perform_handshake` performs ECDH **between the client and the relay**. Each client in a room ends up with a **different** pairwise session key (key_A for client A, key_B for client B, etc.).
 
-`wzp_client::encrypted_transport::EncryptingTransport` exists
-(`crates/wzp-client/src/encrypted_transport.rs`) and is fully tested.
-It wraps any `Arc<dyn MediaTransport>` and intercepts every `send_media` /
-`recv_media` call with `session.encrypt()` / `session.decrypt()`.
+The relay is an SFU — it forwards `MediaPacket` bytes between participants in a room without inspecting their payloads. The relay does not run a decrypt-then-encrypt step keyed per-recipient.
+
+Wrapping `QuinnTransport` in `EncryptingTransport` therefore produced:
+
+```
+Client A:  plaintext --[encrypt key_A]--> ciphertext --> Relay
+Relay:     forwards ciphertext (bytes) --> Client B
+Client B:  ciphertext --[decrypt key_B]--> garbage --> silent audio
+```
+
+Result: every recipient saw decryption failures, audio went silent.
+
+This is **not a bug in `EncryptingTransport`** — the wrapper does exactly what it claims. The bug was thinking the pairwise client-relay session was usable for participant-to-participant media. It isn't.
 
 ## Goals
 
-- The relay-path `HandshakeResult::session` is used to construct an
-  `EncryptingTransport` that wraps the raw `QuinnTransport`.
-- All `send_media` and `recv_media` calls in the relay path go through the
-  wrapper, not the raw transport.
-- The direct P2P path (`is_direct_p2p == true`) is left unchanged — QUIC TLS
-  is the encryption layer there.
-- `cargo check --manifest-path desktop/src-tauri/Cargo.toml` passes.
-- A `#[cfg(test)]` test verifies that the relay path uses `EncryptingTransport`.
+A future implementation must satisfy:
 
-## Non-goals
+- Two clients in a room can exchange media that the **other client** can decrypt.
+- The **relay cannot decrypt** any media payload (true E2E), OR alternatively, the relay can decrypt+re-encrypt per recipient (hop-by-hop, sometimes called SFU-trusted).
+- Joining and leaving the room mid-call rotates keys so departed members can't decrypt subsequent traffic (forward secrecy on membership change).
+- Compatible with the existing `MediaPacket` wire format (header in plaintext, payload encrypted).
 
-- Rekeying (`SignalMessage::Rekey`) — tracked separately.
-- Video transport encryption (same mechanism; apply after audio is confirmed working).
-- Changes to the P2P path, the relay binary, or any crate outside `desktop/src-tauri`.
+## Two valid approaches
 
-## Design
+### Approach A — MLS group keys (true E2E)
 
-### `EncryptingTransport` API (read `crates/wzp-client/src/encrypted_transport.rs`)
+Use the [MLS protocol](https://datatracker.ietf.org/doc/rfc9420/) (e.g. via the `openmls` crate) to derive a shared **group key** that all room members possess and the relay does not.
 
-```rust
-pub struct EncryptingTransport { ... }
+- Relay acts as a **delivery service** for MLS Handshake messages (`Welcome`, `Commit`, `Proposal`) but never sees the group secret.
+- Every media packet is AEAD-sealed with the current group epoch key.
+- Group rekey is triggered by:
+  - Member join/leave (forward secrecy on membership)
+  - Periodic (every N seconds or N packets) for post-compromise security
+- Each room maintains its own MLS group; the relay just stores opaque `mls_blob` payloads in `SignalMessage::MlsHandshake`.
 
-impl EncryptingTransport {
-    pub fn new(inner: Arc<dyn MediaTransport>, session: Box<dyn CryptoSession>) -> Self;
-}
+**Pros:** real E2E. Relay compromise does not leak media.
+**Cons:** Significant complexity (MLS state machine per room, persistent ratchet trees, key schedule). Adds `openmls` dependency (~30 KLOC). Federation across relays is harder.
 
-// Implements MediaTransport:
-//   send_media  → session.encrypt(header_bytes, payload) → inner.send_media
-//   recv_media  → inner.recv_media → session.decrypt(header_bytes, ciphertext)
-//   send_signal / recv_signal / path_quality / close → forwarded unchanged
+### Approach B — Hop-by-hop re-encryption at the relay
+
+The relay holds a `CryptoSession` per connected client (which it already does — see `_crypto_session` discarded in `crates/wzp-relay/src/main.rs:1817`). On forward:
+
+```
+Relay.recv_media(from A):    decrypt with key_A → plaintext
+Relay.send_media(to B, C, D): for each recipient X, encrypt with key_X
 ```
 
-`EncryptingTransport` is NOT `Arc`-wrapped by the constructor; wrap it in
-`Arc::new(...)` when storing as `Arc<dyn MediaTransport>`.
+This is the same model as Matrix Megolm-without-Megolm — encrypted hop-by-hop but the relay sees plaintext briefly in between.
 
-### Two call sites in `desktop/src-tauri/src/engine.rs`
+**Pros:** Reuses existing per-client `ChaChaSession`. Implementation is ~100 lines in the relay's room forwarding loop. Federation works the same way (each relay-relay hop has its own session).
+**Cons:** Relay sees plaintext. A compromised relay can record and decrypt all media. This is **not E2E** — but it is strictly stronger than the current state (plaintext-over-QUIC-TLS exposes media to anyone with a TLS-terminating proxy on the relay).
 
-**Call site 1 — Android path** (`CallEngine::start` around line 575):
+## Recommendation
 
-```rust
-if !is_direct_p2p {
-    let _hs = match wzp_client::handshake::perform_handshake(...).await { Ok(hs) => hs, ... };
-    // hs.session is discarded here — fix this
-}
-```
+**Ship Approach B first.** It's a small, well-scoped change that closes the relay-operator-can-see-plaintext-in-RAM gap without requiring an MLS rewrite. Then layer Approach A on top when the threat model demands relay-untrusted operation.
 
-Change: capture `hs`, then build a wrapped transport:
+## Out of scope for this PRD
 
-```rust
-if !is_direct_p2p {
-    let hs = match wzp_client::handshake::perform_handshake(...).await { Ok(hs) => hs, ... };
-    info!(video_codec = ?hs.video_codec, "handshake complete");
-    let transport: Arc<dyn wzp_proto::MediaTransport> =
-        Arc::new(wzp_client::encrypted_transport::EncryptingTransport::new(
-            transport.clone(),
-            hs.session,
-        ));
-    // use `transport` (the wrapped version) for all subsequent send_t / recv_t clones
-}
-```
+- Federation gossip key exchange (separate PRD)
+- SAS (Short Authentication String) verification UX (separate PRD)
+- Rekey on session compromise (handled by the chosen approach's group/pairwise rekey)
 
-The variable `transport` must shadow the raw `Arc<QuinnTransport>` so that
-every subsequent clone of `transport` picks up the encrypted wrapper.
+## Acceptance criteria (Approach B, first iteration)
 
-**Call site 2 — Desktop path** (`CallEngine::start` around line 1551):
+1. Relay's room forwarding loop (`crates/wzp-relay/src/room.rs:354` and `:1353`) calls `sender_session.decrypt()` then `recipient_session.encrypt()` per recipient before `send_media`.
+2. Each `RoomMember` holds its `Box<dyn CryptoSession>` (currently discarded as `_crypto_session` in `main.rs:1817`).
+3. Client-side: re-add the `EncryptingTransport` wrapping in `desktop/src-tauri/src/engine.rs` (the two sites reverted in `e8cab25`).
+4. Integration test: two-client mock room exchanges media; verify each recipient gets the sender's plaintext back after the relay double-hop.
+5. Existing 825 tests still pass.
 
-```rust
-let _negotiated_video_codec = if !is_direct_p2p {
-    let hs = wzp_client::handshake::perform_handshake(...).await?;
-    info!(video_codec = ?hs.video_codec, "handshake complete");
-    hs.video_codec   // session dropped here — fix this
-} else { None };
-```
+## Verification
 
-Change: extract `session` before returning `video_codec`, then shadow
-`transport` with the wrapped version. Because `transport` is used after this
-block (cloned into `send_t`, `recv_t`, etc.), the shadow must happen inside
-the same scope or immediately after:
+`cargo test -p wzp-relay --test multi_client_relay_path` should pass with two simulated clients sending audio in both directions and decrypting each other's frames.
 
-```rust
-let (_negotiated_video_codec, transport): (_, Arc<dyn wzp_proto::MediaTransport>) =
-    if !is_direct_p2p {
-        let hs = wzp_client::handshake::perform_handshake(...).await?;
-        info!(video_codec = ?hs.video_codec, "handshake complete");
-        let enc = Arc::new(wzp_client::encrypted_transport::EncryptingTransport::new(
-            transport.clone(),
-            hs.session,
-        ));
-        (hs.video_codec, enc)
-    } else {
-        info!("direct P2P — skipping relay handshake");
-        (None, transport.clone())
-    };
-```
+## Files to touch
 
-All subsequent `transport.clone()` calls then operate on the encrypted wrapper.
+- `crates/wzp-relay/src/main.rs` — keep `crypto_session` per-client (drop the `_` prefix)
+- `crates/wzp-relay/src/room.rs` — add decrypt/re-encrypt to forward path
+- `crates/wzp-relay/src/session_mgr.rs` — store sessions keyed by peer
+- `desktop/src-tauri/src/engine.rs` — restore `EncryptingTransport` wrapping (~2 sites)
+- `crates/wzp-relay/tests/multi_client_relay_path.rs` — new integration test
 
-### Import
+## Risk / rollback
 
-Add to the top of `engine.rs` if not already present:
-
-```rust
-use wzp_client::encrypted_transport::EncryptingTransport;
-```
-
-Or use the fully-qualified path inline (already shown above).
-
-### Type compatibility
-
-- `EncryptingTransport` implements `wzp_proto::MediaTransport` (confirmed in the source).
-- The existing `send_t` / `recv_t` variables are already typed as
-  `Arc<dyn MediaTransport>` (or coerced on first use) — the shadow is a
-  drop-in replacement.
-- The `vid_transport` for the video path (`line ~2090`) is also cloned from
-  `transport`; it will automatically use the encrypted wrapper if the shadow
-  is placed before those clones.
-
-## Implementation steps
-
-1. Read `desktop/src-tauri/src/engine.rs` lines 570–620 (Android path) and
-   1547–1570 (desktop path) to see the exact variable names in each branch.
-2. **Android path fix** (line ~585): rename `_hs` to `hs`, extract
-   `hs.session`, wrap `transport` with `EncryptingTransport::new`, re-bind
-   `transport` as `Arc<dyn MediaTransport>`.
-3. **Desktop path fix** (line ~1551): restructure the
-   `if !is_direct_p2p` block to return `(video_codec, wrapped_transport)`
-   and shadow `transport`.
-4. Confirm that `vid_transport` (line ~2090) is cloned after the shadow — if
-   it is, no further changes are needed for video.
-5. Run `cargo check --manifest-path desktop/src-tauri/Cargo.toml`. Fix any
-   type-mismatch errors (usually a missing `as Arc<dyn MediaTransport>` cast
-   or a moved value).
-6. Add a `#[cfg(test)]` module to `engine.rs` (or to a new
-   `engine_tests.rs` included via `#[cfg(test)] mod engine_tests`) with a
-   test that constructs a `LoopbackTransport`, calls `perform_handshake`
-   against a mock relay fixture, and verifies that a received payload is
-   decrypted before returning from `recv_media`. A simpler alternative that
-   avoids a full handshake: assert `is::<EncryptingTransport>()` on the
-   `transport` variable at the test call site using `std::any::Any`.
-
-## Files to read before implementing
-
-- `desktop/src-tauri/src/engine.rs` lines 475–625 (Android path) and
-  1480–1570 (desktop path)
-- `crates/wzp-client/src/encrypted_transport.rs` (full — for the exact
-  constructor signature and trait impl)
-- `crates/wzp-client/src/handshake.rs` (for `HandshakeResult` struct
-  definition — confirm the `session` field name and type)
-
-## Verify
-
-```bash
-cargo check --manifest-path desktop/src-tauri/Cargo.toml
-```
-
-Expected: 0 errors.
-
-Manual smoke check: both `perform_handshake` call sites in `engine.rs` must
-use `hs.session` (grep: `hs\.session` should appear twice, once per call site).
-The string `_hs` must not remain on the relay path (only on the `_hs =` binding if the variable is intentionally unused before wrapping).
-
-## Done when
-
-- `cargo check --manifest-path desktop/src-tauri/Cargo.toml` exits 0.
-- Both relay-path `perform_handshake` call sites build an `EncryptingTransport`
-  from `hs.session`.
-- The direct-P2P branch (`is_direct_p2p == true`) is unchanged.
-- A `#[cfg(test)]` test in `engine.rs` verifies that `EncryptingTransport`
-  is used on the relay path (construction proof or decrypt round-trip).
+If multi-client tests fail in CI, the change is contained to the relay forwarding loop and one engine.rs edit — straightforward revert.
