@@ -65,7 +65,7 @@ impl MediaCodecEncoder {
             format.set_i32("bitrate", bitrate_bps as i32);
             format.set_i32("frame-rate", 30);
             format.set_i32("i-frame-interval", 1);
-            format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
+            format.set_i32("color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
 
             let codec = MediaCodec::from_encoder_type("video/avc").ok_or_else(|| {
                 VideoError::PlatformError("AMediaCodec_createEncoderByType failed".into())
@@ -122,10 +122,11 @@ impl VideoEncoder for MediaCodecEncoder {
                     } else {
                         0
                     };
+                    let input = i420_to_nv12(&frame.data, self.width as usize, self.height as usize)?;
                     let to_copy = {
                         let buf = buffer.buffer_mut();
-                        let n = frame.data.len().min(buf.len());
-                        for (d, &s) in buf[..n].iter_mut().zip(frame.data[..n].iter()) {
+                        let n = input.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(input[..n].iter()) {
                             d.write(s);
                         }
                         n
@@ -1147,6 +1148,31 @@ fn i420_len(width: usize, height: usize) -> Result<usize, VideoError> {
         .ok_or_else(|| {
             VideoError::InvalidInput(format!("invalid I420 dimensions {width}x{height}"))
         })
+}
+
+#[cfg(target_os = "android")]
+fn i420_to_nv12(src: &[u8], width: usize, height: usize) -> Result<Vec<u8>, VideoError> {
+    let y_size = width
+        .checked_mul(height)
+        .ok_or_else(|| VideoError::InvalidInput(format!("invalid frame dimensions {width}x{height}")))?;
+    let uv_size = y_size / 4;
+    let expected = y_size + uv_size * 2;
+    if src.len() < expected {
+        return Err(VideoError::InvalidInput(format!(
+            "I420 frame too small for NV12 conversion: {} bytes, expected {expected}",
+            src.len()
+        )));
+    }
+
+    let mut out = vec![0u8; expected];
+    out[..y_size].copy_from_slice(&src[..y_size]);
+    let u = &src[y_size..y_size + uv_size];
+    let v = &src[y_size + uv_size..y_size + uv_size * 2];
+    for i in 0..uv_size {
+        out[y_size + i * 2] = u[i];
+        out[y_size + i * 2 + 1] = v[i];
+    }
+    Ok(out)
 }
 
 #[cfg(target_os = "android")]

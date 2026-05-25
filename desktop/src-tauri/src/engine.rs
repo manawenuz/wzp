@@ -1958,6 +1958,22 @@ impl CallEngine {
                                     }),
                                 );
                             }
+                            if should_log_video_sample(camera_frames, false) {
+                                crate::emit_call_debug(
+                                    &vid_app,
+                                    "video:camera_frame_sample",
+                                    serde_json::json!({
+                                        "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                        "codec": format!("{:?}", vid_codec),
+                                        "frame_no": camera_frames,
+                                        "width": f.width,
+                                        "height": f.height,
+                                        "data_bytes": f.data.len(),
+                                        "platform": "android",
+                                        "i420_sample": i420_sample(&f.data, f.width, f.height),
+                                    }),
+                                );
+                            }
                             f
                         }
                         Ok(None) => break,
@@ -3091,6 +3107,22 @@ impl CallEngine {
                                     serde_json::json!({
                                         "t_ms": vid_t0.elapsed().as_millis() as u64,
                                         "codec": format!("{:?}", vid_codec),
+                                        "width": f.width,
+                                        "height": f.height,
+                                        "data_bytes": f.data.len(),
+                                        "platform": "desktop",
+                                        "i420_sample": i420_sample(&f.data, f.width, f.height),
+                                    }),
+                                );
+                            }
+                            if should_log_video_sample(camera_frames, false) {
+                                crate::emit_call_debug(
+                                    &vid_app,
+                                    "video:camera_frame_sample",
+                                    serde_json::json!({
+                                        "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                        "codec": format!("{:?}", vid_codec),
+                                        "frame_no": camera_frames,
                                         "width": f.width,
                                         "height": f.height,
                                         "data_bytes": f.data.len(),
