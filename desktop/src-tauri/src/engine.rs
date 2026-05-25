@@ -1212,6 +1212,7 @@ impl CallEngine {
                                         "t_ms": recv_t0.elapsed().as_millis() as u64,
                                         "codec": format!("{:?}", pkt.header.codec_id),
                                         "payload_bytes": pkt.payload.len(),
+                                        "stream_id": pkt.header.stream_id,
                                     }),
                                 );
                             }
@@ -1943,6 +1944,7 @@ impl CallEngine {
                                 "first_pkt_bytes": pkts[0].payload.len(),
                                 "last_pkt_bytes": pkts.last().map(|pkt| pkt.payload.len()).unwrap_or(0),
                                 "encoded_bytes": encoded.len(),
+                                "stream_id": pkts[0].header.stream_id,
                                 "is_keyframe": is_keyframe,
                             }),
                         );
@@ -2461,6 +2463,7 @@ impl CallEngine {
                                         "t_ms": recv_t0.elapsed().as_millis() as u64,
                                         "codec": format!("{:?}", pkt.header.codec_id),
                                         "payload_bytes": pkt.payload.len(),
+                                        "stream_id": pkt.header.stream_id,
                                     }),
                                 );
                             }
@@ -3042,6 +3045,7 @@ impl CallEngine {
                                 "first_pkt_bytes": pkts[0].payload.len(),
                                 "last_pkt_bytes": pkts.last().map(|pkt| pkt.payload.len()).unwrap_or(0),
                                 "encoded_bytes": encoded.len(),
+                                "stream_id": pkts[0].header.stream_id,
                                 "is_keyframe": is_keyframe,
                             }),
                         );

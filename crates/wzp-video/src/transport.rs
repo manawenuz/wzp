@@ -63,7 +63,11 @@ pub fn packetize_video_frame(
             flags,
             media_type: MediaType::Video,
             codec_id,
-            stream_id: 1, // stream 0 = audio, 1 = video
+            // Legacy relays default receivers to video layer 0. Use video stream
+            // 0 for the single-layer room-video path so packets are forwarded
+            // before any receiver quality state exists. Audio is separated by
+            // media_type, so stream_id 0 does not collide with audio packets.
+            stream_id: 0,
             fec_ratio: 0,
             seq: *seq,
             timestamp: timestamp_ms,
@@ -188,6 +192,7 @@ mod tests {
         assert!(pkts[0].header.is_keyframe());
         assert!(pkts[0].header.is_frame_end());
         assert_eq!(pkts[0].header.media_type, MediaType::Video);
+        assert_eq!(pkts[0].header.stream_id, 0);
 
         let mut reassembler = VideoReassembler::new();
         let result = reassembler.push(&pkts[0]);
