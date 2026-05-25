@@ -263,17 +263,36 @@ pub fn bench_encrypt_decrypt() -> CryptoResult {
         })
         .collect();
 
-    let header = b"bench-header";
+    // Build valid v2 MediaHeader bytes — encrypt/decrypt now derive nonces from
+    // header.seq and require a parseable MediaHeader (WIRE_SIZE bytes minimum).
+    use wzp_proto::packet::MediaHeader;
+    use wzp_proto::{CodecId, MediaType};
     let mut total_bytes: usize = 0;
 
     let start = Instant::now();
-    for payload in &payloads {
+    for (i, payload) in payloads.iter().enumerate() {
+        let hdr = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq: i as u32,
+            timestamp: (i as u32).wrapping_mul(20),
+            fec_block: 0,
+        };
+        let mut header_bytes = Vec::with_capacity(MediaHeader::WIRE_SIZE);
+        hdr.write_to(&mut header_bytes);
+
         let mut ciphertext = Vec::with_capacity(payload.len() + 16);
-        encryptor.encrypt(header, payload, &mut ciphertext).unwrap();
+        encryptor
+            .encrypt(&header_bytes, payload, &mut ciphertext)
+            .unwrap();
 
         let mut plaintext = Vec::with_capacity(payload.len());
         decryptor
-            .decrypt(header, &ciphertext, &mut plaintext)
+            .decrypt(&header_bytes, &ciphertext, &mut plaintext)
             .unwrap();
 
         total_bytes += payload.len();

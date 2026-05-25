@@ -99,31 +99,52 @@ async fn full_handshake_both_sides_derive_same_session() {
     assert_eq!(chosen_profile, wzp_proto::QualityProfile::GOOD);
 
     // Verify both sides can communicate: client encrypts, relay decrypts.
-    let header = b"test-header";
+    // encrypt/decrypt derive nonces from MediaHeader.seq, so we need valid headers.
+    use wzp_proto::packet::MediaHeader;
+    use wzp_proto::{CodecId, MediaType};
+    let make_hdr = |seq: u32| {
+        let h = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq,
+            timestamp: seq.wrapping_mul(20),
+            fec_block: 0,
+        };
+        let mut b = Vec::new();
+        h.write_to(&mut b);
+        b
+    };
+
+    let header = make_hdr(0);
     let plaintext = b"hello from client to relay";
 
     let mut ciphertext = Vec::new();
     client_session
-        .encrypt(header, plaintext, &mut ciphertext)
+        .encrypt(&header, plaintext, &mut ciphertext)
         .expect("client encrypt should succeed");
 
     let mut decrypted = Vec::new();
     relay_session
-        .decrypt(header, &ciphertext, &mut decrypted)
+        .decrypt(&header, &ciphertext, &mut decrypted)
         .expect("relay decrypt should succeed");
 
     assert_eq!(&decrypted[..], plaintext);
 
     // Verify reverse direction: relay encrypts, client decrypts.
+    let header2 = make_hdr(0); // relay's send_seq starts at 0
     let plaintext2 = b"hello from relay to client";
     let mut ciphertext2 = Vec::new();
     relay_session
-        .encrypt(header, plaintext2, &mut ciphertext2)
+        .encrypt(&header2, plaintext2, &mut ciphertext2)
         .expect("relay encrypt should succeed");
 
     let mut decrypted2 = Vec::new();
     client_session
-        .decrypt(header, &ciphertext2, &mut decrypted2)
+        .decrypt(&header2, &ciphertext2, &mut decrypted2)
         .expect("client decrypt should succeed");
 
     assert_eq!(&decrypted2[..], plaintext2);

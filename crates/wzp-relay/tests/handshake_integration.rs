@@ -9,9 +9,28 @@ use std::sync::Arc;
 
 use wzp_client::perform_handshake;
 use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
-use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
+use wzp_proto::packet::MediaHeader;
+use wzp_proto::{CodecId, MediaTransport, MediaType, SignalMessage, default_signal_version};
 use wzp_relay::handshake::accept_handshake;
 use wzp_transport::{QuinnTransport, client_config, create_endpoint, server_config};
+
+/// Build valid v2 MediaHeader bytes for use in encrypt/decrypt test calls.
+fn test_header(seq: u32) -> Vec<u8> {
+    let h = MediaHeader {
+        version: 2,
+        flags: 0,
+        media_type: MediaType::Audio,
+        codec_id: CodecId::Opus24k,
+        stream_id: 0,
+        fec_ratio: 0,
+        seq,
+        timestamp: seq.wrapping_mul(20),
+        fec_block: 0,
+    };
+    let mut b = Vec::new();
+    h.write_to(&mut b);
+    b
+}
 
 /// Establish a QUIC connection and wrap both sides in `QuinnTransport`.
 ///
@@ -79,7 +98,7 @@ async fn handshake_succeeds() {
 
     // Both sides should have derived a working CryptoSession.
     // Verify by encrypting on one side and decrypting on the other.
-    let header = b"test-header";
+    let header = test_header(0);
     let plaintext = b"hello warzone";
 
     let mut ciphertext = Vec::new();
@@ -87,12 +106,12 @@ async fn handshake_succeeds() {
     let mut callee_session = callee_session;
 
     caller_session
-        .encrypt(header, plaintext, &mut ciphertext)
+        .encrypt(&header, plaintext, &mut ciphertext)
         .expect("encrypt");
 
     let mut decrypted = Vec::new();
     callee_session
-        .decrypt(header, &ciphertext, &mut decrypted)
+        .decrypt(&header, &ciphertext, &mut decrypted)
         .expect("decrypt");
 
     assert_eq!(&decrypted, plaintext);
@@ -212,7 +231,7 @@ async fn handshake_verifies_identity() {
         .expect("accept_handshake must succeed");
 
     // Cross-encrypt/decrypt to prove the shared session works.
-    let header = b"id-test";
+    let header = test_header(0);
     let plaintext = b"identity verified";
 
     let mut ct = Vec::new();
@@ -220,12 +239,12 @@ async fn handshake_verifies_identity() {
     let mut callee_session = callee_session;
 
     caller_session
-        .encrypt(header, plaintext, &mut ct)
+        .encrypt(&header, plaintext, &mut ct)
         .expect("encrypt");
 
     let mut pt = Vec::new();
     callee_session
-        .decrypt(header, &ct, &mut pt)
+        .decrypt(&header, &ct, &mut pt)
         .expect("decrypt");
 
     assert_eq!(&pt, plaintext);
@@ -292,7 +311,7 @@ async fn auth_then_handshake() {
     assert_eq!(received_token, "bearer-test-token-12345");
 
     // Verify the crypto session works after the auth preamble.
-    let header = b"auth-hdr";
+    let header = test_header(0);
     let plaintext = b"post-auth payload";
 
     let mut ct = Vec::new();
@@ -300,12 +319,12 @@ async fn auth_then_handshake() {
     let mut callee_session = callee_session;
 
     caller_session
-        .encrypt(header, plaintext, &mut ct)
+        .encrypt(&header, plaintext, &mut ct)
         .expect("encrypt");
 
     let mut pt = Vec::new();
     callee_session
-        .decrypt(header, &ct, &mut pt)
+        .decrypt(&header, &ct, &mut pt)
         .expect("decrypt");
 
     assert_eq!(&pt, plaintext);

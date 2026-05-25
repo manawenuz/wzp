@@ -209,18 +209,34 @@ mod tests {
         let mut alice_session = alice.derive_session(&bob_eph_pub).unwrap();
         let mut bob_session = bob.derive_session(&alice_eph_pub).unwrap();
 
-        // Verify they can communicate: Alice encrypts, Bob decrypts
-        let header = b"call-header";
+        // Verify they can communicate: Alice encrypts, Bob decrypts.
+        // Use a valid v2 MediaHeader — encrypt/decrypt now derive the nonce from
+        // header.seq and will reject raw byte slices shorter than WIRE_SIZE.
+        use wzp_proto::{CodecId, MediaHeader, MediaType};
+        let header = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq: 0,
+            timestamp: 0,
+            fec_block: 0,
+        };
+        let mut header_bytes = Vec::new();
+        header.write_to(&mut header_bytes);
+
         let plaintext = b"hello from alice";
 
         let mut ciphertext = Vec::new();
         alice_session
-            .encrypt(header, plaintext, &mut ciphertext)
+            .encrypt(&header_bytes, plaintext, &mut ciphertext)
             .unwrap();
 
         let mut decrypted = Vec::new();
         bob_session
-            .decrypt(header, &ciphertext, &mut decrypted)
+            .decrypt(&header_bytes, &ciphertext, &mut decrypted)
             .unwrap();
 
         assert_eq!(&decrypted, plaintext);

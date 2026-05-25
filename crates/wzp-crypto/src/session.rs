@@ -101,10 +101,14 @@ impl CryptoSession for ChaChaSession {
         plaintext: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<(), CryptoError> {
-        let nonce_bytes = nonce::build_nonce(&self.session_id, self.send_seq, Direction::Send);
+        // Derive nonce from the wire-level seq in the header, not from an
+        // internal counter. This ensures the receiver can reconstruct the
+        // same nonce using the header it receives, regardless of delivery order.
+        let header = parse_header(header_bytes)
+            .ok_or_else(|| CryptoError::Internal("header too short to derive nonce".into()))?;
+        let nonce_bytes = nonce::build_nonce(&self.session_id, header.seq, Direction::Send);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // Encrypt with AAD
         use chacha20poly1305::aead::Payload;
         let payload = Payload {
             msg: plaintext,
@@ -117,7 +121,7 @@ impl CryptoSession for ChaChaSession {
             .map_err(|_| CryptoError::Internal("encryption failed".into()))?;
 
         out.extend_from_slice(&ciphertext);
-        self.send_seq = self.send_seq.wrapping_add(1);
+        self.send_seq = self.send_seq.wrapping_add(1); // packet counter for rekey trigger only
         Ok(())
     }
 
@@ -127,9 +131,14 @@ impl CryptoSession for ChaChaSession {
         ciphertext: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<(), CryptoError> {
-        // Use Direction::Send to match the sender's nonce construction.
-        // The recv_seq counter tracks which packet from the peer we're decrypting.
-        let nonce_bytes = nonce::build_nonce(&self.session_id, self.recv_seq, Direction::Send);
+        // Parse header before decryption — needed for nonce derivation.
+        // Using header.seq (not recv_seq) means the nonce is always derived
+        // from the same wire field as the sender, surviving out-of-order delivery.
+        // A recv_seq counter diverges from the sender's send_seq on any reorder,
+        // causing every subsequent decryption to fail for the rest of the session.
+        let header = parse_header(header_bytes)
+            .ok_or_else(|| CryptoError::Internal("header too short to derive nonce".into()))?;
+        let nonce_bytes = nonce::build_nonce(&self.session_id, header.seq, Direction::Send);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         use chacha20poly1305::aead::Payload;
@@ -145,20 +154,17 @@ impl CryptoSession for ChaChaSession {
 
         let plaintext_len = plaintext.len();
         out.extend_from_slice(&plaintext);
-        self.recv_seq = self.recv_seq.wrapping_add(1);
+        self.recv_seq = self.recv_seq.wrapping_add(1); // packet counter for rekey trigger only
 
-        // Anti-replay check: if header parses as a v2 MediaHeader, verify seq
-        // is not a replay for this (stream_id, media_type).
-        if let Some(header) = parse_header(header_bytes) {
-            let window = self
-                .anti_replay
-                .entry((header.stream_id, header.media_type))
-                .or_insert_with(|| default_window_for_media_type(header.media_type));
-            if let Err(e) = window.check_and_update(header.seq) {
-                // Roll back the plaintext we just appended.
-                out.truncate(out.len() - plaintext_len);
-                return Err(e);
-            }
+        // Anti-replay check: header already parsed above.
+        let window = self
+            .anti_replay
+            .entry((header.stream_id, header.media_type))
+            .or_insert_with(|| default_window_for_media_type(header.media_type));
+        if let Err(e) = window.check_and_update(header.seq) {
+            // Roll back the plaintext we just appended.
+            out.truncate(out.len() - plaintext_len);
+            return Err(e);
         }
 
         Ok(())
@@ -198,24 +204,42 @@ impl CryptoSession for ChaChaSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wzp_proto::{CodecId, MediaType};
 
     fn make_session_pair() -> (ChaChaSession, ChaChaSession) {
         let key = [0x42u8; 32];
         (ChaChaSession::new(key), ChaChaSession::new(key))
     }
 
+    /// Build a minimal valid v2 MediaHeader serialised to bytes.
+    fn make_header_bytes(seq: u32) -> Vec<u8> {
+        let header = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq,
+            timestamp: seq.wrapping_mul(20),
+            fec_block: 0,
+        };
+        let mut bytes = Vec::new();
+        header.write_to(&mut bytes);
+        bytes
+    }
+
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let (mut alice, mut bob) = make_session_pair();
-        let header = b"test-header";
+        let header = make_header_bytes(0);
         let plaintext = b"hello warzone";
 
         let mut ciphertext = Vec::new();
-        alice.encrypt(header, plaintext, &mut ciphertext).unwrap();
+        alice.encrypt(&header, plaintext, &mut ciphertext).unwrap();
 
-        // Bob decrypts (his recv matches Alice's send)
         let mut decrypted = Vec::new();
-        bob.decrypt(header, &ciphertext, &mut decrypted).unwrap();
+        bob.decrypt(&header, &ciphertext, &mut decrypted).unwrap();
 
         assert_eq!(&decrypted, plaintext);
     }
@@ -223,14 +247,18 @@ mod tests {
     #[test]
     fn decrypt_wrong_aad_fails() {
         let (mut alice, mut bob) = make_session_pair();
-        let header = b"correct-header";
+        let correct_header = make_header_bytes(0);
+        // Different seq → different nonce AND different AAD bytes: decryption must fail.
+        let wrong_header = make_header_bytes(1);
         let plaintext = b"secret data";
 
         let mut ciphertext = Vec::new();
-        alice.encrypt(header, plaintext, &mut ciphertext).unwrap();
+        alice
+            .encrypt(&correct_header, plaintext, &mut ciphertext)
+            .unwrap();
 
         let mut decrypted = Vec::new();
-        let result = bob.decrypt(b"wrong-header", &ciphertext, &mut decrypted);
+        let result = bob.decrypt(&wrong_header, &ciphertext, &mut decrypted);
         assert!(result.is_err());
     }
 
@@ -239,29 +267,29 @@ mod tests {
         let mut alice = ChaChaSession::new([0xAA; 32]);
         let mut eve = ChaChaSession::new([0xBB; 32]);
 
-        let header = b"hdr";
+        let header = make_header_bytes(0);
         let plaintext = b"secret";
 
         let mut ciphertext = Vec::new();
-        alice.encrypt(header, plaintext, &mut ciphertext).unwrap();
+        alice.encrypt(&header, plaintext, &mut ciphertext).unwrap();
 
         let mut decrypted = Vec::new();
-        let result = eve.decrypt(header, &ciphertext, &mut decrypted);
+        let result = eve.decrypt(&header, &ciphertext, &mut decrypted);
         assert!(result.is_err());
     }
 
     #[test]
     fn multiple_packets_roundtrip() {
         let (mut alice, mut bob) = make_session_pair();
-        let header = b"hdr";
 
-        for i in 0..100 {
+        for i in 0..100u32 {
+            let header = make_header_bytes(i);
             let msg = format!("message {}", i);
             let mut ct = Vec::new();
-            alice.encrypt(header, msg.as_bytes(), &mut ct).unwrap();
+            alice.encrypt(&header, msg.as_bytes(), &mut ct).unwrap();
 
             let mut pt = Vec::new();
-            bob.decrypt(header, &ct, &mut pt).unwrap();
+            bob.decrypt(&header, &ct, &mut pt).unwrap();
             assert_eq!(pt, msg.as_bytes());
         }
     }
@@ -279,6 +307,57 @@ mod tests {
         alice.complete_rekey(&peer_pub).unwrap();
         // Session is now rekeyed - counters reset
         assert_eq!(alice.send_seq, 0);
+    }
+
+    #[test]
+    fn decrypt_survives_out_of_order_delivery() {
+        // Regression test for nonce derivation using recv_seq instead of
+        // MediaHeader.seq. If nonces are tied to a local counter, any reorder
+        // causes the counter to diverge from the sender's seq and every
+        // subsequent packet fails decryption permanently.
+        use wzp_proto::{CodecId, MediaType};
+
+        let key = [0x55u8; 32];
+        let mut alice = ChaChaSession::new(key);
+        let mut bob = ChaChaSession::new(key);
+
+        let plaintext = b"audio payload";
+
+        // Encrypt 5 packets in order (seqs 10, 11, 12, 13, 14).
+        let seqs = [10u32, 11, 12, 13, 14];
+        let mut ciphertexts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for &seq in &seqs {
+            let header = MediaHeader {
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
+                codec_id: CodecId::Opus24k,
+                stream_id: 0,
+                fec_ratio: 0,
+                seq,
+                timestamp: seq * 20,
+                fec_block: 0,
+            };
+            let mut header_bytes = Vec::new();
+            header.write_to(&mut header_bytes);
+            let mut ct = Vec::new();
+            alice.encrypt(&header_bytes, plaintext, &mut ct).unwrap();
+            ciphertexts.push((header_bytes, ct));
+        }
+
+        // Bob receives them out of order: 0, 2, 1, 4, 3
+        let delivery_order = [0usize, 2, 1, 4, 3];
+        for &idx in &delivery_order {
+            let (ref hdr, ref ct) = ciphertexts[idx];
+            let mut pt = Vec::new();
+            let result = bob.decrypt(hdr, ct, &mut pt);
+            assert!(
+                result.is_ok(),
+                "out-of-order packet (original idx={idx}, seq={}) must decrypt successfully",
+                seqs[idx]
+            );
+            assert_eq!(&pt, plaintext);
+        }
     }
 
     #[test]
