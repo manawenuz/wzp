@@ -1184,6 +1184,7 @@ impl CallEngine {
             let mut video_decoder_codec: Option<wzp_proto::CodecId> = None;
             let mut video_first_recv_logged = false;
             let mut video_first_reassembled_logged = false;
+            let mut video_reassembled_samples: u64 = 0;
             let mut video_first_decoded_logged = false;
             let mut video_decoder_buffering_count: u64 = 0;
 
@@ -1217,6 +1218,7 @@ impl CallEngine {
                             if let Some((codec_id, is_kf, frame)) =
                                 video_reassembler.push(&pkt)
                             {
+                                video_reassembled_samples += 1;
                                 if !video_first_reassembled_logged {
                                     video_first_reassembled_logged = true;
                                     crate::emit_call_debug(
@@ -1227,6 +1229,20 @@ impl CallEngine {
                                             "codec": format!("{:?}", codec_id),
                                             "is_keyframe": is_kf,
                                             "frame_bytes": frame.len(),
+                                            "platform": "android",
+                                        }),
+                                    );
+                                }
+                                if video_reassembled_samples <= 5 {
+                                    crate::emit_call_debug(
+                                        &recv_app,
+                                        "video:reassembled_frame",
+                                        serde_json::json!({
+                                            "t_ms": recv_t0.elapsed().as_millis() as u64,
+                                            "codec": format!("{:?}", codec_id),
+                                            "is_keyframe": is_kf,
+                                            "frame_bytes": frame.len(),
+                                            "frame_no": video_reassembled_samples,
                                             "platform": "android",
                                         }),
                                     );
@@ -1778,6 +1794,7 @@ impl CallEngine {
                 let mut first_camera_frame_logged = false;
                 let mut camera_frames: u64 = 0;
                 let mut empty_encodes: u64 = 0;
+                let mut encoded_frame_samples: u64 = 0;
                 let mut wait_ticks: u64 = 0;
                 encoder.request_keyframe();
                 crate::emit_call_debug(
@@ -1894,6 +1911,26 @@ impl CallEngine {
                     let pkts = wzp_video::transport::packetize_video_frame(
                         &encoded, vid_codec, is_keyframe, &mut seq, ts_ms,
                     );
+                    if encoded_frame_samples < 5 {
+                        encoded_frame_samples += 1;
+                        let packet_payload_bytes: usize =
+                            pkts.iter().map(|pkt| pkt.payload.len()).sum();
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:encoded_frame",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "camera_frames": camera_frames,
+                                "encoded_bytes": encoded.len(),
+                                "packet_payload_bytes": packet_payload_bytes,
+                                "packets": pkts.len(),
+                                "is_keyframe": is_keyframe,
+                                "sample_no": encoded_frame_samples,
+                                "platform": "android",
+                            }),
+                        );
+                    }
                     if !first_send_logged && !pkts.is_empty() {
                         first_send_logged = true;
                         crate::emit_call_debug(
@@ -1904,6 +1941,8 @@ impl CallEngine {
                                 "codec": format!("{:?}", vid_codec),
                                 "packets": pkts.len(),
                                 "first_pkt_bytes": pkts[0].payload.len(),
+                                "last_pkt_bytes": pkts.last().map(|pkt| pkt.payload.len()).unwrap_or(0),
+                                "encoded_bytes": encoded.len(),
                                 "is_keyframe": is_keyframe,
                             }),
                         );
@@ -2389,6 +2428,7 @@ impl CallEngine {
             let mut video_decoder_codec: Option<wzp_proto::CodecId> = None;
             let mut video_first_recv_logged_desktop = false;
             let mut video_first_reassembled_logged = false;
+            let mut video_reassembled_samples: u64 = 0;
             let mut video_first_decoded_logged = false;
             let mut video_decoder_buffering_count: u64 = 0;
             let mut decoded_frames: u64 = 0;
@@ -2427,6 +2467,7 @@ impl CallEngine {
                             if let Some((codec_id, is_kf, frame)) =
                                 video_reassembler.push(&pkt)
                             {
+                                video_reassembled_samples += 1;
                                 if !video_first_reassembled_logged {
                                     video_first_reassembled_logged = true;
                                     crate::emit_call_debug(
@@ -2437,6 +2478,20 @@ impl CallEngine {
                                             "codec": format!("{:?}", codec_id),
                                             "is_keyframe": is_kf,
                                             "frame_bytes": frame.len(),
+                                            "platform": "desktop",
+                                        }),
+                                    );
+                                }
+                                if video_reassembled_samples <= 5 {
+                                    crate::emit_call_debug(
+                                        &recv_app,
+                                        "video:reassembled_frame",
+                                        serde_json::json!({
+                                            "t_ms": recv_t0.elapsed().as_millis() as u64,
+                                            "codec": format!("{:?}", codec_id),
+                                            "is_keyframe": is_kf,
+                                            "frame_bytes": frame.len(),
+                                            "frame_no": video_reassembled_samples,
                                             "platform": "desktop",
                                         }),
                                     );
@@ -2838,6 +2893,7 @@ impl CallEngine {
                 let mut first_camera_frame_logged = false;
                 let mut camera_frames: u64 = 0;
                 let mut empty_encodes: u64 = 0;
+                let mut encoded_frame_samples: u64 = 0;
                 let mut wait_ticks: u64 = 0;
                 encoder.request_keyframe();
                 crate::emit_call_debug(
@@ -2954,6 +3010,26 @@ impl CallEngine {
                     let pkts = wzp_video::transport::packetize_video_frame(
                         &encoded, vid_codec, is_keyframe, &mut seq, ts_ms,
                     );
+                    if encoded_frame_samples < 5 {
+                        encoded_frame_samples += 1;
+                        let packet_payload_bytes: usize =
+                            pkts.iter().map(|pkt| pkt.payload.len()).sum();
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:encoded_frame",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "camera_frames": camera_frames,
+                                "encoded_bytes": encoded.len(),
+                                "packet_payload_bytes": packet_payload_bytes,
+                                "packets": pkts.len(),
+                                "is_keyframe": is_keyframe,
+                                "sample_no": encoded_frame_samples,
+                                "platform": "desktop",
+                            }),
+                        );
+                    }
                     if !first_send_logged && !pkts.is_empty() {
                         first_send_logged = true;
                         crate::emit_call_debug(
@@ -2964,6 +3040,8 @@ impl CallEngine {
                                 "codec": format!("{:?}", vid_codec),
                                 "packets": pkts.len(),
                                 "first_pkt_bytes": pkts[0].payload.len(),
+                                "last_pkt_bytes": pkts.last().map(|pkt| pkt.payload.len()).unwrap_or(0),
+                                "encoded_bytes": encoded.len(),
                                 "is_keyframe": is_keyframe,
                             }),
                         );

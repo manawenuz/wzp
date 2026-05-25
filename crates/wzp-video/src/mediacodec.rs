@@ -992,8 +992,13 @@ fn extract_vps_sps_pps(annex_b: &[u8]) -> HevcParameterSets {
 /// (4-byte start codes `0x00 0x00 0x00 0x01`).
 #[allow(dead_code)]
 fn avcc_to_annexb(data: &[u8]) -> Vec<u8> {
+    if starts_with_annex_b_start_code(data) {
+        return data.to_vec();
+    }
+
     let mut out = Vec::with_capacity(data.len() + data.len() / 4);
     let mut offset = 0;
+    let mut saw_nal = false;
     while offset + 4 <= data.len() {
         let nal_len = u32::from_be_bytes([
             data[offset],
@@ -1003,13 +1008,18 @@ fn avcc_to_annexb(data: &[u8]) -> Vec<u8> {
         ]) as usize;
         offset += 4;
         if offset + nal_len > data.len() {
-            break;
+            return if saw_nal { out } else { data.to_vec() };
         }
         out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
         out.extend_from_slice(&data[offset..offset + nal_len]);
         offset += nal_len;
+        saw_nal = true;
     }
     out
+}
+
+fn starts_with_annex_b_start_code(data: &[u8]) -> bool {
+    data.starts_with(&[0x00, 0x00, 0x01]) || data.starts_with(&[0x00, 0x00, 0x00, 0x01])
 }
 
 /// Parse an Annex-B access unit and return the first SPS and PPS found.
@@ -1161,6 +1171,16 @@ mod tests {
             0x3C, 0x80,
         ];
         assert_eq!(annex_b, expected);
+    }
+
+    #[test]
+    fn avcc_to_annexb_passes_through_annexb() {
+        let annex_b = vec![
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x1E,
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21,
+        ];
+
+        assert_eq!(avcc_to_annexb(&annex_b), annex_b);
     }
 
     #[test]
