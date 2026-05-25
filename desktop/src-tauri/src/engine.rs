@@ -133,6 +133,7 @@ fn codec_to_profile(codec: CodecId) -> QualityProfile {
 /// Handles RoomUpdate (participant list), QualityDirective (relay-pushed
 /// codec switch), and Hangup from the relay signal stream.
 async fn run_signal_task(
+    app: tauri::AppHandle,
     transport: Arc<wzp_transport::QuinnTransport>,
     running: Arc<AtomicBool>,
     pending_profile: Arc<AtomicU8>,
@@ -164,7 +165,32 @@ async fn run_signal_task(
                     })
                     .collect();
                 let count = unique.len();
+                let event_participants = unique
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "fingerprint": p.fingerprint,
+                            "alias": p.alias,
+                            "relay_label": p.relay_label,
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 *participants.lock().await = unique;
+                crate::emit_call_debug(
+                    &app,
+                    "media:room_update",
+                    serde_json::json!({
+                        "participants": event_participants.clone(),
+                        "count": count,
+                    }),
+                );
+                let _ = app.emit(
+                    "call-event",
+                    serde_json::json!({
+                        "kind": "participants",
+                        "participants": event_participants,
+                    }),
+                );
                 event_cb("room-update", &format!("{count} participants"));
             }
             Ok(Ok(Some(wzp_proto::SignalMessage::QualityDirective {
@@ -1418,6 +1444,7 @@ impl CallEngine {
         // Signal task (presence + quality directives).
         let event_cb = Arc::new(event_cb);
         tokio::spawn(run_signal_task(
+            app.clone(),
             transport.clone(),
             running.clone(),
             pending_profile.clone(),
@@ -1826,6 +1853,7 @@ impl CallEngine {
         // Signal task (presence + quality directives)
         let event_cb = Arc::new(event_cb);
         tokio::spawn(run_signal_task(
+            _app.clone(),
             transport.clone(),
             running.clone(),
             pending_profile.clone(),
