@@ -1,3 +1,8 @@
+---
+tags: [architecture, wzp]
+type: architecture
+---
+
 # Road to Video
 
 > Plan for adding video to WZP. Audio remains unchanged through Phase V1; video is additive. See `PROTOCOL-AUDIT.md` for the issues this plan addresses.

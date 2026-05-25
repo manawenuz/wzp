@@ -1,3 +1,8 @@
+---
+tags: [architecture, wzp]
+type: architecture
+---
+
 # WZP Protocol Specification (one-page reference)
 
 > Distilled from `docs/ARCHITECTURE.md` and the `wzp-proto` crate. Authoritative wire details live in `crates/wzp-proto/src/packet.rs`.

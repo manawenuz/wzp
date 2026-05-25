@@ -1,3 +1,8 @@
+---
+tags: [reference, wzp]
+type: reference
+---
+
 # WarzonePhone Development Progress Report
 
 ## Phase 1: Protocol Core
