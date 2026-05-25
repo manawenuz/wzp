@@ -15,8 +15,8 @@ set -euo pipefail
 #   - Output: desktop/src-tauri/gen/android/.../*.apk
 #
 # Usage:
-#   ./scripts/build-tauri-android.sh                  # full pipeline (debug, arm64 only)
-#   ./scripts/build-tauri-android.sh --release        # release APK
+#   ./scripts/build-tauri-android.sh                  # full pipeline (release, arm64 only)
+#   ./scripts/build-tauri-android.sh --debug          # debug APK (faster, no optimisation)
 #   ./scripts/build-tauri-android.sh --no-pull        # skip git fetch
 #   ./scripts/build-tauri-android.sh --rust           # force-clean rust target
 #   ./scripts/build-tauri-android.sh --init           # also run `cargo tauri android init`
@@ -38,7 +38,7 @@ SSH_OPTS="-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=
 REBUILD_RUST=0
 DO_PULL=1
 DO_INIT=0
-BUILD_RELEASE=0
+BUILD_RELEASE=1
 BUILD_ARCH="arm64"
 NEXT_IS_ARCH=0
 for arg in "$@"; do
@@ -52,7 +52,7 @@ for arg in "$@"; do
         --pull)     DO_PULL=1 ;;
         --no-pull)  DO_PULL=0 ;;
         --init)     DO_INIT=1 ;;
-        --release)  BUILD_RELEASE=1 ;;
+        --debug)    BUILD_RELEASE=0 ;;
         --arch)     NEXT_IS_ARCH=1 ;;
         -h|--help)
             sed -n '3,32p' "$0"
@@ -320,6 +320,31 @@ for ARCH in $ARCHS; do
     echo ""
     echo ">>> cargo tauri android build ${PROFILE_FLAG} --target $TARGET --apk"
     cargo tauri android build ${PROFILE_FLAG} --target "$TARGET" --apk
+
+    # ─── Workaround: Tauri CLI 2.10.x does not copy frontendDist to the
+    # Android assets folder. The Rust build step writes tauri.conf.json
+    # there correctly, but index.html and the JS/CSS assets are never
+    # transferred, causing the WebView to fail with "Asset not found:
+    # index.html" at runtime.
+    #
+    # Fix: inject the missing files directly into the unsigned APK (which
+    # is just a ZIP file). The existing zipalign + apksigner step below
+    # handles realignment and signing, so this produces a valid APK.
+    # Re-running Gradle is NOT used here because the Gradle Rust build
+    # task (BuildTask.kt) calls `cargo tauri android android-studio-script`
+    # which requires the full Tauri CLI environment and fails standalone.
+    UNSIGNED_APK_PATH="gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+    if [ -f "$UNSIGNED_APK_PATH" ] && ! unzip -l "$UNSIGNED_APK_PATH" 2>/dev/null | grep -q "assets/index.html"; then
+        echo ">>> frontend assets missing from APK — patching unsigned APK directly"
+        PATCH_DIR="/tmp/apk-frontend-patch-$$"
+        rm -rf "$PATCH_DIR"
+        mkdir -p "$PATCH_DIR/assets"
+        cp -r /build/source/desktop/dist/. "$PATCH_DIR/assets/"
+        (cd "$PATCH_DIR" && zip -r /build/source/desktop/src-tauri/"$UNSIGNED_APK_PATH" assets/)
+        rm -rf "$PATCH_DIR"
+        echo ">>> APK patched: $(ls -lh "$UNSIGNED_APK_PATH" | awk "{print \$5}")"
+        echo ">>> assets in APK: $(unzip -l "$UNSIGNED_APK_PATH" | grep "assets/" | wc -l) entries"
+    fi
 
     # Copy produced APK with arch suffix
     BUILT_APK=$(find gen/android -name "*.apk" -newer "$APK_OUTPUT_DIR" -type f 2>/dev/null | head -1)

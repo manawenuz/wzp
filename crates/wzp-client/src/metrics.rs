@@ -178,7 +178,10 @@ mod tests {
 
         // Immediate second write should be skipped (60s interval).
         let second = writer.maybe_write(&snap).unwrap();
-        assert!(!second, "second write should be skipped — interval not elapsed");
+        assert!(
+            !second,
+            "second write should be skipped — interval not elapsed"
+        );
 
         // Clean up.
         let _ = std::fs::remove_file(&path);

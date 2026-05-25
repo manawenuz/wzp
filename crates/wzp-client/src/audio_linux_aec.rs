@@ -54,13 +54,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use tracing::{info, warn};
 use webrtc_audio_processing::{
     Config, EchoCancellation, EchoCancellationSuppressionLevel, InitializationConfig,
-    NoiseSuppression, NoiseSuppressionLevel, Processor, NUM_SAMPLES_PER_FRAME,
+    NUM_SAMPLES_PER_FRAME, NoiseSuppression, NoiseSuppressionLevel, Processor,
 };
 
 use crate::audio_ring::AudioRing;
@@ -97,8 +97,8 @@ fn get_or_init_processor() -> anyhow::Result<Arc<Mutex<Processor>>> {
         num_render_channels: APM_NUM_CHANNELS as i32,
         ..Default::default()
     };
-    let mut processor = Processor::new(&init_config)
-        .map_err(|e| anyhow!("webrtc APM init failed: {e:?}"))?;
+    let mut processor =
+        Processor::new(&init_config).map_err(|e| anyhow!("webrtc APM init failed: {e:?}"))?;
 
     let config = Config {
         echo_cancellation: Some(EchoCancellation {

@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 // ─── Call-flow debug logs (GUI-gated) ────────────────────────────────
 //
@@ -59,17 +59,15 @@ fn set_call_debug_logs_internal(on: bool) {
     CALL_DEBUG_LOGS.store(on, Ordering::Relaxed);
 }
 
-/// Emit a `call-debug-log` event to the JS side IF the flag is on.
+/// Emit a `call-debug-log` event to the JS side.
 /// Also mirrors to `tracing::info!` so logcat keeps its copy
-/// regardless of the flag — the toggle only controls the GUI
-/// overlay, not the underlying Android log stream.
-pub(crate) fn emit_call_debug(
-    app: &tauri::AppHandle,
-    step: &str,
-    details: serde_json::Value,
-) {
+/// regardless of the flag. Connect/register steps are always emitted
+/// because they are needed to diagnose failed joins after app data is
+/// cleared and the GUI debug toggle is back to its default false value.
+pub(crate) fn emit_call_debug(app: &tauri::AppHandle, step: &str, details: serde_json::Value) {
     tracing::info!(step, ?details, "call-debug");
-    if !call_debug_logs_enabled() {
+    let force_emit = step.starts_with("connect:") || step.starts_with("register_signal:");
+    if !force_emit && !call_debug_logs_enabled() {
         return;
     }
     let payload = serde_json::json!({
@@ -86,6 +84,213 @@ pub(crate) fn emit_call_debug(
 /// Short git hash captured at compile time by build.rs.
 const GIT_HASH: &str = env!("WZP_GIT_HASH");
 
+// ─── Video helpers ────────────────────────────────────────────────────────────
+
+/// Convert an I420 frame to a JPEG and base64-encode it for IPC.
+///
+/// Returns `None` if the data is too short or encoding fails.
+/// Called from the video recv task in engine.rs to produce the `jpeg_b64`
+/// field of every `video:frame` Tauri event.
+pub(crate) fn i420_to_jpeg_b64(data: &[u8], width: u32, height: u32) -> Option<String> {
+    use base64::Engine as _;
+    use image::{DynamicImage, ImageBuffer, Rgb};
+
+    let w = width as usize;
+    let h = height as usize;
+    let y_size = w * h;
+    let uv_size = w * h / 4;
+
+    if data.len() < y_size + 2 * uv_size {
+        return None;
+    }
+
+    let mut rgb = vec![0u8; w * h * 3];
+    for row in 0..h {
+        for col in 0..w {
+            let y = data[row * w + col] as f32;
+            let uv_idx = (row / 2) * (w / 2) + col / 2;
+            let u = data[y_size + uv_idx] as f32 - 128.0;
+            let v = data[y_size + uv_size + uv_idx] as f32 - 128.0;
+            let out = (row * w + col) * 3;
+            rgb[out]     = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+            rgb[out + 1] = (y - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
+            rgb[out + 2] = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    let img = DynamicImage::ImageRgb8(ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb)?);
+    let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+    img.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
+/// RGB24 → I420 (planar 4:2:0).  Layout: Y(w×h) | U(w/2×h/2) | V(w/2×h/2).
+fn rgb_to_i420(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let y_size = w * h;
+    let uv_size = (w / 2) * (h / 2);
+    let mut out = vec![0u8; y_size + 2 * uv_size];
+    for row in 0..h {
+        for col in 0..w {
+            let i = (row * w + col) * 3;
+            let r = rgb[i] as f32;
+            let g = rgb[i + 1] as f32;
+            let b = rgb[i + 2] as f32;
+            out[row * w + col] = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
+            if row % 2 == 0 && col % 2 == 0 {
+                let uv = (row / 2) * (w / 2) + col / 2;
+                out[y_size + uv]          = (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
+                out[y_size + uv_size + uv] = (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Tauri command: receive a JPEG frame from the frontend camera (getUserMedia),
+/// decode it, convert to I420, and push into the active call's video send task.
+///
+/// The frontend calls this at ~15 fps from a canvas.toDataURL() capture loop.
+#[tauri::command]
+async fn push_camera_frame(
+    state: tauri::State<'_, Arc<AppState>>,
+    jpeg_b64: String,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    let jpeg_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&jpeg_b64)
+        .map_err(|e| e.to_string())?;
+
+    let dyn_img = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    let rgb_img = dyn_img.to_rgb8();
+    let w = rgb_img.width() as usize;
+    let h = rgb_img.height() as usize;
+    let yuv = rgb_to_i420(rgb_img.as_raw(), w, h);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let frame = wzp_video::encoder::VideoFrame {
+        width: w as u32,
+        height: h as u32,
+        data: yuv,
+        timestamp_ms: ts,
+    };
+
+    let engine = state.engine.lock().await;
+    if let Some(ref eng) = *engine {
+        if let Some(ref tx) = eng.camera_tx {
+            let _ = tx.try_send(frame); // drop frame if send task is saturated
+        }
+    }
+    Ok(())
+}
+
+// ─── Video helper tests ───────────────────────────────────────────────────────
+#[cfg(test)]
+mod video_tests {
+    use super::{i420_to_jpeg_b64, rgb_to_i420};
+    use base64::Engine as _;
+
+    fn solid_rgb_frame(w: usize, h: usize, r: u8, g: u8, b: u8) -> Vec<u8> {
+        let mut rgb = vec![0u8; w * h * 3];
+        for i in 0..w * h {
+            rgb[i * 3]     = r;
+            rgb[i * 3 + 1] = g;
+            rgb[i * 3 + 2] = b;
+        }
+        rgb
+    }
+
+    fn solid_i420(w: usize, h: usize, y: u8, u: u8, v: u8) -> Vec<u8> {
+        let y_size = w * h;
+        let uv_size = w * h / 4;
+        let mut data = vec![y; y_size + 2 * uv_size];
+        data[y_size..y_size + uv_size].fill(u);
+        data[y_size + uv_size..].fill(v);
+        data
+    }
+
+    #[test]
+    fn rgb_to_i420_output_size() {
+        let rgb = solid_rgb_frame(640, 360, 128, 128, 128);
+        let yuv = rgb_to_i420(&rgb, 640, 360);
+        assert_eq!(yuv.len(), 640 * 360 * 3 / 2);
+    }
+
+    #[test]
+    fn rgb_to_i420_pure_green_luma() {
+        // Pure green (0, 255, 0) → Y ≈ 150 (0.587 × 255 ≈ 150).
+        let rgb = solid_rgb_frame(4, 4, 0, 255, 0);
+        let yuv = rgb_to_i420(&rgb, 4, 4);
+        let y = yuv[0];
+        assert!(y >= 140 && y <= 160, "pure-green luma out of range: {y}");
+    }
+
+    #[test]
+    fn rgb_to_i420_grey_is_neutral() {
+        // Mid-grey RGB → U and V should both be near 128.
+        let rgb = solid_rgb_frame(4, 4, 128, 128, 128);
+        let yuv = rgb_to_i420(&rgb, 4, 4);
+        let uv_start = 4 * 4;
+        let u = yuv[uv_start];
+        let v = yuv[uv_start + 4]; // 4 = (4/2)*(4/2)
+        assert!((u as i32 - 128).abs() <= 5, "grey U out of range: {u}");
+        assert!((v as i32 - 128).abs() <= 5, "grey V out of range: {v}");
+    }
+
+    #[test]
+    fn i420_to_jpeg_b64_produces_non_empty_output() {
+        let data = solid_i420(64, 64, 128, 128, 128);
+        let b64 = i420_to_jpeg_b64(&data, 64, 64);
+        assert!(b64.is_some(), "valid I420 must produce Some(b64)");
+        let s = b64.unwrap();
+        assert!(!s.is_empty());
+        // JPEG base64 starts with '/9j/' (FFD8FF marker).
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&s).unwrap();
+        assert_eq!(&decoded[0..2], &[0xFF, 0xD8], "output must start with JPEG SOI marker");
+    }
+
+    #[test]
+    fn i420_to_jpeg_b64_rejects_undersized_buffer() {
+        // Buffer too short: only Y plane, no chroma.
+        let data = vec![128u8; 64 * 64];
+        let b64 = i420_to_jpeg_b64(&data, 64, 64);
+        assert!(b64.is_none(), "truncated buffer must yield None");
+    }
+
+    #[test]
+    fn i420_to_jpeg_b64_color_preservation() {
+        // A red (255, 0, 0) I420 frame should decode to a mostly-red JPEG.
+        // After JPEG lossy compression the exact values drift, so we only
+        // check that the decoded pixel has R > G and R > B.
+        use base64::Engine as _;
+
+        // Convert red RGB → I420.
+        let rgb = solid_rgb_frame(64, 64, 255, 0, 0);
+        let yuv = rgb_to_i420(&rgb, 64, 64);
+
+        let b64 = i420_to_jpeg_b64(&yuv, 64, 64).expect("should produce JPEG");
+        let jpeg = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+
+        let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+        let rgb_img = img.to_rgb8();
+        let px = rgb_img.get_pixel(32, 32);
+        let (r, g, b) = (px[0], px[1], px[2]);
+        assert!(r > g && r > b, "red frame: expected R dominant, got R={r} G={g} B={b}");
+    }
+
+    #[test]
+    fn rgb_i420_conversion_is_deterministic() {
+        let rgb = solid_rgb_frame(8, 8, 200, 100, 50);
+        let yuv1 = rgb_to_i420(&rgb, 8, 8);
+        let yuv2 = rgb_to_i420(&rgb, 8, 8);
+        assert_eq!(yuv1, yuv2, "rgb_to_i420 must be deterministic");
+    }
+}
+
 /// Resolved by `setup()` once we have a Tauri AppHandle. Holds the
 /// platform-correct app data dir (e.g. `/data/data/com.wzp.desktop/files` on
 /// Android, `~/Library/Application Support/com.wzp.desktop` on macOS).
@@ -94,18 +299,16 @@ static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Adjective list — keep in sync with the noun list below. Both are powers of
 /// 2 friendly so the modulo bias is negligible.
 const ALIAS_ADJECTIVES: &[&str] = &[
-    "Swift", "Silent", "Brave", "Calm", "Dark", "Fierce", "Ghost",
-    "Iron", "Lucky", "Noble", "Quick", "Sharp", "Storm", "Wild",
-    "Cold", "Bright", "Lone", "Red", "Grey", "Frosty", "Dusty",
-    "Rusty", "Neon", "Void", "Solar", "Lunar", "Cyber", "Pixel",
-    "Sonic", "Hyper", "Turbo", "Nano", "Mega", "Ultra", "Zinc",
+    "Swift", "Silent", "Brave", "Calm", "Dark", "Fierce", "Ghost", "Iron", "Lucky", "Noble",
+    "Quick", "Sharp", "Storm", "Wild", "Cold", "Bright", "Lone", "Red", "Grey", "Frosty", "Dusty",
+    "Rusty", "Neon", "Void", "Solar", "Lunar", "Cyber", "Pixel", "Sonic", "Hyper", "Turbo", "Nano",
+    "Mega", "Ultra", "Zinc",
 ];
 const ALIAS_NOUNS: &[&str] = &[
-    "Wolf", "Hawk", "Fox", "Bear", "Lynx", "Crow", "Viper",
-    "Cobra", "Tiger", "Eagle", "Shark", "Raven", "Falcon", "Otter",
-    "Mantis", "Panda", "Jackal", "Badger", "Heron", "Bison",
-    "Condor", "Coyote", "Gecko", "Hornet", "Marten", "Osprey",
-    "Parrot", "Puma", "Raptor", "Stork", "Toucan", "Walrus",
+    "Wolf", "Hawk", "Fox", "Bear", "Lynx", "Crow", "Viper", "Cobra", "Tiger", "Eagle", "Shark",
+    "Raven", "Falcon", "Otter", "Mantis", "Panda", "Jackal", "Badger", "Heron", "Bison", "Condor",
+    "Coyote", "Gecko", "Hornet", "Marten", "Osprey", "Parrot", "Puma", "Raptor", "Stork", "Toucan",
+    "Walrus",
 ];
 
 /// Derive a stable human-readable alias from the seed bytes. Same seed →
@@ -215,19 +418,28 @@ async fn ping_relay(relay: String) -> Result<PingResult, String> {
             let server_fingerprint = conn
                 .peer_identity()
                 .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
-                .and_then(|certs| certs.first().map(|c| {
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    c.as_ref().hash(&mut hasher);
-                    let h = hasher.finish();
-                    format!("{h:016x}")
-                }))
+                .and_then(|certs| {
+                    certs.first().map(|c| {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        c.as_ref().hash(&mut hasher);
+                        let h = hasher.finish();
+                        format!("{h:016x}")
+                    })
+                })
                 .unwrap_or_else(|| {
-                    format!("{:x}", addr.ip().to_string().len() as u64 * 0x9e3779b97f4a7c15 + addr.port() as u64)
+                    format!(
+                        "{:x}",
+                        addr.ip().to_string().len() as u64 * 0x9e3779b97f4a7c15
+                            + addr.port() as u64
+                    )
                 });
 
             conn.close(0u32.into(), b"ping");
-            Ok(PingResult { rtt_ms, server_fingerprint })
+            Ok(PingResult {
+                rtt_ms,
+                server_fingerprint,
+            })
         }
         Ok(Err(e)) => Err(format!("{e}")),
         Err(_) => Err("timeout (3s)".into()),
@@ -285,7 +497,11 @@ fn load_or_create_seed() -> Result<wzp_crypto::Seed, String> {
 #[tauri::command]
 fn get_identity() -> Result<String, String> {
     let seed = load_or_create_seed()?;
-    Ok(seed.derive_identity().public_identity().fingerprint.to_string())
+    Ok(seed
+        .derive_identity()
+        .public_identity()
+        .fingerprint
+        .to_string())
 }
 
 /// Build/identity info shown on the home screen so the user can prove which
@@ -343,15 +559,19 @@ async fn connect(
 ) -> Result<String, String> {
     let force_direct = direct_only.unwrap_or(false);
     let enable_birthday = birthday_attack.unwrap_or(false);
-    emit_call_debug(&app, "connect:start", serde_json::json!({
-        "relay": relay,
-        "room": room,
-        "peer_direct_addr": peer_direct_addr,
-        "peer_local_addrs": peer_local_addrs,
-        "peer_mapped_addr": peer_mapped_addr,
-        "direct_only": force_direct,
-        "birthday_attack": enable_birthday,
-    }));
+    emit_call_debug(
+        &app,
+        "connect:start",
+        serde_json::json!({
+            "relay": relay,
+            "room": room,
+            "peer_direct_addr": peer_direct_addr,
+            "peer_local_addrs": peer_local_addrs,
+            "peer_mapped_addr": peer_mapped_addr,
+            "direct_only": force_direct,
+            "birthday_attack": enable_birthday,
+        }),
+    );
     let mut engine_lock = state.engine.lock().await;
     if engine_lock.is_some() {
         emit_call_debug(&app, "connect:already_connected", serde_json::json!({}));
@@ -375,11 +595,14 @@ async fn connect(
     // identical to Phase 0 behavior.
     let (own_reflex_addr, signal_endpoint_for_race, ipv6_endpoint_for_race) = {
         let mut sig = state.signal.lock().await;
-        (sig.own_reflex_addr.clone(), sig.endpoint.clone(), sig.ipv6_endpoint.take())
+        (
+            sig.own_reflex_addr.clone(),
+            sig.endpoint.clone(),
+            sig.ipv6_endpoint.take(),
+        )
     };
-    let peer_addr_parsed: Option<std::net::SocketAddr> = peer_direct_addr
-        .as_deref()
-        .and_then(|s| s.parse().ok());
+    let peer_addr_parsed: Option<std::net::SocketAddr> =
+        peer_direct_addr.as_deref().and_then(|s| s.parse().ok());
     let relay_addr_parsed: Option<std::net::SocketAddr> = relay.parse().ok();
     let role = wzp_client::reflect::determine_role(
         own_reflex_addr.as_deref(),
@@ -406,114 +629,126 @@ async fn connect(
     // Set inside the Phase 6 negotiation block below.
     let mut is_direct_p2p_agreed = false;
 
-    let pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>> =
-        match (role, relay_addr_parsed) {
-            (Some(r), Some(relay_sockaddr))
-                if peer_addr_parsed.is_some() || !peer_local_parsed.is_empty() =>
-            {
-                // Phase 8: parse peer_mapped_addr from CallSetup
-                let peer_mapped_parsed: Option<std::net::SocketAddr> = peer_mapped_addr
-                    .as_deref()
-                    .and_then(|s| s.parse().ok());
+    let pre_connected_transport: Option<Arc<wzp_transport::QuinnTransport>> = match (
+        role,
+        relay_addr_parsed,
+    ) {
+        (Some(r), Some(relay_sockaddr))
+            if peer_addr_parsed.is_some() || !peer_local_parsed.is_empty() =>
+        {
+            // Phase 8: parse peer_mapped_addr from CallSetup
+            let peer_mapped_parsed: Option<std::net::SocketAddr> =
+                peer_mapped_addr.as_deref().and_then(|s| s.parse().ok());
 
-                // Phase 8.6: if peer sent a HardNatProbe with sequential
-                // allocation, predict their next ports and add as candidates.
-                let mut predicted_addrs: Vec<std::net::SocketAddr> = Vec::new();
-                {
-                    let sig = state.signal.lock().await;
-                    if let Some(ref probe) = sig.peer_hard_nat_probe {
-                        if let Some(delta) = parse_sequential_delta(&probe.allocation) {
-                            if let Some(&last_port) = probe.port_sequence.first() {
-                                let predicted = wzp_client::stun::predict_ports(
-                                    last_port, delta, 1, 3,
-                                );
-                                for p in predicted {
-                                    predicted_addrs.push(
-                                        std::net::SocketAddr::new(probe.external_ip, p)
-                                    );
-                                }
-                                tracing::info!(
-                                    delta,
-                                    last_port,
-                                    predicted_count = predicted_addrs.len(),
-                                    "connect: added predicted ports from HardNatProbe"
-                                );
-                                emit_call_debug(&app, "connect:hard_nat_predicted", serde_json::json!({
+            // Phase 8.6: if peer sent a HardNatProbe with sequential
+            // allocation, predict their next ports and add as candidates.
+            let mut predicted_addrs: Vec<std::net::SocketAddr> = Vec::new();
+            {
+                let sig = state.signal.lock().await;
+                if let Some(ref probe) = sig.peer_hard_nat_probe {
+                    if let Some(delta) = parse_sequential_delta(&probe.allocation) {
+                        if let Some(&last_port) = probe.port_sequence.first() {
+                            let predicted = wzp_client::stun::predict_ports(last_port, delta, 1, 3);
+                            for p in predicted {
+                                predicted_addrs
+                                    .push(std::net::SocketAddr::new(probe.external_ip, p));
+                            }
+                            tracing::info!(
+                                delta,
+                                last_port,
+                                predicted_count = predicted_addrs.len(),
+                                "connect: added predicted ports from HardNatProbe"
+                            );
+                            emit_call_debug(
+                                &app,
+                                "connect:hard_nat_predicted",
+                                serde_json::json!({
                                     "delta": delta,
                                     "last_port": last_port,
                                     "predicted": predicted_addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
-                                }));
-                            }
+                                }),
+                            );
                         }
                     }
                 }
+            }
 
-                // Phase 8.6: if peer sent birthday attack ports, add
-                // them as extra candidates the Dialer can target.
-                // Only wait for birthday ports if we know the peer has
-                // a non-cone NAT (from HardNatProbe). Otherwise start
-                // the race immediately — LAN/cone calls shouldn't wait.
-                let mut birthday_addrs: Vec<std::net::SocketAddr> = Vec::new();
-                {
-                    let peer_needs_birthday = enable_birthday && {
-                        let sig = state.signal.lock().await;
-                        sig.peer_hard_nat_probe.as_ref()
-                            .map(|p| p.allocation != "port-preserving")
-                            .unwrap_or(false)
-                    };
-                    if peer_needs_birthday {
-                        // Wait up to 3s for BirthdayStart (Acceptor needs
-                        // time to open ports + STUN-probe them).
-                        for _ in 0..6 {
-                            let sig = state.signal.lock().await;
-                            if sig.peer_birthday_ports.is_some() { break; }
-                            drop(sig);
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        }
-                    }
+            // Phase 8.6: if peer sent birthday attack ports, add
+            // them as extra candidates the Dialer can target.
+            // Only wait for birthday ports if we know the peer has
+            // a non-cone NAT (from HardNatProbe). Otherwise start
+            // the race immediately — LAN/cone calls shouldn't wait.
+            let mut birthday_addrs: Vec<std::net::SocketAddr> = Vec::new();
+            {
+                let peer_needs_birthday = enable_birthday && {
                     let sig = state.signal.lock().await;
-                    if let Some(ref bday) = sig.peer_birthday_ports {
-                        let targets = wzp_client::birthday::generate_dialer_targets(
-                            match bday.external_ip {
-                                std::net::IpAddr::V4(ip) => ip,
-                                _ => std::net::Ipv4Addr::UNSPECIFIED,
-                            },
-                            &bday.ports,
-                            64, // spray up to 64 targets
-                        );
-                        birthday_addrs = targets;
-                        tracing::info!(
-                            birthday_targets = birthday_addrs.len(),
-                            known_ports = bday.ports.len(),
-                            "connect: adding birthday attack targets"
-                        );
-                        emit_call_debug(&app, "connect:birthday_targets", serde_json::json!({
+                    sig.peer_hard_nat_probe
+                        .as_ref()
+                        .map(|p| p.allocation != "port-preserving")
+                        .unwrap_or(false)
+                };
+                if peer_needs_birthday {
+                    // Wait up to 3s for BirthdayStart (Acceptor needs
+                    // time to open ports + STUN-probe them).
+                    for _ in 0..6 {
+                        let sig = state.signal.lock().await;
+                        if sig.peer_birthday_ports.is_some() {
+                            break;
+                        }
+                        drop(sig);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+                let sig = state.signal.lock().await;
+                if let Some(ref bday) = sig.peer_birthday_ports {
+                    let targets = wzp_client::birthday::generate_dialer_targets(
+                        match bday.external_ip {
+                            std::net::IpAddr::V4(ip) => ip,
+                            _ => std::net::Ipv4Addr::UNSPECIFIED,
+                        },
+                        &bday.ports,
+                        64, // spray up to 64 targets
+                    );
+                    birthday_addrs = targets;
+                    tracing::info!(
+                        birthday_targets = birthday_addrs.len(),
+                        known_ports = bday.ports.len(),
+                        "connect: adding birthday attack targets"
+                    );
+                    emit_call_debug(
+                        &app,
+                        "connect:birthday_targets",
+                        serde_json::json!({
                             "known_ports": bday.ports,
                             "total_targets": birthday_addrs.len(),
-                        }));
-                    }
+                        }),
+                    );
                 }
+            }
 
-                let mut all_local = peer_local_parsed.clone();
-                all_local.extend(predicted_addrs);
-                all_local.extend(birthday_addrs);
+            let mut all_local = peer_local_parsed.clone();
+            all_local.extend(predicted_addrs);
+            all_local.extend(birthday_addrs);
 
-                let candidates = wzp_client::dual_path::PeerCandidates {
-                    reflexive: peer_addr_parsed,
-                    local: all_local,
-                    mapped: peer_mapped_parsed,
-                };
-                tracing::info!(
-                    role = ?r,
-                    candidates = ?candidates.dial_order(),
-                    %relay,
-                    %room,
-                    own = ?own_reflex_addr,
-                    "connect: starting dual-path race"
-                );
-                let own_reflex_parsed: Option<std::net::SocketAddr> =
-                    own_reflex_addr.as_deref().and_then(|s| s.parse().ok());
-                emit_call_debug(&app, "connect:dual_path_race_start", serde_json::json!({
+            let candidates = wzp_client::dual_path::PeerCandidates {
+                reflexive: peer_addr_parsed,
+                local: all_local,
+                mapped: peer_mapped_parsed,
+            };
+            tracing::info!(
+                role = ?r,
+                candidates = ?candidates.dial_order(),
+                %relay,
+                %room,
+                own = ?own_reflex_addr,
+                "connect: starting dual-path race"
+            );
+            let own_reflex_parsed: Option<std::net::SocketAddr> =
+                own_reflex_addr.as_deref().and_then(|s| s.parse().ok());
+            emit_call_debug(
+                &app,
+                "connect:dual_path_race_start",
+                serde_json::json!({
                     "role": format!("{:?}", r),
                     "peer_reflex": peer_addr_parsed.map(|a| a.to_string()),
                     "peer_mapped": peer_mapped_parsed.map(|a| a.to_string()),
@@ -522,191 +757,221 @@ async fn connect(
                     "dial_order_smart": candidates.smart_dial_order(own_reflex_parsed.as_ref()).iter().map(|a| a.to_string()).collect::<Vec<_>>(),
                     "relay_addr": relay_sockaddr.to_string(),
                     "own_reflex_addr": own_reflex_addr,
-                }));
-                let (path_report_tx, path_report_rx) = tokio::sync::oneshot::channel::<bool>();
-                {
-                    let mut sig = state.signal.lock().await;
-                    sig.pending_path_report = Some(path_report_tx);
-                }
+                }),
+            );
+            let (path_report_tx, path_report_rx) = tokio::sync::oneshot::channel::<bool>();
+            {
+                let mut sig = state.signal.lock().await;
+                sig.pending_path_report = Some(path_report_tx);
+            }
 
-                let room_sni = room.clone();
-                let call_sni = format!("call-{room}");
-                match wzp_client::dual_path::race(
-                    r,
-                    candidates,
-                    relay_sockaddr,
-                    room_sni,
-                    call_sni,
-                    own_reflex_parsed,
-                    signal_endpoint_for_race.clone(),
-                    ipv6_endpoint_for_race.clone(),
-                )
-                .await
-                {
-                    Ok(race_result) => {
-                        let local_direct_ok = race_result.direct_transport.is_some();
-                        let local_winner = race_result.local_winner;
-                        tracing::info!(
-                            ?local_winner,
-                            local_direct_ok,
-                            has_relay = race_result.relay_transport.is_some(),
-                            "connect: race finished, starting Phase 6 negotiation"
-                        );
-                        emit_call_debug(&app, "connect:dual_path_race_done", serde_json::json!({
+            let room_sni = room.clone();
+            let call_sni = format!("call-{room}");
+            match wzp_client::dual_path::race(
+                r,
+                candidates,
+                relay_sockaddr,
+                room_sni,
+                call_sni,
+                own_reflex_parsed,
+                signal_endpoint_for_race.clone(),
+                ipv6_endpoint_for_race.clone(),
+            )
+            .await
+            {
+                Ok(race_result) => {
+                    let local_direct_ok = race_result.direct_transport.is_some();
+                    let local_winner = race_result.local_winner;
+                    tracing::info!(
+                        ?local_winner,
+                        local_direct_ok,
+                        has_relay = race_result.relay_transport.is_some(),
+                        "connect: race finished, starting Phase 6 negotiation"
+                    );
+                    emit_call_debug(
+                        &app,
+                        "connect:dual_path_race_done",
+                        serde_json::json!({
                             "local_winner": format!("{:?}", local_winner),
                             "local_direct_ok": local_direct_ok,
                             "has_relay": race_result.relay_transport.is_some(),
                             "candidate_diags": race_result.candidate_diags,
-                        }));
+                        }),
+                    );
 
-                        // Phase 6: send our report to the peer and
-                        // wait for theirs before committing. Both
-                        // sides must agree on the same path to
-                        // prevent the one-picks-Direct-other-picks-
-                        // Relay race condition that causes TX>0 RX=0
-                        // on both sides.
-                        //
-                        // Extract call_id from the room name
-                        // ("call-<id>" → "<id>").
-                        let call_id_for_report = room.strip_prefix("call-")
-                            .unwrap_or(&room)
-                            .to_string();
+                    // Phase 6: send our report to the peer and
+                    // wait for theirs before committing. Both
+                    // sides must agree on the same path to
+                    // prevent the one-picks-Direct-other-picks-
+                    // Relay race condition that causes TX>0 RX=0
+                    // on both sides.
+                    //
+                    // Extract call_id from the room name
+                    // ("call-<id>" → "<id>").
+                    let call_id_for_report =
+                        room.strip_prefix("call-").unwrap_or(&room).to_string();
 
-                        // The oneshot was installed BEFORE the race
-                        // (see path_report_tx above) so the peer's
-                        // report is already buffered in path_report_rx
-                        // if it arrived during the race.
-                        let rx = path_report_rx;
-                        let peer_direct_ok = {
-                            let transport_for_report = {
-                                let sig = state.signal.lock().await;
-                                sig.transport.as_ref().cloned()
+                    // The oneshot was installed BEFORE the race
+                    // (see path_report_tx above) so the peer's
+                    // report is already buffered in path_report_rx
+                    // if it arrived during the race.
+                    let rx = path_report_rx;
+                    let peer_direct_ok = {
+                        let transport_for_report = {
+                            let sig = state.signal.lock().await;
+                            sig.transport.as_ref().cloned()
+                        };
+                        // Send our report
+                        if let Some(ref t) = transport_for_report {
+                            let report = wzp_proto::SignalMessage::MediaPathReport {
+                                version: default_signal_version(),
+                                call_id: call_id_for_report.clone(),
+                                direct_ok: local_direct_ok,
+                                race_winner: format!("{:?}", local_winner),
                             };
-                            // Send our report
-                            if let Some(ref t) = transport_for_report {
-                                let report = wzp_proto::SignalMessage::MediaPathReport {
-                                    call_id: call_id_for_report.clone(),
-                                    direct_ok: local_direct_ok,
-                                    race_winner: format!("{:?}", local_winner),
-                                };
-                                let _ = t.send_signal(&report).await;
-                                emit_call_debug(&app, "connect:path_report_sent", serde_json::json!({
+                            let _ = t.send_signal(&report).await;
+                            emit_call_debug(
+                                &app,
+                                "connect:path_report_sent",
+                                serde_json::json!({
                                     "direct_ok": local_direct_ok,
                                     "race_winner": format!("{:?}", local_winner),
-                                }));
-                            }
-                            // Wait for peer's report (3s timeout)
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(3),
-                                rx,
-                            ).await {
-                                Ok(Ok(peer_ok)) => {
-                                    emit_call_debug(&app, "connect:peer_report_received", serde_json::json!({
+                                }),
+                            );
+                        }
+                        // Wait for peer's report (3s timeout)
+                        match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+                            Ok(Ok(peer_ok)) => {
+                                emit_call_debug(
+                                    &app,
+                                    "connect:peer_report_received",
+                                    serde_json::json!({
                                         "peer_direct_ok": peer_ok,
-                                    }));
-                                    peer_ok
-                                }
-                                _ => {
-                                    // Timeout or channel error — peer
-                                    // may be on an old build without
-                                    // Phase 6. Fall back to relay.
-                                    emit_call_debug(&app, "connect:peer_report_timeout", serde_json::json!({}));
-                                    let mut sig = state.signal.lock().await;
-                                    sig.pending_path_report = None;
-                                    false
-                                }
+                                    }),
+                                );
+                                peer_ok
                             }
-                        };
+                            _ => {
+                                // Timeout or channel error — peer
+                                // may be on an old build without
+                                // Phase 6. Fall back to relay.
+                                emit_call_debug(
+                                    &app,
+                                    "connect:peer_report_timeout",
+                                    serde_json::json!({}),
+                                );
+                                let mut sig = state.signal.lock().await;
+                                sig.pending_path_report = None;
+                                false
+                            }
+                        }
+                    };
 
-                        // Phase 6 decision: BOTH must agree on direct
-                        let use_direct = local_direct_ok && peer_direct_ok;
-                        let chosen_path = if use_direct {
-                            wzp_client::dual_path::WinningPath::Direct
-                        } else {
-                            wzp_client::dual_path::WinningPath::Relay
-                        };
-                        emit_call_debug(&app, "connect:path_negotiated", serde_json::json!({
+                    // Phase 6 decision: BOTH must agree on direct
+                    let use_direct = local_direct_ok && peer_direct_ok;
+                    let chosen_path = if use_direct {
+                        wzp_client::dual_path::WinningPath::Direct
+                    } else {
+                        wzp_client::dual_path::WinningPath::Relay
+                    };
+                    emit_call_debug(
+                        &app,
+                        "connect:path_negotiated",
+                        serde_json::json!({
                             "use_direct": use_direct,
                             "local_direct_ok": local_direct_ok,
                             "peer_direct_ok": peer_direct_ok,
                             "chosen_path": format!("{:?}", chosen_path),
                             "direct_only": force_direct,
-                        }));
+                        }),
+                    );
 
-                        // direct_only mode: refuse relay fallback
-                        if force_direct && !use_direct {
-                            let reason = format!(
-                                "direct_only: P2P failed (local_ok={local_direct_ok}, peer_ok={peer_direct_ok})"
-                            );
-                            emit_call_debug(&app, "connect:direct_only_failed", serde_json::json!({
+                    // direct_only mode: refuse relay fallback
+                    if force_direct && !use_direct {
+                        let reason = format!(
+                            "direct_only: P2P failed (local_ok={local_direct_ok}, peer_ok={peer_direct_ok})"
+                        );
+                        emit_call_debug(
+                            &app,
+                            "connect:direct_only_failed",
+                            serde_json::json!({
                                 "reason": reason,
                                 "candidate_diags": race_result.candidate_diags,
-                            }));
-                            return Err(reason);
-                        }
-                        tracing::info!(
-                            ?chosen_path,
-                            use_direct,
-                            local_direct_ok,
-                            peer_direct_ok,
-                            "connect: Phase 6 path agreed"
+                            }),
                         );
-
-                        // Pick the agreed transport. Tag it with
-                        // whether this is truly a direct P2P conn
-                        // so CallEngine knows whether to skip the
-                        // handshake. Critical: relay transports
-                        // delivered via pre_connected MUST still
-                        // run perform_handshake — the relay expects
-                        // it for participant authentication.
-                        is_direct_p2p_agreed = use_direct;
-                        if use_direct {
-                            // Close losing relay transport so the
-                            // relay sees a clean disconnect instead
-                            // of waiting 30s for idle timeout.
-                            if let Some(loser) = race_result.relay_transport.as_ref() {
-                                loser.connection().close(0u32.into(), b"not-selected");
-                            }
-                            race_result.direct_transport
-                        } else {
-                            // Close losing direct transport so the
-                            // peer's endpoint doesn't retain a
-                            // phantom connection that pollutes
-                            // future accept() calls.
-                            if let Some(loser) = race_result.direct_transport.as_ref() {
-                                loser.connection().close(0u32.into(), b"not-selected");
-                            }
-                            race_result.relay_transport
-                        }
+                        return Err(reason);
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "connect: dual-path race failed, falling back to classic relay connect");
-                        emit_call_debug(&app, "connect:dual_path_race_failed", serde_json::json!({
-                            "error": e.to_string(),
-                        }));
-                        None
+                    tracing::info!(
+                        ?chosen_path,
+                        use_direct,
+                        local_direct_ok,
+                        peer_direct_ok,
+                        "connect: Phase 6 path agreed"
+                    );
+
+                    // Pick the agreed transport. Tag it with
+                    // whether this is truly a direct P2P conn
+                    // so CallEngine knows whether to skip the
+                    // handshake. Critical: relay transports
+                    // delivered via pre_connected MUST still
+                    // run perform_handshake — the relay expects
+                    // it for participant authentication.
+                    is_direct_p2p_agreed = use_direct;
+                    if use_direct {
+                        // Close losing relay transport so the
+                        // relay sees a clean disconnect instead
+                        // of waiting 30s for idle timeout.
+                        if let Some(loser) = race_result.relay_transport.as_ref() {
+                            loser.connection().close(0u32.into(), b"not-selected");
+                        }
+                        race_result.direct_transport
+                    } else {
+                        // Close losing direct transport so the
+                        // peer's endpoint doesn't retain a
+                        // phantom connection that pollutes
+                        // future accept() calls.
+                        if let Some(loser) = race_result.direct_transport.as_ref() {
+                            loser.connection().close(0u32.into(), b"not-selected");
+                        }
+                        race_result.relay_transport
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(error = %e, "connect: dual-path race failed, falling back to classic relay connect");
+                    emit_call_debug(
+                        &app,
+                        "connect:dual_path_race_failed",
+                        serde_json::json!({
+                            "error": e.to_string(),
+                        }),
+                    );
+                    None
+                }
             }
-            _ => {
-                tracing::info!(
-                    has_peer_reflex = peer_direct_addr.is_some(),
-                    has_peer_local = !peer_local_addrs_vec.is_empty(),
-                    has_own = own_reflex_addr.is_some(),
-                    ?role,
-                    %relay,
-                    %room,
-                    "connect: skipping dual-path race (missing inputs), relay-only"
-                );
-                emit_call_debug(&app, "connect:dual_path_skipped", serde_json::json!({
+        }
+        _ => {
+            tracing::info!(
+                has_peer_reflex = peer_direct_addr.is_some(),
+                has_peer_local = !peer_local_addrs_vec.is_empty(),
+                has_own = own_reflex_addr.is_some(),
+                ?role,
+                %relay,
+                %room,
+                "connect: skipping dual-path race (missing inputs), relay-only"
+            );
+            emit_call_debug(
+                &app,
+                "connect:dual_path_skipped",
+                serde_json::json!({
                     "has_peer_reflex": peer_direct_addr.is_some(),
                     "has_peer_local": !peer_local_addrs_vec.is_empty(),
                     "has_own": own_reflex_addr.is_some(),
                     "role": format!("{:?}", role),
-                }));
-                None
-            }
-        };
+                }),
+            );
+            None
+        }
+    };
 
     // If we previously opened a quinn::Endpoint for the signaling connection
     // (direct-call path), reuse it so the media connection shares the same
@@ -716,6 +981,18 @@ async fn connect(
     if reuse_endpoint.is_some() && pre_connected_transport.is_none() {
         tracing::info!("connect: reusing existing signal endpoint for media connection");
     }
+    emit_call_debug(
+        &app,
+        "connect:reuse_endpoint",
+        serde_json::json!({
+            "has_reuse_endpoint": reuse_endpoint.is_some(),
+            "reuse_local_addr": reuse_endpoint
+                .as_ref()
+                .and_then(|ep| ep.local_addr().ok())
+                .map(|addr| addr.to_string()),
+            "has_pre_connected_transport": pre_connected_transport.is_some(),
+        }),
+    );
 
     let app_clone = app.clone();
     // Log transport details for debugging direct P2P media issues
@@ -726,20 +1003,41 @@ async fn connect(
             "close_reason": t.connection().close_reason().map(|r| format!("{r:?}")),
         })
     });
-    emit_call_debug(&app, "connect:call_engine_starting", serde_json::json!({
-        "is_direct_p2p": is_direct_p2p_agreed,
-        "transport": transport_info,
-    }));
+    emit_call_debug(
+        &app,
+        "connect:call_engine_starting",
+        serde_json::json!({
+            "is_direct_p2p": is_direct_p2p_agreed,
+            "transport": transport_info,
+        }),
+    );
     let app_for_engine = app.clone();
-    match CallEngine::start(relay, room, alias, os_aec, quality, reuse_endpoint, pre_connected_transport, is_direct_p2p_agreed, app_for_engine, move |event_kind, message| {
-        let _ = app_clone.emit(
-            "call-event",
-            CallEvent {
-                kind: event_kind.to_string(),
-                message: message.to_string(),
-            },
-        );
-    })
+    let (active_quality, peer_max_quality) = {
+        let sig = state.signal.lock().await;
+        (sig.active_quality.clone(), sig.peer_max_quality.clone())
+    };
+    match CallEngine::start(
+        relay,
+        room,
+        alias,
+        os_aec,
+        quality,
+        reuse_endpoint,
+        pre_connected_transport,
+        is_direct_p2p_agreed,
+        app_for_engine,
+        active_quality,
+        peer_max_quality,
+        move |event_kind, message| {
+            let _ = app_clone.emit(
+                "call-event",
+                CallEvent {
+                    kind: event_kind.to_string(),
+                    message: message.to_string(),
+                },
+            );
+        },
+    )
     .await
     {
         Ok(eng) => {
@@ -748,7 +1046,11 @@ async fn connect(
             Ok("connected".into())
         }
         Err(e) => {
-            emit_call_debug(&app, "connect:call_engine_failed", serde_json::json!({ "error": e.to_string() }));
+            emit_call_debug(
+                &app,
+                "connect:call_engine_failed",
+                serde_json::json!({ "error": e.to_string() }),
+            );
             Err(format!("{e}"))
         }
     }
@@ -920,7 +1222,9 @@ async fn set_bluetooth_sco(on: bool) -> Result<(), String> {
                 }
             }
             if !connected {
-                tracing::warn!("set_bluetooth_sco: SCO did not connect within 5s, proceeding anyway");
+                tracing::warn!(
+                    "set_bluetooth_sco: SCO did not connect within 5s, proceeding anyway"
+                );
             }
             // Extra delay: even after getCommunicationDevice reports BT,
             // the audio policy needs ~500ms to apply the bt-sco route.
@@ -1066,6 +1370,12 @@ struct SignalState {
     peer_hard_nat_probe: Option<PeerHardNatInfo>,
     /// Phase 8.6: peer's birthday attack ports, if received.
     peer_birthday_ports: Option<PeerBirthdayInfo>,
+    /// Active quality profile for the encoder. Updated by signal upgrade flow.
+    active_quality: Arc<std::sync::Mutex<wzp_proto::QualityProfile>>,
+    /// Peer's reported max quality cap. The encoder clamps to min(active, peer_max).
+    peer_max_quality: Arc<std::sync::Mutex<Option<wzp_proto::QualityProfile>>>,
+    /// Pending outgoing upgrade proposal: (call_id, proposal_id, profile).
+    pending_upgrade: Arc<std::sync::Mutex<Option<(String, String, wzp_proto::QualityProfile)>>>,
 }
 
 /// Parsed data from a peer's HardNatBirthdayStart signal.
@@ -1101,8 +1411,7 @@ async fn register_signal(
     // point — settings-screen changes come through here.
     let already_same = {
         let sig = state.signal.lock().await;
-        sig.transport.is_some()
-            && sig.desired_relay_addr.as_deref() == Some(relay.as_str())
+        sig.transport.is_some() && sig.desired_relay_addr.as_deref() == Some(relay.as_str())
     };
     if already_same {
         // Idempotent: user hit "Register" twice on the same relay,
@@ -1172,452 +1481,653 @@ fn do_register_signal(
     relay: String,
 ) -> impl std::future::Future<Output = Result<String, String>> + Send {
     async move {
-    use wzp_proto::SignalMessage;
+        use wzp_proto::{SignalMessage, default_signal_version};
 
-    emit_call_debug(&app, "register_signal:start", serde_json::json!({ "relay": relay }));
-    let addr: std::net::SocketAddr = relay.parse().map_err(|e| format!("bad address: {e}"))?;
-    let _ = rustls::crypto::ring::default_provider().install_default();
+        emit_call_debug(
+            &app,
+            "register_signal:start",
+            serde_json::json!({ "relay": relay }),
+        );
+        let addr: std::net::SocketAddr = relay.parse().map_err(|e| format!("bad address: {e}"))?;
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Load or create seed automatically — no need to "connect to a room first"
-    let seed = load_or_create_seed()?;
-    let pub_id = seed.derive_identity().public_identity();
-    let fp = pub_id.fingerprint.to_string();
-    let identity_pub = *pub_id.signing.as_bytes();
-    emit_call_debug(&app, "register_signal:identity_loaded", serde_json::json!({ "fingerprint": fp }));
+        // Load or create seed automatically — no need to "connect to a room first"
+        let seed = load_or_create_seed()?;
+        let pub_id = seed.derive_identity().public_identity();
+        let fp = pub_id.fingerprint.to_string();
+        let identity_pub = *pub_id.signing.as_bytes();
+        emit_call_debug(
+            &app,
+            "register_signal:identity_loaded",
+            serde_json::json!({ "fingerprint": fp }),
+        );
 
-    // Phase 5: single-socket Nebula-style architecture. The signal
-    // endpoint is dual-purpose (client + server config). Every outbound
-    // flow — signal, reflect probes, relay media dials, direct-P2P
-    // dials — uses this same socket, so port-preserving NATs (MikroTik
-    // masquerade is the big one) give us a stable external port that
-    // peers can actually dial. The same socket also accepts incoming
-    // direct-P2P connections during the dual-path race.
-    //
-    // Was `None` before Phase 5 — that produced a client-only endpoint
-    // with a different internal port than later reflect / dual-path
-    // endpoints, which made MikroTik look symmetric and broke direct
-    // P2P because the advertised reflex port was not the listening
-    // port.
-    // 0.0.0.0:0 = IPv4. [::]:0 dual-stack was tried but breaks on
-    // Android (IPV6_V6ONLY=1 on some kernels kills IPv4). IPv6
-    // host candidates need a separate dedicated socket (future).
-    let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let (server_cfg, _cert_der) = wzp_transport::server_config();
-    let endpoint = wzp_transport::create_endpoint(bind, Some(server_cfg))
-        .map_err(|e| format!("{e}"))?;
-    emit_call_debug(&app, "register_signal:endpoint_created", serde_json::json!({ "bind": bind.to_string(), "build": GIT_HASH }));
-    let conn = wzp_transport::connect(&endpoint, addr, "_signal", wzp_transport::client_config())
-        .await
-        .map_err(|e| {
-            emit_call_debug(&app, "register_signal:connect_failed", serde_json::json!({ "error": e.to_string() }));
-            format!("{e}")
-        })?;
-    let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
-    emit_call_debug(&app, "register_signal:quic_connected", serde_json::json!({ "relay": relay }));
+        // Phase 5: single-socket Nebula-style architecture. The signal
+        // endpoint is dual-purpose (client + server config). Every outbound
+        // flow — signal, reflect probes, relay media dials, direct-P2P
+        // dials — uses this same socket, so port-preserving NATs (MikroTik
+        // masquerade is the big one) give us a stable external port that
+        // peers can actually dial. The same socket also accepts incoming
+        // direct-P2P connections during the dual-path race.
+        //
+        // Was `None` before Phase 5 — that produced a client-only endpoint
+        // with a different internal port than later reflect / dual-path
+        // endpoints, which made MikroTik look symmetric and broke direct
+        // P2P because the advertised reflex port was not the listening
+        // port.
+        // 0.0.0.0:0 = IPv4. [::]:0 dual-stack was tried but breaks on
+        // Android (IPV6_V6ONLY=1 on some kernels kills IPv4). IPv6
+        // host candidates need a separate dedicated socket (future).
+        let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let (server_cfg, _cert_der) = wzp_transport::server_config();
+        let endpoint =
+            wzp_transport::create_endpoint(bind, Some(server_cfg)).map_err(|e| format!("{e}"))?;
+        emit_call_debug(
+            &app,
+            "register_signal:endpoint_created",
+            serde_json::json!({ "bind": bind.to_string(), "build": GIT_HASH }),
+        );
+        let conn =
+            wzp_transport::connect(&endpoint, addr, "_signal", wzp_transport::client_config())
+                .await
+                .map_err(|e| {
+                    emit_call_debug(
+                        &app,
+                        "register_signal:connect_failed",
+                        serde_json::json!({ "error": e.to_string() }),
+                    );
+                    format!("{e}")
+                })?;
+        let transport = Arc::new(wzp_transport::QuinnTransport::new(conn));
+        emit_call_debug(
+            &app,
+            "register_signal:quic_connected",
+            serde_json::json!({ "relay": relay }),
+        );
 
-    transport.send_signal(&SignalMessage::RegisterPresence {
-        identity_pub, signature: vec![], alias: None,
-    }).await.map_err(|e| format!("{e}"))?;
-    emit_call_debug(&app, "register_signal:register_presence_sent", serde_json::json!({}));
+        // Send alias from seed-derived adjective+noun so other
+        // users see a friendly name in the lobby.
+        let alias = derive_alias(&seed);
+        transport
+            .send_signal(&SignalMessage::RegisterPresence {
+                version: default_signal_version(),
+                identity_pub,
+                signature: vec![],
+                alias: Some(alias),
+            })
+            .await
+            .map_err(|e| format!("{e}"))?;
+        emit_call_debug(
+            &app,
+            "register_signal:register_presence_sent",
+            serde_json::json!({}),
+        );
 
-    match transport.recv_signal().await.map_err(|e| format!("{e}"))? {
-        Some(SignalMessage::RegisterPresenceAck { success: true, relay_build, .. }) => {
-            emit_call_debug(&app, "register_signal:ack_received", serde_json::json!({
-                "relay_build": relay_build,
-            }));
+        match transport.recv_signal().await.map_err(|e| format!("{e}"))? {
+            Some(SignalMessage::RegisterPresenceAck {
+                success: true,
+                relay_build,
+                ..
+            }) => {
+                emit_call_debug(
+                    &app,
+                    "register_signal:ack_received",
+                    serde_json::json!({
+                        "relay_build": relay_build,
+                    }),
+                );
+            }
+            _ => {
+                emit_call_debug(&app, "register_signal:ack_failed", serde_json::json!({}));
+                return Err("registration failed".into());
+            }
         }
-        _ => {
-            emit_call_debug(&app, "register_signal:ack_failed", serde_json::json!({}));
-            return Err("registration failed".into());
+
+        {
+            let mut sig = signal_state.lock().await;
+            sig.transport = Some(transport.clone());
+            sig.endpoint = Some(endpoint.clone());
+            sig.fingerprint = fp.clone();
+            sig.signal_status = "registered".into();
         }
-    }
+        // Let the JS side know we've (re-)entered "registered" so any
+        // "reconnecting..." banner can clear.
+        let _ = app.emit(
+            "signal-event",
+            serde_json::json!({ "type": "registered", "fingerprint": fp }),
+        );
 
-    {
-        let mut sig = signal_state.lock().await;
-        sig.transport = Some(transport.clone());
-        sig.endpoint = Some(endpoint.clone());
-        sig.fingerprint = fp.clone();
-        sig.signal_status = "registered".into();
-    }
-    // Let the JS side know we've (re-)entered "registered" so any
-    // "reconnecting..." banner can clear.
-    let _ = app.emit(
-        "signal-event",
-        serde_json::json!({ "type": "registered", "fingerprint": fp }),
-    );
-
-    tracing::info!(%fp, "signal registered, spawning recv loop");
-    emit_call_debug(&app, "register_signal:recv_loop_spawning", serde_json::json!({ "fingerprint": fp }));
-    let signal_state_loop = signal_state.clone();
-    let app_clone = app.clone();
-    tokio::spawn(async move {
-        // Capture for the exit-path reconnect trigger below.
-        let signal_state = signal_state_loop.clone();
-        loop {
-            match transport.recv_signal().await {
-                Ok(Some(SignalMessage::CallRinging { call_id })) => {
-                    tracing::info!(%call_id, "signal: CallRinging");
-                    emit_call_debug(&app_clone, "recv:CallRinging", serde_json::json!({ "call_id": call_id }));
-                    let mut sig = signal_state.lock().await; sig.signal_status = "ringing".into();
-                    let _ = app_clone.emit("signal-event", serde_json::json!({"type":"ringing","call_id":call_id}));
-                }
-                Ok(Some(SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, caller_reflexive_addr, caller_build_version, .. })) => {
-                    tracing::info!(%call_id, caller = %caller_fingerprint, peer_build = ?caller_build_version, "signal: DirectCallOffer");
-                    emit_call_debug(&app_clone, "recv:DirectCallOffer", serde_json::json!({
-                        "call_id": call_id,
-                        "caller_fp": caller_fingerprint,
-                        "caller_alias": caller_alias,
-                        "caller_reflexive_addr": caller_reflexive_addr,
-                        "peer_build": caller_build_version,
-                    }));
-                    let mut sig = signal_state.lock().await; sig.signal_status = "incoming".into();
-                    sig.incoming_call_id = Some(call_id.clone()); sig.incoming_caller_fp = Some(caller_fingerprint.clone()); sig.incoming_caller_alias = caller_alias.clone();
-                    // Log as a Missed entry up-front. If the user accepts
-                    // the call, answer_call upgrades it to Received via
-                    // history::mark_received_if_pending(call_id). If they
-                    // reject or ignore, it stays Missed.
-                    history::log(
-                        call_id.clone(),
-                        caller_fingerprint.clone(),
-                        caller_alias.clone(),
-                        history::CallDirection::Missed,
-                    );
-                    let _ = app_clone.emit("signal-event", serde_json::json!({"type":"incoming","call_id":call_id,"caller_fp":caller_fingerprint,"caller_alias":caller_alias}));
-                    let _ = app_clone.emit("history-changed", ());
-                }
-                Ok(Some(SignalMessage::DirectCallAnswer { call_id, accept_mode, callee_reflexive_addr, callee_build_version, .. })) => {
-                    tracing::info!(%call_id, ?accept_mode, peer_build = ?callee_build_version, "signal: DirectCallAnswer (forwarded by relay)");
-                    emit_call_debug(&app_clone, "recv:DirectCallAnswer", serde_json::json!({
-                        "call_id": call_id,
-                        "accept_mode": format!("{:?}", accept_mode),
-                        "callee_reflexive_addr": callee_reflexive_addr,
-                        "peer_build": callee_build_version,
-                    }));
-                }
-                Ok(Some(SignalMessage::CallSetup { call_id, room, relay_addr, peer_direct_addr, peer_local_addrs, peer_mapped_addr })) => {
-                    // Phase 3: peer_direct_addr carries the OTHER party's
-                    // reflex addr. Phase 5.5: peer_local_addrs carries
-                    // their LAN host candidates (usable for same-LAN
-                    // direct dials that can't hairpin through the NAT).
-                    tracing::info!(
-                        %call_id,
-                        %room,
-                        %relay_addr,
-                        peer_direct = ?peer_direct_addr,
-                        peer_local = ?peer_local_addrs,
-                        "signal: CallSetup — emitting setup event to JS"
-                    );
-                    emit_call_debug(&app_clone, "recv:CallSetup", serde_json::json!({
-                        "call_id": call_id,
-                        "room": room,
-                        "relay_addr": relay_addr,
-                        "peer_direct_addr": peer_direct_addr,
-                        "peer_local_addrs": peer_local_addrs,
-                        "peer_mapped_addr": peer_mapped_addr,
-                    }));
-                    let mut sig = signal_state.lock().await;
-                    sig.signal_status = "setup".into();
-                    let _ = app_clone.emit(
-                        "signal-event",
-                        serde_json::json!({
-                            "type": "setup",
-                            "call_id": call_id,
-                            "room": room,
-                            "relay_addr": relay_addr,
-                            "peer_direct_addr": peer_direct_addr,
-                            "peer_local_addrs": peer_local_addrs,
-                            "peer_mapped_addr": peer_mapped_addr,
-                        }),
-                    );
-                }
-                Ok(Some(SignalMessage::Hangup { reason, .. })) => {
-                    tracing::info!(?reason, "signal: Hangup");
-                    emit_call_debug(&app_clone, "recv:Hangup", serde_json::json!({ "reason": format!("{:?}", reason) }));
-                    let mut sig = signal_state.lock().await;
-                    sig.signal_status = "registered".into();
-                    sig.incoming_call_id = None;
-                    sig.ipv6_endpoint = None;
-                    sig.pending_path_report = None;
-                    let _ = app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
-                }
-                Ok(Some(SignalMessage::MediaPathReport { call_id, direct_ok, race_winner })) => {
-                    // Phase 6: the peer is telling us whether
-                    // their direct path succeeded. Fire the
-                    // pending oneshot so the connect command can
-                    // make the agreed decision.
-                    tracing::info!(
-                        %call_id,
+        tracing::info!(%fp, "signal registered, spawning recv loop");
+        emit_call_debug(
+            &app,
+            "register_signal:recv_loop_spawning",
+            serde_json::json!({ "fingerprint": fp }),
+        );
+        let signal_state_loop = signal_state.clone();
+        let app_clone = app.clone();
+        tokio::spawn(async move {
+            // Capture for the exit-path reconnect trigger below.
+            let signal_state = signal_state_loop.clone();
+            loop {
+                match transport.recv_signal().await {
+                    Ok(Some(SignalMessage::CallRinging { call_id, .. })) => {
+                        tracing::info!(%call_id, "signal: CallRinging");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:CallRinging",
+                            serde_json::json!({ "call_id": call_id }),
+                        );
+                        let mut sig = signal_state.lock().await;
+                        sig.signal_status = "ringing".into();
+                        let _ = app_clone.emit(
+                            "signal-event",
+                            serde_json::json!({"type":"ringing","call_id":call_id}),
+                        );
+                    }
+                    Ok(Some(SignalMessage::DirectCallOffer {
+                        caller_fingerprint,
+                        caller_alias,
+                        call_id,
+                        caller_reflexive_addr,
+                        caller_build_version,
+                        ..
+                    })) => {
+                        tracing::info!(%call_id, caller = %caller_fingerprint, peer_build = ?caller_build_version, "signal: DirectCallOffer");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:DirectCallOffer",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "caller_fp": caller_fingerprint,
+                                "caller_alias": caller_alias,
+                                "caller_reflexive_addr": caller_reflexive_addr,
+                                "peer_build": caller_build_version,
+                            }),
+                        );
+                        let mut sig = signal_state.lock().await;
+                        sig.signal_status = "incoming".into();
+                        sig.incoming_call_id = Some(call_id.clone());
+                        sig.incoming_caller_fp = Some(caller_fingerprint.clone());
+                        sig.incoming_caller_alias = caller_alias.clone();
+                        // Log as a Missed entry up-front. If the user accepts
+                        // the call, answer_call upgrades it to Received via
+                        // history::mark_received_if_pending(call_id). If they
+                        // reject or ignore, it stays Missed.
+                        history::log(
+                            call_id.clone(),
+                            caller_fingerprint.clone(),
+                            caller_alias.clone(),
+                            history::CallDirection::Missed,
+                        );
+                        let _ = app_clone.emit("signal-event", serde_json::json!({"type":"incoming","call_id":call_id,"caller_fp":caller_fingerprint,"caller_alias":caller_alias}));
+                        let _ = app_clone.emit("history-changed", ());
+                    }
+                    Ok(Some(SignalMessage::DirectCallAnswer {
+                        call_id,
+                        accept_mode,
+                        callee_reflexive_addr,
+                        callee_build_version,
+                        ..
+                    })) => {
+                        tracing::info!(%call_id, ?accept_mode, peer_build = ?callee_build_version, "signal: DirectCallAnswer (forwarded by relay)");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:DirectCallAnswer",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "accept_mode": format!("{:?}", accept_mode),
+                                "callee_reflexive_addr": callee_reflexive_addr,
+                                "peer_build": callee_build_version,
+                            }),
+                        );
+                    }
+                    Ok(Some(SignalMessage::CallSetup {
+                        call_id,
+                        room,
+                        relay_addr,
+                        peer_direct_addr,
+                        peer_local_addrs,
+                        peer_mapped_addr,
+                        ..
+                    })) => {
+                        // Phase 3: peer_direct_addr carries the OTHER party's
+                        // reflex addr. Phase 5.5: peer_local_addrs carries
+                        // their LAN host candidates (usable for same-LAN
+                        // direct dials that can't hairpin through the NAT).
+                        tracing::info!(
+                            %call_id,
+                            %room,
+                            %relay_addr,
+                            peer_direct = ?peer_direct_addr,
+                            peer_local = ?peer_local_addrs,
+                            "signal: CallSetup — emitting setup event to JS"
+                        );
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:CallSetup",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "room": room,
+                                "relay_addr": relay_addr,
+                                "peer_direct_addr": peer_direct_addr,
+                                "peer_local_addrs": peer_local_addrs,
+                                "peer_mapped_addr": peer_mapped_addr,
+                            }),
+                        );
+                        let mut sig = signal_state.lock().await;
+                        sig.signal_status = "setup".into();
+                        let _ = app_clone.emit(
+                            "signal-event",
+                            serde_json::json!({
+                                "type": "setup",
+                                "call_id": call_id,
+                                "room": room,
+                                "relay_addr": relay_addr,
+                                "peer_direct_addr": peer_direct_addr,
+                                "peer_local_addrs": peer_local_addrs,
+                                "peer_mapped_addr": peer_mapped_addr,
+                            }),
+                        );
+                    }
+                    Ok(Some(SignalMessage::Hangup { reason, .. })) => {
+                        tracing::info!(?reason, "signal: Hangup");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:Hangup",
+                            serde_json::json!({ "reason": format!("{:?}", reason) }),
+                        );
+                        let mut sig = signal_state.lock().await;
+                        sig.signal_status = "registered".into();
+                        sig.incoming_call_id = None;
+                        sig.ipv6_endpoint = None;
+                        sig.pending_path_report = None;
+                        let _ =
+                            app_clone.emit("signal-event", serde_json::json!({"type":"hangup"}));
+                    }
+                    Ok(Some(SignalMessage::MediaPathReport {
+                        call_id,
                         direct_ok,
-                        %race_winner,
-                        "signal: MediaPathReport from peer"
-                    );
-                    emit_call_debug(&app_clone, "recv:MediaPathReport", serde_json::json!({
-                        "call_id": call_id,
-                        "peer_direct_ok": direct_ok,
-                        "peer_race_winner": race_winner,
-                    }));
-                    let mut sig = signal_state.lock().await;
-                    if let Some(tx) = sig.pending_path_report.take() {
-                        let _ = tx.send(direct_ok);
+                        race_winner,
+                        ..
+                    })) => {
+                        // Phase 6: the peer is telling us whether
+                        // their direct path succeeded. Fire the
+                        // pending oneshot so the connect command can
+                        // make the agreed decision.
+                        tracing::info!(
+                            %call_id,
+                            direct_ok,
+                            %race_winner,
+                            "signal: MediaPathReport from peer"
+                        );
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:MediaPathReport",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "peer_direct_ok": direct_ok,
+                                "peer_race_winner": race_winner,
+                            }),
+                        );
+                        let mut sig = signal_state.lock().await;
+                        if let Some(tx) = sig.pending_path_report.take() {
+                            let _ = tx.send(direct_ok);
+                        }
                     }
-                }
-                Ok(Some(SignalMessage::CandidateUpdate { call_id, reflexive_addr, local_addrs, mapped_addr, generation })) => {
-                    // Phase 8: peer re-gathered candidates after a
-                    // network change. Emit to JS for UI notification
-                    // and potential transport re-race.
-                    tracing::info!(
-                        %call_id,
+                    Ok(Some(SignalMessage::CandidateUpdate {
+                        call_id,
+                        reflexive_addr,
+                        local_addrs,
+                        mapped_addr,
                         generation,
-                        reflexive = ?reflexive_addr,
-                        mapped = ?mapped_addr,
-                        local_count = local_addrs.len(),
-                        "signal: CandidateUpdate from peer"
-                    );
-                    emit_call_debug(&app_clone, "recv:CandidateUpdate", serde_json::json!({
-                        "call_id": call_id,
-                        "generation": generation,
-                        "reflexive_addr": reflexive_addr,
-                        "local_addrs": local_addrs,
-                        "mapped_addr": mapped_addr,
-                    }));
-                    let _ = app_clone.emit("signal-event", serde_json::json!({
-                        "type": "candidate_update",
-                        "call_id": call_id,
-                        "generation": generation,
-                        "reflexive_addr": reflexive_addr,
-                        "local_addrs": local_addrs,
-                        "mapped_addr": mapped_addr,
-                    }));
-                    // TODO Phase 8: use IceAgent.apply_peer_update() +
-                    // race_upgrade() to attempt transport hot-swap
-                }
-                Ok(Some(SignalMessage::HardNatProbe { call_id, port_sequence, allocation, probe_time_ms, external_ip })) => {
-                    tracing::info!(
-                        %call_id,
-                        %allocation,
-                        ports = ?port_sequence,
-                        %external_ip,
+                        ..
+                    })) => {
+                        // Phase 8: peer re-gathered candidates after a
+                        // network change. Emit to JS for UI notification
+                        // and potential transport re-race.
+                        tracing::info!(
+                            %call_id,
+                            generation,
+                            reflexive = ?reflexive_addr,
+                            mapped = ?mapped_addr,
+                            local_count = local_addrs.len(),
+                            "signal: CandidateUpdate from peer"
+                        );
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:CandidateUpdate",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "generation": generation,
+                                "reflexive_addr": reflexive_addr,
+                                "local_addrs": local_addrs,
+                                "mapped_addr": mapped_addr,
+                            }),
+                        );
+                        let _ = app_clone.emit(
+                            "signal-event",
+                            serde_json::json!({
+                                "type": "candidate_update",
+                                "call_id": call_id,
+                                "generation": generation,
+                                "reflexive_addr": reflexive_addr,
+                                "local_addrs": local_addrs,
+                                "mapped_addr": mapped_addr,
+                            }),
+                        );
+                        // TODO Phase 8: use IceAgent.apply_peer_update() +
+                        // race_upgrade() to attempt transport hot-swap
+                    }
+                    Ok(Some(SignalMessage::HardNatProbe {
+                        call_id,
+                        port_sequence,
+                        allocation,
                         probe_time_ms,
-                        "signal: HardNatProbe from peer"
-                    );
-                    emit_call_debug(&app_clone, "recv:HardNatProbe", serde_json::json!({
-                        "call_id": call_id,
-                        "allocation": allocation,
-                        "port_sequence": port_sequence,
-                        "external_ip": external_ip,
-                    }));
-                    // Stash for the connect command to use in port prediction
-                    if let Ok(ip) = external_ip.parse::<std::net::IpAddr>() {
-                        let mut sig = signal_state.lock().await;
-                        sig.peer_hard_nat_probe = Some(PeerHardNatInfo {
-                            external_ip: ip,
-                            port_sequence: port_sequence.clone(),
-                            allocation: allocation.clone(),
-                        });
-                    }
-
-                    // If peer has a random/symmetric NAT and WE are the
-                    // Acceptor, open birthday attack ports and send
-                    // BirthdayStart so the peer can spray us.
-                    if allocation == "random" || allocation.starts_with("sequential") {
-                        let state_bg = signal_state.clone();
-                        let app_bg = app_clone.clone();
-                        let call_id_bg = call_id.clone();
-                        tokio::spawn(async move {
-                            let config = wzp_client::birthday::BirthdayConfig::default();
-                            let (result, _sockets) = wzp_client::birthday::open_acceptor_ports(&config).await;
-                            if result.succeeded > 0 {
-                                let ext_ports: Vec<u16> = result.ports.iter().map(|p| p.external_port).collect();
-                                let ext_ip = result.external_ip
-                                    .map(|ip| ip.to_string())
-                                    .unwrap_or_default();
-                                emit_call_debug(&app_bg, "birthday:acceptor_ports_opened", serde_json::json!({
-                                    "succeeded": result.succeeded,
-                                    "external_ip": ext_ip,
-                                    "ports": ext_ports,
-                                }));
-                                let sig = state_bg.lock().await;
-                                if let Some(ref t) = sig.transport {
-                                    let _ = t.send_signal(&wzp_proto::SignalMessage::HardNatBirthdayStart {
-                                        call_id: call_id_bg,
-                                        acceptor_port_count: result.succeeded,
-                                        acceptor_ports: ext_ports,
-                                        external_ip: ext_ip,
-                                    }).await;
-                                }
-                                // Keep _sockets alive for 10s so NAT mappings persist
-                                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                            }
-                        });
-                    }
-                }
-                Ok(Some(SignalMessage::PresenceList { users })) => {
-                    tracing::info!(count = users.len(), "signal: PresenceList received");
-                    // Emit to JS frontend for lobby user list
-                    let user_list: Vec<serde_json::Value> = users.iter().map(|u| {
-                        serde_json::json!({
-                            "fingerprint": u.fingerprint,
-                            "alias": u.alias,
-                        })
-                    }).collect();
-                    let _ = app_clone.emit("signal-event", serde_json::json!({
-                        "type": "presence_list",
-                        "users": user_list,
-                    }));
-                }
-                Ok(Some(SignalMessage::UpgradeProposal { call_id, proposal_id, proposed_profile, local_loss_pct, local_rtt_ms })) => {
-                    tracing::info!(%call_id, %proposal_id, ?proposed_profile, "signal: UpgradeProposal from peer");
-                    emit_call_debug(&app_clone, "recv:UpgradeProposal", serde_json::json!({
-                        "call_id": call_id, "proposal_id": proposal_id,
-                        "proposed_profile": format!("{proposed_profile:?}"),
-                        "peer_loss_pct": local_loss_pct, "peer_rtt_ms": local_rtt_ms,
-                    }));
-                    // TODO: auto-accept if our own quality supports it,
-                    // or surface to UI for manual accept/reject
-                }
-                Ok(Some(SignalMessage::UpgradeResponse { call_id, proposal_id, accepted, reason })) => {
-                    tracing::info!(%call_id, %proposal_id, accepted, ?reason, "signal: UpgradeResponse from peer");
-                    emit_call_debug(&app_clone, "recv:UpgradeResponse", serde_json::json!({
-                        "call_id": call_id, "proposal_id": proposal_id,
-                        "accepted": accepted, "reason": reason,
-                    }));
-                    // TODO: if accepted, send UpgradeConfirm + switch encoder
-                }
-                Ok(Some(SignalMessage::UpgradeConfirm { call_id, proposal_id, confirmed_profile })) => {
-                    tracing::info!(%call_id, %proposal_id, ?confirmed_profile, "signal: UpgradeConfirm");
-                    emit_call_debug(&app_clone, "recv:UpgradeConfirm", serde_json::json!({
-                        "call_id": call_id, "proposal_id": proposal_id,
-                        "confirmed_profile": format!("{confirmed_profile:?}"),
-                    }));
-                    // TODO: switch encoder to confirmed_profile at next frame boundary
-                }
-                Ok(Some(SignalMessage::QualityCapability { call_id, max_profile, loss_pct, rtt_ms })) => {
-                    tracing::info!(%call_id, ?max_profile, "signal: QualityCapability from peer");
-                    emit_call_debug(&app_clone, "recv:QualityCapability", serde_json::json!({
-                        "call_id": call_id,
-                        "peer_max_profile": format!("{max_profile:?}"),
-                        "peer_loss_pct": loss_pct, "peer_rtt_ms": rtt_ms,
-                    }));
-                    // TODO: adjust our encoder to not exceed peer's max_profile
-                    // (asymmetric quality — each side encodes at its own best)
-                }
-                Ok(Some(SignalMessage::HardNatBirthdayStart { call_id, acceptor_port_count, acceptor_ports, external_ip })) => {
-                    tracing::info!(
-                        %call_id,
-                        acceptor_port_count,
-                        port_count = acceptor_ports.len(),
-                        %external_ip,
-                        "signal: HardNatBirthdayStart from peer"
-                    );
-                    emit_call_debug(&app_clone, "recv:HardNatBirthdayStart", serde_json::json!({
-                        "call_id": call_id,
-                        "acceptor_port_count": acceptor_port_count,
-                        "acceptor_ports": acceptor_ports,
-                        "external_ip": external_ip,
-                    }));
-                    // Stash for the connect command (if still running)
-                    // or for a background spray after relay fallback.
-                    if let Ok(ip) = external_ip.parse::<std::net::IpAddr>() {
-                        let mut sig = signal_state.lock().await;
-                        sig.peer_birthday_ports = Some(PeerBirthdayInfo {
-                            external_ip: ip,
-                            ports: acceptor_ports,
-                        });
-                    }
-                }
-                Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
-                    // "STUN for QUIC" response — the relay told us our
-                    // own server-reflexive address. If a Tauri command
-                    // is currently awaiting this, fire the oneshot;
-                    // otherwise log and drop (unsolicited responses
-                    // from a confused relay shouldn't crash the loop).
-                    tracing::info!(%observed_addr, "signal: ReflectResponse");
-                    match observed_addr.parse::<std::net::SocketAddr>() {
-                        Ok(parsed) => {
+                        external_ip,
+                        ..
+                    })) => {
+                        tracing::info!(
+                            %call_id,
+                            %allocation,
+                            ports = ?port_sequence,
+                            %external_ip,
+                            probe_time_ms,
+                            "signal: HardNatProbe from peer"
+                        );
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:HardNatProbe",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "allocation": allocation,
+                                "port_sequence": port_sequence,
+                                "external_ip": external_ip,
+                            }),
+                        );
+                        // Stash for the connect command to use in port prediction
+                        if let Ok(ip) = external_ip.parse::<std::net::IpAddr>() {
                             let mut sig = signal_state.lock().await;
-                            if let Some(tx) = sig.pending_reflect.take() {
-                                // `send` returns Err(addr) only if the
-                                // receiver was dropped (caller timed out
-                                // or canceled). Either way, nothing to
-                                // do — the value is gone.
-                                let _ = tx.send(parsed);
-                            } else {
-                                tracing::debug!(%observed_addr, "reflect: unsolicited response (no pending sender)");
-                            }
-                            let _ = app_clone.emit(
+                            sig.peer_hard_nat_probe = Some(PeerHardNatInfo {
+                                external_ip: ip,
+                                port_sequence: port_sequence.clone(),
+                                allocation: allocation.clone(),
+                            });
+                        }
+
+                        // If peer has a random/symmetric NAT and WE are the
+                        // Acceptor, open birthday attack ports and send
+                        // BirthdayStart so the peer can spray us.
+                        if allocation == "random" || allocation.starts_with("sequential") {
+                            let state_bg = signal_state.clone();
+                            let app_bg = app_clone.clone();
+                            let call_id_bg = call_id.clone();
+                            tokio::spawn(async move {
+                                let config = wzp_client::birthday::BirthdayConfig::default();
+                                let (result, _sockets) =
+                                    wzp_client::birthday::open_acceptor_ports(&config).await;
+                                if result.succeeded > 0 {
+                                    let ext_ports: Vec<u16> =
+                                        result.ports.iter().map(|p| p.external_port).collect();
+                                    let ext_ip = result
+                                        .external_ip
+                                        .map(|ip| ip.to_string())
+                                        .unwrap_or_default();
+                                    emit_call_debug(
+                                        &app_bg,
+                                        "birthday:acceptor_ports_opened",
+                                        serde_json::json!({
+                                            "succeeded": result.succeeded,
+                                            "external_ip": ext_ip,
+                                            "ports": ext_ports,
+                                        }),
+                                    );
+                                    let sig = state_bg.lock().await;
+                                    if let Some(ref t) = sig.transport {
+                                        let _ = t
+                                            .send_signal(
+                                                &wzp_proto::SignalMessage::HardNatBirthdayStart {
+                                                    version: default_signal_version(),
+                                                    call_id: call_id_bg,
+                                                    acceptor_port_count: result.succeeded,
+                                                    acceptor_ports: ext_ports,
+                                                    external_ip: ext_ip,
+                                                },
+                                            )
+                                            .await;
+                                    }
+                                    // Keep _sockets alive for 10s so NAT mappings persist
+                                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                                }
+                            });
+                        }
+                    }
+                    Ok(Some(SignalMessage::PresenceList { users, .. })) => {
+                        tracing::info!(count = users.len(), "signal: PresenceList received");
+                        // Emit to JS frontend for lobby user list
+                        let user_list: Vec<serde_json::Value> = users
+                            .iter()
+                            .map(|u| {
+                                serde_json::json!({
+                                    "fingerprint": u.fingerprint,
+                                    "alias": u.alias,
+                                })
+                            })
+                            .collect();
+                        let _ = app_clone.emit(
+                            "signal-event",
+                            serde_json::json!({
+                                "type": "presence_list",
+                                "users": user_list,
+                            }),
+                        );
+                    }
+                    Ok(Some(SignalMessage::UpgradeProposal {
+                        call_id,
+                        proposal_id,
+                        proposed_profile,
+                        local_loss_pct,
+                        local_rtt_ms,
+                        ..
+                    })) => {
+                        tracing::info!(%call_id, %proposal_id, ?proposed_profile, "signal: UpgradeProposal from peer");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:UpgradeProposal",
+                            serde_json::json!({
+                                "call_id": call_id, "proposal_id": proposal_id,
+                                "proposed_profile": format!("{proposed_profile:?}"),
+                                "peer_loss_pct": local_loss_pct, "peer_rtt_ms": local_rtt_ms,
+                            }),
+                        );
+                        if let Err(e) = handle_upgrade_proposal(&*transport, &call_id, &proposal_id).await {
+                            tracing::warn!("failed to send UpgradeResponse: {e}");
+                        }
+                    }
+                    Ok(Some(SignalMessage::UpgradeResponse {
+                        call_id,
+                        proposal_id,
+                        accepted,
+                        reason,
+                        ..
+                    })) => {
+                        tracing::info!(%call_id, %proposal_id, accepted, ?reason, "signal: UpgradeResponse from peer");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:UpgradeResponse",
+                            serde_json::json!({
+                                "call_id": call_id, "proposal_id": proposal_id,
+                                "accepted": accepted, "reason": reason,
+                            }),
+                        );
+                        if let Err(e) = handle_upgrade_response(
+                            &*transport, &signal_state, &call_id, &proposal_id, accepted,
+                        ).await {
+                            tracing::warn!("failed to handle UpgradeResponse: {e}");
+                        }
+                    }
+                    Ok(Some(SignalMessage::UpgradeConfirm {
+                        call_id,
+                        proposal_id,
+                        confirmed_profile,
+                        ..
+                    })) => {
+                        tracing::info!(%call_id, %proposal_id, ?confirmed_profile, "signal: UpgradeConfirm");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:UpgradeConfirm",
+                            serde_json::json!({
+                                "call_id": call_id, "proposal_id": proposal_id,
+                                "confirmed_profile": format!("{confirmed_profile:?}"),
+                            }),
+                        );
+                        handle_upgrade_confirm(&signal_state, confirmed_profile).await;
+                    }
+                    Ok(Some(SignalMessage::QualityCapability {
+                        call_id,
+                        max_profile,
+                        loss_pct,
+                        rtt_ms,
+                        ..
+                    })) => {
+                        tracing::info!(%call_id, ?max_profile, "signal: QualityCapability from peer");
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:QualityCapability",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "peer_max_profile": format!("{max_profile:?}"),
+                                "peer_loss_pct": loss_pct, "peer_rtt_ms": rtt_ms,
+                            }),
+                        );
+                        handle_quality_capability(&signal_state, max_profile).await;
+                    }
+                    Ok(Some(SignalMessage::HardNatBirthdayStart {
+                        call_id,
+                        acceptor_port_count,
+                        acceptor_ports,
+                        external_ip,
+                        ..
+                    })) => {
+                        tracing::info!(
+                            %call_id,
+                            acceptor_port_count,
+                            port_count = acceptor_ports.len(),
+                            %external_ip,
+                            "signal: HardNatBirthdayStart from peer"
+                        );
+                        emit_call_debug(
+                            &app_clone,
+                            "recv:HardNatBirthdayStart",
+                            serde_json::json!({
+                                "call_id": call_id,
+                                "acceptor_port_count": acceptor_port_count,
+                                "acceptor_ports": acceptor_ports,
+                                "external_ip": external_ip,
+                            }),
+                        );
+                        // Stash for the connect command (if still running)
+                        // or for a background spray after relay fallback.
+                        if let Ok(ip) = external_ip.parse::<std::net::IpAddr>() {
+                            let mut sig = signal_state.lock().await;
+                            sig.peer_birthday_ports = Some(PeerBirthdayInfo {
+                                external_ip: ip,
+                                ports: acceptor_ports,
+                            });
+                        }
+                    }
+                    Ok(Some(SignalMessage::ReflectResponse { observed_addr, .. })) => {
+                        // "STUN for QUIC" response — the relay told us our
+                        // own server-reflexive address. If a Tauri command
+                        // is currently awaiting this, fire the oneshot;
+                        // otherwise log and drop (unsolicited responses
+                        // from a confused relay shouldn't crash the loop).
+                        tracing::info!(%observed_addr, "signal: ReflectResponse");
+                        match observed_addr.parse::<std::net::SocketAddr>() {
+                            Ok(parsed) => {
+                                let mut sig = signal_state.lock().await;
+                                if let Some(tx) = sig.pending_reflect.take() {
+                                    // `send` returns Err(addr) only if the
+                                    // receiver was dropped (caller timed out
+                                    // or canceled). Either way, nothing to
+                                    // do — the value is gone.
+                                    let _ = tx.send(parsed);
+                                } else {
+                                    tracing::debug!(%observed_addr, "reflect: unsolicited response (no pending sender)");
+                                }
+                                let _ = app_clone.emit(
                                 "signal-event",
                                 serde_json::json!({"type":"reflect","observed_addr":observed_addr}),
                             );
-                        }
-                        Err(e) => {
-                            tracing::warn!(%observed_addr, error = %e, "reflect: relay returned unparseable addr");
-                            // Treat unparseable response as a failed
-                            // request so the caller doesn't hang.
-                            let mut sig = signal_state.lock().await;
-                            let _ = sig.pending_reflect.take();
+                            }
+                            Err(e) => {
+                                tracing::warn!(%observed_addr, error = %e, "reflect: relay returned unparseable addr");
+                                // Treat unparseable response as a failed
+                                // request so the caller doesn't hang.
+                                let mut sig = signal_state.lock().await;
+                                let _ = sig.pending_reflect.take();
+                            }
                         }
                     }
-                }
-                Ok(Some(other)) => {
-                    tracing::debug!(?other, "signal: unhandled message");
-                }
-                Ok(None) => {
-                    tracing::warn!("signal recv returned None — peer closed");
-                    break;
-                }
-                Err(wzp_proto::TransportError::Deserialize(e)) => {
-                    // Forward-compat: the relay sent us a
-                    // SignalMessage variant we don't know yet
-                    // (older client against a newer relay).
-                    // Log and keep the signal connection alive —
-                    // otherwise direct-call registration would
-                    // silently die on any protocol bump.
-                    tracing::warn!(error = %e, "signal recv: unknown variant, continuing");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "signal recv error — breaking loop");
-                    break;
+                    Ok(Some(other)) => {
+                        tracing::debug!(?other, "signal: unhandled message");
+                    }
+                    Ok(None) => {
+                        tracing::warn!("signal recv returned None — peer closed");
+                        break;
+                    }
+                    Err(wzp_proto::TransportError::Deserialize(e)) => {
+                        // Forward-compat: the relay sent us a
+                        // SignalMessage variant we don't know yet
+                        // (older client against a newer relay).
+                        // Log and keep the signal connection alive —
+                        // otherwise direct-call registration would
+                        // silently die on any protocol bump.
+                        tracing::warn!(error = %e, "signal recv: unknown variant, continuing");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "signal recv error — breaking loop");
+                        break;
+                    }
                 }
             }
-        }
-        tracing::warn!("signal recv loop exited — signal_status=idle, transport dropped");
-        // Determine whether this was a user-requested close or an
-        // unexpected drop. `desired_relay_addr.is_some()` means the
-        // user still wants to be registered — spawn the reconnect
-        // supervisor with exponential backoff.
-        let (should_reconnect, desired_relay, already_reconnecting) = {
-            let mut sig = signal_state.lock().await;
-            sig.signal_status = "idle".into();
-            sig.transport = None;
-            (
-                sig.desired_relay_addr.is_some(),
-                sig.desired_relay_addr.clone(),
-                sig.reconnect_in_progress,
-            )
-        };
-        if should_reconnect && !already_reconnecting {
-            if let Some(relay) = desired_relay {
-                tracing::info!(%relay, "signal recv loop exited unexpectedly — spawning reconnect supervisor");
-                emit_call_debug(
-                    &app_clone,
-                    "signal:reconnect_supervisor_spawning",
-                    serde_json::json!({ "relay": relay }),
-                );
-                let _ = app_clone.emit(
-                    "signal-event",
-                    serde_json::json!({ "type": "reconnecting", "relay": relay }),
-                );
-                let state_for_sup = signal_state.clone();
-                let app_for_sup = app_clone.clone();
-                tokio::spawn(async move {
-                    signal_reconnect_supervisor(state_for_sup, app_for_sup, relay).await;
-                });
+            tracing::warn!("signal recv loop exited — signal_status=idle, transport dropped");
+            // Determine whether this was a user-requested close or an
+            // unexpected drop. `desired_relay_addr.is_some()` means the
+            // user still wants to be registered — spawn the reconnect
+            // supervisor with exponential backoff.
+            let (should_reconnect, desired_relay, already_reconnecting) = {
+                let mut sig = signal_state.lock().await;
+                sig.signal_status = "idle".into();
+                sig.transport = None;
+                (
+                    sig.desired_relay_addr.is_some(),
+                    sig.desired_relay_addr.clone(),
+                    sig.reconnect_in_progress,
+                )
+            };
+            if should_reconnect && !already_reconnecting {
+                if let Some(relay) = desired_relay {
+                    tracing::info!(%relay, "signal recv loop exited unexpectedly — spawning reconnect supervisor");
+                    emit_call_debug(
+                        &app_clone,
+                        "signal:reconnect_supervisor_spawning",
+                        serde_json::json!({ "relay": relay }),
+                    );
+                    let _ = app_clone.emit(
+                        "signal-event",
+                        serde_json::json!({ "type": "reconnecting", "relay": relay }),
+                    );
+                    let state_for_sup = signal_state.clone();
+                    let app_for_sup = app_clone.clone();
+                    tokio::spawn(async move {
+                        signal_reconnect_supervisor(state_for_sup, app_for_sup, relay).await;
+                    });
+                }
+            } else if should_reconnect && already_reconnecting {
+                tracing::debug!("signal recv loop exited; reconnect supervisor already running");
             }
-        } else if should_reconnect && already_reconnecting {
-            tracing::debug!("signal recv loop exited; reconnect supervisor already running");
-        }
-    });
-    Ok(fp)
+        });
+        Ok(fp)
     } // end async move
 } // end fn do_register_signal
 
@@ -1748,9 +2258,13 @@ async fn place_call(
     app: tauri::AppHandle,
     target_fp: String,
 ) -> Result<(), String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
 
-    emit_call_debug(&app, "place_call:start", serde_json::json!({ "target_fp": target_fp }));
+    emit_call_debug(
+        &app,
+        "place_call:start",
+        serde_json::json!({ "target_fp": target_fp }),
+    );
 
     // Phase 3 hole-punching: query our own reflex addr BEFORE the
     // offer so we can advertise it. Best-effort — a failed reflect
@@ -1761,12 +2275,20 @@ async fn place_call(
     // Critical: this call does its own state.signal.lock() usage and
     // MUST NOT be wrapped in an outer lock, or the recv loop's
     // ReflectResponse handler will deadlock on the same mutex.
-    emit_call_debug(&app, "place_call:reflect_query_start", serde_json::json!({}));
+    emit_call_debug(
+        &app,
+        "place_call:reflect_query_start",
+        serde_json::json!({}),
+    );
     let state_inner: Arc<AppState> = (*state).clone();
     let own_reflex = try_reflect_own_addr(&state_inner).await.ok().flatten();
     if let Some(ref a) = own_reflex {
         tracing::info!(%a, "place_call: learned own reflex addr for hole-punching advertisement");
-        emit_call_debug(&app, "place_call:reflect_query_ok", serde_json::json!({ "addr": a }));
+        emit_call_debug(
+            &app,
+            "place_call:reflect_query_ok",
+            serde_json::json!({ "addr": a }),
+        );
     } else {
         tracing::info!("place_call: no reflex addr available, falling back to relay-only");
         emit_call_debug(&app, "place_call:reflect_query_none", serde_json::json!({}));
@@ -1777,7 +2299,8 @@ async fn place_call(
     // with the correct port.
     let caller_local_addrs: Vec<String> = {
         let mut sig = state.signal.lock().await;
-        let v4_port = sig.endpoint
+        let v4_port = sig
+            .endpoint
             .as_ref()
             .and_then(|ep| ep.local_addr().ok())
             .map(|la| la.port())
@@ -1790,7 +2313,8 @@ async fn place_call(
         }
         let (sc, _) = wzp_transport::server_config();
         let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
-        let v6_port = v6_ep.as_ref()
+        let v6_port = v6_ep
+            .as_ref()
             .and_then(|ep| ep.local_addr().ok())
             .map(|a| a.port());
         if let Some(ref ep) = v6_ep {
@@ -1808,15 +2332,23 @@ async fn place_call(
             .map(|a| a.to_string())
             .collect()
     };
-    emit_call_debug(&app, "place_call:host_candidates", serde_json::json!({
-        "local_addrs": caller_local_addrs,
-    }));
+    emit_call_debug(
+        &app,
+        "place_call:host_candidates",
+        serde_json::json!({
+            "local_addrs": caller_local_addrs,
+        }),
+    );
 
     // Phase 8: attempt port mapping for symmetric NAT traversal.
     // This is best-effort — if the router doesn't support NAT-PMP/PCP/UPnP,
     // we fall back to reflexive + host candidates only.
     let caller_mapped_addr: Option<String> = {
-        let v4_port = state.signal.lock().await.endpoint
+        let v4_port = state
+            .signal
+            .lock()
+            .await
+            .endpoint
             .as_ref()
             .and_then(|ep| ep.local_addr().ok())
             .map(|la| la.port())
@@ -1826,9 +2358,13 @@ async fn place_call(
                 Ok(mapping) => {
                     let addr = mapping.external_addr.to_string();
                     tracing::info!(%addr, protocol = ?mapping.protocol, "place_call: port mapping acquired");
-                    emit_call_debug(&app, "place_call:portmap_ok", serde_json::json!({
-                        "addr": addr, "protocol": format!("{:?}", mapping.protocol),
-                    }));
+                    emit_call_debug(
+                        &app,
+                        "place_call:portmap_ok",
+                        serde_json::json!({
+                            "addr": addr, "protocol": format!("{:?}", mapping.protocol),
+                        }),
+                    );
                     Some(addr)
                 }
                 Err(e) => {
@@ -1853,6 +2389,7 @@ async fn place_call(
     tracing::info!(%call_id, %target_fp, reflex = ?own_reflex, mapped = ?caller_mapped_addr, "place_call: sending DirectCallOffer");
     transport
         .send_signal(&SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: sig.fingerprint.clone(),
             caller_alias: None,
             target_fingerprint: target_fp.clone(),
@@ -1868,14 +2405,22 @@ async fn place_call(
         })
         .await
         .map_err(|e| {
-            emit_call_debug(&app, "place_call:send_failed", serde_json::json!({ "error": e.to_string() }));
+            emit_call_debug(
+                &app,
+                "place_call:send_failed",
+                serde_json::json!({ "error": e.to_string() }),
+            );
             format!("{e}")
         })?;
-    emit_call_debug(&app, "place_call:offer_sent", serde_json::json!({
-        "call_id": call_id,
-        "target_fp": target_fp,
-        "caller_reflexive_addr": own_reflex,
-    }));
+    emit_call_debug(
+        &app,
+        "place_call:offer_sent",
+        serde_json::json!({
+            "call_id": call_id,
+            "target_fp": target_fp,
+            "caller_reflexive_addr": own_reflex,
+        }),
+    );
 
     // Phase 8.6: spawn background port allocation detection + HardNatProbe.
     // This runs AFTER the offer is sent so it doesn't delay call setup.
@@ -1902,18 +2447,22 @@ async fn place_call(
             );
             let sig = state_bg.signal.lock().await;
             if let Some(ref t) = sig.transport {
-                let _ = t.send_signal(&SignalMessage::HardNatProbe {
-                    call_id: call_id_bg,
-                    port_sequence: result.observed_ports,
-                    allocation: alloc_str,
-                    probe_time_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                    external_ip: result.external_ip
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_default(),
-                }).await;
+                let _ = t
+                    .send_signal(&SignalMessage::HardNatProbe {
+                        version: default_signal_version(),
+                        call_id: call_id_bg,
+                        port_sequence: result.observed_ports,
+                        allocation: alloc_str,
+                        probe_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        external_ip: result
+                            .external_ip
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_default(),
+                    })
+                    .await;
             }
         });
     }
@@ -1930,16 +2479,20 @@ async fn answer_call(
     call_id: String,
     mode: i32,
 ) -> Result<(), String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
     let accept_mode = match mode {
         0 => wzp_proto::CallAcceptMode::Reject,
         1 => wzp_proto::CallAcceptMode::AcceptTrusted,
         _ => wzp_proto::CallAcceptMode::AcceptGeneric,
     };
-    emit_call_debug(&app, "answer_call:start", serde_json::json!({
-        "call_id": call_id,
-        "accept_mode": format!("{:?}", accept_mode),
-    }));
+    emit_call_debug(
+        &app,
+        "answer_call:start",
+        serde_json::json!({
+            "call_id": call_id,
+            "accept_mode": format!("{:?}", accept_mode),
+        }),
+    );
 
     // Phase 3 hole-punching: only AcceptTrusted reveals our reflex
     // addr. Privacy-mode (AcceptGeneric) and Reject explicitly do
@@ -1950,69 +2503,95 @@ async fn answer_call(
     // the reflect await or the recv loop's ReflectResponse handler
     // will deadlock on the same mutex.
     let own_reflex = if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
-        emit_call_debug(&app, "answer_call:reflect_query_start", serde_json::json!({}));
+        emit_call_debug(
+            &app,
+            "answer_call:reflect_query_start",
+            serde_json::json!({}),
+        );
         let state_inner: Arc<AppState> = (*state).clone();
         let r = try_reflect_own_addr(&state_inner).await.ok().flatten();
         if let Some(ref a) = r {
             tracing::info!(%call_id, %a, "answer_call: learned own reflex addr for AcceptTrusted");
-            emit_call_debug(&app, "answer_call:reflect_query_ok", serde_json::json!({ "addr": a }));
+            emit_call_debug(
+                &app,
+                "answer_call:reflect_query_ok",
+                serde_json::json!({ "addr": a }),
+            );
         } else {
             tracing::info!(%call_id, "answer_call: no reflex addr for AcceptTrusted, falling back to relay-only");
-            emit_call_debug(&app, "answer_call:reflect_query_none", serde_json::json!({}));
+            emit_call_debug(
+                &app,
+                "answer_call:reflect_query_none",
+                serde_json::json!({}),
+            );
         }
         r
     } else {
         // Reject / AcceptGeneric: keep the IP private.
-        emit_call_debug(&app, "answer_call:privacy_mode_skip_reflect", serde_json::json!({}));
+        emit_call_debug(
+            &app,
+            "answer_call:privacy_mode_skip_reflect",
+            serde_json::json!({}),
+        );
         None
     };
 
     // Phase 5.5 + 7: gather LAN host candidates (AcceptTrusted
     // only — privacy mode keeps LAN addrs hidden).
-    let callee_local_addrs: Vec<String> =
-        if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
-            let mut sig = state.signal.lock().await;
-            let v4_port = sig.endpoint
-                .as_ref()
-                .and_then(|ep| ep.local_addr().ok())
-                .map(|la| la.port())
-                .unwrap_or(0);
+    let callee_local_addrs: Vec<String> = if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted
+    {
+        let mut sig = state.signal.lock().await;
+        let v4_port = sig
+            .endpoint
+            .as_ref()
+            .and_then(|ep| ep.local_addr().ok())
+            .map(|la| la.port())
+            .unwrap_or(0);
 
-            // Phase 7: create IPv6 endpoint. Close leftover first.
-            if let Some(old) = sig.ipv6_endpoint.take() {
-                old.close(0u32.into(), b"new-call");
-            }
-            let (sc, _) = wzp_transport::server_config();
-            let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
-            let v6_port = v6_ep.as_ref()
-                .and_then(|ep| ep.local_addr().ok())
-                .map(|a| a.port());
-            if let Some(ref ep) = v6_ep {
-                tracing::info!(
-                    v4_port,
-                    v6_port,
-                    v6_local = ?ep.local_addr().ok(),
-                    "answer_call: IPv6 endpoint created for dual-stack P2P"
-                );
-            }
-            sig.ipv6_endpoint = v6_ep;
+        // Phase 7: create IPv6 endpoint. Close leftover first.
+        if let Some(old) = sig.ipv6_endpoint.take() {
+            old.close(0u32.into(), b"new-call");
+        }
+        let (sc, _) = wzp_transport::server_config();
+        let v6_ep = wzp_transport::create_ipv6_endpoint(v4_port, Some(sc)).ok();
+        let v6_port = v6_ep
+            .as_ref()
+            .and_then(|ep| ep.local_addr().ok())
+            .map(|a| a.port());
+        if let Some(ref ep) = v6_ep {
+            tracing::info!(
+                v4_port,
+                v6_port,
+                v6_local = ?ep.local_addr().ok(),
+                "answer_call: IPv6 endpoint created for dual-stack P2P"
+            );
+        }
+        sig.ipv6_endpoint = v6_ep;
 
-            wzp_client::reflect::local_host_candidates(v4_port, v6_port)
-                .into_iter()
-                .map(|a| a.to_string())
-                .collect()
-        } else {
-            Vec::new()
-        };
-    emit_call_debug(&app, "answer_call:host_candidates", serde_json::json!({
-        "local_addrs": callee_local_addrs,
-    }));
+        wzp_client::reflect::local_host_candidates(v4_port, v6_port)
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    emit_call_debug(
+        &app,
+        "answer_call:host_candidates",
+        serde_json::json!({
+            "local_addrs": callee_local_addrs,
+        }),
+    );
 
     // Phase 8: attempt port mapping (AcceptTrusted only — privacy mode
     // keeps the mapped addr hidden too).
     let callee_mapped_addr: Option<String> =
         if accept_mode == wzp_proto::CallAcceptMode::AcceptTrusted {
-            let v4_port = state.signal.lock().await.endpoint
+            let v4_port = state
+                .signal
+                .lock()
+                .await
+                .endpoint
                 .as_ref()
                 .and_then(|ep| ep.local_addr().ok())
                 .map(|la| la.port())
@@ -2047,6 +2626,7 @@ async fn answer_call(
     tracing::info!(%call_id, ?accept_mode, reflex = ?own_reflex, mapped = ?callee_mapped_addr, "answer_call: sending DirectCallAnswer");
     transport
         .send_signal(&SignalMessage::DirectCallAnswer {
+            version: default_signal_version(),
             call_id: call_id.clone(),
             accept_mode,
             identity_pub: None,
@@ -2061,15 +2641,23 @@ async fn answer_call(
         .await
         .map_err(|e| {
             tracing::error!(%call_id, error = %e, "answer_call: send_signal failed");
-            emit_call_debug(&app, "answer_call:send_failed", serde_json::json!({ "error": e.to_string() }));
+            emit_call_debug(
+                &app,
+                "answer_call:send_failed",
+                serde_json::json!({ "error": e.to_string() }),
+            );
             format!("{e}")
         })?;
     tracing::info!(%call_id, "answer_call: DirectCallAnswer sent successfully");
-    emit_call_debug(&app, "answer_call:answer_sent", serde_json::json!({
-        "call_id": call_id,
-        "accept_mode": format!("{:?}", accept_mode),
-        "callee_reflexive_addr": own_reflex,
-    }));
+    emit_call_debug(
+        &app,
+        "answer_call:answer_sent",
+        serde_json::json!({
+            "call_id": call_id,
+            "accept_mode": format!("{:?}", accept_mode),
+            "callee_reflexive_addr": own_reflex,
+        }),
+    );
     // Upgrade the pending "Missed" entry to "Received" if the user
     // accepted (mode != Reject). Mode 0 = Reject → leave as Missed.
     if mode != 0 && history::mark_received_if_pending(&call_id) {
@@ -2099,18 +2687,22 @@ async fn answer_call(
             );
             let sig = state_bg.signal.lock().await;
             if let Some(ref t) = sig.transport {
-                let _ = t.send_signal(&wzp_proto::SignalMessage::HardNatProbe {
-                    call_id: call_id_bg,
-                    port_sequence: result.observed_ports,
-                    allocation: alloc_str,
-                    probe_time_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                    external_ip: result.external_ip
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_default(),
-                }).await;
+                let _ = t
+                    .send_signal(&wzp_proto::SignalMessage::HardNatProbe {
+                        version: default_signal_version(),
+                        call_id: call_id_bg,
+                        port_sequence: result.observed_ports,
+                        allocation: alloc_str,
+                        probe_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        external_ip: result
+                            .external_ip
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_default(),
+                    })
+                    .await;
             }
         });
     }
@@ -2135,9 +2727,7 @@ async fn answer_call(
 /// discovery. This handles the case where the relay is overloaded
 /// or temporarily unreachable for reflect but the call can still
 /// proceed with STUN-discovered addresses.
-async fn try_reflect_own_addr(
-    state: &Arc<AppState>,
-) -> Result<Option<String>, String> {
+async fn try_reflect_own_addr(state: &Arc<AppState>) -> Result<Option<String>, String> {
     use wzp_proto::SignalMessage;
     let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
     let transport = {
@@ -2181,9 +2771,7 @@ async fn try_reflect_own_addr(
 
 /// STUN fallback for reflexive address discovery when relay-based
 /// reflection fails. Queries public STUN servers independently.
-async fn try_stun_fallback(
-    state: &Arc<AppState>,
-) -> Result<Option<String>, String> {
+async fn try_stun_fallback(state: &Arc<AppState>) -> Result<Option<String>, String> {
     let stun_config = wzp_client::stun::StunConfig {
         servers: vec![
             "stun.l.google.com:19302".into(),
@@ -2226,9 +2814,7 @@ async fn try_stun_fallback(
 /// boundary unchanged — JS-side can display it directly or parse it
 /// with `new URL(...)` / a regex if needed.
 #[tauri::command]
-async fn get_reflected_address(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<String, String> {
+async fn get_reflected_address(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
     use wzp_proto::SignalMessage;
     let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
     let transport = {
@@ -2307,7 +2893,11 @@ async fn detect_nat_type(
     let stun_config = wzp_client::stun::StunConfig::default();
 
     let mode_str = mode.as_deref().unwrap_or("both");
-    tracing::info!(mode = mode_str, relay_count = parsed.len(), "detect_nat_type: starting");
+    tracing::info!(
+        mode = mode_str,
+        relay_count = parsed.len(),
+        "detect_nat_type: starting"
+    );
 
     let detection = match mode_str {
         "relay" => {
@@ -2327,8 +2917,12 @@ async fn detect_nat_type(
         _ => {
             // "both" — relay + STUN in parallel (default, highest confidence)
             wzp_client::reflect::detect_nat_type_with_stun(
-                parsed, 1500, shared_endpoint, &stun_config,
-            ).await
+                parsed,
+                1500,
+                shared_endpoint,
+                &stun_config,
+            )
+            .await
         }
     };
     serde_json::to_value(&detection).map_err(|e| format!("serialize: {e}"))
@@ -2349,7 +2943,11 @@ async fn run_netcheck(
         relay_addrs.push((r.name, addr));
     }
 
-    let local_port = state.signal.lock().await.endpoint
+    let local_port = state
+        .signal
+        .lock()
+        .await
+        .endpoint
         .as_ref()
         .and_then(|ep| ep.local_addr().ok())
         .map(|la| la.port())
@@ -2379,9 +2977,13 @@ struct RelayArg {
 }
 
 #[tauri::command]
-async fn get_signal_status(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+async fn get_signal_status(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
     let sig = state.signal.lock().await;
-    Ok(serde_json::json!({"status":sig.signal_status,"fingerprint":sig.fingerprint,"incoming_call_id":sig.incoming_call_id,"incoming_caller_fp":sig.incoming_caller_fp}))
+    Ok(
+        serde_json::json!({"status":sig.signal_status,"fingerprint":sig.fingerprint,"incoming_call_id":sig.incoming_call_id,"incoming_caller_fp":sig.incoming_caller_fp}),
+    )
 }
 
 /// Tear down the signal connection so the user goes back to idle. Called
@@ -2417,7 +3019,7 @@ async fn hangup_call(
     state: tauri::State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
 
     emit_call_debug(&app, "hangup_call:start", serde_json::json!({}));
 
@@ -2429,6 +3031,7 @@ async fn hangup_call(
         if let Some(ref transport) = sig.transport {
             match transport
                 .send_signal(&SignalMessage::Hangup {
+                    version: default_signal_version(),
                     reason: wzp_proto::HangupReason::Normal,
                     call_id: None,
                 })
@@ -2449,7 +3052,11 @@ async fn hangup_call(
             }
         } else {
             tracing::debug!("hangup_call: no signal transport, skipping Hangup send");
-            emit_call_debug(&app, "hangup_call:no_signal_transport", serde_json::json!({}));
+            emit_call_debug(
+                &app,
+                "hangup_call:no_signal_transport",
+                serde_json::json!({}),
+            );
         }
     }
 
@@ -2466,16 +3073,125 @@ async fn hangup_call(
 
 // ─── App entry point ─────────────────────────────────────────────────────────
 
-/// Shared Tauri app builder. Used by the desktop `main.rs` and the mobile
-/// entry point below.
-pub fn run() {
-    tracing_subscriber::fmt().init();
+// ─── Quality upgrade flow handlers (testable) ─────────────────────────────
 
-    let state = Arc::new(AppState {
-        engine: Mutex::new(None),
-        signal: Arc::new(Mutex::new(SignalState {
-            transport: None, endpoint: None, ipv6_endpoint: None, fingerprint: String::new(), signal_status: "idle".into(),
-            incoming_call_id: None, incoming_caller_fp: None, incoming_caller_alias: None,
+async fn handle_upgrade_proposal(
+    transport: &dyn wzp_proto::MediaTransport,
+    call_id: &str,
+    proposal_id: &str,
+) -> Result<(), wzp_proto::TransportError> {
+    let response = wzp_proto::SignalMessage::UpgradeResponse {
+        version: default_signal_version(),
+        call_id: call_id.to_string(),
+        proposal_id: proposal_id.to_string(),
+        accepted: true,
+        reason: None,
+    };
+    transport.send_signal(&response).await
+}
+
+async fn handle_upgrade_response(
+    transport: &dyn wzp_proto::MediaTransport,
+    signal_state: &Arc<tokio::sync::Mutex<SignalState>>,
+    call_id: &str,
+    proposal_id: &str,
+    accepted: bool,
+) -> Result<(), wzp_proto::TransportError> {
+    if accepted {
+        let maybe_proposal = {
+            let sig = signal_state.lock().await;
+            sig.pending_upgrade.lock().unwrap().take()
+        };
+        if let Some((_cid, pid, profile)) = maybe_proposal {
+            if pid == proposal_id {
+                let confirm = wzp_proto::SignalMessage::UpgradeConfirm {
+                    version: default_signal_version(),
+                    call_id: call_id.to_string(),
+                    proposal_id: proposal_id.to_string(),
+                    confirmed_profile: profile.clone(),
+                };
+                transport.send_signal(&confirm).await?;
+                {
+                    let sig = signal_state.lock().await;
+                    *sig.active_quality.lock().unwrap() = profile;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_upgrade_confirm(
+    signal_state: &Arc<tokio::sync::Mutex<SignalState>>,
+    confirmed_profile: wzp_proto::QualityProfile,
+) {
+    let sig = signal_state.lock().await;
+    *sig.active_quality.lock().unwrap() = confirmed_profile;
+}
+
+async fn handle_quality_capability(
+    signal_state: &Arc<tokio::sync::Mutex<SignalState>>,
+    max_profile: wzp_proto::QualityProfile,
+) {
+    let sig = signal_state.lock().await;
+    *sig.peer_max_quality.lock().unwrap() = Some(max_profile);
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
+    use wzp_proto::{MediaPacket, MediaTransport, PathQuality, SignalMessage, TransportError};
+
+    struct LoopbackTransport {
+        sent: StdMutex<Vec<SignalMessage>>,
+    }
+
+    impl LoopbackTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                sent: StdMutex::new(Vec::new()),
+            })
+        }
+        fn take_sent(&self) -> Vec<SignalMessage> {
+            self.sent.lock().unwrap().drain(..).collect()
+        }
+    }
+
+    #[async_trait]
+    impl MediaTransport for LoopbackTransport {
+        async fn send_media(&self, _packet: &MediaPacket) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn recv_media(&self) -> Result<Option<MediaPacket>, TransportError> {
+            Ok(None)
+        }
+        async fn send_signal(&self, msg: &SignalMessage) -> Result<(), TransportError> {
+            self.sent.lock().unwrap().push(msg.clone());
+            Ok(())
+        }
+        async fn recv_signal(&self) -> Result<Option<SignalMessage>, TransportError> {
+            Ok(None)
+        }
+        fn path_quality(&self) -> PathQuality {
+            PathQuality::default()
+        }
+        async fn close(&self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn empty_signal_state() -> Arc<tokio::sync::Mutex<SignalState>> {
+        Arc::new(tokio::sync::Mutex::new(SignalState {
+            transport: None,
+            endpoint: None,
+            ipv6_endpoint: None,
+            fingerprint: String::new(),
+            signal_status: "idle".into(),
+            incoming_call_id: None,
+            incoming_caller_fp: None,
+            incoming_caller_alias: None,
             pending_reflect: None,
             own_reflex_addr: None,
             desired_relay_addr: None,
@@ -2483,6 +3199,127 @@ pub fn run() {
             pending_path_report: None,
             peer_hard_nat_probe: None,
             peer_birthday_ports: None,
+            active_quality: Arc::new(std::sync::Mutex::new(wzp_proto::QualityProfile::GOOD)),
+            peer_max_quality: Arc::new(std::sync::Mutex::new(None)),
+            pending_upgrade: Arc::new(std::sync::Mutex::new(None)),
+        }))
+    }
+
+    #[tokio::test]
+    async fn upgrade_proposal_auto_accepts() {
+        let transport = LoopbackTransport::new();
+        handle_upgrade_proposal(&*transport, "c1", "p1").await.unwrap();
+
+        let sent = transport.take_sent();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            SignalMessage::UpgradeResponse {
+                call_id,
+                proposal_id,
+                accepted,
+                reason,
+                ..
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(proposal_id, "p1");
+                assert!(accepted);
+                assert!(reason.is_none());
+            }
+            other => panic!("expected UpgradeResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_response_accepted_sends_confirm_and_updates_quality() {
+        let transport = LoopbackTransport::new();
+        let signal_state = empty_signal_state();
+        {
+            let sig = signal_state.lock().await;
+            *sig.pending_upgrade.lock().unwrap() =
+                Some(("c1".into(), "p1".into(), wzp_proto::QualityProfile::STUDIO_48K));
+        }
+
+        handle_upgrade_response(&*transport, &signal_state, "c1", "p1", true)
+            .await
+            .unwrap();
+
+        let sent = transport.take_sent();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            SignalMessage::UpgradeConfirm {
+                call_id,
+                proposal_id,
+                confirmed_profile,
+                ..
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(proposal_id, "p1");
+                assert_eq!(*confirmed_profile, wzp_proto::QualityProfile::STUDIO_48K);
+            }
+            other => panic!("expected UpgradeConfirm, got {other:?}"),
+        }
+
+        let sig = signal_state.lock().await;
+        assert_eq!(
+            *sig.active_quality.lock().unwrap(),
+            wzp_proto::QualityProfile::STUDIO_48K
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_confirm_updates_active_quality() {
+        let signal_state = empty_signal_state();
+        handle_upgrade_confirm(&signal_state, wzp_proto::QualityProfile::STUDIO_64K).await;
+
+        let sig = signal_state.lock().await;
+        assert_eq!(
+            *sig.active_quality.lock().unwrap(),
+            wzp_proto::QualityProfile::STUDIO_64K
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_capability_updates_peer_max() {
+        let signal_state = empty_signal_state();
+        handle_quality_capability(&signal_state, wzp_proto::QualityProfile::GOOD).await;
+
+        let sig = signal_state.lock().await;
+        assert_eq!(
+            sig.peer_max_quality.lock().unwrap().unwrap(),
+            wzp_proto::QualityProfile::GOOD
+        );
+    }
+}
+
+/// Shared Tauri app builder. Used by the desktop `main.rs` and the mobile
+/// entry point below.
+pub fn run() {
+    tracing_subscriber::fmt().init();
+
+    let active_quality = Arc::new(std::sync::Mutex::new(wzp_proto::QualityProfile::GOOD));
+    let peer_max_quality = Arc::new(std::sync::Mutex::new(None));
+    let pending_upgrade = Arc::new(std::sync::Mutex::new(None));
+    let state = Arc::new(AppState {
+        engine: Mutex::new(None),
+        signal: Arc::new(Mutex::new(SignalState {
+            transport: None,
+            endpoint: None,
+            ipv6_endpoint: None,
+            fingerprint: String::new(),
+            signal_status: "idle".into(),
+            incoming_call_id: None,
+            incoming_caller_fp: None,
+            incoming_caller_alias: None,
+            pending_reflect: None,
+            own_reflex_addr: None,
+            desired_relay_addr: None,
+            reconnect_in_progress: false,
+            pending_path_report: None,
+            peer_hard_nat_probe: None,
+            peer_birthday_ports: None,
+            active_quality: active_quality.clone(),
+            peer_max_quality: peer_max_quality.clone(),
+            pending_upgrade: pending_upgrade.clone(),
         })),
     });
 
@@ -2530,17 +3367,36 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            ping_relay, get_identity, get_app_info,
-            connect, disconnect, toggle_mic, toggle_speaker, get_status,
-            register_signal, place_call, answer_call, get_signal_status,
-            get_reflected_address, detect_nat_type, run_netcheck,
+            ping_relay,
+            get_identity,
+            get_app_info,
+            connect,
+            disconnect,
+            toggle_mic,
+            toggle_speaker,
+            get_status,
+            register_signal,
+            place_call,
+            answer_call,
+            get_signal_status,
+            get_reflected_address,
+            detect_nat_type,
+            run_netcheck,
             hangup_call,
             deregister,
-            set_speakerphone, is_speakerphone_on,
-            set_bluetooth_sco, is_bluetooth_available, get_audio_route,
-            get_call_history, get_recent_contacts, clear_call_history,
-            set_dred_verbose_logs, get_dred_verbose_logs,
-            set_call_debug_logs, get_call_debug_logs,
+            set_speakerphone,
+            is_speakerphone_on,
+            set_bluetooth_sco,
+            is_bluetooth_available,
+            get_audio_route,
+            get_call_history,
+            get_recent_contacts,
+            clear_call_history,
+            set_dred_verbose_logs,
+            get_dred_verbose_logs,
+            set_call_debug_logs,
+            get_call_debug_logs,
+            push_camera_frame,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarzonePhone");

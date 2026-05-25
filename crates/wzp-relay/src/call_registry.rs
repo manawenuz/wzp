@@ -83,7 +83,12 @@ impl CallRegistry {
     }
 
     /// Create a new pending call. Returns the call_id.
-    pub fn create_call(&mut self, call_id: String, caller_fp: String, callee_fp: String) -> &DirectCall {
+    pub fn create_call(
+        &mut self,
+        call_id: String,
+        caller_fp: String,
+        callee_fp: String,
+    ) -> &DirectCall {
         let call = DirectCall {
             call_id: call_id.clone(),
             caller_fingerprint: caller_fp,
@@ -189,7 +194,12 @@ impl CallRegistry {
     }
 
     /// Transition to Active state.
-    pub fn set_active(&mut self, call_id: &str, mode: wzp_proto::CallAcceptMode, room: String) -> bool {
+    pub fn set_active(
+        &mut self,
+        call_id: &str,
+        mode: wzp_proto::CallAcceptMode,
+        room: String,
+    ) -> bool {
         if let Some(call) = self.calls.get_mut(call_id) {
             if call.state == DirectCallState::Pending || call.state == DirectCallState::Ringing {
                 call.state = DirectCallState::Active;
@@ -213,7 +223,8 @@ impl CallRegistry {
 
     /// Find active/pending calls involving a fingerprint.
     pub fn calls_for_fingerprint(&self, fp: &str) -> Vec<&DirectCall> {
-        self.calls.values()
+        self.calls
+            .values()
             .filter(|c| {
                 c.state != DirectCallState::Ended
                     && (c.caller_fingerprint == fp || c.callee_fingerprint == fp)
@@ -236,22 +247,25 @@ impl CallRegistry {
     /// Returns call IDs of expired calls.
     pub fn expire_stale(&mut self, timeout: Duration) -> Vec<DirectCall> {
         let now = Instant::now();
-        let expired: Vec<String> = self.calls.iter()
+        let expired: Vec<String> = self
+            .calls
+            .iter()
             .filter(|(_, c)| {
-                c.state == DirectCallState::Pending
-                    && now.duration_since(c.created_at) > timeout
+                c.state == DirectCallState::Pending && now.duration_since(c.created_at) > timeout
             })
             .map(|(id, _)| id.clone())
             .collect();
 
-        expired.into_iter()
+        expired
+            .into_iter()
             .filter_map(|id| self.calls.remove(&id))
             .collect()
     }
 
     /// Number of active (non-ended) calls.
     pub fn active_count(&self) -> usize {
-        self.calls.values()
+        self.calls
+            .values()
             .filter(|c| c.state != DirectCallState::Ended)
             .count()
     }
@@ -270,9 +284,16 @@ mod tests {
         assert!(reg.set_ringing("c1"));
         assert_eq!(reg.get("c1").unwrap().state, DirectCallState::Ringing);
 
-        assert!(reg.set_active("c1", wzp_proto::CallAcceptMode::AcceptGeneric, "_call:c1".into()));
+        assert!(reg.set_active(
+            "c1",
+            wzp_proto::CallAcceptMode::AcceptGeneric,
+            "_call:c1".into()
+        ));
         assert_eq!(reg.get("c1").unwrap().state, DirectCallState::Active);
-        assert_eq!(reg.get("c1").unwrap().room_name.as_deref(), Some("_call:c1"));
+        assert_eq!(
+            reg.get("c1").unwrap().room_name.as_deref(),
+            Some("_call:c1")
+        );
 
         let ended = reg.end_call("c1").unwrap();
         assert_eq!(ended.state, DirectCallState::Ended);
@@ -329,10 +350,7 @@ mod tests {
         // Both addrs are independently readable — the relay uses
         // them to cross-wire peer_direct_addr in CallSetup.
         let c = reg.get("c1").unwrap();
-        assert_eq!(
-            c.caller_reflexive_addr.as_deref(),
-            Some("192.0.2.1:4433")
-        );
+        assert_eq!(c.caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
         assert_eq!(
             c.callee_reflexive_addr.as_deref(),
             Some("198.51.100.9:4433")

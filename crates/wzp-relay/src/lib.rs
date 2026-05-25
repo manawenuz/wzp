@@ -7,22 +7,27 @@
 //! It operates on FEC-protected packets, managing loss recovery and adaptive
 //! quality transitions.
 
+pub mod audio_scorer;
 pub mod auth;
 pub mod call_registry;
 pub mod config;
+pub mod conformance;
 pub mod event_log;
 pub mod federation;
-pub mod signal_hub;
 pub mod handshake;
 pub mod metrics;
 pub mod pipeline;
 pub mod presence;
 pub mod probe;
 pub mod relay_link;
+pub mod response_policy;
 pub mod room;
 pub mod route;
 pub mod session_mgr;
+pub mod signal_hub;
 pub mod trunk;
+pub mod verdict;
+pub mod video_scorer;
 pub mod ws;
 
 pub use config::RelayConfig;

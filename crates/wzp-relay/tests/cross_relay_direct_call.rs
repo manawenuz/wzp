@@ -24,7 +24,7 @@
 //!    Bob's CallSetup carries Alice's reflex addr — cross-wired
 //!    through two relays + a federation link.
 
-use wzp_proto::{CallAcceptMode, SignalMessage};
+use wzp_proto::{CallAcceptMode, SignalMessage, default_signal_version};
 use wzp_relay::call_registry::CallRegistry;
 
 // ────────────────────────────────────────────────────────────────
@@ -42,6 +42,7 @@ const RELAY_B_ADDR: &str = "203.0.113.10:4433";
 /// Helper that Alice's place_call sends.
 fn alice_offer(call_id: &str) -> SignalMessage {
     SignalMessage::DirectCallOffer {
+        version: default_signal_version(),
         caller_fingerprint: "alice".into(),
         caller_alias: None,
         target_fingerprint: "bob".into(),
@@ -84,6 +85,7 @@ fn relay_a_handle_offer(reg_a: &mut CallRegistry, offer: &SignalMessage) -> Sign
     // Build the federation envelope the main loop would
     // broadcast.
     SignalMessage::FederatedSignalForward {
+        version: default_signal_version(),
         inner: Box::new(offer.clone()),
         origin_relay_fp: RELAY_A_TLS_FP.into(),
     }
@@ -94,9 +96,11 @@ fn relay_a_handle_offer(reg_a: &mut CallRegistry, offer: &SignalMessage) -> Sign
 /// reproduced here for the test.
 fn relay_b_handle_forwarded_offer(reg_b: &mut CallRegistry, forward: &SignalMessage) {
     let (inner, origin_relay_fp) = match forward {
-        SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
-            (inner.as_ref().clone(), origin_relay_fp.clone())
-        }
+        SignalMessage::FederatedSignalForward {
+            inner,
+            origin_relay_fp,
+            ..
+        } => (inner.as_ref().clone(), origin_relay_fp.clone()),
         _ => panic!("not a forward"),
     };
     // Loop-prevention: drop self-sourced.
@@ -114,11 +118,7 @@ fn relay_b_handle_forwarded_offer(reg_b: &mut CallRegistry, forward: &SignalMess
     };
 
     // Simulated: target is local to B (Bob is registered here).
-    reg_b.create_call(
-        call_id.clone(),
-        caller_fingerprint,
-        target_fingerprint,
-    );
+    reg_b.create_call(call_id.clone(), caller_fingerprint, target_fingerprint);
     reg_b.set_caller_reflexive_addr(&call_id, caller_reflexive_addr);
     reg_b.set_peer_relay_fp(&call_id, Some(origin_relay_fp));
 }
@@ -126,6 +126,7 @@ fn relay_b_handle_forwarded_offer(reg_b: &mut CallRegistry, forward: &SignalMess
 /// Bob's answer — AcceptTrusted with his reflex addr.
 fn bob_answer(call_id: &str) -> SignalMessage {
     SignalMessage::DirectCallAnswer {
+        version: default_signal_version(),
         call_id: call_id.into(),
         accept_mode: CallAcceptMode::AcceptTrusted,
         identity_pub: None,
@@ -169,12 +170,14 @@ fn relay_b_handle_local_answer(
 
     // Forward the answer back over federation.
     let forward = SignalMessage::FederatedSignalForward {
+        version: default_signal_version(),
         inner: Box::new(answer.clone()),
         origin_relay_fp: RELAY_B_TLS_FP.into(),
     };
 
     // Local CallSetup for Bob — peer_direct_addr = Alice's addr.
     let setup_for_bob = SignalMessage::CallSetup {
+        version: default_signal_version(),
         call_id: call_id.clone(),
         room: format!("call-{call_id}"),
         relay_addr: RELAY_B_ADDR.into(),
@@ -194,9 +197,11 @@ fn relay_a_handle_forwarded_answer(
     forward: &SignalMessage,
 ) -> SignalMessage {
     let (inner, origin_relay_fp) = match forward {
-        SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
-            (inner.as_ref().clone(), origin_relay_fp.clone())
-        }
+        SignalMessage::FederatedSignalForward {
+            inner,
+            origin_relay_fp,
+            ..
+        } => (inner.as_ref().clone(), origin_relay_fp.clone()),
         _ => panic!("not a forward"),
     };
     assert_ne!(origin_relay_fp, RELAY_A_TLS_FP);
@@ -217,6 +222,7 @@ fn relay_a_handle_forwarded_answer(
 
     // Alice's CallSetup — peer_direct_addr = Bob's addr.
     SignalMessage::CallSetup {
+        version: default_signal_version(),
         call_id: call_id.clone(),
         room: format!("call-{call_id}"),
         relay_addr: RELAY_A_ADDR.into(),
@@ -270,12 +276,15 @@ fn cross_relay_answer_crosswires_peer_direct_addrs() {
 
     // Bob answers on Relay B.
     let answer = bob_answer("c-xrelay-2");
-    let (answer_forward, setup_for_bob) =
-        relay_b_handle_local_answer(&mut reg_b, &answer);
+    let (answer_forward, setup_for_bob) = relay_b_handle_local_answer(&mut reg_b, &answer);
 
     // Bob's CallSetup carries Alice's addr.
     match setup_for_bob {
-        SignalMessage::CallSetup { peer_direct_addr, relay_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr,
+            relay_addr,
+            ..
+        } => {
             assert_eq!(peer_direct_addr.as_deref(), Some(ALICE_ADDR));
             assert_eq!(relay_addr, RELAY_B_ADDR);
         }
@@ -286,7 +295,11 @@ fn cross_relay_answer_crosswires_peer_direct_addrs() {
     // her CallSetup.
     let setup_for_alice = relay_a_handle_forwarded_answer(&mut reg_a, &answer_forward);
     match setup_for_alice {
-        SignalMessage::CallSetup { peer_direct_addr, relay_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr,
+            relay_addr,
+            ..
+        } => {
             assert_eq!(peer_direct_addr.as_deref(), Some(BOB_ADDR));
             assert_eq!(relay_addr, RELAY_A_ADDR);
         }
@@ -307,15 +320,21 @@ fn cross_relay_loop_prevention_drops_self_sourced_forward() {
     // A FederatedSignalForward that circles back to the origin
     // relay should be dropped before it hits the call registry.
     let forward = SignalMessage::FederatedSignalForward {
+        version: default_signal_version(),
         inner: Box::new(alice_offer("c-loop")),
         origin_relay_fp: RELAY_B_TLS_FP.into(),
     };
     // The dispatcher in main.rs calls this explicit check before
     // doing any work. Reproduce it inline.
     let origin = match &forward {
-        SignalMessage::FederatedSignalForward { origin_relay_fp, .. } => origin_relay_fp.clone(),
+        SignalMessage::FederatedSignalForward {
+            origin_relay_fp, ..
+        } => origin_relay_fp.clone(),
         _ => unreachable!(),
     };
     // Relay B sees origin == its own fp → drop.
-    assert_eq!(origin, RELAY_B_TLS_FP, "loop-prevention triggers on self-fp");
+    assert_eq!(
+        origin, RELAY_B_TLS_FP,
+        "loop-prevention triggers on self-fp"
+    );
 }

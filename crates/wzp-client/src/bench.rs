@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use wzp_crypto::ChaChaSession;
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
-use wzp_proto::traits::{CryptoSession, FecDecoder, FecEncoder};
 use wzp_proto::QualityProfile;
+use wzp_proto::traits::{CryptoSession, FecDecoder, FecEncoder};
 
 use crate::call::{CallConfig, CallDecoder, CallEncoder};
 
@@ -151,7 +151,7 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
     let mut total_repair_bytes = 0usize;
 
     for block_idx in 0..num_blocks {
-        let block_id = (block_idx % 256) as u8;
+        let block_id = (block_idx % 65536) as u16;
 
         // Create fresh encoder and decoder for each block
         let mut fec_enc = RaptorQFecEncoder::new(frames_per_block, 256);
@@ -170,7 +170,7 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
 
         // Collect all symbols: source + repair
         struct Symbol {
-            index: u8,
+            index: u16,
             is_repair: bool,
             data: Vec<u8>,
         }
@@ -180,7 +180,7 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
             // For add_symbol we need to provide the raw data; the decoder pads internally
             total_source_bytes += sym.len();
             all_symbols.push(Symbol {
-                index: i as u8,
+                index: i as u16,
                 is_repair: false,
                 data: sym.clone(),
             });
@@ -201,9 +201,13 @@ pub fn bench_fec_recovery(loss_pct: f32) -> FecResult {
         // Deterministic shuffle for reproducibility using a simple seed
         // We use a basic Fisher-Yates with a fixed-per-block seed
         let mut indices: Vec<usize> = (0..all_symbols.len()).collect();
-        let mut seed = (block_idx as u64).wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut seed = (block_idx as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
         for i in (1..indices.len()).rev() {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = (seed >> 33) as usize % (i + 1);
             indices.swap(i, j);
         }
@@ -259,17 +263,36 @@ pub fn bench_encrypt_decrypt() -> CryptoResult {
         })
         .collect();
 
-    let header = b"bench-header";
+    // Build valid v2 MediaHeader bytes — encrypt/decrypt now derive nonces from
+    // header.seq and require a parseable MediaHeader (WIRE_SIZE bytes minimum).
+    use wzp_proto::packet::MediaHeader;
+    use wzp_proto::{CodecId, MediaType};
     let mut total_bytes: usize = 0;
 
     let start = Instant::now();
-    for payload in &payloads {
+    for (i, payload) in payloads.iter().enumerate() {
+        let hdr = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq: i as u32,
+            timestamp: (i as u32).wrapping_mul(20),
+            fec_block: 0,
+        };
+        let mut header_bytes = Vec::with_capacity(MediaHeader::WIRE_SIZE);
+        hdr.write_to(&mut header_bytes);
+
         let mut ciphertext = Vec::with_capacity(payload.len() + 16);
-        encryptor.encrypt(header, payload, &mut ciphertext).unwrap();
+        encryptor
+            .encrypt(&header_bytes, payload, &mut ciphertext)
+            .unwrap();
 
         let mut plaintext = Vec::with_capacity(payload.len());
         decryptor
-            .decrypt(header, &ciphertext, &mut plaintext)
+            .decrypt(&header_bytes, &ciphertext, &mut plaintext)
             .unwrap();
 
         total_bytes += payload.len();

@@ -30,8 +30,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use wzp_proto::{MediaTransport, SignalMessage};
-use wzp_transport::{client_config, create_endpoint, QuinnTransport};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
+use wzp_transport::{QuinnTransport, client_config, create_endpoint};
 
 /// Result of one probe against one relay. Always returned so the
 /// UI can render per-relay status even when some fail.
@@ -110,10 +110,9 @@ pub async fn probe_reflect_addr(
     let start = Instant::now();
     let probe = async {
         // Open the signal connection.
-        let conn =
-            wzp_transport::connect(&endpoint, relay, "_signal", client_config())
-                .await
-                .map_err(|e| format!("connect: {e}"))?;
+        let conn = wzp_transport::connect(&endpoint, relay, "_signal", client_config())
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
         let transport = QuinnTransport::new(conn);
 
         // The relay signal handler waits for a RegisterPresence
@@ -124,6 +123,7 @@ pub async fn probe_reflect_addr(
         // path does in desktop/src-tauri/src/lib.rs register_signal.
         transport
             .send_signal(&SignalMessage::RegisterPresence {
+                version: default_signal_version(),
                 identity_pub: [0u8; 32],
                 signature: vec![],
                 alias: None,
@@ -151,7 +151,7 @@ pub async fn probe_reflect_addr(
             .map_err(|e| format!("send Reflect: {e}"))?;
 
         match transport.recv_signal().await {
-            Ok(Some(SignalMessage::ReflectResponse { observed_addr })) => {
+            Ok(Some(SignalMessage::ReflectResponse { observed_addr, .. })) => {
                 let parsed: SocketAddr = observed_addr
                     .parse()
                     .map_err(|e| format!("parse observed_addr {observed_addr:?}: {e}"))?;
@@ -540,10 +540,7 @@ mod tests {
 
     #[test]
     fn classify_two_identical_is_cone() {
-        let probes = vec![
-            mk(Some("192.0.2.1:4433")),
-            mk(Some("192.0.2.1:4433")),
-        ];
+        let probes = vec![mk(Some("192.0.2.1:4433")), mk(Some("192.0.2.1:4433"))];
         let (nt, addr) = classify_nat(&probes);
         assert_eq!(nt, NatType::Cone);
         assert_eq!(addr.as_deref(), Some("192.0.2.1:4433"));
@@ -551,10 +548,7 @@ mod tests {
 
     #[test]
     fn classify_same_ip_different_ports_is_symmetric() {
-        let probes = vec![
-            mk(Some("192.0.2.1:4433")),
-            mk(Some("192.0.2.1:51234")),
-        ];
+        let probes = vec![mk(Some("192.0.2.1:4433")), mk(Some("192.0.2.1:51234"))];
         let (nt, addr) = classify_nat(&probes);
         assert_eq!(nt, NatType::SymmetricPort);
         assert!(addr.is_none());
@@ -562,10 +556,7 @@ mod tests {
 
     #[test]
     fn classify_different_ips_is_multiple() {
-        let probes = vec![
-            mk(Some("192.0.2.1:4433")),
-            mk(Some("198.51.100.9:4433")),
-        ];
+        let probes = vec![mk(Some("192.0.2.1:4433")), mk(Some("198.51.100.9:4433"))];
         let (nt, addr) = classify_nat(&probes);
         assert_eq!(nt, NatType::Multiple);
         assert!(addr.is_none());
@@ -591,9 +582,9 @@ mod tests {
     #[test]
     fn classify_drops_loopback_probes() {
         let probes = vec![
-            mk(Some("127.0.0.1:4433")),     // loopback — must be dropped
-            mk(Some("203.0.113.5:4433")),   // public
-            mk(Some("203.0.113.5:4433")),   // public, same addr
+            mk(Some("127.0.0.1:4433")),   // loopback — must be dropped
+            mk(Some("203.0.113.5:4433")), // public
+            mk(Some("203.0.113.5:4433")), // public, same addr
         ];
         let (nt, addr) = classify_nat(&probes);
         // Two public probes with identical addrs → Cone.
@@ -608,9 +599,9 @@ mod tests {
         // client with a 100.64/10 addr is on the same CGNAT
         // network and can't contribute to public NAT classification.
         let probes = vec![
-            mk(Some("100.64.0.42:4433")),   // CGNAT — dropped
-            mk(Some("203.0.113.5:4433")),   // public
-            mk(Some("203.0.113.5:12345")),  // public, different port
+            mk(Some("100.64.0.42:4433")),  // CGNAT — dropped
+            mk(Some("203.0.113.5:4433")),  // public
+            mk(Some("203.0.113.5:12345")), // public, different port
         ];
         let (nt, _) = classify_nat(&probes);
         // Two public probes same IP different port → SymmetricPort.

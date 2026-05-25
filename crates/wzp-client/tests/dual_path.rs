@@ -19,7 +19,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use wzp_client::dual_path::{race, PeerCandidates, WinningPath};
+use wzp_client::dual_path::{PeerCandidates, WinningPath, race};
 use wzp_client::reflect::Role;
 use wzp_transport::{create_endpoint, server_config};
 
@@ -125,8 +125,15 @@ async fn dual_path_direct_wins_on_loopback() {
     .await
     .expect("race must succeed");
 
-    assert!(result.direct_transport.is_some(), "direct transport should be available");
-    assert_eq!(result.local_winner, WinningPath::Direct, "direct should win on loopback");
+    assert!(
+        result.direct_transport.is_some(),
+        "direct transport should be available"
+    );
+    assert_eq!(
+        result.local_winner,
+        WinningPath::Direct,
+        "direct should win on loopback"
+    );
 
     // Cancel the acceptor accept task so the test finishes.
     acceptor_accept_task.abort();
@@ -170,7 +177,10 @@ async fn dual_path_relay_wins_when_direct_is_dead() {
     .await
     .expect("race must succeed via relay fallback");
 
-    assert!(result.relay_transport.is_some(), "relay transport should be available");
+    assert!(
+        result.relay_transport.is_some(),
+        "relay transport should be available"
+    );
     assert_eq!(
         result.local_winner,
         WinningPath::Relay,

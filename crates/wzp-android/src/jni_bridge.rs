@@ -3,9 +3,9 @@
 use std::panic;
 use std::sync::Once;
 
+use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
-use jni::JNIEnv;
 use tracing::{error, info};
 use wzp_proto::QualityProfile;
 
@@ -26,19 +26,21 @@ const PROFILE_AUTO: jint = 7;
 
 fn profile_from_int(value: jint) -> QualityProfile {
     match value {
-        0 => QualityProfile::GOOD,            // Opus 24k
-        1 => QualityProfile::DEGRADED,        // Opus 6k
-        2 => QualityProfile::CATASTROPHIC,    // Codec2 1.2k
-        3 => QualityProfile {                 // Codec2 3.2k
+        0 => QualityProfile::GOOD,         // Opus 24k
+        1 => QualityProfile::DEGRADED,     // Opus 6k
+        2 => QualityProfile::CATASTROPHIC, // Codec2 1.2k
+        3 => QualityProfile {
+            // Codec2 3.2k
             codec: wzp_proto::CodecId::Codec2_3200,
             fec_ratio: 0.5,
             frame_duration_ms: 20,
             frames_per_block: 5,
+            ..QualityProfile::GOOD
         },
-        4 => QualityProfile::STUDIO_32K,      // Opus 32k
-        5 => QualityProfile::STUDIO_48K,      // Opus 48k
-        6 => QualityProfile::STUDIO_64K,      // Opus 64k
-        _ => QualityProfile::GOOD,            // auto falls back to GOOD
+        4 => QualityProfile::STUDIO_32K, // Opus 32k
+        5 => QualityProfile::STUDIO_48K, // Opus 48k
+        6 => QualityProfile::STUDIO_64K, // Opus 64k
+        _ => QualityProfile::GOOD,       // auto falls back to GOOD
     }
 }
 
@@ -48,25 +50,33 @@ static INIT_LOGGING: Once = Once::new();
 /// Safe to call multiple times — only the first call takes effect.
 fn init_logging() {
     INIT_LOGGING.call_once(|| {
-        // Wrap in catch_unwind — sharded_slab allocation inside
-        // tracing_subscriber::registry() can crash on some Android
-        // devices if scudo malloc fails during early initialization.
-        let _ = std::panic::catch_unwind(|| {
-            use tracing_subscriber::layer::SubscriberExt;
-            use tracing_subscriber::util::SubscriberInitExt;
-            use tracing_subscriber::EnvFilter;
-            if let Ok(layer) = tracing_android::layer("wzp_android") {
-                // Filter: INFO for our crates, WARN for everything else.
-                // The jni crate emits VERBOSE logs for every method lookup
-                // (~10 lines per JNI call, 100+ calls/sec) which floods logcat
-                // and causes the system to kill the app.
-                let filter = EnvFilter::new("warn,wzp_android=info,wzp_proto=info,wzp_transport=info,wzp_codec=info,wzp_fec=info,wzp_crypto=info");
-                let _ = tracing_subscriber::registry()
-                    .with(layer)
-                    .with(filter)
-                    .try_init();
-            }
-        });
+        #[cfg(target_os = "android")]
+        {
+            // Wrap in catch_unwind — sharded_slab allocation inside
+            // tracing_subscriber::registry() can crash on some Android
+            // devices if scudo malloc fails during early initialization.
+            let _ = std::panic::catch_unwind(|| {
+                use tracing_subscriber::layer::SubscriberExt;
+                use tracing_subscriber::util::SubscriberInitExt;
+                use tracing_subscriber::EnvFilter;
+                if let Ok(layer) = tracing_android::layer("wzp_android") {
+                    // Filter: INFO for our crates, WARN for everything else.
+                    // The jni crate emits VERBOSE logs for every method lookup
+                    // (~10 lines per JNI call, 100+ calls/sec) which floods logcat
+                    // and causes the system to kill the app.
+                    let filter = EnvFilter::new("warn,wzp_android=info,wzp_proto=info,wzp_transport=info,wzp_codec=info,wzp_fec=info,wzp_crypto=info");
+                    let _ = tracing_subscriber::registry()
+                        .with(layer)
+                        .with(filter)
+                        .try_init();
+                }
+            });
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            // On non-Android targets tracing-android is unavailable.
+            let _ = tracing_subscriber::fmt::try_init();
+        }
     });
 }
 
@@ -101,11 +111,26 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
     profile_j: jint,
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
-        let room: String = env.get_string(&room_j).map(|s| s.into()).unwrap_or_default();
-        let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
-        let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
-        let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
+        let relay_addr: String = env
+            .get_string(&relay_addr_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let room: String = env
+            .get_string(&room_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let seed_hex: String = env
+            .get_string(&seed_hex_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let token: String = env
+            .get_string(&token_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let alias: String = env
+            .get_string(&alias_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
 
         let h = unsafe { handle_ref(handle) };
 
@@ -128,7 +153,11 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartCall(
             auto_profile: profile_j == PROFILE_AUTO,
             relay_addr,
             room,
-            auth_token: if token.is_empty() { Vec::new() } else { token.into_bytes() },
+            auth_token: if token.is_empty() {
+                Vec::new()
+            } else {
+                token.into_bytes()
+            },
             identity_seed,
             alias: if alias.is_empty() { None } else { Some(alias) },
         };
@@ -241,7 +270,8 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeOnNetworkChang
 ) {
     let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        h.engine.on_network_changed(network_type as u8, bandwidth_kbps as u32);
+        h.engine
+            .on_network_changed(network_type as u8, bandwidth_kbps as u32);
     }));
 }
 
@@ -307,13 +337,14 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeWriteAudioDire
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        let ptr = env.get_direct_buffer_address(&buffer).unwrap_or(std::ptr::null_mut());
+        let ptr = env
+            .get_direct_buffer_address(&buffer)
+            .unwrap_or(std::ptr::null_mut());
         if ptr.is_null() || sample_count <= 0 {
             return 0;
         }
-        let samples = unsafe {
-            std::slice::from_raw_parts(ptr as *const i16, sample_count as usize)
-        };
+        let samples =
+            unsafe { std::slice::from_raw_parts(ptr as *const i16, sample_count as usize) };
         h.engine.write_audio(samples) as jint
     }));
     result.unwrap_or(0)
@@ -332,13 +363,14 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeReadAudioDirec
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        let ptr = env.get_direct_buffer_address(&buffer).unwrap_or(std::ptr::null_mut());
+        let ptr = env
+            .get_direct_buffer_address(&buffer)
+            .unwrap_or(std::ptr::null_mut());
         if ptr.is_null() || max_samples <= 0 {
             return 0;
         }
-        let samples = unsafe {
-            std::slice::from_raw_parts_mut(ptr as *mut i16, max_samples as usize)
-        };
+        let samples =
+            unsafe { std::slice::from_raw_parts_mut(ptr as *mut i16, max_samples as usize) };
         h.engine.read_audio(samples) as jint
     }));
     result.unwrap_or(0)
@@ -367,7 +399,10 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePingRelay<'a>(
 ) -> jstring {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        let relay: String = env.get_string(&relay_j).map(|s| s.into()).unwrap_or_default();
+        let relay: String = env
+            .get_string(&relay_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
         match h.engine.ping_relay(&relay) {
             Ok(json) => Some(json),
             Err(_) => None,
@@ -399,10 +434,22 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartSignaling
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        let relay_addr: String = env.get_string(&relay_addr_j).map(|s| s.into()).unwrap_or_default();
-        let seed_hex: String = env.get_string(&seed_hex_j).map(|s| s.into()).unwrap_or_default();
-        let token: String = env.get_string(&token_j).map(|s| s.into()).unwrap_or_default();
-        let alias: String = env.get_string(&alias_j).map(|s| s.into()).unwrap_or_default();
+        let relay_addr: String = env
+            .get_string(&relay_addr_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let seed_hex: String = env
+            .get_string(&seed_hex_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let token: String = env
+            .get_string(&token_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let alias: String = env
+            .get_string(&alias_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
 
         h.engine.start_signaling(
             &relay_addr,
@@ -414,8 +461,14 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeStartSignaling
 
     match result {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { error!("start_signaling failed: {e}"); -1 }
-        Err(_) => { error!("start_signaling panicked"); -1 }
+        Ok(Err(e)) => {
+            error!("start_signaling failed: {e}");
+            -1
+        }
+        Err(_) => {
+            error!("start_signaling panicked");
+            -1
+        }
     }
 }
 
@@ -430,14 +483,23 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativePlaceCall<'a>(
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        let target: String = env.get_string(&target_fp_j).map(|s| s.into()).unwrap_or_default();
+        let target: String = env
+            .get_string(&target_fp_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
         h.engine.place_call(&target)
     }));
 
     match result {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { error!("place_call failed: {e}"); -1 }
-        Err(_) => { error!("place_call panicked"); -1 }
+        Ok(Err(e)) => {
+            error!("place_call failed: {e}");
+            -1
+        }
+        Err(_) => {
+            error!("place_call panicked");
+            -1
+        }
     }
 }
 
@@ -453,7 +515,10 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeAnswerCall<'a>
 ) -> jint {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let h = unsafe { handle_ref(handle) };
-        let call_id: String = env.get_string(&call_id_j).map(|s| s.into()).unwrap_or_default();
+        let call_id: String = env
+            .get_string(&call_id_j)
+            .map(|s| s.into())
+            .unwrap_or_default();
         let accept_mode = match mode {
             0 => wzp_proto::CallAcceptMode::Reject,
             1 => wzp_proto::CallAcceptMode::AcceptTrusted,
@@ -464,7 +529,13 @@ pub unsafe extern "system" fn Java_com_wzp_engine_WzpEngine_nativeAnswerCall<'a>
 
     match result {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { error!("answer_call failed: {e}"); -1 }
-        Err(_) => { error!("answer_call panicked"); -1 }
+        Ok(Err(e)) => {
+            error!("answer_call failed: {e}");
+            -1
+        }
+        Err(_) => {
+            error!("answer_call panicked");
+            -1
+        }
     }
 }

@@ -99,14 +99,15 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::LossRecoveryUpdate { .. } => CallSignalType::Offer, // reuse (telemetry)
         SignalMessage::Ping { .. } | SignalMessage::Pong { .. } => CallSignalType::Offer,
         SignalMessage::AuthToken { .. } => CallSignalType::Offer,
-        SignalMessage::Hold => CallSignalType::Hold,
-        SignalMessage::Unhold => CallSignalType::Unhold,
-        SignalMessage::Mute => CallSignalType::Mute,
-        SignalMessage::Unmute => CallSignalType::Unmute,
+        SignalMessage::Hold { .. } => CallSignalType::Hold,
+        SignalMessage::Unhold { .. } => CallSignalType::Unhold,
+        SignalMessage::Mute { .. } => CallSignalType::Mute,
+        SignalMessage::Unmute { .. } => CallSignalType::Unmute,
         SignalMessage::Transfer { .. } => CallSignalType::Transfer,
-        SignalMessage::TransferAck => CallSignalType::Offer, // reuse
+        SignalMessage::TransferAck { .. } => CallSignalType::Offer, // reuse
         SignalMessage::PresenceUpdate { .. } => CallSignalType::Offer, // reuse
         SignalMessage::RouteQuery { .. } => CallSignalType::Offer, // reuse
+        SignalMessage::TransportFeedback { .. } => CallSignalType::Offer, // reuse (BWE)
         SignalMessage::RouteResponse { .. } => CallSignalType::Offer, // reuse
         SignalMessage::SessionForward { .. } => CallSignalType::Offer, // reuse
         SignalMessage::SessionForwardAck { .. } => CallSignalType::Offer, // reuse
@@ -118,14 +119,14 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         SignalMessage::DirectCallAnswer { .. } => CallSignalType::Answer,
         SignalMessage::CallSetup { .. } => CallSignalType::Offer, // relay-only
         SignalMessage::CallRinging { .. } => CallSignalType::Ringing,
-        SignalMessage::RegisterPresence { .. }
-        | SignalMessage::RegisterPresenceAck { .. } => CallSignalType::Offer, // relay-only
+        SignalMessage::RegisterPresence { .. } | SignalMessage::RegisterPresenceAck { .. } => {
+            CallSignalType::Offer
+        } // relay-only
         // NAT reflection is a client↔relay control exchange that
         // never crosses the featherChat bridge — if it ever reaches
         // this mapper something is wrong, but we still have to give
         // an answer. "Offer" is the generic catch-all.
-        SignalMessage::Reflect
-        | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
+        SignalMessage::Reflect | SignalMessage::ReflectResponse { .. } => CallSignalType::Offer, // control-plane
         // Phase 4 cross-relay forwarding envelope — strictly a
         // relay-to-relay message, never rides the featherChat
         // bridge. Catch-all mapping for completeness.
@@ -140,6 +141,9 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
         | SignalMessage::QualityCapability { .. } => CallSignalType::Offer, // quality negotiation
         SignalMessage::PresenceList { .. } => CallSignalType::Offer, // lobby presence
         SignalMessage::QualityDirective { .. } => CallSignalType::Offer, // relay-initiated
+        SignalMessage::Nack { .. }
+        | SignalMessage::PictureLossIndication { .. }
+        | SignalMessage::SetPriorityMode { .. } => CallSignalType::Offer, // relay-initiated (video loss recovery)
     }
 }
 
@@ -147,15 +151,20 @@ pub fn signal_to_call_type(signal: &SignalMessage) -> CallSignalType {
 mod tests {
     use super::*;
     use wzp_proto::QualityProfile;
+    use wzp_proto::default_signal_version;
 
     #[test]
     fn payload_roundtrip() {
         let signal = SignalMessage::CallOffer {
+            version: default_signal_version(),
             identity_pub: [1u8; 32],
             ephemeral_pub: [2u8; 32],
             signature: vec![3u8; 64],
             supported_profiles: vec![QualityProfile::GOOD],
             alias: None,
+            protocol_version: 2,
+            supported_versions: vec![2],
+            video_codecs: vec![],
         };
 
         let encoded = encode_call_payload(&signal, Some("relay.example.com:4433"), Some("myroom"));
@@ -169,29 +178,53 @@ mod tests {
     #[test]
     fn signal_type_mapping() {
         let offer = SignalMessage::CallOffer {
+            version: default_signal_version(),
             identity_pub: [0; 32],
             ephemeral_pub: [0; 32],
             signature: vec![],
             supported_profiles: vec![],
             alias: None,
+            protocol_version: 2,
+            supported_versions: vec![2],
+            video_codecs: vec![],
         };
         assert!(matches!(signal_to_call_type(&offer), CallSignalType::Offer));
 
         let hangup = SignalMessage::Hangup {
+            version: default_signal_version(),
             reason: wzp_proto::HangupReason::Normal,
             call_id: None,
         };
-        assert!(matches!(signal_to_call_type(&hangup), CallSignalType::Hangup));
+        assert!(matches!(
+            signal_to_call_type(&hangup),
+            CallSignalType::Hangup
+        ));
 
-        assert!(matches!(signal_to_call_type(&SignalMessage::Hold), CallSignalType::Hold));
-        assert!(matches!(signal_to_call_type(&SignalMessage::Unhold), CallSignalType::Unhold));
-        assert!(matches!(signal_to_call_type(&SignalMessage::Mute), CallSignalType::Mute));
-        assert!(matches!(signal_to_call_type(&SignalMessage::Unmute), CallSignalType::Unmute));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Hold { version: default_signal_version() }),
+            CallSignalType::Hold
+        ));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Unhold { version: default_signal_version() }),
+            CallSignalType::Unhold
+        ));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Mute { version: default_signal_version() }),
+            CallSignalType::Mute
+        ));
+        assert!(matches!(
+            signal_to_call_type(&SignalMessage::Unmute { version: default_signal_version() }),
+            CallSignalType::Unmute
+        ));
 
         let transfer = SignalMessage::Transfer {
+            version: default_signal_version(),
             target_fingerprint: "abc".to_string(),
             relay_addr: None,
         };
-        assert!(matches!(signal_to_call_type(&transfer), CallSignalType::Transfer));
+        assert!(matches!(
+            signal_to_call_type(&transfer),
+            CallSignalType::Transfer
+        ));
     }
 }

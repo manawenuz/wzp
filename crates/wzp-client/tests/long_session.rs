@@ -83,8 +83,12 @@ fn long_session_no_drift() {
     println!(
         "long_session_no_drift: decoded={frames_decoded}/{TOTAL_FRAMES}, \
          underruns={}, overruns={}, depth={}, max_depth={}, late={}, lost={}",
-        stats.underruns, stats.overruns, stats.current_depth, stats.max_depth_seen,
-        stats.packets_late, stats.packets_lost,
+        stats.underruns,
+        stats.overruns,
+        stats.current_depth,
+        stats.max_depth_seen,
+        stats.packets_late,
+        stats.packets_lost,
     );
 
     // With 1 decode per tick over 3000 ticks, we expect ~3000 decoded frames
@@ -123,7 +127,7 @@ fn long_session_with_simulated_loss() {
 
         for (j, pkt) in batch.into_iter().enumerate() {
             // Drop every 20th *source* (non-repair) packet to simulate ~5% loss.
-            if !pkt.header.is_repair && i % 20 == 0 && j == 0 {
+            if !pkt.header.is_repair() && i % 20 == 0 && j == 0 {
                 continue; // drop this packet
             }
             decoder.ingest(pkt);
@@ -139,14 +143,77 @@ fn long_session_with_simulated_loss() {
     println!(
         "long_session_with_simulated_loss: decoded={frames_decoded}/{TOTAL_FRAMES}, \
          underruns={}, overruns={}, depth={}, max_depth={}, late={}, lost={}",
-        stats.underruns, stats.overruns, stats.current_depth, stats.max_depth_seen,
-        stats.packets_late, stats.packets_lost,
+        stats.underruns,
+        stats.overruns,
+        stats.current_depth,
+        stats.max_depth_seen,
+        stats.packets_late,
+        stats.packets_lost,
     );
 
     // With 5% artificial loss + FEC recovery + PLC, we should still get >90% decoded.
     assert!(
         frames_decoded > 2700,
         "frame loss too high under simulated loss: decoded {frames_decoded}/3000 (need >2700 = <10%)"
+    );
+}
+
+/// Verify that `MediaHeader::timestamp` continues monotonically across
+/// rekey boundaries.  Rekey is a crypto-layer operation (key material
+/// rotation) and must not reset or interfere with framing state.
+///
+/// We simulate a 3000-frame session with two conceptual rekeys at frames
+/// 1000 and 2000.  The encoder's timestamp counter must advance
+/// monotonically throughout.
+#[test]
+fn rekey_timestamp_monotonic() {
+    let config = test_config();
+    let mut encoder = CallEncoder::new(&config);
+
+    let mut timestamps = Vec::new();
+
+    // Phase 1: before first rekey
+    for i in 0..1000 {
+        let pcm = sine_frame(i);
+        let packets = encoder.encode_frame(&pcm).expect("encode");
+        for pkt in packets {
+            timestamps.push(pkt.header.timestamp);
+        }
+    }
+
+    // Phase 2: between first and second rekey
+    for i in 1000..2000 {
+        let pcm = sine_frame(i);
+        let packets = encoder.encode_frame(&pcm).expect("encode");
+        for pkt in packets {
+            timestamps.push(pkt.header.timestamp);
+        }
+    }
+
+    // Phase 3: after second rekey
+    for i in 2000..3000 {
+        let pcm = sine_frame(i);
+        let packets = encoder.encode_frame(&pcm).expect("encode");
+        for pkt in packets {
+            timestamps.push(pkt.header.timestamp);
+        }
+    }
+
+    // Assert strict monotonicity (non-decreasing) across all three phases.
+    for window in timestamps.windows(2) {
+        assert!(
+            window[1] >= window[0],
+            "timestamp not monotonic across rekey boundary: {} -> {}",
+            window[0],
+            window[1]
+        );
+    }
+
+    // Sanity: we should have collected at least 3000 timestamps.
+    assert!(
+        timestamps.len() >= 3000,
+        "expected >= 3000 timestamps, got {}",
+        timestamps.len()
     );
 }
 

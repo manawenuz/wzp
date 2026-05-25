@@ -1,21 +1,20 @@
 //! Sliding window replay protection.
 //!
-//! Tracks seen sequence numbers using a bitmap. Window size is 1024 packets.
-//! Sequence numbers that are too old (more than WINDOW_SIZE behind the highest
-//! seen) are rejected.
+//! Tracks seen sequence numbers using a bitmap. Window size is configurable
+//! at construction time. Sequence numbers that are too old (more than
+//! `window_size` behind the highest seen) are rejected.
 
 use wzp_proto::CryptoError;
-
-/// Window size in packets.
-const WINDOW_SIZE: u16 = 1024;
 
 /// Sliding window anti-replay detector.
 ///
 /// Uses a bitmap to track which sequence numbers have been seen within
-/// the current window. Handles u16 wrapping correctly.
+/// the current window. Handles `u32` wrapping correctly.
 pub struct AntiReplayWindow {
+    /// Window size in packets.
+    window_size: u32,
     /// Highest sequence number seen so far.
-    highest: u16,
+    highest: u32,
     /// Bitmap of seen packets. Bit i corresponds to (highest - i).
     bitmap: Vec<u64>,
     /// Whether any packet has been received yet.
@@ -23,21 +22,26 @@ pub struct AntiReplayWindow {
 }
 
 impl AntiReplayWindow {
-    /// Number of u64 words needed for the bitmap.
-    const BITMAP_WORDS: usize = (WINDOW_SIZE as usize + 63) / 64;
-
-    /// Create a new anti-replay window.
+    /// Create a new anti-replay window with the default size of 1024 packets.
     pub fn new() -> Self {
+        Self::with_window(1024)
+    }
+
+    /// Create a new anti-replay window with a custom size.
+    pub fn with_window(size: usize) -> Self {
+        let window_size = size as u32;
+        let bitmap_words = (size + 63) / 64;
         Self {
+            window_size,
             highest: 0,
-            bitmap: vec![0u64; Self::BITMAP_WORDS],
+            bitmap: vec![0u64; bitmap_words],
             initialized: false,
         }
     }
 
     /// Check if a sequence number is valid (not a replay, not too old).
     /// If valid, marks it as seen.
-    pub fn check_and_update(&mut self, seq: u16) -> Result<(), CryptoError> {
+    pub fn check_and_update(&mut self, seq: u32) -> Result<(), CryptoError> {
         if !self.initialized {
             self.initialized = true;
             self.highest = seq;
@@ -52,17 +56,17 @@ impl AntiReplayWindow {
             return Err(CryptoError::ReplayDetected { seq });
         }
 
-        if diff < 0x8000 {
-            // seq is ahead of highest (wrapping-aware: diff in [1, 0x7FFF])
+        if diff < 0x8000_0000 {
+            // seq is ahead of highest (wrapping-aware: diff in [1, 0x7FFF_FFFF])
             let shift = diff as usize;
             self.advance_window(shift);
             self.highest = seq;
             self.set_bit(0);
             Ok(())
         } else {
-            // seq is behind highest (wrapping-aware: diff in [0x8000, 0xFFFF])
+            // seq is behind highest (wrapping-aware: diff in [0x8000_0000, 0xFFFF_FFFF])
             let behind = self.highest.wrapping_sub(seq) as usize;
-            if behind >= WINDOW_SIZE as usize {
+            if behind >= self.window_size as usize {
                 return Err(CryptoError::ReplayDetected { seq });
             }
             if self.get_bit(behind) {
@@ -75,7 +79,8 @@ impl AntiReplayWindow {
 
     /// Advance the window by `shift` positions (shift left = new bits at position 0).
     fn advance_window(&mut self, shift: usize) {
-        if shift >= WINDOW_SIZE as usize {
+        let window_size = self.window_size as usize;
+        if shift >= window_size {
             for word in &mut self.bitmap {
                 *word = 0;
             }
@@ -156,7 +161,11 @@ mod tests {
     fn sequential_accepted() {
         let mut w = AntiReplayWindow::new();
         for i in 0..200 {
-            assert!(w.check_and_update(i).is_ok(), "seq {} should be accepted", i);
+            assert!(
+                w.check_and_update(i).is_ok(),
+                "seq {} should be accepted",
+                i
+            );
         }
     }
 
@@ -183,11 +192,11 @@ mod tests {
     #[test]
     fn wrapping_works() {
         let mut w = AntiReplayWindow::new();
-        assert!(w.check_and_update(65530).is_ok());
-        assert!(w.check_and_update(65535).is_ok());
+        assert!(w.check_and_update(0xFFFF_FFF0).is_ok());
+        assert!(w.check_and_update(0xFFFF_FFFF).is_ok());
         assert!(w.check_and_update(0).is_ok()); // wrapped
         assert!(w.check_and_update(1).is_ok());
-        assert!(w.check_and_update(65535).is_err()); // duplicate
+        assert!(w.check_and_update(0xFFFF_FFFF).is_err()); // duplicate
     }
 
     #[test]
@@ -200,5 +209,54 @@ mod tests {
         assert!(w.check_and_update(1024).is_ok());
         // Now 0 is 1024 behind 1024, which is at the boundary limit
         assert!(w.check_and_update(0).is_err()); // already seen or too old
+    }
+
+    #[test]
+    fn custom_window_size() {
+        let mut w = AntiReplayWindow::with_window(64);
+        for i in 0..64 {
+            assert!(w.check_and_update(i).is_ok());
+        }
+        // seq 0 is now exactly at the boundary (64 behind 64)
+        assert!(w.check_and_update(0).is_err());
+    }
+
+    #[test]
+    fn video_burst_200_with_one_reorder() {
+        let mut w = AntiReplayWindow::with_window(1024);
+        // Simulate a 200-packet burst
+        for i in 0..200 {
+            assert!(
+                w.check_and_update(i).is_ok(),
+                "seq {} should be accepted",
+                i
+            );
+        }
+        // One packet reordered (arrives late)
+        assert!(w.check_and_update(50).is_err(), "seq 50 is a duplicate");
+        // But a packet just behind the window should still be ok
+        assert!(w.check_and_update(199).is_err(), "seq 199 is a duplicate");
+        // Continue the burst
+        for i in 200..400 {
+            assert!(
+                w.check_and_update(i).is_ok(),
+                "seq {} should be accepted",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn u32_high_range_works() {
+        let mut w = AntiReplayWindow::with_window(64);
+        let base = 1000u32;
+        assert!(w.check_and_update(base).is_ok());
+        assert!(w.check_and_update(base + 1).is_ok());
+        // 65 behind highest (base+1) is outside the 64-packet window
+        assert!(w.check_and_update(base.wrapping_sub(64)).is_err());
+        // 63 behind is inside
+        assert!(w.check_and_update(base.wrapping_sub(62)).is_ok());
+        // base itself is now a duplicate
+        assert!(w.check_and_update(base).is_err());
     }
 }

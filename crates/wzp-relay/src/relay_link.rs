@@ -40,10 +40,7 @@ impl RelayLink {
     /// should skip normal client auth/handshake for relay-SNI connections.
     pub async fn connect(target: SocketAddr) -> Result<Self, anyhow::Error> {
         // Create a client-only endpoint on an OS-assigned port.
-        let endpoint = wzp_transport::create_endpoint(
-            "0.0.0.0:0".parse().unwrap(),
-            None,
-        )?;
+        let endpoint = wzp_transport::create_endpoint("0.0.0.0:0".parse().unwrap(), None)?;
 
         let client_cfg = wzp_transport::client_config();
         let conn = wzp_transport::connect(&endpoint, target, "_relay", client_cfg).await?;
@@ -336,10 +333,11 @@ mod tests {
 
     #[test]
     fn session_forward_signal_roundtrip() {
-        use wzp_proto::SignalMessage;
+        use wzp_proto::{SignalMessage, default_signal_version};
 
         // SessionForward roundtrip
         let msg = SignalMessage::SessionForward {
+            version: default_signal_version(),
             session_id: "abcd1234".to_string(),
             target_fingerprint: "deadbeef".to_string(),
             source_relay: "10.0.0.1:4433".to_string(),
@@ -351,6 +349,7 @@ mod tests {
                 session_id,
                 target_fingerprint,
                 source_relay,
+                ..
             } => {
                 assert_eq!(session_id, "abcd1234");
                 assert_eq!(target_fingerprint, "deadbeef");
@@ -361,6 +360,7 @@ mod tests {
 
         // SessionForwardAck roundtrip
         let ack = SignalMessage::SessionForwardAck {
+            version: default_signal_version(),
             session_id: "abcd1234".to_string(),
             room_name: "relay-room-42".to_string(),
         };
@@ -370,6 +370,7 @@ mod tests {
             SignalMessage::SessionForwardAck {
                 session_id,
                 room_name,
+                ..
             } => {
                 assert_eq!(session_id, "abcd1234");
                 assert_eq!(room_name, "relay-room-42");
@@ -457,17 +458,15 @@ mod tests {
 
         let pkt = MediaPacket {
             header: wzp_proto::packet::MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: wzp_proto::MediaType::Audio,
                 codec_id: wzp_proto::CodecId::Opus16k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq: 1,
                 timestamp: 100,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: bytes::Bytes::from_static(b"test"),
             quality_report: None,

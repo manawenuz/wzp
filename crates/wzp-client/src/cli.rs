@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 const FRAME_SAMPLES: usize = 960; // 20ms @ 48kHz
 
@@ -108,7 +108,11 @@ fn parse_args() -> CliArgs {
             "--signal" => signal = true,
             "--call" => {
                 i += 1;
-                call_target = Some(args.get(i).expect("--call requires a fingerprint").to_string());
+                call_target = Some(
+                    args.get(i)
+                        .expect("--call requires a fingerprint")
+                        .to_string(),
+                );
             }
             "--send-tone" => {
                 i += 1;
@@ -185,8 +189,12 @@ fn parse_args() -> CliArgs {
                 );
             }
             "--sweep" => sweep = true,
-            "--netcheck" => { netcheck = true; }
-            "--version-check" => { version_check = true; }
+            "--netcheck" => {
+                netcheck = true;
+            }
+            "--version-check" => {
+                version_check = true;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
                 eprintln!();
@@ -197,13 +205,19 @@ fn parse_args() -> CliArgs {
                 eprintln!("  --record <file.raw>    Record received audio to raw PCM file");
                 eprintln!("  --echo-test <secs>     Run automated echo quality test");
                 eprintln!("  --drift-test <secs>    Run automated clock-drift measurement");
-                eprintln!("  --sweep                Run jitter buffer parameter sweep (local, no network)");
-                eprintln!("  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)");
+                eprintln!(
+                    "  --sweep                Run jitter buffer parameter sweep (local, no network)"
+                );
+                eprintln!(
+                    "  --seed <hex>           Identity seed (64 hex chars, featherChat compatible)"
+                );
                 eprintln!("  --mnemonic <words...>  Identity seed as BIP39 mnemonic (24 words)");
                 eprintln!("  --room <name>          Room name (hashed for privacy before sending)");
                 eprintln!("  --token <token>        featherChat bearer token for relay auth");
                 eprintln!("  --metrics-file <path>  Write JSONL telemetry to file (1 line/sec)");
-                eprintln!("                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)");
+                eprintln!(
+                    "                         (48kHz mono s16le, play with ffplay -f s16le -ar 48000 -ch_layout mono file.raw)"
+                );
                 eprintln!();
                 eprintln!("Default relay: 127.0.0.1:4433");
                 std::process::exit(0);
@@ -265,9 +279,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.netcheck {
         let config = wzp_client::netcheck::NetcheckConfig {
             stun_config: wzp_client::stun::StunConfig::default(),
-            relays: vec![
-                ("relay".into(), cli.relay_addr),
-            ],
+            relays: vec![("relay".into(), cli.relay_addr)],
             timeout: std::time::Duration::from_secs(5),
             test_portmap: true,
             test_ipv6: true,
@@ -283,7 +295,8 @@ async fn main() -> anyhow::Result<()> {
         let client_config = wzp_transport::client_config();
         let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
         let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
-        let conn = wzp_transport::connect(&endpoint, cli.relay_addr, "version", client_config).await?;
+        let conn =
+            wzp_transport::connect(&endpoint, cli.relay_addr, "version", client_config).await?;
         match conn.accept_uni().await {
             Ok(mut recv) => {
                 let data = recv.read_to_end(256).await.unwrap_or_default();
@@ -291,7 +304,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("{} {}", cli.relay_addr, version.trim());
             }
             Err(e) => {
-                eprintln!("relay {} does not support version query: {e}", cli.relay_addr);
+                eprintln!(
+                    "relay {} does not support version query: {e}",
+                    cli.relay_addr
+                );
             }
         }
         endpoint.close(0u32.into(), b"done");
@@ -331,8 +347,7 @@ async fn main() -> anyhow::Result<()> {
         "0.0.0.0:0".parse()?
     };
     let endpoint = wzp_transport::create_endpoint(bind_addr, None)?;
-    let connection =
-        wzp_transport::connect(&endpoint, cli.relay_addr, &sni, client_config).await?;
+    let connection = wzp_transport::connect(&endpoint, cli.relay_addr, &sni, client_config).await?;
 
     info!("Connected to relay");
 
@@ -343,10 +358,12 @@ async fn main() -> anyhow::Result<()> {
     {
         let shutdown_transport = transport.clone();
         tokio::spawn(async move {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
-            let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .expect("failed to register SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("failed to register SIGINT handler");
             tokio::select! {
                 _ = sigterm.recv() => { info!("SIGTERM received, closing connection..."); }
                 _ = sigint.recv() => { info!("SIGINT received, closing connection..."); }
@@ -354,13 +371,16 @@ async fn main() -> anyhow::Result<()> {
             // Close the QUIC connection immediately (APPLICATION_CLOSE frame).
             // Don't call process::exit — let the main task detect the closed
             // connection and perform clean shutdown (e.g., save recordings).
-            shutdown_transport.connection().close(0u32.into(), b"shutdown");
+            shutdown_transport
+                .connection()
+                .close(0u32.into(), b"shutdown");
         });
     }
 
     // Send auth token if provided (relay with --auth-url expects this first)
     if let Some(ref token) = cli.token {
         let auth = wzp_proto::SignalMessage::AuthToken {
+            version: default_signal_version(),
             token: token.clone(),
         };
         transport.send_signal(&auth).await?;
@@ -368,21 +388,29 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Crypto handshake — establishes verified identity + session key
-    let _crypto_session = wzp_client::handshake::perform_handshake(
+    let hs = wzp_client::handshake::perform_handshake(
         &*transport,
         &seed.0,
         None, // alias — desktop client doesn't set one yet
-    ).await?;
-    info!("crypto handshake complete");
+    )
+    .await?;
+    info!(video_codec = ?hs.video_codec, "crypto handshake complete");
+
+    // Wrap the transport so all media I/O goes through AEAD encryption.
+    let enc_transport: Arc<dyn wzp_proto::MediaTransport> = Arc::new(
+        wzp_client::encrypted_transport::EncryptingTransport::new(transport.clone(), hs.session),
+    );
 
     if cli.live {
         #[cfg(feature = "audio")]
         {
-            return run_live(transport).await;
+            return run_live(enc_transport).await;
         }
         #[cfg(not(feature = "audio"))]
         {
-            anyhow::bail!("--live requires the 'audio' feature (build with: cargo build --features audio)");
+            anyhow::bail!(
+                "--live requires the 'audio' feature (build with: cargo build --features audio)"
+            );
         }
     } else if let Some(secs) = cli.echo_test_secs {
         let result = wzp_client::echo_test::run_echo_test(&*transport, secs, 5.0).await?;
@@ -399,14 +427,20 @@ async fn main() -> anyhow::Result<()> {
         transport.close().await?;
         Ok(())
     } else if cli.send_tone_secs.is_some() || cli.send_file.is_some() || cli.record_file.is_some() {
-        run_file_mode(transport, cli.send_tone_secs, cli.send_file, cli.record_file).await
+        run_file_mode(
+            enc_transport,
+            cli.send_tone_secs,
+            cli.send_file,
+            cli.record_file,
+        )
+        .await
     } else {
-        run_silence(transport).await
+        run_silence(enc_transport).await
     }
 }
 
 /// Send silence frames (connectivity test).
-async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
+async fn run_silence(transport: Arc<dyn wzp_proto::MediaTransport>) -> anyhow::Result<()> {
     let config = CallConfig::default();
     let mut encoder = CallEncoder::new(&config);
 
@@ -420,7 +454,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
     for i in 0..250u32 {
         let packets = encoder.encode_frame(&pcm)?;
         for pkt in &packets {
-            if pkt.header.is_repair {
+            if pkt.header.is_repair() {
                 total_repair += 1;
             } else {
                 total_source += 1;
@@ -445,6 +479,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
 
     info!(total_source, total_repair, total_bytes, "done — closing");
     let hangup = wzp_proto::SignalMessage::Hangup {
+        version: default_signal_version(),
         reason: wzp_proto::HangupReason::Normal,
         call_id: None,
     };
@@ -455,7 +490,7 @@ async fn run_silence(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::R
 
 /// File/tone mode: send a test tone or audio file, and/or record received audio.
 async fn run_file_mode(
-    transport: Arc<wzp_transport::QuinnTransport>,
+    transport: Arc<dyn wzp_proto::MediaTransport>,
     send_tone_secs: Option<u32>,
     send_file: Option<String>,
     record_file: Option<String>,
@@ -470,21 +505,28 @@ async fn run_file_mode(
             // Read raw PCM file (48kHz mono s16le)
             let bytes = match std::fs::read(path) {
                 Ok(b) => b,
-                Err(e) => { error!("read {path}: {e}"); return; }
+                Err(e) => {
+                    error!("read {path}: {e}");
+                    return;
+                }
             };
-            let samples: Vec<i16> = bytes.chunks_exact(2)
+            let samples: Vec<i16> = bytes
+                .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
             let duration = samples.len() as f64 / 48_000.0;
             info!(file = %path, duration = format!("{:.1}s", duration), "sending audio file");
-            samples.chunks(FRAME_SAMPLES)
+            samples
+                .chunks(FRAME_SAMPLES)
                 .filter(|c| c.len() == FRAME_SAMPLES)
                 .map(|c| c.to_vec())
                 .collect()
         } else if let Some(secs) = send_tone_secs {
             let total = (secs as u64) * 50;
             info!(seconds = secs, frames = total, "sending 440Hz tone");
-            (0..total).map(|i| generate_sine_frame(440.0, 48_000, i)).collect()
+            (0..total)
+                .map(|i| generate_sine_frame(440.0, 48_000, i))
+                .collect()
         } else {
             // No sending, just wait
             tokio::signal::ctrl_c().await.ok();
@@ -508,7 +550,7 @@ async fn run_file_mode(
                 }
             };
             for pkt in &packets {
-                if pkt.header.is_repair {
+                if pkt.header.is_repair() {
                     total_repair += 1;
                 } else {
                     total_source += 1;
@@ -556,7 +598,7 @@ async fn run_file_mode(
                 result = recv_transport.recv_media() => {
                     match result {
                         Ok(Some(pkt)) => {
-                            let is_repair = pkt.header.is_repair;
+                            let is_repair = pkt.header.is_repair();
                             decoder.ingest(pkt);
                             if !is_repair {
                                 if let Some(n) = decoder.decode_next(&mut pcm_buf) {
@@ -597,6 +639,7 @@ async fn run_file_mode(
 
     // Send Hangup signal so the relay knows we're done
     let hangup = wzp_proto::SignalMessage::Hangup {
+        version: default_signal_version(),
         reason: wzp_proto::HangupReason::Normal,
         call_id: None,
     };
@@ -636,7 +679,7 @@ async fn run_file_mode(
 
 /// Live mode: capture from mic, encode, send; receive, decode, play.
 #[cfg(feature = "audio")]
-async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Result<()> {
+async fn run_live(transport: Arc<dyn wzp_proto::MediaTransport>) -> anyhow::Result<()> {
     use wzp_client::audio_io::{AudioCapture, AudioPlayback};
 
     let capture = AudioCapture::start()?;
@@ -689,7 +732,7 @@ async fn run_live(transport: Arc<wzp_transport::QuinnTransport>) -> anyhow::Resu
         loop {
             match recv_transport.recv_media().await {
                 Ok(Some(pkt)) => {
-                    let is_repair = pkt.header.is_repair;
+                    let is_repair = pkt.header.is_repair();
                     decoder.ingest(pkt);
                     // Only decode for source packets (1 source = 1 audio frame).
                     // Repair packets feed the FEC decoder but don't produce audio.
@@ -734,7 +777,7 @@ async fn run_signal_mode(
     token: Option<String>,
     call_target: Option<String>,
 ) -> anyhow::Result<()> {
-    use wzp_proto::SignalMessage;
+    use wzp_proto::{SignalMessage, default_signal_version};
 
     let identity = seed.derive_identity();
     let pub_id = identity.public_identity();
@@ -756,22 +799,34 @@ async fn run_signal_mode(
 
     // Auth if token provided
     if let Some(ref tok) = token {
-        transport.send_signal(&SignalMessage::AuthToken { token: tok.clone() }).await?;
+        transport
+            .send_signal(&SignalMessage::AuthToken {
+                version: default_signal_version(),
+                token: tok.clone(),
+            })
+            .await?;
     }
 
     // Register presence (signature not verified in Phase 1)
-    transport.send_signal(&SignalMessage::RegisterPresence {
-        identity_pub,
-        signature: vec![], // Phase 1: not verified
-        alias: None,
-    }).await?;
+    transport
+        .send_signal(&SignalMessage::RegisterPresence {
+            version: default_signal_version(),
+            identity_pub,
+            signature: vec![], // Phase 1: not verified
+            alias: None,
+        })
+        .await?;
 
     // Wait for ack
     match transport.recv_signal().await? {
         Some(SignalMessage::RegisterPresenceAck { success: true, .. }) => {
             info!(fingerprint = %fp, "registered on relay — waiting for calls");
         }
-        Some(SignalMessage::RegisterPresenceAck { success: false, error, .. }) => {
+        Some(SignalMessage::RegisterPresenceAck {
+            success: false,
+            error,
+            ..
+        }) => {
             anyhow::bail!("registration failed: {}", error.unwrap_or_default());
         }
         other => {
@@ -782,25 +837,33 @@ async fn run_signal_mode(
     // If --call specified, place the call
     if let Some(ref target) = call_target {
         info!(target = %target, "placing direct call...");
-        let call_id = format!("{:016x}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let call_id = format!(
+            "{:016x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
 
-        transport.send_signal(&SignalMessage::DirectCallOffer {
-            caller_fingerprint: fp.clone(),
-            caller_alias: None,
-            target_fingerprint: target.clone(),
-            call_id: call_id.clone(),
-            identity_pub,
-            ephemeral_pub: [0u8; 32], // Phase 1: not used for key exchange
-            signature: vec![],
-            supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
-            // CLI client doesn't attempt hole-punching; always
-            // relay-path.
-            caller_reflexive_addr: None,
-            caller_local_addrs: Vec::new(),
-            caller_mapped_addr: None,
-            caller_build_version: None,
-        }).await?;
+        transport
+            .send_signal(&SignalMessage::DirectCallOffer {
+                version: default_signal_version(),
+                caller_fingerprint: fp.clone(),
+                caller_alias: None,
+                target_fingerprint: target.clone(),
+                call_id: call_id.clone(),
+                identity_pub,
+                ephemeral_pub: [0u8; 32], // Phase 1: not used for key exchange
+                signature: vec![],
+                supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
+                // CLI client doesn't attempt hole-punching; always
+                // relay-path.
+                caller_reflexive_addr: None,
+                caller_local_addrs: Vec::new(),
+                caller_mapped_addr: None,
+                caller_build_version: None,
+            })
+            .await?;
     }
 
     // Signal recv loop — handle incoming signals
@@ -811,10 +874,15 @@ async fn run_signal_mode(
     loop {
         match signal_transport.recv_signal().await {
             Ok(Some(msg)) => match msg {
-                SignalMessage::CallRinging { call_id } => {
+                SignalMessage::CallRinging { call_id, .. } => {
                     info!(call_id = %call_id, "ringing...");
                 }
-                SignalMessage::DirectCallOffer { caller_fingerprint, caller_alias, call_id, .. } => {
+                SignalMessage::DirectCallOffer {
+                    caller_fingerprint,
+                    caller_alias,
+                    call_id,
+                    ..
+                } => {
                     info!(
                         from = %caller_fingerprint,
                         alias = ?caller_alias,
@@ -822,25 +890,40 @@ async fn run_signal_mode(
                         "incoming call — auto-accepting (generic)"
                     );
                     // Auto-accept for CLI testing
-                    let _ = signal_transport.send_signal(&SignalMessage::DirectCallAnswer {
-                        call_id,
-                        accept_mode: wzp_proto::CallAcceptMode::AcceptGeneric,
-                        identity_pub: Some(identity_pub),
-                        ephemeral_pub: None,
-                        signature: None,
-                        chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
-                        // CLI auto-accept uses generic (privacy) mode,
-                        // so callee addr stays hidden from the caller.
-                        callee_reflexive_addr: None,
-                        callee_local_addrs: Vec::new(),
-                        callee_mapped_addr: None,
-                        callee_build_version: None,
-                    }).await;
+                    let _ = signal_transport
+                        .send_signal(&SignalMessage::DirectCallAnswer {
+                            version: default_signal_version(),
+                            call_id,
+                            accept_mode: wzp_proto::CallAcceptMode::AcceptGeneric,
+                            identity_pub: Some(identity_pub),
+                            ephemeral_pub: None,
+                            signature: None,
+                            chosen_profile: Some(wzp_proto::QualityProfile::GOOD),
+                            // CLI auto-accept uses generic (privacy) mode,
+                            // so callee addr stays hidden from the caller.
+                            callee_reflexive_addr: None,
+                            callee_local_addrs: Vec::new(),
+                            callee_mapped_addr: None,
+                            callee_build_version: None,
+                        })
+                        .await;
                 }
-                SignalMessage::DirectCallAnswer { call_id, accept_mode, .. } => {
+                SignalMessage::DirectCallAnswer {
+                    call_id,
+                    accept_mode,
+                    ..
+                } => {
                     info!(call_id = %call_id, mode = ?accept_mode, "call answered");
                 }
-                SignalMessage::CallSetup { call_id, room, relay_addr: setup_relay, peer_direct_addr: _, peer_local_addrs: _, peer_mapped_addr: _ } => {
+                SignalMessage::CallSetup {
+                    call_id,
+                    room,
+                    relay_addr: setup_relay,
+                    peer_direct_addr: _,
+                    peer_local_addrs: _,
+                    peer_mapped_addr: _,
+                    ..
+                } => {
                     info!(call_id = %call_id, room = %room, relay = %setup_relay, "call setup — connecting to media room");
 
                     // Connect to the media room
@@ -848,18 +931,28 @@ async fn run_signal_mode(
                     let media_cfg = wzp_transport::client_config();
                     match wzp_transport::connect(&endpoint, media_relay, &room, media_cfg).await {
                         Ok(media_conn) => {
-                            let media_transport = Arc::new(wzp_transport::QuinnTransport::new(media_conn));
+                            let media_transport =
+                                Arc::new(wzp_transport::QuinnTransport::new(media_conn));
 
                             // Crypto handshake
-                            match wzp_client::handshake::perform_handshake(&*media_transport, &my_seed, None).await {
-                                Ok(_session) => {
-                                    info!("media connected — sending tone (press Ctrl+C to hang up)");
+                            match wzp_client::handshake::perform_handshake(
+                                &*media_transport,
+                                &my_seed,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(_hs) => {
+                                    info!(
+                                        "media connected — sending tone (press Ctrl+C to hang up)"
+                                    );
 
                                     // Simple tone sender for testing
                                     let mt = media_transport.clone();
                                     let send_task = tokio::spawn(async move {
                                         let config = wzp_client::call::CallConfig::default();
-                                        let mut encoder = wzp_client::call::CallEncoder::new(&config);
+                                        let mut encoder =
+                                            wzp_client::call::CallEncoder::new(&config);
                                         let duration = tokio::time::Duration::from_millis(20);
                                         loop {
                                             let pcm: Vec<i16> = (0..FRAME_SAMPLES)
@@ -867,7 +960,9 @@ async fn run_signal_mode(
                                                 .collect();
                                             if let Ok(pkts) = encoder.encode_frame(&pcm) {
                                                 for pkt in &pkts {
-                                                    if mt.send_media(pkt).await.is_err() { return; }
+                                                    if mt.send_media(pkt).await.is_err() {
+                                                        return;
+                                                    }
                                                 }
                                             }
                                             tokio::time::sleep(duration).await;
@@ -890,6 +985,7 @@ async fn run_signal_mode(
                                             _ = tokio::signal::ctrl_c() => {
                                                 info!("hanging up...");
                                                 let _ = signal_transport.send_signal(&SignalMessage::Hangup {
+                                                    version: default_signal_version(),
                                                     reason: wzp_proto::HangupReason::Normal,
                                                     call_id: None,
                                                 }).await;

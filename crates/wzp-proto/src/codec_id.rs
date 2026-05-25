@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 /// Identifies the audio codec and bitrate configuration.
 ///
-/// Encoded as 4 bits in the media packet header.
+/// Encoded as 4 bits in the v1 media packet header, and as a full 8-bit
+/// value in the v2 [`MediaHeaderV2`](crate::MediaHeaderV2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum CodecId {
@@ -24,6 +25,16 @@ pub enum CodecId {
     Opus48k = 7,
     /// Opus at 64kbps (studio high)
     Opus64k = 8,
+    /// H.264 baseline profile (video).
+    H264Baseline = 9,
+    // Reserved for video codecs; implementations land in PRD-video-multicodec.
+    // 10 => H264 main
+    // 11 => H265 main
+    // 13 => VP9
+    /// AV1 main profile (video).
+    Av1Main = 12,
+    /// H.265 main profile (video).
+    H265Main = 11,
 }
 
 impl CodecId {
@@ -39,6 +50,7 @@ impl CodecId {
             Self::Codec2_3200 => 3_200,
             Self::Codec2_1200 => 1_200,
             Self::ComfortNoise => 0,
+            Self::H264Baseline | Self::H265Main | Self::Av1Main => 2_000_000,
         }
     }
 
@@ -50,16 +62,22 @@ impl CodecId {
             Self::Codec2_3200 => 20,
             Self::Codec2_1200 => 40,
             Self::ComfortNoise => 20,
+            Self::H264Baseline | Self::H265Main | Self::Av1Main => 33,
         }
     }
 
     /// Sample rate expected by this codec.
     pub const fn sample_rate_hz(self) -> u32 {
         match self {
-            Self::Opus24k | Self::Opus16k | Self::Opus6k
-            | Self::Opus32k | Self::Opus48k | Self::Opus64k => 48_000,
+            Self::Opus24k
+            | Self::Opus16k
+            | Self::Opus6k
+            | Self::Opus32k
+            | Self::Opus48k
+            | Self::Opus64k => 48_000,
             Self::Codec2_3200 | Self::Codec2_1200 => 8_000,
             Self::ComfortNoise => 48_000,
+            Self::H264Baseline | Self::H265Main | Self::Av1Main => 48_000,
         }
     }
 
@@ -75,6 +93,9 @@ impl CodecId {
             6 => Some(Self::Opus32k),
             7 => Some(Self::Opus48k),
             8 => Some(Self::Opus64k),
+            9 => Some(Self::H264Baseline),
+            11 => Some(Self::H265Main),
+            12 => Some(Self::Av1Main),
             _ => None,
         }
     }
@@ -84,10 +105,22 @@ impl CodecId {
         self as u8
     }
 
+    /// Returns true if this is a video codec variant.
+    pub const fn is_video(self) -> bool {
+        matches!(self, Self::H264Baseline | Self::H265Main | Self::Av1Main)
+    }
+
     /// Returns true if this is an Opus variant.
     pub const fn is_opus(self) -> bool {
-        matches!(self, Self::Opus6k | Self::Opus16k | Self::Opus24k
-            | Self::Opus32k | Self::Opus48k | Self::Opus64k)
+        matches!(
+            self,
+            Self::Opus6k
+                | Self::Opus16k
+                | Self::Opus24k
+                | Self::Opus32k
+                | Self::Opus48k
+                | Self::Opus64k
+        )
     }
 }
 
@@ -102,6 +135,18 @@ pub struct QualityProfile {
     pub frame_duration_ms: u8,
     /// Number of source frames per FEC block.
     pub frames_per_block: u8,
+    /// Bandwidth-allocation priority between audio and video.
+    #[serde(default)]
+    pub priority_mode: crate::PriorityMode,
+    /// Target video bitrate in kbps (set by quality controller, not handshake).
+    #[serde(default)]
+    pub video_bitrate_kbps: Option<u32>,
+    /// Target video resolution as (width, height).
+    #[serde(default)]
+    pub video_resolution: Option<(u16, u16)>,
+    /// Target video frame rate.
+    #[serde(default)]
+    pub video_fps: Option<u8>,
 }
 
 impl QualityProfile {
@@ -111,6 +156,10 @@ impl QualityProfile {
         fec_ratio: 0.2,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Degraded conditions: Opus 6kbps, moderate FEC.
@@ -119,6 +168,10 @@ impl QualityProfile {
         fec_ratio: 0.5,
         frame_duration_ms: 40,
         frames_per_block: 10,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Catastrophic conditions: Codec2 1.2kbps, heavy FEC.
@@ -127,6 +180,10 @@ impl QualityProfile {
         fec_ratio: 1.0,
         frame_duration_ms: 40,
         frames_per_block: 8,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Studio low: Opus 32kbps, minimal FEC.
@@ -135,6 +192,10 @@ impl QualityProfile {
         fec_ratio: 0.1,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Studio: Opus 48kbps, minimal FEC.
@@ -143,6 +204,10 @@ impl QualityProfile {
         fec_ratio: 0.1,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Studio high: Opus 64kbps, minimal FEC.
@@ -151,11 +216,58 @@ impl QualityProfile {
         fec_ratio: 0.1,
         frame_duration_ms: 20,
         frames_per_block: 5,
+        priority_mode: crate::PriorityMode::AudioFirst,
+        video_bitrate_kbps: None,
+        video_resolution: None,
+        video_fps: None,
     };
 
     /// Estimated total bandwidth in kbps including FEC overhead.
     pub fn total_bitrate_kbps(&self) -> f32 {
         let base = self.codec.bitrate_bps() as f32 / 1000.0;
         base * (1.0 + self.fec_ratio)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodecId, QualityProfile};
+    use crate::PriorityMode;
+
+    #[test]
+    fn codec_id_unknown_values_rejected() {
+        for v in [10u8, 13].iter().copied().chain(14u8..=255) {
+            assert!(CodecId::from_wire(v).is_none(), "v={v}");
+        }
+    }
+
+    #[test]
+    fn h265_main_roundtrips() {
+        assert_eq!(CodecId::H265Main.to_wire(), 11);
+        assert_eq!(CodecId::from_wire(11), Some(CodecId::H265Main));
+        assert!(CodecId::H265Main.is_video());
+        assert_eq!(CodecId::H265Main.bitrate_bps(), 2_000_000);
+        assert_eq!(CodecId::H265Main.frame_duration_ms(), 33);
+    }
+
+    #[test]
+    fn av1_main_roundtrips() {
+        assert_eq!(CodecId::Av1Main.to_wire(), 12);
+        assert_eq!(CodecId::from_wire(12), Some(CodecId::Av1Main));
+        assert!(CodecId::Av1Main.is_video());
+        assert_eq!(CodecId::Av1Main.bitrate_bps(), 2_000_000);
+        assert_eq!(CodecId::Av1Main.frame_duration_ms(), 33);
+    }
+
+    #[test]
+    fn quality_profile_backward_compat_old_json() {
+        // Old JSON emitted before T5.1 has no priority_mode or video fields.
+        let old_json =
+            r#"{"codec":"Opus24k","fec_ratio":0.2,"frame_duration_ms":20,"frames_per_block":5}"#;
+        let parsed: QualityProfile = serde_json::from_str(old_json).unwrap();
+        assert_eq!(parsed.priority_mode, PriorityMode::AudioFirst);
+        assert_eq!(parsed.video_bitrate_kbps, None);
+        assert_eq!(parsed.video_resolution, None);
+        assert_eq!(parsed.video_fps, None);
     }
 }

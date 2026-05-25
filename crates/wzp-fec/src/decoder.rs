@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use raptorq::{EncodingPacket, ObjectTransmissionInformation, PayloadId, SourceBlockDecoder};
-use wzp_proto::error::FecError;
 use wzp_proto::FecDecoder;
+use wzp_proto::error::FecError;
 
 /// Length prefix size (u16 little-endian), must match encoder.
 const LEN_PREFIX: usize = 2;
@@ -32,7 +32,7 @@ struct BlockState {
 /// RaptorQ-based FEC decoder that handles multiple concurrent blocks.
 pub struct RaptorQFecDecoder {
     /// Per-block decoder state, keyed by block_id.
-    blocks: HashMap<u8, BlockState>,
+    blocks: HashMap<u16, BlockState>,
     /// Symbol size (must match encoder).
     symbol_size: u16,
     /// Number of source symbols per block (from encoder config).
@@ -57,7 +57,7 @@ impl RaptorQFecDecoder {
         Self::new(frames_per_block, 256)
     }
 
-    fn get_or_create_block(&mut self, block_id: u8) -> &mut BlockState {
+    fn get_or_create_block(&mut self, block_id: u16) -> &mut BlockState {
         self.blocks.entry(block_id).or_insert_with(|| BlockState {
             num_source_symbols: Some(self.frames_per_block),
             packets: Vec::new(),
@@ -72,8 +72,8 @@ impl RaptorQFecDecoder {
 impl FecDecoder for RaptorQFecDecoder {
     fn add_symbol(
         &mut self,
-        block_id: u8,
-        symbol_index: u8,
+        block_id: u16,
+        symbol_index: u16,
         _is_repair: bool,
         data: &[u8],
     ) -> Result<(), FecError> {
@@ -104,13 +104,13 @@ impl FecDecoder for RaptorQFecDecoder {
         padded[..len].copy_from_slice(&data[..len]);
 
         let esi = symbol_index as u32;
-        let packet = EncodingPacket::new(PayloadId::new(block_id, esi), padded);
+        let packet = EncodingPacket::new(PayloadId::new((block_id & 0xFF) as u8, esi), padded);
         block.packets.push(packet);
 
         Ok(())
     }
 
-    fn try_decode(&mut self, block_id: u8) -> Result<Option<Vec<Vec<u8>>>, FecError> {
+    fn try_decode(&mut self, block_id: u16) -> Result<Option<Vec<Vec<u8>>>, FecError> {
         let frames_per_block = self.frames_per_block;
         let block = match self.blocks.get_mut(&block_id) {
             Some(b) => b,
@@ -125,7 +125,7 @@ impl FecDecoder for RaptorQFecDecoder {
         let block_length = (num_source as u64) * (block.symbol_size as u64);
 
         let config = ObjectTransmissionInformation::with_defaults(block_length, block.symbol_size);
-        let mut decoder = SourceBlockDecoder::new(block_id, &config, block_length);
+        let mut decoder = SourceBlockDecoder::new((block_id & 0xFF) as u8, &config, block_length);
 
         let decoded = decoder.decode(block.packets.clone());
 
@@ -140,10 +140,7 @@ impl FecDecoder for RaptorQFecDecoder {
                         frames.push(Vec::new());
                         continue;
                     }
-                    let payload_len = u16::from_le_bytes([
-                        data[offset],
-                        data[offset + 1],
-                    ]) as usize;
+                    let payload_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
                     let payload_start = offset + LEN_PREFIX;
                     let payload_end = (payload_start + payload_len).min(data.len());
                     frames.push(data[payload_start..payload_end].to_vec());
@@ -159,15 +156,15 @@ impl FecDecoder for RaptorQFecDecoder {
         }
     }
 
-    fn expire_before(&mut self, block_id: u8) {
+    fn expire_before(&mut self, block_id: u16) {
         // Remove blocks with IDs "older" than block_id.
-        // With wrapping u8 IDs, we consider a block old if its distance
-        // (in the forward direction) to block_id is > 128.
+        // With wrapping u16 IDs, we consider a block old if its distance
+        // (in the forward direction) to block_id is > 32768.
         self.blocks.retain(|&id, _| {
             let distance = block_id.wrapping_sub(id);
-            // If distance is 0 or > 128, the block is current or "ahead" — keep it.
-            // If distance is 1..=128, the block is behind — remove it.
-            distance == 0 || distance > 128
+            // If distance is 0 or > 32768, the block is current or "ahead" — keep it.
+            // If distance is 1..=32768, the block is behind — remove it.
+            distance == 0 || distance > 32768
         });
     }
 }
@@ -198,9 +195,7 @@ mod tests {
 
         // Feed all source symbols (using the length-prefixed padded data).
         for (i, pkt) in source_pkts.iter().enumerate() {
-            decoder
-                .add_symbol(0, i as u8, false, pkt.data())
-                .unwrap();
+            decoder.add_symbol(0, i as u16, false, pkt.data()).unwrap();
         }
 
         let result = decoder.try_decode(0).unwrap();
@@ -233,7 +228,11 @@ mod tests {
         let config = ObjectTransmissionInformation::new(block_len, SYMBOL_SIZE, 1, 1, 1);
         let mut dec = SourceBlockDecoder::new(0, &config, block_len);
         let decoded = dec.decode(all);
-        assert!(decoded.is_some(), "Should recover with {:.0}% loss", drop_fraction * 100.0);
+        assert!(
+            decoded.is_some(),
+            "Should recover with {:.0}% loss",
+            drop_fraction * 100.0
+        );
 
         let data = decoded.unwrap();
         let ss = SYMBOL_SIZE as usize;
@@ -245,22 +244,28 @@ mod tests {
     }
 
     #[test]
-    fn decode_with_30pct_loss() { run_loss_test(FRAMES_PER_BLOCK, 0.5, 0.3); }
+    fn decode_with_30pct_loss() {
+        run_loss_test(FRAMES_PER_BLOCK, 0.5, 0.3);
+    }
 
     #[test]
-    fn decode_with_50pct_loss() { run_loss_test(FRAMES_PER_BLOCK, 1.0, 0.5); }
+    fn decode_with_50pct_loss() {
+        run_loss_test(FRAMES_PER_BLOCK, 1.0, 0.5);
+    }
 
     #[test]
-    fn decode_with_70pct_source_loss_heavy_repair() { run_loss_test(8, 2.0, 0.5); }
+    fn decode_with_70pct_source_loss_heavy_repair() {
+        run_loss_test(8, 2.0, 0.5);
+    }
 
     #[test]
     fn expire_removes_old_blocks() {
         let mut decoder = RaptorQFecDecoder::new(FRAMES_PER_BLOCK, SYMBOL_SIZE);
 
         // Add symbols to blocks 0, 1, 2
-        for block_id in 0..3u8 {
+        for block_id in 0..3u16 {
             decoder
-                .add_symbol(block_id, 0, false, &[block_id; 50])
+                .add_symbol(block_id, 0, false, &[block_id as u8; 50])
                 .unwrap();
         }
 
@@ -288,10 +293,10 @@ mod tests {
         // Interleave symbols from block 0 and block 1
         for i in 0..FRAMES_PER_BLOCK {
             decoder
-                .add_symbol(0, i as u8, false, pkts_a[i].data())
+                .add_symbol(0, i as u16, false, pkts_a[i].data())
                 .unwrap();
             decoder
-                .add_symbol(1, i as u8, false, pkts_b[i].data())
+                .add_symbol(1, i as u16, false, pkts_b[i].data())
                 .unwrap();
         }
 

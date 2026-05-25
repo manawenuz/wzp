@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_transport::QuinnTransport;
 
 use crate::config::{PeerConfig, TrustedConfig};
@@ -56,13 +56,14 @@ impl Deduplicator {
     }
 
     /// Returns true if this packet is a duplicate (already seen within TTL).
-    fn is_dup(&mut self, room_hash: &[u8; 8], seq: u16, extra: u64) -> bool {
+    fn is_dup(&mut self, room_hash: &[u8; 8], seq: u32, extra: u64) -> bool {
         let key = u64::from_be_bytes(*room_hash) ^ (seq as u64) ^ extra;
         let now = Instant::now();
 
         // Periodic cleanup (every ~256 packets)
         if self.entries.len() > 256 {
-            self.entries.retain(|_, ts| now.duration_since(*ts) < self.ttl);
+            self.entries
+                .retain(|_, ts| now.duration_since(*ts) < self.ttl);
         }
 
         if let Some(ts) = self.entries.get(&key) {
@@ -215,8 +216,11 @@ impl FederationManager {
     pub async fn broadcast_signal(&self, msg: &wzp_proto::SignalMessage) -> usize {
         let peers: Vec<(String, String, Arc<QuinnTransport>)> = {
             let links = self.peer_links.lock().await;
-            links.iter().map(|(fp, l)| (fp.clone(), l.label.clone(), l.transport.clone())).collect()
-        };  // lock released
+            links
+                .iter()
+                .map(|(fp, l)| (fp.clone(), l.label.clone(), l.transport.clone()))
+                .collect()
+        }; // lock released
         let mut count = 0;
         for (fp, label, transport) in &peers {
             match transport.send_signal(msg).await {
@@ -249,7 +253,7 @@ impl FederationManager {
         let transport = {
             let links = self.peer_links.lock().await;
             links.get(&normalized).map(|l| l.transport.clone())
-        };  // lock released
+        }; // lock released
         match transport {
             Some(t) => t
                 .send_signal(msg)
@@ -300,9 +304,10 @@ impl FederationManager {
             return Some(room.to_string());
         }
         // Hashed match (desktop clients hash room names for SNI privacy)
-        self.global_rooms.iter().find(|name| {
-            wzp_crypto::hash_room_name(name) == room
-        }).map(|s| s.to_string())
+        self.global_rooms
+            .iter()
+            .find(|name| wzp_crypto::hash_room_name(name) == room)
+            .map(|s| s.to_string())
     }
 
     /// Get the canonical federation room hash for a room.
@@ -371,7 +376,10 @@ impl FederationManager {
 
     /// Get all remote participants for a room from all peer links.
     /// Deduplicates by fingerprint (same participant may appear via multiple links).
-    pub async fn get_remote_participants(&self, room: &str) -> Vec<wzp_proto::packet::RoomParticipant> {
+    pub async fn get_remote_participants(
+        &self,
+        room: &str,
+    ) -> Vec<wzp_proto::packet::RoomParticipant> {
         let canonical = self.resolve_global_room(room);
         let links = self.peer_links.lock().await;
         let mut result = Vec::new();
@@ -407,12 +415,22 @@ impl FederationManager {
     /// the other room-tagged helpers and for future per-room-name logging
     /// or rate limiting; the body currently forwards on `room_hash` alone
     /// because that's what the wire format carries.
-    pub async fn forward_to_peers(&self, _room_name: &str, room_hash: &[u8; 8], media_data: &Bytes) {
+    pub async fn forward_to_peers(
+        &self,
+        _room_name: &str,
+        room_hash: &[u8; 8],
+        media_data: &Bytes,
+    ) {
         let peers: Vec<(String, Arc<QuinnTransport>)> = {
             let links = self.peer_links.lock().await;
-            if links.is_empty() { return; }
-            links.values().map(|l| (l.label.clone(), l.transport.clone())).collect()
-        };  // lock released
+            if links.is_empty() {
+                return;
+            }
+            links
+                .values()
+                .map(|l| (l.label.clone(), l.transport.clone()))
+                .collect()
+        }; // lock released
 
         for (label, transport) in &peers {
             let mut tagged = Vec::with_capacity(8 + media_data.len());
@@ -420,8 +438,10 @@ impl FederationManager {
             tagged.extend_from_slice(media_data);
             match transport.send_raw_datagram(&tagged) {
                 Ok(()) => {
-                    self.metrics.federation_packets_forwarded
-                        .with_label_values(&[label, "out"]).inc();
+                    self.metrics
+                        .federation_packets_forwarded
+                        .with_label_values(&[label, "out"])
+                        .inc();
                 }
                 Err(e) => warn!(peer = %label, "federation send error: {e}"),
             }
@@ -431,20 +451,25 @@ impl FederationManager {
     // ── Trust verification (kept from previous implementation) ──
 
     pub fn find_peer_by_fingerprint(&self, fp: &str) -> Option<&PeerConfig> {
-        self.peers.iter().find(|p| normalize_fp(&p.fingerprint) == normalize_fp(fp))
+        self.peers
+            .iter()
+            .find(|p| normalize_fp(&p.fingerprint) == normalize_fp(fp))
     }
 
     pub fn find_peer_by_addr(&self, addr: SocketAddr) -> Option<&PeerConfig> {
         let addr_ip = addr.ip();
         self.peers.iter().find(|p| {
-            p.url.parse::<SocketAddr>()
+            p.url
+                .parse::<SocketAddr>()
                 .map(|sa| sa.ip() == addr_ip)
                 .unwrap_or(false)
         })
     }
 
     pub fn find_trusted_by_fingerprint(&self, fp: &str) -> Option<&TrustedConfig> {
-        self.trusted.iter().find(|t| normalize_fp(&t.fingerprint) == normalize_fp(fp))
+        self.trusted
+            .iter()
+            .find(|t| normalize_fp(&t.fingerprint) == normalize_fp(fp))
     }
 
     pub fn check_inbound_trust(&self, addr: SocketAddr, hello_fp: &str) -> Option<String> {
@@ -452,7 +477,12 @@ impl FederationManager {
             return Some(peer.label.clone().unwrap_or_else(|| peer.url.clone()));
         }
         if let Some(trusted) = self.find_trusted_by_fingerprint(hello_fp) {
-            return Some(trusted.label.clone().unwrap_or_else(|| hello_fp[..16].to_string()));
+            return Some(
+                trusted
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| hello_fp[..16].to_string()),
+            );
         }
         None
     }
@@ -471,7 +501,8 @@ pub async fn run_federation_media_egress(
         if count == 1 || count % 250 == 0 {
             info!(room = %out.room_name, count, "federation egress: forwarding media");
         }
-        fm.forward_to_peers(&out.room_name, &out.room_hash, &out.data).await;
+        fm.forward_to_peers(&out.room_name, &out.room_hash, &out.data)
+            .await;
     }
     info!(total = count, "federation egress task ended");
 }
@@ -489,7 +520,11 @@ async fn run_room_event_dispatcher(
                 if fm.is_global_room(&room) {
                     let participants = fm.room_mgr.local_participant_list(&room);
                     info!(room = %room, count = participants.len(), "global room now active, announcing to peers");
-                    let msg = SignalMessage::GlobalRoomActive { room, participants };
+                    let msg = SignalMessage::GlobalRoomActive {
+                        version: default_signal_version(),
+                        room,
+                        participants,
+                    };
                     let transports: Vec<Arc<QuinnTransport>> = {
                         let links = fm.peer_links.lock().await;
                         links.values().map(|l| l.transport.clone()).collect()
@@ -502,7 +537,10 @@ async fn run_room_event_dispatcher(
             Ok(RoomEvent::LocalLeave { room }) => {
                 if fm.is_global_room(&room) {
                     info!(room = %room, "global room now inactive, announcing to peers");
-                    let msg = SignalMessage::GlobalRoomInactive { room };
+                    let msg = SignalMessage::GlobalRoomInactive {
+                        version: default_signal_version(),
+                        room,
+                    };
                     let transports: Vec<Arc<QuinnTransport>> = {
                         let links = fm.peer_links.lock().await;
                         links.values().map(|l| l.transport.clone()).collect()
@@ -536,7 +574,9 @@ async fn run_stale_presence_sweeper(fm: Arc<FederationManager>) {
             let links = fm.peer_links.lock().await;
             let mut stale = Vec::new();
             for (fp, link) in links.iter() {
-                if link.last_seen.elapsed() > stale_threshold && !link.remote_participants.is_empty() {
+                if link.last_seen.elapsed() > stale_threshold
+                    && !link.remote_participants.is_empty()
+                {
                     for room in link.remote_participants.keys() {
                         stale.push((fp.clone(), room.clone()));
                     }
@@ -576,6 +616,7 @@ async fn run_stale_presence_sweeper(fm: Arc<FederationManager>) {
                     let mut seen = HashSet::new();
                     all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
                     let update = SignalMessage::RoomUpdate {
+                        version: default_signal_version(),
                         count: all_participants.len() as u32,
                         participants: all_participants,
                     };
@@ -615,7 +656,10 @@ async fn run_peer_loop(fm: Arc<FederationManager>, peer: PeerConfig) {
 }
 
 /// Connect to a peer relay and send hello.
-async fn connect_to_peer(fm: &FederationManager, peer: &PeerConfig) -> Result<Arc<QuinnTransport>, anyhow::Error> {
+async fn connect_to_peer(
+    fm: &FederationManager,
+    peer: &PeerConfig,
+) -> Result<Arc<QuinnTransport>, anyhow::Error> {
     let addr: SocketAddr = peer.url.parse()?;
     let client_cfg = wzp_transport::client_config();
     let conn = wzp_transport::connect(&fm.endpoint, addr, "_federation", client_cfg).await?;
@@ -623,9 +667,12 @@ async fn connect_to_peer(fm: &FederationManager, peer: &PeerConfig) -> Result<Ar
 
     // Send hello with our TLS fingerprint
     let hello = SignalMessage::FederationHello {
+        version: default_signal_version(),
         tls_fingerprint: fm.local_tls_fp.clone(),
     };
-    transport.send_signal(&hello).await
+    transport
+        .send_signal(&hello)
+        .await
         .map_err(|e| anyhow::anyhow!("federation hello send failed: {e}"))?;
 
     info!(peer_url = %peer.url, label = ?peer.label, "federation: connected (hello sent)");
@@ -642,16 +689,22 @@ async fn run_federation_link(
     peer_label: String,
 ) -> Result<(), anyhow::Error> {
     // Register peer link + metrics
-    fm.metrics.federation_peer_status.with_label_values(&[&peer_label]).set(1);
+    fm.metrics
+        .federation_peer_status
+        .with_label_values(&[&peer_label])
+        .set(1);
     {
         let mut links = fm.peer_links.lock().await;
-        links.insert(peer_fp.clone(), PeerLink {
-            transport: transport.clone(),
-            label: peer_label.clone(),
-            active_rooms: HashSet::new(),
-            remote_participants: HashMap::new(),
-            last_seen: Instant::now(),
-        });
+        links.insert(
+            peer_fp.clone(),
+            PeerLink {
+                transport: transport.clone(),
+                label: peer_label.clone(),
+                active_rooms: HashSet::new(),
+                remote_participants: HashMap::new(),
+                last_seen: Instant::now(),
+            },
+        );
     }
 
     // Announce our currently active global rooms to this new peer
@@ -665,7 +718,11 @@ async fn run_federation_link(
             if fm.is_global_room(room_name) {
                 let participants = fm.room_mgr.local_participant_list(room_name);
                 info!(peer = %peer_label, room = %room_name, participants = participants.len(), "announcing local global room to new peer");
-                msgs.push(SignalMessage::GlobalRoomActive { room: room_name.clone(), participants });
+                msgs.push(SignalMessage::GlobalRoomActive {
+                    version: default_signal_version(),
+                    room: room_name.clone(),
+                    participants,
+                });
             }
         }
 
@@ -677,6 +734,7 @@ async fn run_federation_link(
                     if fm.is_global_room(room) {
                         info!(peer = %peer_label, room = %room, via = %link.label, "propagating remote room to new peer");
                         msgs.push(SignalMessage::GlobalRoomActive {
+                            version: default_signal_version(),
                             room: room.clone(),
                             participants: participants.clone(),
                         });
@@ -761,7 +819,10 @@ async fn run_federation_link(
     }
 
     // Cleanup: remove peer link + metrics
-    fm.metrics.federation_peer_status.with_label_values(&[&peer_label]).set(0);
+    fm.metrics
+        .federation_peer_status
+        .with_label_values(&[&peer_label])
+        .set(0);
     {
         let mut links = fm.peer_links.lock().await;
         links.remove(&peer_fp);
@@ -787,7 +848,9 @@ async fn handle_signal(
     }
 
     match msg {
-        SignalMessage::GlobalRoomActive { room, participants } => {
+        SignalMessage::GlobalRoomActive {
+            room, participants, ..
+        } => {
             if fm.is_global_room(&room) {
                 info!(peer = %peer_label, room = %room, remote_participants = participants.len(), "peer has global room active");
                 let mut links = fm.peer_links.lock().await;
@@ -799,34 +862,44 @@ async fn handle_signal(
                 fm.metrics.federation_active_rooms.set(total as i64);
                 if let Some(link) = links.get_mut(peer_fp) {
                     // Tag remote participants with their relay label
-                    let tagged: Vec<_> = participants.iter().map(|p| {
-                        let mut tagged = p.clone();
-                        if tagged.relay_label.is_none() {
-                            tagged.relay_label = Some(link.label.clone());
-                        }
-                        tagged
-                    }).collect();
+                    let tagged: Vec<_> = participants
+                        .iter()
+                        .map(|p| {
+                            let mut tagged = p.clone();
+                            if tagged.relay_label.is_none() {
+                                tagged.relay_label = Some(link.label.clone());
+                            }
+                            tagged
+                        })
+                        .collect();
                     link.remote_participants.insert(room.clone(), tagged);
                 }
                 // Propagate to other peers (with relay labels preserved)
                 let tagged_for_propagation = if let Some(link) = links.get(peer_fp) {
                     let label = link.label.clone();
-                    participants.iter().map(|p| {
-                        let mut t = p.clone();
-                        if t.relay_label.is_none() {
-                            t.relay_label = Some(label.clone());
-                        }
-                        t
-                    }).collect::<Vec<_>>()
+                    participants
+                        .iter()
+                        .map(|p| {
+                            let mut t = p.clone();
+                            if t.relay_label.is_none() {
+                                t.relay_label = Some(label.clone());
+                            }
+                            t
+                        })
+                        .collect::<Vec<_>>()
                 } else {
                     participants.clone()
                 };
                 for (fp, link) in links.iter() {
                     if fp != peer_fp {
-                        let _ = link.transport.send_signal(&SignalMessage::GlobalRoomActive {
-                            room: room.clone(),
-                            participants: tagged_for_propagation.clone(),
-                        }).await;
+                        let _ = link
+                            .transport
+                            .send_signal(&SignalMessage::GlobalRoomActive {
+                                version: default_signal_version(),
+                                room: room.clone(),
+                                participants: tagged_for_propagation.clone(),
+                            })
+                            .await;
                     }
                 }
                 drop(links);
@@ -835,19 +908,25 @@ async fn handle_signal(
                 // Find the local room name (may be hashed or raw)
                 let active = fm.room_mgr.active_rooms();
                 for local_room in &active {
-                    if fm.is_global_room(local_room) && fm.resolve_global_room(local_room) == fm.resolve_global_room(&room) {
+                    if fm.is_global_room(local_room)
+                        && fm.resolve_global_room(local_room) == fm.resolve_global_room(&room)
+                    {
                         // Build merged participant list: local + all remote (deduped)
                         let mut all_participants = fm.room_mgr.local_participant_list(local_room);
                         {
                             let links = fm.peer_links.lock().await;
                             for link in links.values() {
                                 if let Some(ref canonical) = fm.resolve_global_room(local_room) {
-                                    if let Some(remote) = link.remote_participants.get(canonical.as_str()) {
+                                    if let Some(remote) =
+                                        link.remote_participants.get(canonical.as_str())
+                                    {
                                         all_participants.extend(remote.iter().cloned());
                                     }
                                     // Also check raw room name, but only if different from canonical
                                     if canonical != local_room {
-                                        if let Some(remote) = link.remote_participants.get(local_room) {
+                                        if let Some(remote) =
+                                            link.remote_participants.get(local_room)
+                                        {
                                             all_participants.extend(remote.iter().cloned());
                                         }
                                     }
@@ -858,6 +937,7 @@ async fn handle_signal(
                         let mut seen = HashSet::new();
                         all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
                         let update = SignalMessage::RoomUpdate {
+                            version: default_signal_version(),
                             count: all_participants.len() as u32,
                             participants: all_participants,
                         };
@@ -868,7 +948,7 @@ async fn handle_signal(
                 }
             }
         }
-        SignalMessage::GlobalRoomInactive { room } => {
+        SignalMessage::GlobalRoomInactive { room, .. } => {
             info!(peer = %peer_label, room = %room, "peer global room now inactive");
             let mut links = fm.peer_links.lock().await;
             if let Some(link) = links.get_mut(peer_fp) {
@@ -890,7 +970,9 @@ async fn handle_signal(
                 let canonical = fm.resolve_global_room(&room);
                 let mut result = Vec::new();
                 for (fp, link) in links.iter() {
-                    if fp == peer_fp { continue; }
+                    if fp == peer_fp {
+                        continue;
+                    }
                     if let Some(ref c) = canonical {
                         if let Some(remote) = link.remote_participants.get(c.as_str()) {
                             result.extend(remote.iter().cloned());
@@ -904,11 +986,16 @@ async fn handle_signal(
 
             // Propagate to other peers: send updated GlobalRoomActive with revised list,
             // or GlobalRoomInactive if no participants remain anywhere
-            let local_active = fm.room_mgr.active_rooms().iter().any(|r| fm.resolve_global_room(r) == fm.resolve_global_room(&room));
+            let local_active = fm
+                .room_mgr
+                .active_rooms()
+                .iter()
+                .any(|r| fm.resolve_global_room(r) == fm.resolve_global_room(&room));
             let has_remaining = !remaining_remote.is_empty() || local_active;
 
             // Collect peer transports to send to (avoid holding lock across await)
-            let peer_sends: Vec<_> = links.iter()
+            let peer_sends: Vec<_> = links
+                .iter()
                 .filter(|(fp, _)| *fp != peer_fp)
                 .map(|(_, link)| link.transport.clone())
                 .collect();
@@ -920,12 +1007,14 @@ async fn handle_signal(
                 if local_active {
                     for local_room in fm.room_mgr.active_rooms() {
                         if fm.resolve_global_room(&local_room) == fm.resolve_global_room(&room) {
-                            updated_participants.extend(fm.room_mgr.local_participant_list(&local_room));
+                            updated_participants
+                                .extend(fm.room_mgr.local_participant_list(&local_room));
                             break;
                         }
                     }
                 }
                 let msg = SignalMessage::GlobalRoomActive {
+                    version: default_signal_version(),
                     room: room.clone(),
                     participants: updated_participants,
                 };
@@ -934,7 +1023,10 @@ async fn handle_signal(
                 }
             } else {
                 // No participants left anywhere — propagate inactive
-                let msg = SignalMessage::GlobalRoomInactive { room: room.clone() };
+                let msg = SignalMessage::GlobalRoomInactive {
+                    version: default_signal_version(),
+                    room: room.clone(),
+                };
                 for transport in &peer_sends {
                     let _ = transport.send_signal(&msg).await;
                 }
@@ -943,13 +1035,16 @@ async fn handle_signal(
             // Broadcast updated RoomUpdate to local clients (remote participant removed)
             let active = fm.room_mgr.active_rooms();
             for local_room in &active {
-                if fm.is_global_room(local_room) && fm.resolve_global_room(local_room) == fm.resolve_global_room(&room) {
+                if fm.is_global_room(local_room)
+                    && fm.resolve_global_room(local_room) == fm.resolve_global_room(&room)
+                {
                     let mut all_participants = fm.room_mgr.local_participant_list(local_room);
                     all_participants.extend(remaining_remote.iter().cloned());
                     // Deduplicate by fingerprint
                     let mut seen = HashSet::new();
                     all_participants.retain(|p| seen.insert(p.fingerprint.clone()));
                     let update = SignalMessage::RoomUpdate {
+                        version: default_signal_version(),
                         count: all_participants.len() as u32,
                         participants: all_participants,
                     };
@@ -972,7 +1067,11 @@ async fn handle_signal(
         // Loop prevention: drop any forward whose origin matches
         // our own federation TLS fingerprint. With
         // broadcast-to-all-peers this prevents A→B→A echo loops.
-        SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
+        SignalMessage::FederatedSignalForward {
+            inner,
+            origin_relay_fp,
+            ..
+        } => {
             if origin_relay_fp == fm.local_tls_fp {
                 tracing::debug!(
                     peer = %peer_label,
@@ -1016,12 +1115,10 @@ async fn handle_signal(
 }
 
 /// Handle an incoming federation datagram (room-hash-tagged media).
-async fn handle_datagram(
-    fm: &Arc<FederationManager>,
-    source_peer_fp: &str,
-    data: Bytes,
-) {
-    if data.len() < 12 { return; } // 8-byte hash + min packet
+async fn handle_datagram(fm: &Arc<FederationManager>, source_peer_fp: &str, data: Bytes) {
+    if data.len() < 12 {
+        return;
+    } // 8-byte hash + min packet
 
     let mut rh = [0u8; 8];
     rh.copy_from_slice(&data[..8]);
@@ -1030,7 +1127,8 @@ async fn handle_datagram(
     let pkt = match wzp_proto::MediaPacket::from_bytes(media_bytes.clone()) {
         Some(pkt) => pkt,
         None => {
-            fm.event_log.emit(Event::new("federation_ingress_malformed").len(data.len()));
+            fm.event_log
+                .emit(Event::new("federation_ingress_malformed").len(data.len()));
             return;
         }
     };
@@ -1038,13 +1136,22 @@ async fn handle_datagram(
     // Event log: federation ingress
     let peer_label = {
         let links = fm.peer_links.lock().await;
-        links.get(source_peer_fp).map(|l| l.label.clone()).unwrap_or_default()
+        links
+            .get(source_peer_fp)
+            .map(|l| l.label.clone())
+            .unwrap_or_default()
     };
-    fm.event_log.emit(Event::new("federation_ingress").packet(&pkt).peer(&peer_label));
+    fm.event_log.emit(
+        Event::new("federation_ingress")
+            .packet(&pkt)
+            .peer(&peer_label),
+    );
 
     // Count inbound federation packet + update last_seen
-    fm.metrics.federation_packets_forwarded
-        .with_label_values(&[source_peer_fp, "in"]).inc();
+    fm.metrics
+        .federation_packets_forwarded
+        .with_label_values(&[source_peer_fp, "in"])
+        .inc();
     {
         let mut links = fm.peer_links.lock().await;
         if let Some(link) = links.get_mut(source_peer_fp) {
@@ -1065,7 +1172,11 @@ async fn handle_datagram(
     {
         let mut dedup = fm.dedup.lock().await;
         if dedup.is_dup(&rh, pkt.header.seq, payload_hash) {
-            fm.event_log.emit(Event::new("dedup_drop").seq(pkt.header.seq).peer(&peer_label));
+            fm.event_log.emit(
+                Event::new("dedup_drop")
+                    .seq(pkt.header.seq)
+                    .peer(&peer_label),
+            );
             return;
         }
     }
@@ -1074,18 +1185,33 @@ async fn handle_datagram(
     let room_name = {
         let active = fm.room_mgr.active_rooms();
         // First: check local rooms (has participants)
-        active.iter().find(|r| room_hash(r) == rh).cloned()
-            .or_else(|| active.iter().find(|r| fm.global_room_hash(r) == rh).cloned())
+        active
+            .iter()
+            .find(|r| room_hash(r) == rh)
+            .cloned()
+            .or_else(|| {
+                active
+                    .iter()
+                    .find(|r| fm.global_room_hash(r) == rh)
+                    .cloned()
+            })
             // Second: check static global room config (hub relay may have no local participants)
             .or_else(|| {
-                fm.global_rooms.iter().find(|name| room_hash(name) == rh).cloned()
+                fm.global_rooms
+                    .iter()
+                    .find(|name| room_hash(name) == rh)
+                    .cloned()
             })
     };
 
     let room_name = match room_name {
         Some(r) => r,
         None => {
-            fm.event_log.emit(Event::new("room_not_found").seq(pkt.header.seq).peer(&peer_label));
+            fm.event_log.emit(
+                Event::new("room_not_found")
+                    .seq(pkt.header.seq)
+                    .peer(&peer_label),
+            );
             // Phase 4.1 diagnostic: log the hash + active rooms
             // so we can diagnose cross-relay call-* media routing
             // failures. This fires when a peer relay sends media
@@ -1107,10 +1233,15 @@ async fn handle_datagram(
     // Rate limit per room
     if FEDERATION_RATE_LIMIT_PPS > 0 {
         let mut limiters = fm.rate_limiters.lock().await;
-        let limiter = limiters.entry(room_name.clone())
+        let limiter = limiters
+            .entry(room_name.clone())
             .or_insert_with(|| RateLimiter::new(FEDERATION_RATE_LIMIT_PPS));
         if !limiter.allow() {
-            fm.event_log.emit(Event::new("rate_limit_drop").room(&room_name).seq(pkt.header.seq));
+            fm.event_log.emit(
+                Event::new("rate_limit_drop")
+                    .room(&room_name)
+                    .seq(pkt.header.seq),
+            );
             return;
         }
     }
@@ -1122,14 +1253,26 @@ async fn handle_datagram(
         match sender {
             room::ParticipantSender::Quic(t) => {
                 if let Err(e) = t.send_raw_datagram(&media_bytes) {
-                    fm.event_log.emit(Event::new("local_deliver_error").room(&room_name).seq(pkt.header.seq).reason(&e.to_string()));
+                    fm.event_log.emit(
+                        Event::new("local_deliver_error")
+                            .room(&room_name)
+                            .seq(pkt.header.seq)
+                            .reason(&e.to_string()),
+                    );
                     warn!("federation local delivery error: {e}");
                 }
             }
-            room::ParticipantSender::WebSocket(_) => { let _ = sender.send_raw(&pkt.payload).await; }
+            room::ParticipantSender::WebSocket(_) => {
+                let _ = sender.send_raw(&pkt.payload).await;
+            }
         }
     }
-    fm.event_log.emit(Event::new("local_deliver").room(&room_name).seq(pkt.header.seq).to_count(locals.len()));
+    fm.event_log.emit(
+        Event::new("local_deliver")
+            .room(&room_name)
+            .seq(pkt.header.seq)
+            .to_count(locals.len()),
+    );
 
     // Multi-hop: forward to ALL other connected peers (not the source)
     // Don't filter by active_rooms — the receiving peer decides whether to deliver

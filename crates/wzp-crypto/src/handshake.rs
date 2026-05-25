@@ -9,8 +9,8 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use wzp_proto::{CryptoError, CryptoSession, KeyExchange};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::session::ChaChaSession;
 
@@ -95,12 +95,11 @@ impl KeyExchange for WarzoneKeyExchange {
         &self,
         peer_ephemeral_pub: &[u8; 32],
     ) -> Result<Box<dyn CryptoSession>, CryptoError> {
-        let secret = self
-            .ephemeral_secret
-            .as_ref()
-            .ok_or_else(|| {
-                CryptoError::Internal("no ephemeral key generated; call generate_ephemeral first".into())
-            })?;
+        let secret = self.ephemeral_secret.as_ref().ok_or_else(|| {
+            CryptoError::Internal(
+                "no ephemeral key generated; call generate_ephemeral first".into(),
+            )
+        })?;
 
         let peer_public = X25519PublicKey::from(*peer_ephemeral_pub);
         // Use diffie_hellman with a clone of the StaticSecret
@@ -210,18 +209,34 @@ mod tests {
         let mut alice_session = alice.derive_session(&bob_eph_pub).unwrap();
         let mut bob_session = bob.derive_session(&alice_eph_pub).unwrap();
 
-        // Verify they can communicate: Alice encrypts, Bob decrypts
-        let header = b"call-header";
+        // Verify they can communicate: Alice encrypts, Bob decrypts.
+        // Use a valid v2 MediaHeader — encrypt/decrypt now derive the nonce from
+        // header.seq and will reject raw byte slices shorter than WIRE_SIZE.
+        use wzp_proto::{CodecId, MediaHeader, MediaType};
+        let header = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq: 0,
+            timestamp: 0,
+            fec_block: 0,
+        };
+        let mut header_bytes = Vec::new();
+        header.write_to(&mut header_bytes);
+
         let plaintext = b"hello from alice";
 
         let mut ciphertext = Vec::new();
         alice_session
-            .encrypt(header, plaintext, &mut ciphertext)
+            .encrypt(&header_bytes, plaintext, &mut ciphertext)
             .unwrap();
 
         let mut decrypted = Vec::new();
         bob_session
-            .decrypt(header, &ciphertext, &mut decrypted)
+            .decrypt(&header_bytes, &ciphertext, &mut decrypted)
             .unwrap();
 
         assert_eq!(&decrypted, plaintext);

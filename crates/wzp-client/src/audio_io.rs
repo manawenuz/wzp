@@ -6,10 +6,10 @@
 //! Audio callbacks are **lock-free**: they read/write directly to an `AudioRing`
 //! (atomic SPSC ring buffer). No Mutex, no channel, no allocation on the hot path.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use tracing::{info, warn};
@@ -78,7 +78,10 @@ impl AudioCapture {
                                     return;
                                 }
                                 if !logged.swap(true, Ordering::Relaxed) {
-                                    eprintln!("[audio] capture callback: {} f32 samples", data.len());
+                                    eprintln!(
+                                        "[audio] capture callback: {} f32 samples",
+                                        data.len()
+                                    );
                                 }
                                 let mut tmp = [0i16; FRAME_SAMPLES];
                                 for chunk in data.chunks(FRAME_SAMPLES) {
@@ -103,7 +106,10 @@ impl AudioCapture {
                                     return;
                                 }
                                 if !logged.swap(true, Ordering::Relaxed) {
-                                    eprintln!("[audio] capture callback: {} i16 samples", data.len());
+                                    eprintln!(
+                                        "[audio] capture callback: {} i16 samples",
+                                        data.len()
+                                    );
                                 }
                                 ring.write(data);
                             },

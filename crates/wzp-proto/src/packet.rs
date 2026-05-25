@@ -1,151 +1,119 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
-use crate::CodecId;
+use crate::{CodecId, MediaType};
 
-/// 12-byte media packet header for the lossy link.
-///
-/// Wire layout:
-/// ```text
-/// Byte 0:  [V:1][T:1][CodecID:4][Q:1][FecRatioHi:1]
-/// Byte 1:  [FecRatioLo:6][unused:2]
-/// Byte 2-3: Sequence number (big-endian u16)
-/// Byte 4-7: Timestamp in ms since session start (big-endian u32)
-/// Byte 8:   FEC block ID
-/// Byte 9:   FEC symbol index within block
-/// Byte 10:  Reserved / flags
-/// Byte 11:  CSRC count
-/// ```
+/// v2 media header alias. All production code uses this type.
+pub type MediaHeader = MediaHeaderV2;
+
+/// 16-byte v2 media header. See docs/PRD/PRD-wire-format-v2.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MediaHeader {
-    /// Protocol version (0 = v1).
+pub struct MediaHeaderV2 {
+    /// Protocol version (always 2 for v2).
     pub version: u8,
-    /// true = FEC repair packet, false = source media.
-    pub is_repair: bool,
+    /// Bit flags: bit 7 T (repair), bit 6 Q (quality report), bit 5 KeyFrame, bit 4 FrameEnd.
+    pub flags: u8,
+    /// Media stream type (Audio, Video, Data, Control).
+    pub media_type: MediaType,
     /// Codec identifier.
     pub codec_id: CodecId,
-    /// Whether a QualityReport trailer is appended.
-    pub has_quality_report: bool,
-    /// FEC ratio as 7-bit value (0-127 maps to 0.0-1.0).
-    pub fec_ratio_encoded: u8,
-    /// Wrapping packet sequence number.
-    pub seq: u16,
-    /// Milliseconds since session start.
+    /// Stream identifier within the session (0 for default audio).
+    pub stream_id: u8,
+    /// FEC ratio encoded as 0..200, mapping to 0.0..2.0.
+    pub fec_ratio: u8,
+    /// Wrapping packet sequence number (32-bit in v2).
+    pub seq: u32,
+    /// Milliseconds since session start. Monotonic for the full session lifetime;
+    /// NOT reset by rekey (rekey changes only key material, not framing state).
     pub timestamp: u32,
-    /// FEC source block ID (wrapping).
-    pub fec_block: u8,
-    /// Symbol index within the FEC block.
-    pub fec_symbol: u8,
-    /// Reserved flags byte.
-    pub reserved: u8,
-    /// Number of contributing sources (for future mixing).
-    pub csrc_count: u8,
+    /// FEC source block ID (low byte) and symbol index (high byte) for audio.
+    pub fec_block: u16,
 }
 
-impl MediaHeader {
-    /// Header size in bytes on the wire.
-    pub const WIRE_SIZE: usize = 12;
+impl MediaHeaderV2 {
+    /// Header size in bytes on the wire (16 for v2).
+    pub const WIRE_SIZE: usize = 16;
+    /// Protocol version byte (always 2).
+    pub const VERSION: u8 = 2;
 
-    /// Create a default header for raw PCM relay (used by WebSocket bridge).
-    pub fn default_pcm() -> Self {
-        Self {
-            version: 0,
-            is_repair: false,
-            codec_id: CodecId::Opus24k,
-            has_quality_report: false,
-            fec_ratio_encoded: 0,
-            seq: 0,
-            timestamp: 0,
-            fec_block: 0,
-            fec_symbol: 0,
-            reserved: 0,
-            csrc_count: 0,
-        }
-    }
-
-    /// Encode the FEC ratio float (0.0-2.0+) to a 7-bit value (0-127).
-    pub fn encode_fec_ratio(ratio: f32) -> u8 {
-        // Map 0.0-2.0 to 0-127, clamping at 127
-        let scaled = (ratio * 63.5).round() as u8;
-        scaled.min(127)
-    }
-
-    /// Decode the 7-bit FEC ratio value back to a float.
-    pub fn decode_fec_ratio(encoded: u8) -> f32 {
-        (encoded & 0x7F) as f32 / 63.5
-    }
-
-    /// Serialize to a 12-byte buffer.
+    /// Serialize the header to a buffer in big-endian wire format.
     pub fn write_to(&self, buf: &mut impl BufMut) {
-        // Byte 0: V(1) | T(1) | CodecID(4) | Q(1) | FecRatioHi(1)
-        let byte0 = ((self.version & 0x01) << 7)
-            | ((self.is_repair as u8) << 6)
-            | ((self.codec_id.to_wire() & 0x0F) << 2)
-            | ((self.has_quality_report as u8) << 1)
-            | ((self.fec_ratio_encoded >> 6) & 0x01);
-        buf.put_u8(byte0);
-
-        // Byte 1: FecRatioLo(6) | unused(2)
-        let byte1 = (self.fec_ratio_encoded & 0x3F) << 2;
-        buf.put_u8(byte1);
-
-        // Bytes 2-3: sequence number
-        buf.put_u16(self.seq);
-
-        // Bytes 4-7: timestamp
+        buf.put_u8(self.version);
+        buf.put_u8(self.flags);
+        buf.put_u8(self.media_type.to_wire());
+        buf.put_u8(self.codec_id.to_wire());
+        buf.put_u8(self.stream_id);
+        buf.put_u8(self.fec_ratio);
+        buf.put_u32(self.seq);
         buf.put_u32(self.timestamp);
-
-        // Byte 8: FEC block
-        buf.put_u8(self.fec_block);
-
-        // Byte 9: FEC symbol
-        buf.put_u8(self.fec_symbol);
-
-        // Byte 10: reserved
-        buf.put_u8(self.reserved);
-
-        // Byte 11: CSRC count
-        buf.put_u8(self.csrc_count);
+        buf.put_u16(self.fec_block);
     }
 
-    /// Deserialize from a buffer. Returns None if insufficient data.
+    /// Deserialize from a buffer. Returns `None` if the buffer is too short
+    /// or the version byte is not 2.
     pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
         if buf.remaining() < Self::WIRE_SIZE {
             return None;
         }
-
-        let byte0 = buf.get_u8();
-        let byte1 = buf.get_u8();
-
-        let version = (byte0 >> 7) & 0x01;
-        let is_repair = ((byte0 >> 6) & 0x01) != 0;
-        let codec_wire = (byte0 >> 2) & 0x0F;
-        let has_quality_report = ((byte0 >> 1) & 0x01) != 0;
-        let fec_ratio_hi = byte0 & 0x01;
-        let fec_ratio_lo = (byte1 >> 2) & 0x3F;
-        let fec_ratio_encoded = (fec_ratio_hi << 6) | fec_ratio_lo;
-
-        let codec_id = CodecId::from_wire(codec_wire)?;
-        let seq = buf.get_u16();
+        let version = buf.get_u8();
+        if version != Self::VERSION {
+            return None;
+        }
+        let flags = buf.get_u8();
+        let media_type = MediaType::from_wire(buf.get_u8())?;
+        let codec_id = CodecId::from_wire(buf.get_u8())?;
+        let stream_id = buf.get_u8();
+        let fec_ratio = buf.get_u8();
+        let seq = buf.get_u32();
         let timestamp = buf.get_u32();
-        let fec_block = buf.get_u8();
-        let fec_symbol = buf.get_u8();
-        let reserved = buf.get_u8();
-        let csrc_count = buf.get_u8();
-
+        let fec_block = buf.get_u16();
         Some(Self {
             version,
-            is_repair,
+            flags,
+            media_type,
             codec_id,
-            has_quality_report,
-            fec_ratio_encoded,
+            stream_id,
+            fec_ratio,
             seq,
             timestamp,
             fec_block,
-            fec_symbol,
-            reserved,
-            csrc_count,
         })
+    }
+
+    /// Bit 7: set when this packet is an FEC repair packet, not source media.
+    pub const FLAG_REPAIR: u8 = 0b1000_0000;
+    /// Bit 6: set when a [`QualityReport`] trailer is appended to the payload.
+    pub const FLAG_QUALITY: u8 = 0b0100_0000;
+    /// Bit 5: set for video keyframes (reserved for future video use).
+    pub const FLAG_KEYFRAME: u8 = 0b0010_0000;
+    /// Bit 4: set when this packet is the final fragment of a frame.
+    pub const FLAG_FRAME_END: u8 = 0b0001_0000;
+
+    /// Returns true if the repair flag is set.
+    pub fn is_repair(&self) -> bool {
+        self.flags & Self::FLAG_REPAIR != 0
+    }
+    /// Returns true if the quality-report flag is set.
+    pub fn has_quality(&self) -> bool {
+        self.flags & Self::FLAG_QUALITY != 0
+    }
+    /// Returns true if the keyframe flag is set.
+    pub fn is_keyframe(&self) -> bool {
+        self.flags & Self::FLAG_KEYFRAME != 0
+    }
+    /// Returns true if the frame-end flag is set.
+    pub fn is_frame_end(&self) -> bool {
+        self.flags & Self::FLAG_FRAME_END != 0
+    }
+
+    /// Encode the FEC ratio float (0.0-2.0) to an 8-bit value (0-200).
+    pub fn encode_fec_ratio(ratio: f32) -> u8 {
+        (ratio * 100.0).round() as u8
+    }
+
+    /// Decode the 8-bit FEC ratio value back to a float.
+    pub fn decode_fec_ratio(encoded: u8) -> f32 {
+        encoded as f32 / 100.0
     }
 
     /// Serialize header to a new Bytes value.
@@ -259,7 +227,7 @@ impl MediaPacket {
         let header = MediaHeader::read_from(&mut cursor)?;
 
         let remaining = data.len() - MediaHeader::WIRE_SIZE;
-        let (payload_len, quality_report) = if header.has_quality_report {
+        let (payload_len, quality_report) = if header.has_quality() {
             if remaining < QualityReport::WIRE_SIZE {
                 return None;
             }
@@ -286,51 +254,46 @@ impl MediaPacket {
     /// Uses the `MiniFrameContext` to decide whether to emit a compact 4-byte
     /// mini-header or a full 12-byte header.  A full header is forced on the
     /// first frame and every `MINI_FRAME_FULL_INTERVAL` frames thereafter.
-    pub fn encode_compact(
-        &self,
-        ctx: &mut MiniFrameContext,
-        frames_since_full: &mut u32,
-    ) -> Bytes {
+    pub fn encode_compact(&self, ctx: &mut MiniFrameContext, frames_since_full: &mut u32) -> Bytes {
         if *frames_since_full > 0 && *frames_since_full < MINI_FRAME_FULL_INTERVAL {
-            // --- mini frame ---
-            let ts_delta = self
-                .header
-                .timestamp
-                .wrapping_sub(ctx.last_header.unwrap().timestamp)
-                as u16;
-            let mini = MiniHeader {
-                timestamp_delta_ms: ts_delta,
-                payload_len: self.payload.len() as u16,
-            };
-            let total = 1 + MiniHeader::WIRE_SIZE + self.payload.len();
-            let mut buf = BytesMut::with_capacity(total);
-            buf.put_u8(FRAME_TYPE_MINI);
-            mini.write_to(&mut buf);
-            buf.put(self.payload.clone());
-            // Advance the context so the next mini-frame delta is relative
-            // to this frame, mirroring what expand() does on the decoder side.
-            ctx.update(&self.header);
-            *frames_since_full += 1;
-            buf.freeze()
-        } else {
-            // --- full frame ---
-            let qr_size = if self.quality_report.is_some() {
-                QualityReport::WIRE_SIZE
-            } else {
-                0
-            };
-            let total = 1 + MediaHeader::WIRE_SIZE + self.payload.len() + qr_size;
-            let mut buf = BytesMut::with_capacity(total);
-            buf.put_u8(FRAME_TYPE_FULL);
-            self.header.write_to(&mut buf);
-            buf.put(self.payload.clone());
-            if let Some(ref qr) = self.quality_report {
-                qr.write_to(&mut buf);
+            if let Some(base) = ctx.last_header() {
+                // --- mini frame ---
+                let ts_delta = self.header.timestamp.wrapping_sub(base.timestamp) as u16;
+                let mini = MiniHeader {
+                    seq_delta: 1,
+                    timestamp_delta_ms: ts_delta,
+                    payload_len: self.payload.len() as u16,
+                };
+                let total = 1 + MiniHeader::WIRE_SIZE + self.payload.len();
+                let mut buf = BytesMut::with_capacity(total);
+                buf.put_u8(FRAME_TYPE_MINI);
+                mini.write_to(&mut buf);
+                buf.put(self.payload.clone());
+                // Advance the context so the next mini-frame delta is relative
+                // to this frame, mirroring what expand() does on the decoder side.
+                ctx.update(&self.header);
+                *frames_since_full += 1;
+                return buf.freeze();
             }
-            ctx.update(&self.header);
-            *frames_since_full = 1; // next frame will be the 1st after full
-            buf.freeze()
         }
+
+        // --- full frame ---
+        let qr_size = if self.quality_report.is_some() {
+            QualityReport::WIRE_SIZE
+        } else {
+            0
+        };
+        let total = 1 + MediaHeader::WIRE_SIZE + self.payload.len() + qr_size;
+        let mut buf = BytesMut::with_capacity(total);
+        buf.put_u8(FRAME_TYPE_FULL);
+        self.header.write_to(&mut buf);
+        buf.put(self.payload.clone());
+        if let Some(ref qr) = self.quality_report {
+            qr.write_to(&mut buf);
+        }
+        ctx.update(&self.header);
+        *frames_since_full = 1; // next frame will be the 1st after full
+        buf.freeze()
     }
 
     /// Decode from compact wire format (auto-detects full vs mini).
@@ -407,6 +370,12 @@ pub struct TrunkFrame {
     pub packets: Vec<TrunkEntry>,
 }
 
+impl Default for TrunkFrame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrunkFrame {
     /// Create an empty trunk frame.
     pub fn new() -> Self {
@@ -460,7 +429,7 @@ impl TrunkFrame {
         if buf.len() < 2 {
             return None;
         }
-        let mut cursor = &buf[..];
+        let mut cursor = buf;
         let count = cursor.get_u16() as usize;
         let mut packets = Vec::with_capacity(count);
         for _ in 0..count {
@@ -494,61 +463,75 @@ pub const FRAME_TYPE_FULL: u8 = 0x00;
 /// Frame type tag: MiniHeader follows (requires prior baseline).
 pub const FRAME_TYPE_MINI: u8 = 0x01;
 
-/// Compact 4-byte header used after a full MediaHeader baseline has been
-/// established. Only the timestamp delta and payload length are transmitted;
-/// all other fields are inherited from the last full header.
+/// v2 mini header alias. All production code uses this type.
+pub type MiniHeader = MiniHeaderV2;
+
+/// Compact 5-byte v2 mini header with explicit `seq_delta`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MiniHeader {
-    /// Milliseconds elapsed since the last header's timestamp.
+pub struct MiniHeaderV2 {
+    /// Packets since the baseline full header (typically 1 in steady state).
+    /// Explicit deltas resolve audit W4: one missed full header no longer desyncs.
+    pub seq_delta: u8,
+    /// Milliseconds elapsed since the last baseline header's timestamp.
     pub timestamp_delta_ms: u16,
-    /// Length of the payload that follows this header.
+    /// Length of the payload that follows this mini header.
     pub payload_len: u16,
 }
 
-impl MiniHeader {
-    /// Header size in bytes on the wire.
-    pub const WIRE_SIZE: usize = 4;
+impl MiniHeaderV2 {
+    /// Header size in bytes on the wire (5 for v2).
+    pub const WIRE_SIZE: usize = 5;
 
-    /// Serialize to a 4-byte buffer.
+    /// Serialize the mini header to a buffer in big-endian wire format.
     pub fn write_to(&self, buf: &mut impl BufMut) {
+        buf.put_u8(self.seq_delta);
         buf.put_u16(self.timestamp_delta_ms);
         buf.put_u16(self.payload_len);
     }
 
-    /// Deserialize from a buffer. Returns `None` if insufficient data.
+    /// Deserialize from a buffer. Returns `None` if the buffer is too short.
     pub fn read_from(buf: &mut impl Buf) -> Option<Self> {
         if buf.remaining() < Self::WIRE_SIZE {
             return None;
         }
         Some(Self {
+            seq_delta: buf.get_u8(),
             timestamp_delta_ms: buf.get_u16(),
             payload_len: buf.get_u16(),
         })
     }
 }
 
-/// Stateful context that expands [`MiniHeader`]s back into full
-/// [`MediaHeader`]s by tracking the last baseline header.
+/// v2 mini frame context alias. All production code uses this type.
+pub type MiniFrameContext = MiniFrameContextV2;
+
+/// Stateful v2 context that expands [`MiniHeaderV2`]s back into full
+/// [`MediaHeaderV2`]s by tracking the last baseline header.
 #[derive(Clone, Debug, Default)]
-pub struct MiniFrameContext {
-    last_header: Option<MediaHeader>,
+pub struct MiniFrameContextV2 {
+    last: Option<MediaHeaderV2>,
 }
 
-impl MiniFrameContext {
-    /// Record a full header as the new baseline for subsequent mini-frames.
-    pub fn update(&mut self, header: &MediaHeader) {
-        self.last_header = Some(*header);
+impl MiniFrameContextV2 {
+    /// Record a full v2 header as the new baseline for subsequent mini-frames.
+    pub fn update(&mut self, h: &MediaHeaderV2) {
+        self.last = Some(*h);
     }
 
-    /// Expand a mini-header into a full [`MediaHeader`] using the stored
-    /// baseline.  Returns `None` if no baseline has been set yet.
-    pub fn expand(&mut self, mini: &MiniHeader) -> Option<MediaHeader> {
-        let base = self.last_header.as_ref()?;
-        let mut expanded = *base;
-        expanded.seq = base.seq.wrapping_add(1);
-        expanded.timestamp = base.timestamp.wrapping_add(mini.timestamp_delta_ms as u32);
-        self.last_header = Some(expanded);
-        Some(expanded)
+    /// Expand a mini-header into a full [`MediaHeaderV2`] using the stored
+    /// baseline. Returns `None` if no baseline has been set yet.
+    pub fn expand(&mut self, m: &MiniHeaderV2) -> Option<MediaHeaderV2> {
+        let base = self.last.as_ref()?;
+        let mut e = *base;
+        e.seq = base.seq.wrapping_add(m.seq_delta as u32);
+        e.timestamp = base.timestamp.wrapping_add(m.timestamp_delta_ms as u32);
+        self.last = Some(e);
+        Some(e)
+    }
+
+    /// Return a reference to the last baseline header, if any.
+    pub fn last_header(&self) -> Option<&MediaHeaderV2> {
+        self.last.as_ref()
     }
 }
 
@@ -557,10 +540,23 @@ impl MiniFrameContext {
 /// Compatible with Warzone messenger's identity model:
 /// - Identity keys are Ed25519 (signing) + X25519 (encryption) derived from a 32-byte seed via HKDF
 /// - Fingerprint = SHA-256(Ed25519 public key)[:16]
+///
+/// **Version field:** every struct variant carries `version: u8` (default 1).
+/// Old payloads that omit `version` deserialize cleanly thanks to `#[serde(default)]`.
+///
+/// **Unknown variant handling:** `#[serde(other)]` is designed for
+/// string/integer enums with adjacent tagging, not for externally tagged enum
+/// variants. With externally tagged representation (the default for Rust enums),
+/// the variant name IS the tag, so there is no other value to catch. `bincode`
+/// in particular does not support `#[serde(other)]`. Unknown variants will
+/// naturally cause a deserialization error, which is the correct behavior for
+/// the signal protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignalMessage {
     /// Call initiation (analogous to Warzone's WireMessage::CallOffer).
     CallOffer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Caller's Ed25519 identity public key (32 bytes).
         identity_pub: [u8; 32],
         /// Ephemeral X25519 public key for this call.
@@ -572,10 +568,22 @@ pub enum SignalMessage {
         /// Optional display name set by the caller.
         #[serde(default)]
         alias: Option<String>,
+        /// Protocol version requested by the caller (default 2 = v2 wire format).
+        #[serde(default = "default_proto_version")]
+        protocol_version: u8,
+        /// Protocol versions this client supports (default [2]).
+        #[serde(default = "default_supported_versions")]
+        supported_versions: Vec<u8>,
+        /// Video codecs supported by the caller, in preference order.
+        /// Absent on old clients (treated as video-incapable).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        video_codecs: Vec<crate::CodecId>,
     },
 
     /// Call acceptance (analogous to Warzone's WireMessage::CallAnswer).
     CallAnswer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Callee's Ed25519 identity public key (32 bytes).
         identity_pub: [u8; 32],
         /// Callee's ephemeral X25519 public key.
@@ -584,15 +592,23 @@ pub enum SignalMessage {
         signature: Vec<u8>,
         /// Chosen quality profile.
         chosen_profile: crate::QualityProfile,
+        /// Video codec chosen by the callee (None = video declined or peer incapable).
+        /// Absent on old clients (treated as no video).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_codec: Option<crate::CodecId>,
     },
 
     /// ICE candidate for NAT traversal.
     IceCandidate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         candidate: String,
     },
 
     /// Periodic rekeying (forward secrecy).
     Rekey {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// New ephemeral X25519 public key.
         new_ephemeral_pub: [u8; 32],
         /// Ed25519 signature over (new_ephemeral_pub || session_id).
@@ -601,6 +617,8 @@ pub enum SignalMessage {
 
     /// Quality/profile change request.
     QualityUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         report: QualityReport,
         recommended_profile: crate::QualityProfile,
     },
@@ -612,6 +630,8 @@ pub enum SignalMessage {
     /// introducing this variant is backward-compatible with pre-Phase-4
     /// relays — they'll just log "unknown signal variant" on receipt.
     LossRecoveryUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Total frames reconstructed via DRED since call start (monotonic).
         #[serde(default)]
         dred_reconstructions: u64,
@@ -626,13 +646,23 @@ pub enum SignalMessage {
     },
 
     /// Connection keepalive / RTT measurement.
-    Ping { timestamp_ms: u64 },
-    Pong { timestamp_ms: u64 },
+    Ping {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        timestamp_ms: u64,
+    },
+    Pong {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        timestamp_ms: u64,
+    },
 
     /// End the call. `call_id` is optional for backwards compatibility
     /// with older clients that send Hangup without it — the relay falls
     /// back to ending ALL active calls for the sender in that case.
     Hangup {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         reason: HangupReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
@@ -640,29 +670,52 @@ pub enum SignalMessage {
 
     /// featherChat bearer token for relay authentication.
     /// Sent as the first signal message when --auth-url is configured.
-    AuthToken { token: String },
+    AuthToken {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        token: String,
+    },
 
     /// Put the call on hold (stop sending media, keep session alive).
-    Hold,
+    Hold {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Resume a held call.
-    Unhold,
+    Unhold {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Mute request from the remote side (server-initiated mute, like IAX2 QUELCH).
-    Mute,
+    Mute {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Unmute request from the remote side (like IAX2 UNQUELCH).
-    Unmute,
+    Unmute {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
     /// Transfer the call to another peer.
     Transfer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         target_fingerprint: String,
         /// Optional relay address for the transfer target.
         relay_addr: Option<String>,
     },
     /// Acknowledge a transfer request.
-    TransferAck,
+    TransferAck {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+    },
 
     /// Presence update from a peer relay (gossip protocol).
     /// Sent periodically over probe connections to share which fingerprints
     /// are connected to the sending relay.
     PresenceUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Fingerprints currently connected to the sending relay.
         fingerprints: Vec<String>,
         /// Address of the sending relay (e.g., "192.168.1.10:4433").
@@ -671,11 +724,15 @@ pub enum SignalMessage {
 
     /// Ask a peer relay to look up a fingerprint in its registry.
     RouteQuery {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         fingerprint: String,
         ttl: u8,
     },
     /// Response to a route query.
     RouteResponse {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         fingerprint: String,
         found: bool,
         relay_chain: Vec<String>,
@@ -685,6 +742,8 @@ pub enum SignalMessage {
     /// Sent over a relay link (`_relay` SNI) to ask the peer relay to
     /// create a room and forward media for the given session.
     SessionForward {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         session_id: String,
         target_fingerprint: String,
         source_relay: String,
@@ -692,12 +751,16 @@ pub enum SignalMessage {
     /// Confirm that the forwarding session has been set up on the peer relay.
     /// The `room_name` tells the source relay which room to address media to.
     SessionForwardAck {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         session_id: String,
         room_name: String,
     },
 
     /// Room membership update — sent by relay to all participants when someone joins or leaves.
     RoomUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Current participant count.
         count: u32,
         /// List of participants currently in the room.
@@ -705,15 +768,18 @@ pub enum SignalMessage {
     },
 
     // ── Federation signals (relay-to-relay) ──
-
     /// Federation: initial handshake — the connecting relay identifies itself.
     FederationHello {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// TLS certificate fingerprint of the connecting relay.
         tls_fingerprint: String,
     },
 
     /// Federation: this relay now has local participants in a global room.
     GlobalRoomActive {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         room: String,
         /// Participants on the announcing relay (for federated presence).
         #[serde(default)]
@@ -722,14 +788,17 @@ pub enum SignalMessage {
 
     /// Federation: this relay's last local participant left a global room.
     GlobalRoomInactive {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         room: String,
     },
 
     // ── Direct calling signals (client ↔ relay signaling) ──
-
     /// Register on relay for direct calls. Sent on `_signal` connections
     /// after optional AuthToken.
     RegisterPresence {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Client's Ed25519 identity public key.
         identity_pub: [u8; 32],
         /// Signature over ("register-presence" || identity_pub).
@@ -740,6 +809,8 @@ pub enum SignalMessage {
 
     /// Relay confirms presence registration.
     RegisterPresenceAck {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -757,6 +828,8 @@ pub enum SignalMessage {
 
     /// Direct call offer routed through the relay to a specific peer.
     DirectCallOffer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// Caller's fingerprint.
         caller_fingerprint: String,
         /// Caller's display name.
@@ -805,6 +878,8 @@ pub enum SignalMessage {
 
     /// Callee's response to a direct call.
     DirectCallAnswer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// How the callee accepts (or rejects).
         accept_mode: CallAcceptMode,
@@ -845,6 +920,8 @@ pub enum SignalMessage {
 
     /// Relay tells both parties: media room is ready.
     CallSetup {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Room name on the relay for the media session (e.g., "_call:a1b2c3d4").
         room: String,
@@ -878,11 +955,12 @@ pub enum SignalMessage {
 
     /// Ringing notification (relay → caller, callee received the offer).
     CallRinging {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
     },
 
     // ── NAT reflection ("STUN for QUIC") ──────────────────────────────
-
     /// Client → relay: "please tell me the source IP:port you see on
     /// this connection". A QUIC-native replacement for classic STUN
     /// that reuses the TLS-authenticated signal channel to the relay
@@ -901,11 +979,12 @@ pub enum SignalMessage {
     /// for IPv4, "[::1]:p" for IPv6. Clients parse it with
     /// `SocketAddr::from_str`.
     ReflectResponse {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         observed_addr: String,
     },
 
     // ── Phase 6: ICE-style path negotiation ─────────────────────
-
     /// Phase 6: each side reports the result of its local dual-
     /// path race to the other side through the relay. Both peers
     /// send this after their race completes; both wait for the
@@ -919,6 +998,8 @@ pub enum SignalMessage {
     /// and the other picks Relay — they now agree on the path
     /// before any media flows.
     MediaPathReport {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Did the direct QUIC connection (P2P dial or accept)
         /// complete successfully on this side?
@@ -930,7 +1011,6 @@ pub enum SignalMessage {
     },
 
     // ── Phase 8: mid-call ICE re-gathering ────────────────────────
-
     /// Phase 8 (Tailscale-inspired): mid-call candidate update sent
     /// when a client's network changes (WiFi → cellular, IP change,
     /// etc.). The relay forwards this to the call peer, who can
@@ -941,6 +1021,8 @@ pub enum SignalMessage {
     /// — peers ignore updates with a generation <= their last-seen
     /// generation to handle reordering.
     CandidateUpdate {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// New server-reflexive address (STUN-discovered or relay-reflected).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -956,12 +1038,13 @@ pub enum SignalMessage {
     },
 
     // ── Hard NAT traversal (port prediction) ──────────────────────
-
     /// Hard NAT probe coordination — exchanged when both peers
     /// detect symmetric NAT. Carries the port allocation pattern
     /// and recent port sequence so the peer can predict which port
     /// to dial.
     HardNatProbe {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Last observed external ports (most recent first).
         /// Typically 3-5 entries from sequential STUN probes.
@@ -979,6 +1062,8 @@ pub enum SignalMessage {
     /// ports it has open. The Dialer then sprays QUIC connects to
     /// these ports (and optionally random ports) on the Acceptor's IP.
     HardNatBirthdayStart {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Number of sockets the Acceptor opened.
         acceptor_port_count: u16,
@@ -989,7 +1074,6 @@ pub enum SignalMessage {
     },
 
     // ── Phase 4: cross-relay direct-call signaling ────────────────────
-
     /// Phase 4: relay-to-relay envelope for forwarding direct-call
     /// signaling across a federation link. When Alice on Relay A
     /// sends a `DirectCallOffer` for Bob whose fingerprint isn't
@@ -1007,6 +1091,8 @@ pub enum SignalMessage {
     /// A→B→A echo loops; proper TTL + dedup will land when
     /// multi-hop federation is added (Phase 4.2).
     FederatedSignalForward {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// The signal message being forwarded
         /// (`DirectCallOffer`, `DirectCallAnswer`, `CallRinging`,
         /// `Hangup`, ...). Boxed because `SignalMessage` is
@@ -1023,28 +1109,32 @@ pub enum SignalMessage {
     /// Relay-initiated quality directive: all participants should switch
     /// to the recommended profile to match the weakest link.
     QualityDirective {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         recommended_profile: crate::QualityProfile,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
 
     // ── Signal presence ───────────────────────────────────────────
-
     /// Relay broadcasts the list of currently registered signal
     /// users to all connected clients. Sent on every register/
     /// deregister so clients can maintain a live lobby user list.
     PresenceList {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         /// List of online users. Each entry is { fingerprint, alias }.
         users: Vec<PresenceUser>,
     },
 
     // ── Quality upgrade negotiation (#28, #29) ──────────────────
-
     /// Peer proposes upgrading to a higher quality profile.
     /// The other side can accept or reject based on its own network
     /// conditions. Used for consensual upgrades that require both
     /// sides to agree (e.g., switching from Opus24k to Studio48k).
     UpgradeProposal {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// Unique ID for this proposal (to match response).
         proposal_id: String,
@@ -1059,6 +1149,8 @@ pub enum SignalMessage {
 
     /// Response to an UpgradeProposal.
     UpgradeResponse {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         proposal_id: String,
         /// true = accepted, both sides switch. false = rejected.
@@ -1071,17 +1163,20 @@ pub enum SignalMessage {
     /// Confirmation that the upgrade is committed — both sides
     /// should switch encoder at the next frame boundary.
     UpgradeConfirm {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         proposal_id: String,
         confirmed_profile: crate::QualityProfile,
     },
 
     // ── Per-participant quality (#30) ───────────────────────────
-
     /// Peer reports its own quality capability — allows asymmetric
     /// encoding where each side uses the best quality its connection
     /// supports, rather than forcing all to the weakest link.
     QualityCapability {
+        #[serde(default = "default_signal_version")]
+        version: u8,
         call_id: String,
         /// The best profile this peer can sustain based on its
         /// current network conditions.
@@ -1091,6 +1186,57 @@ pub enum SignalMessage {
         loss_pct: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rtt_ms: Option<u32>,
+    },
+
+    /// Transport-layer feedback for bandwidth estimation.
+    /// Sent periodically from receiver to sender (or relay to sender)
+    /// carrying ACK/NACK vectors and a REMB-style bandwidth estimate.
+    TransportFeedback {
+        /// Feedback format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// Which media stream this feedback applies to.
+        stream_id: u8,
+        /// Sequence numbers the receiver has successfully received.
+        acked_seqs: Vec<u32>,
+        /// Sequence numbers the receiver is missing.
+        nacked_seqs: Vec<u32>,
+        /// Receiver Estimated Maximum Bitrate in bits per second (REMB).
+        remb_bps: u32,
+        /// Receiver-side arrival time of the latest packet (microseconds since epoch).
+        recv_time_us: u64,
+    },
+
+    /// Negative acknowledgement — request retransmission of specific packets.
+    /// Sent by the receiver when it detects gaps and RTT is low enough
+    /// that retransmission will arrive before decode deadline.
+    Nack {
+        /// NACK format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// Which media stream has the gap.
+        stream_id: u8,
+        /// Missing sequence numbers.
+        seqs: Vec<u32>,
+    },
+
+    /// Mid-call priority-mode override (PRD-video-quality-priority T5.1).
+    SetPriorityMode {
+        /// Signal format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// New priority mode to apply.
+        mode: crate::PriorityMode,
+    },
+
+    /// Picture Loss Indication — decoder can't proceed, needs a fresh keyframe.
+    /// Used instead of Nack when RTT is too high for retransmission to help.
+    PictureLossIndication {
+        /// PLI format version (default 1).
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        /// Which media stream needs the keyframe.
+        stream_id: u8,
     },
 }
 
@@ -1119,19 +1265,63 @@ pub struct RoomParticipant {
     pub relay_label: Option<String>,
 }
 
-/// Reasons for ending a call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Default protocol version for `CallOffer` (v2 wire format).
+pub fn default_proto_version() -> u8 {
+    2
+}
+
+/// Default supported versions for `CallOffer` (only v2).
+pub fn default_supported_versions() -> Vec<u8> {
+    vec![2]
+}
+/// Default signal message version (v1).
+pub fn default_signal_version() -> u8 {
+    1
+}
+
+/// Typed reason for a call hangup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HangupReason {
     Normal,
     Busy,
     Declined,
     Timeout,
     Error,
+    /// Server does not support any of the client's requested protocol versions.
+    ProtocolVersionMismatch {
+        /// Versions the server is willing to speak.
+        server_supported: Vec<u8>,
+    },
+    /// Relay conformance policy violation (Tier G).
+    PolicyViolation {
+        /// Machine-readable violation code.
+        code: ViolationCode,
+        /// Human-readable explanation.
+        reason: String,
+    },
+}
+
+/// Machine-readable policy-violation codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ViolationCode {
+    /// Tier A — sustained bitrate exceeded codec ceiling.
+    Bitrate,
+    /// Tier B — packet rate exceeded safety limit.
+    PacketRate,
+    /// Tier C — timestamp drift.
+    TimestampDrift,
+    /// Tier D — payload size anomaly.
+    PayloadSize,
+    /// Tier E — per-session rate cap.
+    RateCap,
+    /// Tier F — behavioural entropy score below threshold.
+    Entropy,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PriorityMode;
 
     #[test]
     fn quality_report_from_path_stats_basic() {
@@ -1162,17 +1352,15 @@ mod tests {
     #[test]
     fn header_roundtrip() {
         let header = MediaHeader {
-            version: 0,
-            is_repair: false,
+            version: 2,
+            flags: MediaHeader::FLAG_QUALITY,
+            media_type: MediaType::Audio,
             codec_id: CodecId::Opus24k,
-            has_quality_report: true,
-            fec_ratio_encoded: 42,
+            stream_id: 0,
+            fec_ratio: 42,
             seq: 12345,
             timestamp: 987654,
             fec_block: 7,
-            fec_symbol: 3,
-            reserved: 0,
-            csrc_count: 0,
         };
 
         let bytes = header.to_bytes();
@@ -1186,23 +1374,42 @@ mod tests {
     #[test]
     fn header_repair_flag() {
         let header = MediaHeader {
-            version: 0,
-            is_repair: true,
+            version: 2,
+            flags: MediaHeader::FLAG_REPAIR,
+            media_type: MediaType::Audio,
             codec_id: CodecId::Codec2_1200,
-            has_quality_report: false,
-            fec_ratio_encoded: 127,
-            seq: 65535,
+            stream_id: 0,
+            fec_ratio: 127,
+            seq: 0xDEAD_BEEF,
             timestamp: u32::MAX,
-            fec_block: 255,
-            fec_symbol: 255,
-            reserved: 0xFF,
-            csrc_count: 0,
+            fec_block: 0xABCD,
         };
 
         let bytes = header.to_bytes();
         let mut cursor = &bytes[..];
         let decoded = MediaHeader::read_from(&mut cursor).unwrap();
         assert_eq!(header, decoded);
+    }
+
+    #[test]
+    fn media_header_v2_roundtrip() {
+        let h = MediaHeaderV2 {
+            version: 2,
+            flags: MediaHeaderV2::FLAG_QUALITY,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 50,
+            seq: 0xDEAD_BEEF,
+            timestamp: 0x1234_5678,
+            fec_block: 0xABCD,
+        };
+        let mut buf = BytesMut::with_capacity(MediaHeaderV2::WIRE_SIZE);
+        h.write_to(&mut buf);
+        assert_eq!(buf.len(), 16);
+        let mut cursor = std::io::Cursor::new(&buf[..]);
+        let parsed = MediaHeaderV2::read_from(&mut cursor).unwrap();
+        assert_eq!(h, parsed);
     }
 
     #[test]
@@ -1227,17 +1434,15 @@ mod tests {
     fn media_packet_roundtrip() {
         let packet = MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: MediaHeader::FLAG_QUALITY,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus6k,
-                has_quality_report: true,
-                fec_ratio_encoded: 32,
+                stream_id: 0,
+                fec_ratio: 32,
                 seq: 100,
                 timestamp: 2000,
                 fec_block: 1,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from_static(b"test audio data here"),
             quality_report: Some(QualityReport {
@@ -1270,15 +1475,17 @@ mod tests {
         // for v6 and the client side has to parse that back.
         for addr in ["192.0.2.17:4433", "[2001:db8::1]:4433", "127.0.0.1:54321"] {
             let resp = SignalMessage::ReflectResponse {
+                version: default_signal_version(),
                 observed_addr: addr.to_string(),
             };
             let json = serde_json::to_string(&resp).unwrap();
             let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
             match decoded {
-                SignalMessage::ReflectResponse { observed_addr } => {
+                SignalMessage::ReflectResponse { observed_addr, .. } => {
                     assert_eq!(observed_addr, addr);
                     // Must parse back to a SocketAddr cleanly.
-                    let _parsed: std::net::SocketAddr = observed_addr.parse()
+                    let _parsed: std::net::SocketAddr = observed_addr
+                        .parse()
                         .expect("observed_addr must parse as SocketAddr");
                 }
                 _ => panic!("wrong variant after roundtrip"),
@@ -1291,6 +1498,7 @@ mod tests {
         // Wrap a DirectCallOffer inside FederatedSignalForward and
         // prove both directions of serde preserve every field.
         let inner = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: Some("Alice".into()),
             target_fingerprint: "bob".into(),
@@ -1305,13 +1513,18 @@ mod tests {
             caller_build_version: None,
         };
         let forward = SignalMessage::FederatedSignalForward {
+            version: default_signal_version(),
             inner: Box::new(inner),
             origin_relay_fp: "relay-a-tls-fp".into(),
         };
         let json = serde_json::to_string(&forward).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::FederatedSignalForward { inner, origin_relay_fp } => {
+            SignalMessage::FederatedSignalForward {
+                inner,
+                origin_relay_fp,
+                ..
+            } => {
                 assert_eq!(origin_relay_fp, "relay-a-tls-fp");
                 match *inner {
                     SignalMessage::DirectCallOffer {
@@ -1337,6 +1550,7 @@ mod tests {
         // we intend to forward survives being boxed + re-serialized.
         let cases: Vec<SignalMessage> = vec![
             SignalMessage::DirectCallAnswer {
+                version: default_signal_version(),
                 call_id: "c1".into(),
                 accept_mode: CallAcceptMode::AcceptTrusted,
                 identity_pub: None,
@@ -1348,12 +1562,20 @@ mod tests {
                 callee_mapped_addr: None,
                 callee_build_version: None,
             },
-            SignalMessage::CallRinging { call_id: "c1".into() },
-            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
+            SignalMessage::CallRinging {
+                version: default_signal_version(),
+                call_id: "c1".into(),
+            },
+            SignalMessage::Hangup {
+                version: default_signal_version(),
+                reason: HangupReason::Normal,
+                call_id: None,
+            },
         ];
         for inner in cases {
             let inner_disc = std::mem::discriminant(&inner);
             let forward = SignalMessage::FederatedSignalForward {
+                version: default_signal_version(),
                 inner: Box::new(inner),
                 origin_relay_fp: "r".into(),
             };
@@ -1372,6 +1594,7 @@ mod tests {
     fn hole_punching_optional_fields_roundtrip() {
         // DirectCallOffer with Some(caller_reflexive_addr)
         let offer = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -1392,7 +1615,10 @@ mod tests {
         );
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+            SignalMessage::DirectCallOffer {
+                caller_reflexive_addr,
+                ..
+            } => {
                 assert_eq!(caller_reflexive_addr.as_deref(), Some("192.0.2.1:4433"));
             }
             _ => panic!("wrong variant"),
@@ -1402,6 +1628,7 @@ mod tests {
         // OMIT the field from the JSON so older relays that don't
         // know about caller_reflexive_addr don't see it.
         let offer_none = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -1423,6 +1650,7 @@ mod tests {
 
         // DirectCallAnswer with callee_reflexive_addr.
         let answer = SignalMessage::DirectCallAnswer {
+            version: default_signal_version(),
             call_id: "c1".into(),
             accept_mode: CallAcceptMode::AcceptTrusted,
             identity_pub: None,
@@ -1437,17 +1665,18 @@ mod tests {
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
         match decoded {
-            SignalMessage::DirectCallAnswer { callee_reflexive_addr, .. } => {
-                assert_eq!(
-                    callee_reflexive_addr.as_deref(),
-                    Some("198.51.100.9:4433")
-                );
+            SignalMessage::DirectCallAnswer {
+                callee_reflexive_addr,
+                ..
+            } => {
+                assert_eq!(callee_reflexive_addr.as_deref(), Some("198.51.100.9:4433"));
             }
             _ => panic!("wrong variant"),
         }
 
         // CallSetup with peer_direct_addr.
         let setup = SignalMessage::CallSetup {
+            version: default_signal_version(),
             call_id: "c1".into(),
             room: "call-c1".into(),
             relay_addr: "203.0.113.5:4433".into(),
@@ -1458,7 +1687,9 @@ mod tests {
         let decoded: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
         match decoded {
-            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+            SignalMessage::CallSetup {
+                peer_direct_addr, ..
+            } => {
                 assert_eq!(peer_direct_addr.as_deref(), Some("192.0.2.1:4433"));
             }
             _ => panic!("wrong variant"),
@@ -1484,7 +1715,10 @@ mod tests {
         }"#;
         let decoded: SignalMessage = serde_json::from_str(old_offer_json).unwrap();
         match decoded {
-            SignalMessage::DirectCallOffer { caller_reflexive_addr, .. } => {
+            SignalMessage::DirectCallOffer {
+                caller_reflexive_addr,
+                ..
+            } => {
                 assert!(caller_reflexive_addr.is_none());
             }
             _ => panic!("wrong variant"),
@@ -1499,7 +1733,9 @@ mod tests {
         }"#;
         let decoded: SignalMessage = serde_json::from_str(old_setup_json).unwrap();
         match decoded {
-            SignalMessage::CallSetup { peer_direct_addr, .. } => {
+            SignalMessage::CallSetup {
+                peer_direct_addr, ..
+            } => {
                 assert!(peer_direct_addr.is_none());
             }
             _ => panic!("wrong variant"),
@@ -1512,51 +1748,59 @@ mod tests {
         // not break JSON round-tripping of existing variants. Smoke-
         // test a sample of the pre-existing ones.
         let cases = vec![
-            SignalMessage::Ping { timestamp_ms: 12345 },
-            SignalMessage::Hold,
-            SignalMessage::Hangup { reason: HangupReason::Normal, call_id: None },
-            SignalMessage::CallRinging { call_id: "abcd".into() },
+            SignalMessage::Ping {
+                version: default_signal_version(),
+                timestamp_ms: 12345,
+            },
+            SignalMessage::Hold { version: default_signal_version() },
+            SignalMessage::Hangup {
+                version: default_signal_version(),
+                reason: HangupReason::Normal,
+                call_id: None,
+            },
+            SignalMessage::CallRinging {
+                version: default_signal_version(),
+                call_id: "abcd".into(),
+            },
         ];
         for m in cases {
             let json = serde_json::to_string(&m).unwrap();
             let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
             // Discriminant equality proves variant tag survived.
-            assert_eq!(
-                std::mem::discriminant(&m),
-                std::mem::discriminant(&decoded)
-            );
+            assert_eq!(std::mem::discriminant(&m), std::mem::discriminant(&decoded));
         }
     }
 
     #[test]
     fn hold_unhold_serialize() {
-        let hold = SignalMessage::Hold;
+        let hold = SignalMessage::Hold { version: default_signal_version() };
         let json = serde_json::to_string(&hold).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Hold));
+        assert!(matches!(decoded, SignalMessage::Hold { .. }));
 
-        let unhold = SignalMessage::Unhold;
+        let unhold = SignalMessage::Unhold { version: default_signal_version() };
         let json = serde_json::to_string(&unhold).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Unhold));
+        assert!(matches!(decoded, SignalMessage::Unhold { .. }));
     }
 
     #[test]
     fn mute_unmute_serialize() {
-        let mute = SignalMessage::Mute;
+        let mute = SignalMessage::Mute { version: default_signal_version() };
         let json = serde_json::to_string(&mute).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Mute));
+        assert!(matches!(decoded, SignalMessage::Mute { .. }));
 
-        let unmute = SignalMessage::Unmute;
+        let unmute = SignalMessage::Unmute { version: default_signal_version() };
         let json = serde_json::to_string(&unmute).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::Unmute));
+        assert!(matches!(decoded, SignalMessage::Unmute { .. }));
     }
 
     #[test]
     fn transfer_serialize() {
         let transfer = SignalMessage::Transfer {
+            version: default_signal_version(),
             target_fingerprint: "abc123".to_string(),
             relay_addr: Some("relay.example.com:4433".to_string()),
         };
@@ -1566,6 +1810,7 @@ mod tests {
             SignalMessage::Transfer {
                 target_fingerprint,
                 relay_addr,
+                ..
             } => {
                 assert_eq!(target_fingerprint, "abc123");
                 assert_eq!(relay_addr.unwrap(), "relay.example.com:4433");
@@ -1575,6 +1820,7 @@ mod tests {
 
         // Also test with relay_addr = None
         let transfer_no_relay = SignalMessage::Transfer {
+            version: default_signal_version(),
             target_fingerprint: "def456".to_string(),
             relay_addr: None,
         };
@@ -1584,6 +1830,7 @@ mod tests {
             SignalMessage::Transfer {
                 target_fingerprint,
                 relay_addr,
+                ..
             } => {
                 assert_eq!(target_fingerprint, "def456");
                 assert!(relay_addr.is_none());
@@ -1594,22 +1841,27 @@ mod tests {
 
     #[test]
     fn transfer_ack_serialize() {
-        let ack = SignalMessage::TransferAck;
+        let ack = SignalMessage::TransferAck { version: default_signal_version() };
         let json = serde_json::to_string(&ack).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, SignalMessage::TransferAck));
+        assert!(matches!(decoded, SignalMessage::TransferAck { .. }));
     }
 
     #[test]
     fn presence_update_signal_roundtrip() {
         let msg = SignalMessage::PresenceUpdate {
+            version: default_signal_version(),
             fingerprints: vec!["aabb".to_string(), "ccdd".to_string()],
             relay_addr: "10.0.0.1:4433".to_string(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::PresenceUpdate { fingerprints, relay_addr } => {
+            SignalMessage::PresenceUpdate {
+                fingerprints,
+                relay_addr,
+                ..
+            } => {
                 assert_eq!(fingerprints.len(), 2);
                 assert!(fingerprints.contains(&"aabb".to_string()));
                 assert!(fingerprints.contains(&"ccdd".to_string()));
@@ -1620,13 +1872,18 @@ mod tests {
 
         // Empty fingerprints list
         let msg_empty = SignalMessage::PresenceUpdate {
+            version: default_signal_version(),
             fingerprints: vec![],
             relay_addr: "10.0.0.2:4433".to_string(),
         };
         let json = serde_json::to_string(&msg_empty).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::PresenceUpdate { fingerprints, relay_addr } => {
+            SignalMessage::PresenceUpdate {
+                fingerprints,
+                relay_addr,
+                ..
+            } => {
                 assert!(fingerprints.is_empty());
                 assert_eq!(relay_addr, "10.0.0.2:4433");
             }
@@ -1639,11 +1896,11 @@ mod tests {
         let ratio = 0.5;
         let encoded = MediaHeader::encode_fec_ratio(ratio);
         let decoded = MediaHeader::decode_fec_ratio(encoded);
-        assert!((decoded - ratio).abs() < 0.02);
+        assert!((decoded - ratio).abs() < 0.01);
 
         let ratio_max = 2.0;
         let encoded_max = MediaHeader::encode_fec_ratio(ratio_max);
-        assert_eq!(encoded_max, 127);
+        assert_eq!(encoded_max, 200);
     }
 
     // ---------------------------------------------------------------
@@ -1704,6 +1961,7 @@ mod tests {
     #[test]
     fn mini_header_encode_decode() {
         let mini = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 160,
         };
@@ -1718,29 +1976,28 @@ mod tests {
     #[test]
     fn mini_header_wire_size() {
         let mini = MiniHeader {
+            seq_delta: 0xFF,
             timestamp_delta_ms: 0xFFFF,
             payload_len: 0xFFFF,
         };
         let mut buf = BytesMut::new();
         mini.write_to(&mut buf);
-        assert_eq!(buf.len(), 4);
-        assert_eq!(MiniHeader::WIRE_SIZE, 4);
+        assert_eq!(buf.len(), 5);
+        assert_eq!(MiniHeader::WIRE_SIZE, 5);
     }
 
     #[test]
     fn mini_frame_context_expand() {
         let baseline = MediaHeader {
-            version: 0,
-            is_repair: false,
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
             codec_id: CodecId::Opus24k,
-            has_quality_report: false,
-            fec_ratio_encoded: 10,
+            stream_id: 0,
+            fec_ratio: 10,
             seq: 100,
             timestamp: 1000,
             fec_block: 5,
-            fec_symbol: 0,
-            reserved: 0,
-            csrc_count: 0,
         };
 
         let mut ctx = MiniFrameContext::default();
@@ -1748,6 +2005,7 @@ mod tests {
 
         // First expansion
         let mini1 = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };
@@ -1759,6 +2017,7 @@ mod tests {
 
         // Second expansion — builds on expanded h1
         let mini2 = MiniHeader {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };
@@ -1771,6 +2030,73 @@ mod tests {
     fn mini_frame_context_no_baseline() {
         let mut ctx = MiniFrameContext::default();
         let mini = MiniHeader {
+            seq_delta: 1,
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        assert!(ctx.expand(&mini).is_none());
+    }
+
+    #[test]
+    fn mini_header_v2_roundtrip() {
+        let mini = MiniHeaderV2 {
+            seq_delta: 3,
+            timestamp_delta_ms: 20,
+            payload_len: 160,
+        };
+        let mut buf = BytesMut::new();
+        mini.write_to(&mut buf);
+        assert_eq!(buf.len(), 5);
+
+        let mut cursor = &buf[..];
+        let decoded = MiniHeaderV2::read_from(&mut cursor).unwrap();
+        assert_eq!(mini, decoded);
+    }
+
+    #[test]
+    fn mini_frame_context_v2_expand() {
+        let baseline = MediaHeaderV2 {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 50,
+            seq: 100,
+            timestamp: 1000,
+            fec_block: 5,
+        };
+
+        let mut ctx = MiniFrameContextV2::default();
+        ctx.update(&baseline);
+
+        let mini = MiniHeaderV2 {
+            seq_delta: 3,
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        let h1 = ctx.expand(&mini).unwrap();
+        assert_eq!(h1.seq, 103);
+        assert_eq!(h1.timestamp, 1020);
+        assert_eq!(h1.codec_id, CodecId::Opus24k);
+        assert_eq!(h1.fec_block, 5);
+
+        // Second expansion — builds on expanded h1
+        let mini2 = MiniHeaderV2 {
+            seq_delta: 1,
+            timestamp_delta_ms: 20,
+            payload_len: 80,
+        };
+        let h2 = ctx.expand(&mini2).unwrap();
+        assert_eq!(h2.seq, 104);
+        assert_eq!(h2.timestamp, 1040);
+    }
+
+    #[test]
+    fn mini_frame_context_v2_no_baseline() {
+        let mut ctx = MiniFrameContextV2::default();
+        let mini = MiniHeaderV2 {
+            seq_delta: 1,
             timestamp_delta_ms: 20,
             payload_len: 80,
         };
@@ -1779,13 +2105,13 @@ mod tests {
 
     #[test]
     fn full_vs_mini_size_comparison() {
-        // Full frame on wire: 1 byte type tag + 12 byte MediaHeader = 13
+        // Full frame on wire: 1 byte type tag + 16 byte MediaHeader = 17
         let full_size = 1 + MediaHeader::WIRE_SIZE;
-        assert_eq!(full_size, 13);
+        assert_eq!(full_size, 17);
 
-        // Mini frame on wire: 1 byte type tag + 4 byte MiniHeader = 5
+        // Mini frame on wire: 1 byte type tag + 5 byte MiniHeader = 6
         let mini_size = 1 + MiniHeader::WIRE_SIZE;
-        assert_eq!(mini_size, 5);
+        assert_eq!(mini_size, 6);
 
         // Verify the constants match expectations
         assert_eq!(FRAME_TYPE_FULL, 0x00);
@@ -1796,20 +2122,18 @@ mod tests {
     // encode_compact / decode_compact tests
     // ---------------------------------------------------------------
 
-    fn make_media_packet(seq: u16, ts: u32, payload: &[u8]) -> MediaPacket {
+    fn make_media_packet(seq: u32, ts: u32, payload: &[u8]) -> MediaPacket {
         MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus24k,
-                has_quality_report: false,
-                fec_ratio_encoded: 10,
+                stream_id: 0,
+                fec_ratio: 10,
                 seq,
                 timestamp: ts,
                 fec_block: 0,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from(payload.to_vec()),
             quality_report: None,
@@ -1823,7 +2147,7 @@ mod tests {
         let mut frames_since_full: u32 = 0;
 
         let packets: Vec<MediaPacket> = (0..5)
-            .map(|i| make_media_packet(i, i as u32 * 20, b"audio"))
+            .map(|i| make_media_packet(i, i * 20, b"audio"))
             .collect();
 
         for (i, pkt) in packets.iter().enumerate() {
@@ -1835,7 +2159,7 @@ mod tests {
             } else {
                 // Subsequent frames should be mini
                 assert_eq!(wire[0], FRAME_TYPE_MINI, "frame {i} should be MINI");
-                // Mini wire: 1 (tag) + 4 (mini header) + payload
+                // Mini wire: 1 (tag) + 5 (mini header) + payload
                 assert_eq!(wire.len(), 1 + MiniHeader::WIRE_SIZE + pkt.payload.len());
             }
 
@@ -1855,19 +2179,13 @@ mod tests {
         // Encode MINI_FRAME_FULL_INTERVAL + 1 frames. Frame 0 and frame 50
         // should be FULL, everything in between should be MINI.
         for i in 0..=MINI_FRAME_FULL_INTERVAL {
-            let pkt = make_media_packet(i as u16, i * 20, b"data");
+            let pkt = make_media_packet(i, i * 20, b"data");
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
 
             if i == 0 || i == MINI_FRAME_FULL_INTERVAL {
-                assert_eq!(
-                    wire[0], FRAME_TYPE_FULL,
-                    "frame {i} should be FULL"
-                );
+                assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL");
             } else {
-                assert_eq!(
-                    wire[0], FRAME_TYPE_MINI,
-                    "frame {i} should be MINI"
-                );
+                assert_eq!(wire[0], FRAME_TYPE_MINI, "frame {i} should be MINI");
             }
         }
     }
@@ -1875,13 +2193,18 @@ mod tests {
     #[test]
     fn quality_directive_roundtrip() {
         let msg = SignalMessage::QualityDirective {
+            version: default_signal_version(),
             recommended_profile: crate::QualityProfile::DEGRADED,
             reason: Some("weakest link degraded".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::QualityDirective { recommended_profile, reason } => {
+            SignalMessage::QualityDirective {
+                recommended_profile,
+                reason,
+                ..
+            } => {
                 assert_eq!(recommended_profile.codec, CodecId::Opus6k);
                 assert_eq!(reason.as_deref(), Some("weakest link degraded"));
             }
@@ -1892,6 +2215,7 @@ mod tests {
     #[test]
     fn quality_directive_without_reason_roundtrip() {
         let msg = SignalMessage::QualityDirective {
+            version: default_signal_version(),
             recommended_profile: crate::QualityProfile::GOOD,
             reason: None,
         };
@@ -1913,15 +2237,37 @@ mod tests {
         // (which is what the encoder does when the feature is off).
         let mut ctx = MiniFrameContext::default();
 
-        for i in 0..10u16 {
-            let pkt = make_media_packet(i, i as u32 * 20, b"payload");
+        for i in 0..10u32 {
+            let pkt = make_media_packet(i, i * 20, b"payload");
             // When mini-frames are disabled, the encoder always passes
             // frames_since_full = 0 equivalent by never using encode_compact.
             // We test the raw path: frames_since_full forced to 0 every time.
             let mut frames_since_full: u32 = 0;
             let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
-            assert_eq!(wire[0], FRAME_TYPE_FULL, "frame {i} should be FULL when disabled");
+            assert_eq!(
+                wire[0], FRAME_TYPE_FULL,
+                "frame {i} should be FULL when disabled"
+            );
         }
+    }
+
+    #[test]
+    fn encode_compact_fallback_to_full_without_baseline() {
+        // A fresh MiniFrameContext has no baseline header.  If the caller
+        // somehow passes frames_since_full > 0 we must not panic; instead
+        // fall back to a full frame and establish the baseline.
+        let mut ctx = MiniFrameContext::default();
+        let mut frames_since_full: u32 = 1; // claims we've seen a full frame
+
+        let pkt = make_media_packet(0, 0, b"audio");
+        let wire = pkt.encode_compact(&mut ctx, &mut frames_since_full);
+
+        assert_eq!(
+            wire[0], FRAME_TYPE_FULL,
+            "must fall back to FULL when no baseline"
+        );
+        // After the fallback the baseline is established.
+        assert!(ctx.last_header().is_some());
     }
 
     // ── Quality negotiation roundtrip tests (#28, #29, #30) ─────
@@ -1929,6 +2275,7 @@ mod tests {
     #[test]
     fn upgrade_proposal_roundtrip() {
         let msg = SignalMessage::UpgradeProposal {
+            version: default_signal_version(),
             call_id: "c1".into(),
             proposal_id: "p1".into(),
             proposed_profile: crate::QualityProfile::STUDIO_48K,
@@ -1938,7 +2285,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::UpgradeProposal { proposal_id, proposed_profile, .. } => {
+            SignalMessage::UpgradeProposal {
+                proposal_id,
+                proposed_profile,
+                ..
+            } => {
                 assert_eq!(proposal_id, "p1");
                 assert_eq!(proposed_profile, crate::QualityProfile::STUDIO_48K);
             }
@@ -1949,6 +2300,7 @@ mod tests {
     #[test]
     fn upgrade_response_roundtrip() {
         let msg = SignalMessage::UpgradeResponse {
+            version: default_signal_version(),
             call_id: "c1".into(),
             proposal_id: "p1".into(),
             accepted: true,
@@ -1965,6 +2317,7 @@ mod tests {
     #[test]
     fn upgrade_confirm_roundtrip() {
         let msg = SignalMessage::UpgradeConfirm {
+            version: default_signal_version(),
             call_id: "c1".into(),
             proposal_id: "p1".into(),
             confirmed_profile: crate::QualityProfile::STUDIO_64K,
@@ -1972,7 +2325,9 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::UpgradeConfirm { confirmed_profile, .. } => {
+            SignalMessage::UpgradeConfirm {
+                confirmed_profile, ..
+            } => {
                 assert_eq!(confirmed_profile, crate::QualityProfile::STUDIO_64K);
             }
             _ => panic!("wrong variant"),
@@ -1982,6 +2337,7 @@ mod tests {
     #[test]
     fn quality_capability_roundtrip() {
         let msg = SignalMessage::QualityCapability {
+            version: default_signal_version(),
             call_id: "c1".into(),
             max_profile: crate::QualityProfile::GOOD,
             loss_pct: Some(2.5),
@@ -1990,7 +2346,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            SignalMessage::QualityCapability { max_profile, loss_pct, .. } => {
+            SignalMessage::QualityCapability {
+                max_profile,
+                loss_pct,
+                ..
+            } => {
                 assert_eq!(max_profile, crate::QualityProfile::GOOD);
                 assert!((loss_pct.unwrap() - 2.5).abs() < 0.01);
             }
@@ -2003,12 +2363,10 @@ mod tests {
     #[test]
     fn candidate_update_roundtrip() {
         let msg = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "test-123".into(),
             reflexive_addr: Some("203.0.113.5:4433".into()),
-            local_addrs: vec![
-                "192.168.1.10:4433".into(),
-                "10.0.0.5:4433".into(),
-            ],
+            local_addrs: vec!["192.168.1.10:4433".into(), "10.0.0.5:4433".into()],
             mapped_addr: Some("198.51.100.42:12345".into()),
             generation: 7,
         };
@@ -2021,6 +2379,7 @@ mod tests {
                 local_addrs,
                 mapped_addr,
                 generation,
+                ..
             } => {
                 assert_eq!(call_id, "test-123");
                 assert_eq!(reflexive_addr.as_deref(), Some("203.0.113.5:4433"));
@@ -2035,6 +2394,7 @@ mod tests {
     #[test]
     fn candidate_update_minimal_roundtrip() {
         let msg = SignalMessage::CandidateUpdate {
+            version: default_signal_version(),
             call_id: "c".into(),
             reflexive_addr: None,
             local_addrs: vec![],
@@ -2059,6 +2419,7 @@ mod tests {
     #[test]
     fn offer_with_mapped_addr_roundtrip() {
         let msg = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -2090,6 +2451,7 @@ mod tests {
     #[test]
     fn offer_without_mapped_addr_omits_field() {
         let msg = SignalMessage::DirectCallOffer {
+            version: default_signal_version(),
             caller_fingerprint: "alice".into(),
             caller_alias: None,
             target_fingerprint: "bob".into(),
@@ -2110,6 +2472,7 @@ mod tests {
     #[test]
     fn answer_with_mapped_addr_roundtrip() {
         let msg = SignalMessage::DirectCallAnswer {
+            version: default_signal_version(),
             call_id: "c1".into(),
             accept_mode: CallAcceptMode::AcceptTrusted,
             identity_pub: None,
@@ -2136,6 +2499,7 @@ mod tests {
     #[test]
     fn setup_with_mapped_addr_roundtrip() {
         let msg = SignalMessage::CallSetup {
+            version: default_signal_version(),
             call_id: "c1".into(),
             room: "room".into(),
             relay_addr: "1.2.3.4:5".into(),
@@ -2212,6 +2576,7 @@ mod tests {
     #[test]
     fn register_presence_ack_with_new_fields_roundtrip() {
         let msg = SignalMessage::RegisterPresenceAck {
+            version: default_signal_version(),
             success: true,
             error: None,
             relay_build: Some("abc123".into()),
@@ -2263,5 +2628,234 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn transport_feedback_roundtrip() {
+        let original = SignalMessage::TransportFeedback {
+            version: 1,
+            stream_id: 0,
+            acked_seqs: vec![10, 11, 12, 15, 16],
+            nacked_seqs: vec![13, 14],
+            remb_bps: 256_000,
+            recv_time_us: 1_234_567_890,
+        };
+
+        // Test JSON serialization (used for signal channel).
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::TransportFeedback {
+                version,
+                stream_id,
+                acked_seqs,
+                nacked_seqs,
+                remb_bps,
+                recv_time_us,
+                ..
+            } => {
+                assert_eq!(version, 1);
+                assert_eq!(stream_id, 0);
+                assert_eq!(acked_seqs, vec![10, 11, 12, 15, 16]);
+                assert_eq!(nacked_seqs, vec![13, 14]);
+                assert_eq!(remb_bps, 256_000);
+                assert_eq!(recv_time_us, 1_234_567_890);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Test bincode serialization (used for federation forward compat).
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(decoded, SignalMessage::TransportFeedback { .. }));
+    }
+
+    #[test]
+    fn transport_feedback_default_version() {
+        // Simulate an old sender that omits the version field.
+        let json = r#"{
+            "TransportFeedback": {
+                "stream_id": 1,
+                "acked_seqs": [1, 2, 3],
+                "nacked_seqs": [],
+                "remb_bps": 128000,
+                "recv_time_us": 0
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::TransportFeedback { version, .. } => {
+                assert_eq!(version, 1, "serde default makes omitted version 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn old_payload_without_version_deserializes() {
+        // CallOffer without version field — old client sending to new receiver.
+        let json = r#"{
+            "CallOffer": {
+                "identity_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "ephemeral_pub": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "signature": [],
+                "supported_profiles": [],
+                "alias": null,
+                "protocol_version": 2,
+                "supported_versions": [2]
+            }
+        }"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::CallOffer {
+                version,
+                protocol_version,
+                ..
+            } => {
+                assert_eq!(version, 1, "missing version defaults to 1");
+                assert_eq!(protocol_version, 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Ping without version field.
+        let json = r#"{"Ping": {"timestamp_ms": 1234}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Ping {
+                version,
+                timestamp_ms,
+            } => {
+                assert_eq!(version, 1, "missing version defaults to 1");
+                assert_eq!(timestamp_ms, 1234);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Hangup without version field.
+        let json = r#"{"Hangup": {"reason": "Normal", "call_id": null}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Hangup { version, .. } => {
+                assert_eq!(version, 1, "missing version defaults to 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn new_payload_with_version_deserializes() {
+        // Payload that explicitly includes version = 2.
+        let json = r#"{"Ping": {"version": 2, "timestamp_ms": 5678}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Ping {
+                version,
+                timestamp_ms,
+            } => {
+                assert_eq!(version, 2, "explicit version is preserved");
+                assert_eq!(timestamp_ms, 5678);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn nack_roundtrip() {
+        let original = SignalMessage::Nack {
+            version: 1,
+            stream_id: 7,
+            seqs: vec![42, 43, 44],
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::Nack {
+                version,
+                stream_id,
+                seqs,
+            } => {
+                assert_eq!(version, 1);
+                assert_eq!(stream_id, 7);
+                assert_eq!(seqs, vec![42, 43, 44]);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(decoded, SignalMessage::Nack { .. }));
+    }
+
+    #[test]
+    fn nack_default_version() {
+        let json = r#"{"Nack": {"stream_id": 3, "seqs": [10, 11]}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::Nack { version, .. } => {
+                assert_eq!(version, 1, "serde default makes omitted version 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn picture_loss_indication_roundtrip() {
+        let original = SignalMessage::PictureLossIndication {
+            version: 1,
+            stream_id: 5,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::PictureLossIndication { version, stream_id } => {
+                assert_eq!(version, 1);
+                assert_eq!(stream_id, 5);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(
+            decoded,
+            SignalMessage::PictureLossIndication { .. }
+        ));
+    }
+
+    #[test]
+    fn picture_loss_indication_default_version() {
+        let json = r#"{"PictureLossIndication": {"stream_id": 2}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            SignalMessage::PictureLossIndication { version, .. } => {
+                assert_eq!(version, 1, "serde default makes omitted version 1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn set_priority_mode_roundtrip() {
+        let original = SignalMessage::SetPriorityMode {
+            version: 1,
+            mode: PriorityMode::Balanced,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SignalMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SignalMessage::SetPriorityMode { version, mode } => {
+                assert_eq!(version, 1);
+                assert_eq!(mode, PriorityMode::Balanced);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let bin = bincode::serialize(&original).unwrap();
+        let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
+        assert!(matches!(decoded, SignalMessage::SetPriorityMode { .. }));
     }
 }

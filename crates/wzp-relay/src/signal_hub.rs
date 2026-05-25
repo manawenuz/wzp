@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tracing::info;
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_transport::QuinnTransport;
 
 /// A client connected via `_signal` for direct calling.
@@ -34,12 +34,15 @@ impl SignalHub {
     /// Register a new signaling client.
     pub fn register(&mut self, fp: String, transport: Arc<QuinnTransport>, alias: Option<String>) {
         info!(fingerprint = %fp, alias = ?alias, "signal client registered");
-        self.clients.insert(fp.clone(), SignalClient {
-            fingerprint: fp,
-            alias,
-            transport,
-            connected_at: Instant::now(),
-        });
+        self.clients.insert(
+            fp.clone(),
+            SignalClient {
+                fingerprint: fp,
+                alias,
+                transport,
+                connected_at: Instant::now(),
+            },
+        );
     }
 
     /// Unregister a signaling client. Returns the client if found.
@@ -64,10 +67,11 @@ impl SignalHub {
     /// Send a signal message to a client by fingerprint.
     pub async fn send_to(&self, fp: &str, msg: &SignalMessage) -> Result<(), String> {
         match self.clients.get(fp) {
-            Some(client) => {
-                client.transport.send_signal(msg).await
-                    .map_err(|e| format!("send to {fp}: {e}"))
-            }
+            Some(client) => client
+                .transport
+                .send_signal(msg)
+                .await
+                .map_err(|e| format!("send to {fp}: {e}")),
             None => Err(format!("{fp} not online")),
         }
     }
@@ -97,7 +101,10 @@ impl SignalHub {
                 alias: c.alias.clone(),
             })
             .collect();
-        SignalMessage::PresenceList { users }
+        SignalMessage::PresenceList {
+            version: default_signal_version(),
+            users,
+        }
     }
 
     /// Broadcast a message to ALL connected signal clients.

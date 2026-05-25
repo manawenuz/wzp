@@ -1,208 +1,112 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { generateIdenticon, createIdenticonEl } from "./identicon";
+import { createIdenticonEl } from "./identicon";
 
-// ── Incoming-call ringer ─────────────────────────────────────────────
-//
-// Web Audio synthesized two-tone ring that loops until stop() is
-// called. No external asset file — works immediately on every
-// platform Tauri has a WebView on (Android, macOS, Windows, Linux).
-//
-// The pattern is a classic North American ring cadence: 440Hz +
-// 480Hz tone for 2s, 4s silence, repeat. Volume ramps to ~30%
-// peak so it's audible without being obnoxious on laptop
-// speakers. Stops cleanly on stop() — cancels the timer AND
-// disconnects the active oscillators so there's no tail audio.
+// ── Ringer (reused from original) ─────────────────────────────────
 class Ringer {
   private ctx: AudioContext | null = null;
   private timer: number | null = null;
   private activeNodes: AudioNode[] = [];
   private running = false;
-
   start() {
     if (this.running) return;
     this.running = true;
-    // Construct the AudioContext lazily on the first ring — some
-    // platforms (iOS WebView, Android WebView) refuse to create
-    // one until after a user gesture, so we MUST be past that
-    // point by the time start() is called. Incoming call event is
-    // user-adjacent enough that the WebView normally allows it.
     try {
-      if (!this.ctx) {
-        this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-    } catch (e) {
-      console.warn("Ringer: AudioContext unavailable", e);
-      this.running = false;
-      return;
-    }
+      if (!this.ctx) this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    } catch { this.running = false; return; }
     this.playOnce();
-    // 2s tone + 4s silence = 6s cadence. Loop with setInterval.
     this.timer = window.setInterval(() => this.playOnce(), 6000);
   }
-
   stop() {
     this.running = false;
-    if (this.timer != null) {
-      window.clearInterval(this.timer);
-      this.timer = null;
-    }
-    for (const n of this.activeNodes) {
-      try {
-        (n as any).disconnect();
-      } catch {}
-    }
+    if (this.timer != null) { window.clearInterval(this.timer); this.timer = null; }
+    for (const n of this.activeNodes) try { (n as any).disconnect(); } catch {}
     this.activeNodes = [];
   }
-
   private playOnce() {
     if (!this.ctx || !this.running) return;
     const ctx = this.ctx;
-    const now = ctx.currentTime;
-    const toneDurSec = 2.0;
-    // Two-tone ring: 440Hz (A4) + 480Hz (close to B4). Mix both
-    // through one gain node for envelope control.
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
-    gain.gain.setValueAtTime(0.3, now + toneDurSec - 0.05);
-    gain.gain.linearRampToValueAtTime(0, now + toneDurSec);
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + 0.05);
+    gain.gain.setValueAtTime(0.3, ctx.currentTime + 1.95);
+    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 2.0);
     gain.connect(ctx.destination);
-
     for (const freq of [440, 480]) {
       const osc = ctx.createOscillator();
-      osc.type = "sine";
       osc.frequency.value = freq;
       osc.connect(gain);
-      osc.start(now);
-      osc.stop(now + toneDurSec);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 2.0);
       this.activeNodes.push(osc);
     }
     this.activeNodes.push(gain);
-
-    // Schedule a cleanup of old nodes after this tone finishes so
-    // the activeNodes array doesn't grow unbounded across long
-    // rings.
-    window.setTimeout(() => {
-      this.activeNodes = this.activeNodes.filter((n) => n !== gain);
-    }, (toneDurSec + 0.1) * 1000);
   }
 }
 const ringer = new Ringer();
 
-/// Best-effort system notification via the tauri-plugin-notification
-/// plugin. Uses raw `invoke` so we don't need to import
-/// `@tauri-apps/plugin-notification` — just invoke the plugin
-/// commands directly. Silently no-ops if the plugin isn't
-/// available or permission is denied.
-async function notifyIncomingCall(from: string) {
-  try {
-    // Make sure we have permission first. On Android this prompts
-    // the user once; after that it's cached.
-    const granted = await invoke<boolean>(
-      "plugin:notification|is_permission_granted",
-    ).catch(() => false);
-    if (!granted) {
-      const result = await invoke<string>(
-        "plugin:notification|request_permission",
-      ).catch(() => "denied");
-      if (result !== "granted") return;
-    }
-    await invoke("plugin:notification|notify", {
-      options: {
-        title: "Incoming call",
-        body: `From ${from}`,
-      },
-    });
-  } catch (e) {
-    // Notification plugin missing or refused — not fatal, the
-    // visible panel + ringer still alert the user.
-    console.debug("notify: plugin unavailable or refused", e);
-  }
-}
-
-// ── WebView hardening ──
-// Suppress the browser-style right-click context menu on desktop Tauri — it
-// exposes Inspect/Reload/Back/Forward entries that don't belong in a native-
-// feeling VoIP app. Dev tools remain accessible via the usual keyboard
-// shortcuts (F12 / Cmd-Opt-I). On Android there is no right-click so this is
-// a no-op there.
-document.addEventListener("contextmenu", (e) => e.preventDefault());
-
-// Also suppress browser-level zoom via keyboard (Ctrl/Cmd + / - / 0) so the
-// fixed-layout UI can't be accidentally scaled. Pinch-zoom is already handled
-// at the viewport meta level in index.html.
-document.addEventListener(
-  "keydown",
-  (e) => {
-    if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "-" || e.key === "=" || e.key === "0")) {
-      e.preventDefault();
-    }
-  },
-  { capture: true },
-);
-
-// Block gesture-based zoom on browsers that fire these legacy events (mainly
-// Safari / WebKit). Chromium sends `wheel` with ctrlKey for trackpad pinch —
-// catch that too.
+// ── Disable zoom/rubber-banding ───────────────────────────────────
+document.addEventListener("touchmove", (e) => { if ((e as any).scale !== undefined && (e as any).scale !== 1) e.preventDefault(); }, { passive: false });
 document.addEventListener("gesturestart", (e) => e.preventDefault());
 document.addEventListener("gesturechange", (e) => e.preventDefault());
-document.addEventListener("gestureend", (e) => e.preventDefault());
-document.addEventListener(
-  "wheel",
-  (e) => {
-    if (e.ctrlKey) e.preventDefault();
-  },
-  { passive: false },
-);
+document.addEventListener("wheel", (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
 
-// ── Elements ──
-const connectScreen = document.getElementById("connect-screen")!;
+// ── Elements ──────────────────────────────────────────────────────
+const lobbyScreen = document.getElementById("lobby-screen")!;
 const callScreen = document.getElementById("call-screen")!;
-const roomInput = document.getElementById("room") as HTMLInputElement;
-const aliasInput = document.getElementById("alias") as HTMLInputElement;
-const osAecCheckbox = document.getElementById("os-aec") as HTMLInputElement;
-const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
-const connectError = document.getElementById("connect-error")!;
-const roomName = document.getElementById("room-name")!;
-const callTimer = document.getElementById("call-timer")!;
-const callStatus = document.getElementById("call-status")!;
-const levelBar = document.getElementById("level-bar")!;
-const participantsDiv = document.getElementById("participants")!;
-const directCallView = document.getElementById("direct-call-view")!;
-const dcIdenticon = document.getElementById("dc-identicon")!;
-const dcName = document.getElementById("dc-name")!;
-const dcFp = document.getElementById("dc-fp")!;
-const dcBadge = document.getElementById("dc-badge")!;
-const micBtn = document.getElementById("mic-btn")!;
-const micIcon = document.getElementById("mic-icon")!;
-const spkBtn = document.getElementById("spk-btn")!;
-const spkIcon = document.getElementById("spk-icon")!;
-const hangupBtn = document.getElementById("hangup-btn")!;
-const statsDiv = document.getElementById("stats")!;
-const myFingerprintEl = document.getElementById("my-fingerprint")!;
-const myIdenticonEl = document.getElementById("my-identicon")!;
-const recentRoomsDiv = document.getElementById("recent-rooms")!;
-
-// Relay button
-const relaySelected = document.getElementById("relay-selected")!;
-const relayDot = document.getElementById("relay-dot")!;
-const relayLabel = document.getElementById("relay-label")!;
-
-// Relay dialog
-const relayDialog = document.getElementById("relay-dialog")!;
-const relayDialogClose = document.getElementById("relay-dialog-close")!;
-const relayDialogList = document.getElementById("relay-dialog-list")!;
-const relayAddName = document.getElementById("relay-add-name") as HTMLInputElement;
-const relayAddAddr = document.getElementById("relay-add-addr") as HTMLInputElement;
-const relayAddBtn = document.getElementById("relay-add-btn")!;
+const lobbyDot = document.getElementById("lobby-dot")!;
+const lobbyRelayLabel = document.getElementById("lobby-relay-label")!;
+const lobbyRoomLabel = document.getElementById("lobby-room-label")!;
+const lobbyIdenticon = document.getElementById("lobby-identicon")!;
+const lobbyFp = document.getElementById("lobby-fp")!;
+const lobbyUserList = document.getElementById("lobby-user-list")!;
+const lobbyUserCount = document.getElementById("lobby-user-count")!;
+const joinVoiceBtn = document.getElementById("join-voice-btn")!;
+const incomingBanner = document.getElementById("incoming-call-banner")!;
+const incomingCallerName = document.getElementById("incoming-caller-name")!;
+const incomingIdenticon = document.getElementById("incoming-identicon")!;
+const acceptCallBtn = document.getElementById("accept-call-btn")!;
+const rejectCallBtn = document.getElementById("reject-call-btn")!;
+// Voice drawer elements
+const voiceDrawer = document.getElementById("voice-drawer")!;
+const vdRoom = document.getElementById("vd-room")!;
+const vdTimer = document.getElementById("vd-timer")!;
+const vdStatus = document.getElementById("vd-status")!;
+const vdBadge = document.getElementById("vd-badge")!;
+const vdLevelBar = document.getElementById("vd-level-bar")!;
+const vdMicBtn = document.getElementById("vd-mic-btn")!;
+const vdMicIcon = document.getElementById("vd-mic-icon")!;
+const vdSpkBtn = document.getElementById("vd-spk-btn")!;
+const vdSpkIcon = document.getElementById("vd-spk-icon")!;
+const vdEndBtn = document.getElementById("vd-end-btn")!;
+const vdCamBtn = document.getElementById("vd-cam-btn")!;
+const vdCamIcon = document.getElementById("vd-cam-icon")!;
+const vdVideoStrip = document.getElementById("vd-video-strip")!;
+const vdRemoteVideo = document.getElementById("vd-remote-video") as HTMLCanvasElement;
+const vdLocalVideo = document.getElementById("vd-local-video") as HTMLVideoElement;
+const vdDirectInfo = document.getElementById("vd-direct-info")!;
+const vdDcIdenticon = document.getElementById("vd-dc-identicon")!;
+const vdDcName = document.getElementById("vd-dc-name")!;
+const vdDcBadge = document.getElementById("vd-dc-badge")!;
+const vdStats = document.getElementById("vd-stats")!;
+const ctxMenu = document.getElementById("user-context-menu")!;
+const ctxIdenticon = document.getElementById("ctx-identicon")!;
+const ctxName = document.getElementById("ctx-name")!;
+const ctxFp = document.getElementById("ctx-fp")!;
+const ctxCallBtn = document.getElementById("ctx-call-btn")!;
+const ctxCloseBtn = document.getElementById("ctx-close-btn")!;
+// Relay management
+const sRelayList = document.getElementById("s-relay-list")!;
+const sRelayName = document.getElementById("s-relay-name") as HTMLInputElement;
+const sRelayAddr = document.getElementById("s-relay-addr") as HTMLInputElement;
+const sRelayAdd = document.getElementById("s-relay-add")!;
 
 // Settings
 const settingsPanel = document.getElementById("settings-panel")!;
+const settingsBtn = document.getElementById("settings-btn")!;
+const settingsBtnCall = document.getElementById("settings-btn-call")!;
 const settingsClose = document.getElementById("settings-close")!;
 const settingsSave = document.getElementById("settings-save")!;
-const settingsBtnHome = document.getElementById("settings-btn-home")!;
-const settingsBtnCall = document.getElementById("settings-btn-call")!;
 const sRoom = document.getElementById("s-room") as HTMLInputElement;
 const sAlias = document.getElementById("s-alias") as HTMLInputElement;
 const sOsAec = document.getElementById("s-os-aec") as HTMLInputElement;
@@ -215,1572 +119,806 @@ const sCallDebugLogEl = document.getElementById("s-call-debug-log") as HTMLDivEl
 const sCallDebugClearBtn = document.getElementById("s-call-debug-clear") as HTMLButtonElement;
 const sCallDebugCopyBtn = document.getElementById("s-call-debug-copy") as HTMLButtonElement;
 const sCallDebugShareBtn = document.getElementById("s-call-debug-share") as HTMLButtonElement;
-const sCallDebugCopyStatus = document.getElementById("s-call-debug-copy-status") as HTMLElement;
-const sReflectedAddr = document.getElementById("s-reflected-addr") as HTMLSpanElement;
-const sReflectBtn = document.getElementById("s-reflect-btn") as HTMLButtonElement;
-const sNatType = document.getElementById("s-nat-type") as HTMLSpanElement;
-const sNatDetectBtn = document.getElementById("s-nat-detect-btn") as HTMLButtonElement;
-const sNatProbes = document.getElementById("s-nat-probes") as HTMLDivElement;
-const sAgc = document.getElementById("s-agc") as HTMLInputElement;
 const sQuality = document.getElementById("s-quality") as HTMLInputElement;
 const sQualityLabel = document.getElementById("s-quality-label")!;
-
-// Quality slider config — best (left/green) to worst (right/red)
-const QUALITY_STEPS = ["studio-64k", "studio-48k", "studio-32k", "auto", "good", "degraded", "codec2-3200", "catastrophic"];
-const QUALITY_LABELS = ["Studio 64k", "Studio 48k", "Studio 32k", "Auto", "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"];
-const QUALITY_COLORS = ["#22c55e", "#4ade80", "#86efac", "#a3e635", "#facc15", "#f59e0b", "#e97320", "#991b1b"];
-
-function qualityToIndex(q: string): number {
-  const idx = QUALITY_STEPS.indexOf(q);
-  return idx >= 0 ? idx : 3; // default to "auto" (index 3)
-}
-
-function updateQualityUI(index: number) {
-  sQualityLabel.textContent = QUALITY_LABELS[index];
-  sQualityLabel.style.color = QUALITY_COLORS[index];
-  sQuality.style.background = `linear-gradient(90deg, #22c55e 0%, #86efac 25%, #facc15 50%, #e97320 75%, #991b1b 100%)`;
-}
-
-sQuality.addEventListener("input", () => {
-  updateQualityUI(parseInt(sQuality.value));
-});
 const sFingerprint = document.getElementById("s-fingerprint")!;
-const sRecentRooms = document.getElementById("s-recent-rooms")!;
-const sClearRecent = document.getElementById("s-clear-recent")!;
+const sPublicAddr = document.getElementById("s-public-addr")!;
+const sReflectBtn = document.getElementById("s-reflect-btn")!;
+const sNatDetectBtn = document.getElementById("s-nat-detect-btn")!;
+const sNatResult = document.getElementById("s-nat-result")!;
 
-// Key warning dialog
-const keyWarning = document.getElementById("key-warning")!;
-const kwOldFp = document.getElementById("kw-old-fp")!;
-const kwNewFp = document.getElementById("kw-new-fp")!;
-const kwAccept = document.getElementById("kw-accept")!;
-const kwCancel = document.getElementById("kw-cancel")!;
-
-let statusInterval: number | null = null;
-let myFingerprint = "";
-let userDisconnected = false;
-
-// ── Data types ──
-interface RelayServer {
-  name: string;
-  address: string;
-  rtt?: number | null;
-  serverFingerprint?: string | null;    // from ping
-  knownFingerprint?: string | null;     // saved TOFU fingerprint
-}
-
+// ── State ─────────────────────────────────────────────────────────
+interface RelayServer { name: string; address: string; }
 interface RecentRoom { relay: string; room: string; }
-
 interface Settings {
   relays: RelayServer[];
   selectedRelay: number;
   room: string;
   alias: string;
   osAec: boolean;
-  agc: boolean;
   quality: string;
   recentRooms: RecentRoom[];
-  /// When true, the Rust side emits the chatty per-frame DRED parse +
-  /// reconstruction + classical-PLC logs and adds DRED counters to the
-  /// recv heartbeat. Off in normal mode keeps logcat clean.
   dredDebugLogs: boolean;
-  /// Phase 3.5: when true, every step of a call's lifecycle (register,
-  /// reflect query, offer/answer, relay setup, dual-path race, engine
-  /// start, media) emits a `call-debug-log` Tauri event that this UI
-  /// renders into the rolling Debug Log panel in settings. Off in
-  /// normal mode keeps the GUI quiet but logcat always has a copy.
   callDebugLogs: boolean;
-  /// Debug: skip relay fallback on direct calls — fail if P2P
-  /// doesn't connect. Useful for testing NAT traversal.
   directOnly: boolean;
-  /// Enable birthday attack for hard NAT traversal. Adds ~3s to
-  /// call setup when peer has symmetric NAT. Off by default.
   birthdayAttack: boolean;
 }
 
 function loadSettings(): Settings {
   const defaults: Settings = {
     relays: [
-      // Local laptop relay — used during Android rewrite testing so the phone
-      // and the relay logs are on the same host. Laptop IP on the test LAN.
-      { name: "Laptop", address: "172.16.81.125:4433" },
       { name: "Default", address: "193.180.213.68:4433" },
     ],
     selectedRelay: 0, room: "general", alias: "",
-    osAec: true, agc: true, quality: "auto", recentRooms: [],
-    dredDebugLogs: false,
-    callDebugLogs: false,
-    directOnly: false,
-    birthdayAttack: false,
+    osAec: true, quality: "auto", recentRooms: [],
+    dredDebugLogs: false, callDebugLogs: false,
+    directOnly: false, birthdayAttack: false,
   };
   try {
     const raw = localStorage.getItem("wzp-settings");
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed.relay && !parsed.relays) {
-        parsed.relays = [{ name: "Default", address: parsed.relay }];
-        parsed.selectedRelay = 0;
-        delete parsed.relay;
-      }
-      if (parsed.recentRooms?.length > 0 && typeof parsed.recentRooms[0] === "string") {
-        const addr = parsed.relays?.[0]?.address || defaults.relays[0].address;
-        parsed.recentRooms = parsed.recentRooms.map((r: string) => ({ relay: addr, room: r }));
-      }
-      // Ensure the Laptop test relay is present as the first entry for
-      // existing installs — otherwise users with cached settings keep using
-      // the remote default and we have to manually add it each install.
-      // Remove this block once the Android rewrite is stable.
-      const LAPTOP_ADDR = "172.16.81.125:4433";
-      if (Array.isArray(parsed.relays) && !parsed.relays.some((r: any) => r.address === LAPTOP_ADDR)) {
-        parsed.relays.unshift({ name: "Laptop", address: LAPTOP_ADDR });
-        parsed.selectedRelay = 0;
-      }
-      return { ...defaults, ...parsed };
-    }
+    if (raw) return { ...defaults, ...JSON.parse(raw) };
   } catch {}
   return defaults;
 }
-
-function saveSettingsObj(s: Settings) {
+function saveSettings(s: Settings) {
   localStorage.setItem("wzp-settings", JSON.stringify(s));
 }
-
-function getSelectedRelay(): RelayServer | undefined {
+function getRelay(): RelayServer | null {
   const s = loadSettings();
-  return s.relays[s.selectedRelay];
+  return s.relays[s.selectedRelay] || s.relays[0] || null;
 }
 
-// ── Helpers ──
-function escapeHtml(s: string): string {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
+let myFingerprint = "";
+let statusInterval: number | null = null;
+let inVoice = false;
+let connectPending = false; // guard against double-tap while connect is in-flight
+let directCallPeer: { fingerprint: string; alias: string | null } | null = null;
+let pendingCallId: string | null = null;
 
-// ── Lock status ──
-type LockStatus = "verified" | "new" | "changed" | "offline" | "unknown";
+// Video / camera state
+let cameraActive = false;
+let cameraStream: MediaStream | null = null;
+let cameraFrameTimer: number | null = null;
+let remoteVideoActive = false;
 
-function lockStatus(relay: RelayServer): LockStatus {
-  if (relay.rtt === undefined || relay.rtt === null) return "unknown";
-  if (relay.rtt < 0) return "offline";
-  if (!relay.serverFingerprint) return "new";
-  if (!relay.knownFingerprint) return "new"; // first time
-  if (relay.serverFingerprint === relay.knownFingerprint) return "verified";
-  return "changed";
-}
-
-function lockIcon(status: LockStatus): string {
-  switch (status) {
-    case "verified": return "🔒";
-    case "new": return "🔓";
-    case "changed": return "⚠️";
-    case "offline": return "🔴";
-    case "unknown": return "⚪";
+function showToast(msg: string, durationMs = 3500) {
+  let el = document.getElementById("wzp-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wzp-toast";
+    el.style.cssText = "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);" +
+      "background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:8px;" +
+      "padding:10px 18px;font-size:13px;z-index:9999;pointer-events:none;opacity:0;transition:opacity .2s";
+    document.body.appendChild(el);
   }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout((el as any)._timer);
+  (el as any)._timer = setTimeout(() => { el!.style.opacity = "0"; }, durationMs);
 }
 
-function lockColor(status: LockStatus): string {
-  switch (status) {
-    case "verified": return "var(--green)";
-    case "new": return "var(--yellow)";
-    case "changed": return "var(--red)";
-    case "offline": return "var(--red)";
-    case "unknown": return "var(--text-dim)";
+function errorMessage(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && "message" in e) {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === "string") return msg;
   }
+  return String(e);
 }
 
-// ── Apply settings ──
-function applySettings() {
-  const s = loadSettings();
-  roomInput.value = s.room;
-  aliasInput.value = s.alias;
-  osAecCheckbox.checked = s.osAec;
-  renderRecentRooms(s.recentRooms);
-  renderRelayButton();
+function connectDebugSummary(entry: CallDebugEntry | null): string {
+  if (!entry) return "no native connect event received";
+  const details = entry.details && typeof entry.details === "object"
+    ? JSON.stringify(entry.details)
+    : String(entry.details ?? "");
+  return `${entry.step}${details ? ` ${details}` : ""}`;
 }
 
-// ── Relay button ──
-function renderRelayButton() {
-  const s = loadSettings();
-  const sel = s.relays[s.selectedRelay];
-  if (sel) {
-    const ls = lockStatus(sel);
-    relayDot.textContent = lockIcon(ls);
-    relayDot.className = "relay-lock";
-    relayLabel.textContent = `${sel.name} (${sel.address})`;
-  } else {
-    relayDot.textContent = "⚪";
-    relayDot.className = "relay-lock";
-    relayLabel.textContent = "No relay configured";
-  }
+let lastConnectDebug: CallDebugEntry | null = null;
+
+function connectWithTimeout(args: Record<string, unknown>, timeoutMs = 45000) {
+  lastConnectDebug = null;
+  return Promise.race([
+    invoke("connect", args),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(
+        `connect timed out (${Math.round(timeoutMs / 1000)}s); last native step: ${connectDebugSummary(lastConnectDebug)}`
+      )), timeoutMs)
+    ),
+  ]);
 }
 
-relaySelected.addEventListener("click", () => openRelayDialog());
-
-// ── Relay dialog ──
-function openRelayDialog() {
-  renderRelayDialogList();
-  relayAddName.value = "";
-  relayAddAddr.value = "";
-  relayDialog.classList.remove("hidden");
+// Known users in the room (from RoomUpdate or signal presence)
+interface LobbyUser {
+  fingerprint: string;
+  alias: string | null;
+  inVoice: boolean;
+  speaking: boolean;
 }
+let lobbyUsers: Map<string, LobbyUser> = new Map();
 
-function closeRelayDialog() {
-  relayDialog.classList.add("hidden");
-  renderRelayButton();
-}
-
-function renderRelayDialogList() {
-  const s = loadSettings();
-  relayDialogList.innerHTML = "";
-  s.relays.forEach((r, i) => {
-    const item = document.createElement("div");
-    item.className = `relay-dialog-item ${i === s.selectedRelay ? "selected" : ""}`;
-
-    const ls = lockStatus(r);
-    const fp = r.serverFingerprint || r.address;
-
-    // Identicon
-    const icon = createIdenticonEl(fp, 32, true);
-    icon.title = r.serverFingerprint
-      ? `Server: ${r.serverFingerprint}\nClick to copy`
-      : `No fingerprint yet`;
-    item.appendChild(icon);
-
-    // Info
-    const info = document.createElement("div");
-    info.className = "relay-info";
-    info.innerHTML = `
-      <div class="relay-name">${escapeHtml(r.name)}</div>
-      <div class="relay-addr">${escapeHtml(r.address)}</div>
-    `;
-    item.appendChild(info);
-
-    // Lock + RTT
-    const meta = document.createElement("div");
-    meta.className = "relay-meta";
-    const rttStr = r.rtt !== undefined && r.rtt !== null
-      ? (r.rtt < 0 ? "offline" : `${r.rtt}ms`)
-      : "";
-    meta.innerHTML = `
-      <span class="relay-lock-icon" style="color:${lockColor(ls)}">${lockIcon(ls)}</span>
-      <span class="relay-rtt">${rttStr}</span>
-    `;
-    item.appendChild(meta);
-
-    // Delete button
-    const del = document.createElement("button");
-    del.className = "remove";
-    del.textContent = "×";
-    del.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const s = loadSettings();
-      s.relays.splice(i, 1);
-      if (s.selectedRelay >= s.relays.length) s.selectedRelay = Math.max(0, s.relays.length - 1);
-      saveSettingsObj(s);
-      renderRelayDialogList();
-      renderRelayButton();
-    });
-    item.appendChild(del);
-
-    // Click to select
-    item.addEventListener("click", () => {
-      const prev = loadSettings();
-      const prevRelayAddr = prev.relays[prev.selectedRelay]?.address;
-
-      const s = loadSettings();
-      s.selectedRelay = i;
-
-      // TOFU: if first time seeing this server, trust its fingerprint
-      if (r.serverFingerprint && !r.knownFingerprint) {
-        s.relays[i].knownFingerprint = r.serverFingerprint;
-      }
-
-      saveSettingsObj(s);
-      renderRelayDialogList();
-      renderRelayButton();
-
-      // If the user switched relays and we're currently registered,
-      // transparently re-register against the new one. The Rust
-      // `register_signal` command is idempotent and handles the
-      // swap internally (close old transport → connect new). This
-      // makes "change server" a single-click operation instead of
-      // manual deregister + re-register.
-      const newRelayAddr = r.address;
-      if (newRelayAddr && newRelayAddr !== prevRelayAddr) {
-        (async () => {
-          // Is a signal currently registered? get_signal_status is
-          // cheap and lets us decide whether to kick the swap.
-          try {
-            const st: any = await invoke("get_signal_status");
-            if (st && st.status === "registered") {
-              await invoke<string>("register_signal", { relay: newRelayAddr });
-              // `signal-event { type: "registered" }` from Rust will
-              // update directRegistered for us — no manual render here.
-            }
-          } catch (e) {
-            console.warn("relay swap: failed to re-register", e);
-          }
-        })();
-      }
-    });
-
-    relayDialogList.appendChild(item);
-  });
-}
-
-relayAddBtn.addEventListener("click", () => {
-  const name = relayAddName.value.trim();
-  const addr = relayAddAddr.value.trim();
-  if (!addr) return;
-  const s = loadSettings();
-  s.relays.push({ name: name || addr, address: addr });
-  saveSettingsObj(s);
-  relayAddName.value = "";
-  relayAddAddr.value = "";
-  renderRelayDialogList();
-  pingAllRelays();
-});
-
-relayDialogClose.addEventListener("click", closeRelayDialog);
-relayDialog.addEventListener("click", (e) => { if (e.target === relayDialog) closeRelayDialog(); });
-
-// ── Ping ──
-interface PingResult { rtt_ms: number; server_fingerprint: string; }
-
-async function pingAllRelays() {
-  const s = loadSettings();
-  for (let i = 0; i < s.relays.length; i++) {
-    const r = s.relays[i];
-    try {
-      const result: PingResult = await invoke("ping_relay", { relay: r.address });
-      r.rtt = result.rtt_ms;
-      r.serverFingerprint = result.server_fingerprint;
-
-      // TOFU: auto-save fingerprint on first contact
-      if (!r.knownFingerprint) {
-        r.knownFingerprint = result.server_fingerprint;
-      }
-    } catch {
-      r.rtt = -1;
-    }
-  }
-  saveSettingsObj(s);
-  renderRelayButton();
-  if (!relayDialog.classList.contains("hidden")) renderRelayDialogList();
-}
-
-// ── Recent rooms ──
-function renderRecentRooms(rooms: RecentRoom[]) {
-  recentRoomsDiv.innerHTML = rooms
-    .map((r) => `<span class="recent-room" data-relay="${escapeHtml(r.relay)}" data-room="${escapeHtml(r.room)}">${escapeHtml(r.room)}</span>`)
-    .join("");
-  recentRoomsDiv.querySelectorAll(".recent-room").forEach((el) => {
-    el.addEventListener("click", () => {
-      const ds = (el as HTMLElement).dataset;
-      roomInput.value = ds.room || "";
-      const s = loadSettings();
-      const idx = s.relays.findIndex((r) => r.address === ds.relay);
-      if (idx >= 0) { s.selectedRelay = idx; saveSettingsObj(s); renderRelayButton(); }
-    });
-  });
-}
-
-// ── Init ──
-applySettings();
-setTimeout(pingAllRelays, 300);
-// Hydrate the Rust DRED + call-debug verbose-logs flags from saved
-// settings on boot so the choice survives app restarts without
-// needing the user to reopen the settings panel.
-invoke("set_dred_verbose_logs", { enabled: !!loadSettings().dredDebugLogs }).catch(() => {});
-invoke("set_call_debug_logs", { enabled: !!loadSettings().callDebugLogs }).catch(() => {});
-
-// ── Phase 3.5: call-flow debug log rolling buffer ─────────────────
-// Backend emits `call-debug-log` events at every step of the call
-// lifecycle when the flag is on. We keep a cap-200 ring here and
-// render into the Settings panel's Debug Log section.
-interface CallDebugEntry {
-  ts_ms: number;
-  step: string;
-  details: any;
-}
-const CALL_DEBUG_MAX = 200;
+// ── Call debug buffer ─────────────────────────────────────────────
+interface CallDebugEntry { ts_ms: number; step: string; details: any; }
 const callDebugBuffer: CallDebugEntry[] = [];
-
-function renderCallDebugLog() {
-  // Skip the render if the section isn't visible — cheap guard on
-  // hot path, repainted each time the user opens settings.
-  if (sCallDebugSection.style.display === "none") return;
-  const lines = callDebugBuffer.map((e) => {
-    const iso = new Date(e.ts_ms).toISOString().slice(11, 23); // HH:MM:SS.mmm
-    const details = e.details && Object.keys(e.details).length > 0
-      ? " " + JSON.stringify(e.details)
-      : "";
-    return `${iso} ${e.step}${details}`;
-  });
-  sCallDebugLogEl.textContent = lines.join("\n");
-  sCallDebugLogEl.scrollTop = sCallDebugLogEl.scrollHeight;
-}
+const CALL_DEBUG_MAX = 200;
 
 listen("call-debug-log", (event: any) => {
   const entry: CallDebugEntry = event.payload;
   callDebugBuffer.push(entry);
-  if (callDebugBuffer.length > CALL_DEBUG_MAX) {
-    callDebugBuffer.shift();
-  }
+  if (entry.step?.startsWith("connect:")) lastConnectDebug = entry;
+  if (callDebugBuffer.length > CALL_DEBUG_MAX) callDebugBuffer.shift();
   renderCallDebugLog();
 });
 
-sCallDebugClearBtn.addEventListener("click", () => {
-  callDebugBuffer.length = 0;
-  sCallDebugLogEl.textContent = "";
-});
-
-/// Serialise the rolling call-debug buffer as plain text for
-/// copy/share. One entry per line, HH:MM:SS.mmm + step +
-/// compact JSON details. Same format the on-screen panel uses.
-function formatCallDebugLog(): string {
-  return callDebugBuffer
+function renderCallDebugLog() {
+  if (!sCallDebugLogEl) return;
+  sCallDebugLogEl.textContent = callDebugBuffer
     .map((e) => {
-      const iso = new Date(e.ts_ms).toISOString().slice(11, 23);
-      const details =
-        e.details && Object.keys(e.details).length > 0
-          ? " " + JSON.stringify(e.details)
-          : "";
-      return `${iso} ${e.step}${details}`;
+      const t = new Date(e.ts_ms).toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3 } as any);
+      const d = typeof e.details === "object" ? JSON.stringify(e.details) : String(e.details);
+      return `${t} ${e.step} ${d}`;
     })
     .join("\n");
+  sCallDebugLogEl.scrollTop = sCallDebugLogEl.scrollHeight;
 }
 
-/// One-shot status helper for the copy/share buttons.
-function flashCallDebugStatus(msg: string, isError: boolean = false) {
-  sCallDebugCopyStatus.textContent = msg;
-  sCallDebugCopyStatus.style.color = isError ? "var(--yellow)" : "var(--green)";
-  setTimeout(() => {
-    sCallDebugCopyStatus.textContent = "";
-  }, 2500);
+// ── Quality slider ────────────────────────────────────────────────
+const QUALITY_STEPS = ["studio-64k", "studio-48k", "studio-32k", "auto", "good", "degraded", "codec2-3200", "catastrophic"];
+const QUALITY_LABELS = ["Studio 64k", "Studio 48k", "Studio 32k", "Auto", "Opus 24k", "Opus 6k", "Codec2 3.2k", "Codec2 1.2k"];
+const QUALITY_COLORS = ["#22c55e", "#4ade80", "#86efac", "#a3e635", "#facc15", "#f59e0b", "#e97320", "#991b1b"];
+
+function qualityToIndex(q: string): number { const i = QUALITY_STEPS.indexOf(q); return i >= 0 ? i : 3; }
+function updateQualityUI(i: number) {
+  if (sQualityLabel) { sQualityLabel.textContent = QUALITY_LABELS[i]; sQualityLabel.style.color = QUALITY_COLORS[i]; }
 }
+sQuality?.addEventListener("input", () => updateQualityUI(parseInt(sQuality.value)));
 
-sCallDebugCopyBtn.addEventListener("click", async () => {
-  const text = formatCallDebugLog();
-  if (!text) {
-    flashCallDebugStatus("Log is empty", true);
-    return;
-  }
-  try {
-    await navigator.clipboard.writeText(text);
-    flashCallDebugStatus(`✓ Copied ${callDebugBuffer.length} entries`);
-  } catch (e) {
-    // Some WebViews refuse clipboard access without a user
-    // permission prompt; fall back to a selection-based copy.
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.top = "0";
-      ta.style.left = "0";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      if (ok) {
-        flashCallDebugStatus(`✓ Copied ${callDebugBuffer.length} entries`);
-      } else {
-        throw new Error("execCommand returned false");
-      }
-    } catch (e2) {
-      flashCallDebugStatus(`⚠ Copy failed: ${String(e2)}`, true);
-    }
-  }
-});
-
-sCallDebugShareBtn.addEventListener("click", async () => {
-  const text = formatCallDebugLog();
-  if (!text) {
-    flashCallDebugStatus("Log is empty", true);
-    return;
-  }
-  // Try the Web Share API first — on Android WebView, this opens
-  // the standard Share sheet and the user can send the text to
-  // any messaging app. Falls back to clipboard copy if the
-  // WebView doesn't expose navigator.share (most desktop
-  // WebViews don't).
-  const nav: any = navigator;
-  if (nav.share) {
-    try {
-      await nav.share({
-        title: "WarzonePhone debug log",
-        text,
-      });
-      flashCallDebugStatus(`✓ Shared ${callDebugBuffer.length} entries`);
-      return;
-    } catch (e) {
-      // User cancelled or WebView rejected — fall through to
-      // clipboard copy as a best-effort.
-      console.debug("share failed, falling back to clipboard", e);
-    }
-  }
-  try {
-    await navigator.clipboard.writeText(text);
-    flashCallDebugStatus(`✓ Copied (no share API)`);
-  } catch (e) {
-    flashCallDebugStatus(`⚠ Share + copy both failed`, true);
-  }
-});
-
-// Load fingerprint + alias + git hash + render identicon
-interface AppInfo { git_hash: string; alias: string; fingerprint: string; data_dir: string }
-
-(async () => {
-  try {
-    const info: AppInfo = await invoke("get_app_info");
-    const fp = info.fingerprint;
-    myFingerprint = fp;
-    myFingerprintEl.textContent = fp;
-    myFingerprintEl.style.cursor = "pointer";
-    myFingerprintEl.addEventListener("click", () => {
-      navigator.clipboard.writeText(fp).then(() => {
-        const orig = myFingerprintEl.textContent;
-        myFingerprintEl.textContent = "Copied!";
-        setTimeout(() => { myFingerprintEl.textContent = orig; }, 1000);
-      });
-    });
-
-    // Identicon next to fingerprint
-    const icon = createIdenticonEl(fp, 28, true);
-    myIdenticonEl.innerHTML = "";
-    myIdenticonEl.appendChild(icon);
-
-    // Prefill alias if the user hasn't typed one yet
-    if (!aliasInput.value.trim()) {
-      aliasInput.value = info.alias;
-      const s = loadSettings();
-      s.alias = info.alias;
-      saveSettingsObj(s);
-    }
-
-    // Stamp the build hash on the home screen so we can prove which build
-    // is installed (this caused us a lot of grief on the Kotlin app).
-    let buildEl = document.getElementById("build-hash");
-    if (!buildEl) {
-      buildEl = document.createElement("div");
-      buildEl.id = "build-hash";
-      buildEl.style.cssText = "font-size:10px;opacity:0.6;text-align:center;margin-top:4px;font-family:monospace";
-      myFingerprintEl.parentElement?.appendChild(buildEl);
-    }
-    buildEl.textContent = `build ${info.git_hash} • ${info.alias}`;
-    buildEl.title = info.data_dir;
-  } catch (e) {
-    console.error("get_app_info failed", e);
-  }
-})();
-
-// ── Connect ──
-connectBtn.addEventListener("click", doConnect);
-[roomInput, aliasInput].forEach((el) =>
-  el.addEventListener("keydown", (e) => { if (e.key === "Enter") doConnect(); })
-);
-
-function showKeyWarning(oldFp: string, newFp: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    kwOldFp.textContent = oldFp;
-    kwNewFp.textContent = newFp;
-    keyWarning.classList.remove("hidden");
-
-    const cleanup = () => {
-      keyWarning.classList.add("hidden");
-      kwAccept.removeEventListener("click", onAccept);
-      kwCancel.removeEventListener("click", onCancel);
-      keyWarning.removeEventListener("click", onBackdrop);
-    };
-    const onAccept = () => { cleanup(); resolve(true); };
-    const onCancel = () => { cleanup(); resolve(false); };
-    const onBackdrop = (e: Event) => { if (e.target === keyWarning) { cleanup(); resolve(false); } };
-
-    kwAccept.addEventListener("click", onAccept);
-    kwCancel.addEventListener("click", onCancel);
-    keyWarning.addEventListener("click", onBackdrop);
+// ── Lobby rendering ───────────────────────────────────────────────
+function renderLobbyUsers() {
+  lobbyUserList.innerHTML = "";
+  const users = Array.from(lobbyUsers.values())
+    .filter((u) => u.fingerprint !== myFingerprint) // always exclude self
+    .sort((a, b) => {
+    // Voice users first, then alphabetical
+    if (a.inVoice !== b.inVoice) return a.inVoice ? -1 : 1;
+    return (a.alias || a.fingerprint).localeCompare(b.alias || b.fingerprint);
   });
+
+  lobbyUserCount.textContent = String(users.length);
+
+  if (users.length === 0) {
+    lobbyUserList.innerHTML = '<div class="lobby-empty">No one else is here yet</div>';
+    return;
+  }
+
+  for (const user of users) {
+    const row = document.createElement("div");
+    row.className = "user-row" + (user.inVoice ? " in-voice" : "") + (user.speaking ? " speaking" : "");
+    row.dataset.fp = user.fingerprint;
+
+    const identicon = document.createElement("div");
+    identicon.className = "user-identicon";
+    identicon.appendChild(createIdenticonEl(user.fingerprint, 36, true));
+
+    const info = document.createElement("div");
+    info.className = "user-info";
+    info.innerHTML = `<div class="user-name">${user.alias || user.fingerprint.substring(0, 16)}</div>
+      <div class="user-fp">${user.fingerprint}</div>`;
+
+    const status = document.createElement("div");
+    status.className = "user-status";
+    if (user.speaking) {
+      status.innerHTML = '<span class="user-status-icon">&#x1F50A;</span>';
+    } else if (user.inVoice) {
+      status.innerHTML = '<span class="user-status-icon">&#x1F3A7;</span>';
+    }
+
+    row.appendChild(identicon);
+    row.appendChild(info);
+    row.appendChild(status);
+
+    row.addEventListener("click", () => openContextMenu(user));
+    lobbyUserList.appendChild(row);
+  }
 }
 
-async function doConnect() {
-  const relay = getSelectedRelay();
-  if (!relay) { connectError.textContent = "No relay selected"; return; }
+// ── Context menu ──────────────────────────────────────────────────
+let contextUser: LobbyUser | null = null;
 
-  // Warn on fingerprint mismatch
-  const ls = lockStatus(relay);
-  if (ls === "changed") {
-    const accepted = await showKeyWarning(relay.knownFingerprint || "", relay.serverFingerprint || "");
-    if (!accepted) return;
-    // User accepted — update known fingerprint
-    const s = loadSettings();
-    s.relays[s.selectedRelay].knownFingerprint = relay.serverFingerprint;
-    saveSettingsObj(s);
-    renderRelayButton();
+function openContextMenu(user: LobbyUser) {
+  contextUser = user;
+  ctxIdenticon.innerHTML = "";
+  ctxIdenticon.appendChild(createIdenticonEl(user.fingerprint, 40, true));
+  ctxName.textContent = user.alias || user.fingerprint.substring(0, 16);
+  ctxFp.textContent = user.fingerprint;
+  // Hide call button for self
+  const isSelf = user.fingerprint === myFingerprint;
+  (ctxCallBtn as HTMLButtonElement).disabled = isSelf;
+  (ctxCallBtn as HTMLElement).style.opacity = isSelf ? "0.3" : "1";
+  ctxMenu.classList.remove("hidden");
+}
+
+ctxCloseBtn.addEventListener("click", () => ctxMenu.classList.add("hidden"));
+ctxMenu.addEventListener("click", (e) => { if (e.target === ctxMenu) ctxMenu.classList.add("hidden"); });
+
+let callInProgress = false;
+ctxCallBtn.addEventListener("click", async () => {
+  if (!contextUser || callInProgress) return;
+  if (contextUser.fingerprint === myFingerprint) {
+    ctxMenu.classList.add("hidden");
+    return;
   }
-
-  // Don't block connect on offline — ping may have failed transiently
-
-  connectError.textContent = "";
-  connectBtn.disabled = true;
-  connectBtn.textContent = "Connecting...";
-  userDisconnected = false;
-
-  const s = loadSettings();
-  s.room = roomInput.value; s.alias = aliasInput.value; s.osAec = osAecCheckbox.checked;
-  const room = roomInput.value.trim();
-  if (room) {
-    const entry: RecentRoom = { relay: relay.address, room };
-    s.recentRooms = [entry, ...s.recentRooms.filter((r) => !(r.relay === relay.address && r.room === room))].slice(0, 5);
+  // Don't place a call if there's already a pending incoming call
+  if (pendingCallId) {
+    ctxMenu.classList.add("hidden");
+    return;
   }
-  saveSettingsObj(s);
-
+  callInProgress = true;
+  ctxMenu.classList.add("hidden");
+  directCallPeer = { fingerprint: contextUser.fingerprint, alias: contextUser.alias };
   try {
-    await invoke("connect", {
-      relay: relay.address, room: roomInput.value,
-      alias: aliasInput.value, osAec: osAecCheckbox.checked,
+    await invoke("place_call", { targetFp: contextUser.fingerprint });
+    // Keep callInProgress true until the call resolves (setup/hangup)
+    // — it's cleared in leaveVoice() or when the call connects
+  } catch (e: any) {
+    console.error("place_call failed:", e);
+    directCallPeer = null;
+    callInProgress = false;
+  }
+});
+
+// ── Voice join/leave (drawer-based) ───────────────────────────────
+joinVoiceBtn.addEventListener("click", async () => {
+  if (inVoice || connectPending) return;
+  const relay = getRelay();
+  const s = loadSettings();
+  if (!relay) { showToast("No relay configured"); return; }
+  connectPending = true;
+  const origText = joinVoiceBtn.textContent;
+  joinVoiceBtn.textContent = "Connecting…";
+  (joinVoiceBtn as HTMLButtonElement).disabled = true;
+  try {
+    await connectWithTimeout({
+      relay: relay.address,
+      room: s.room || "general",
+      alias: s.alias || "",
+      osAec: s.osAec,
       quality: s.quality || "auto",
     });
-    showCallScreen();
+    enterVoice(false);
   } catch (e: any) {
-    connectError.textContent = String(e);
-    connectBtn.disabled = false;
-    connectBtn.textContent = "Connect";
-  }
-}
-
-// Phase 5.6: when we're in a direct P2P call (not relay-
-// mediated), the relay's room infrastructure never sends a
-// RoomUpdate because neither peer actually joined the room.
-// pollStatus sees an empty participant list and shows "Waiting
-// for participants...". Track the peer's identity from the
-// signal plane and render a synthetic participant entry instead.
-let directCallPeer: { fingerprint: string; alias: string | null } | null = null;
-
-function showCallScreen() {
-  connectScreen.classList.add("hidden");
-  callScreen.classList.remove("hidden");
-
-  // Direct call → phone-style layout; room call → group layout.
-  if (directCallPeer) {
-    const fp = directCallPeer.fingerprint || "";
-    const alias = directCallPeer.alias;
-    roomName.textContent = alias || fp.substring(0, 16) || "Direct Call";
-    dcName.textContent = alias || "Unknown";
-    dcFp.textContent = fp;
-    dcIdenticon.innerHTML = "";
-    dcIdenticon.appendChild(createIdenticonEl(fp || "?", 96, true));
-    dcBadge.textContent = "Connecting...";
-    dcBadge.className = "dc-badge connecting";
-    directCallView.classList.remove("hidden");
-    participantsDiv.classList.add("hidden");
-  } else {
-    roomName.textContent = roomInput.value;
-    directCallView.classList.add("hidden");
-    participantsDiv.classList.remove("hidden");
-  }
-  callStatus.className = "status-dot";
-  statusInterval = window.setInterval(pollStatus, 250);
-  // Sync the audio route label with the OS state (Android only; on desktop
-  // get_audio_route returns "earpiece" so we land on the default).
-  invoke<string>("get_audio_route")
-    .then((route) => { currentAudioRoute = (route as AudioRoute) || "earpiece"; updateRouteLabel(); })
-    .catch(() => { currentAudioRoute = "earpiece"; updateRouteLabel(); });
-}
-
-function showConnectScreen() {
-  callScreen.classList.add("hidden");
-  connectScreen.classList.remove("hidden");
-  connectBtn.disabled = false;
-  connectBtn.textContent = "Connect";
-  levelBar.style.width = "0%";
-  directCallPeer = null;
-  // Clear the media-degraded banner if present
-  const banner = document.getElementById("media-degraded-banner");
-  if (banner) banner.remove();
-  if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
-}
-
-// ── Mute / hangup ──
-micBtn.addEventListener("click", async () => {
-  try { const m: boolean = await invoke("toggle_mic"); micBtn.classList.toggle("muted", m); micIcon.textContent = m ? "Mic Off" : "Mic"; } catch {}
-});
-
-// Audio routing (Android) — cycles between earpiece, speaker, and Bluetooth
-// SCO. Each transition calls the corresponding Tauri command which sets the
-// AudioManager state and restarts Oboe streams so AAudio picks up the new
-// route. On desktop all commands are no-ops.
-//
-// Earpiece is NOT a "muted" state, so DO NOT add the `.muted` CSS class
-// (which would tint the button red); that was a bug in 0178cbd that made
-// earpiece mode look like playback was off.
-type AudioRoute = "earpiece" | "speaker" | "bluetooth";
-let currentAudioRoute: AudioRoute = "earpiece";
-let routeBusy = false;
-
-function updateRouteLabel() {
-  spkBtn.classList.remove("speaker-on", "bt-on");
-  spkBtn.classList.remove("muted");
-  switch (currentAudioRoute) {
-    case "speaker":
-      spkIcon.textContent = "🔊 Speaker";
-      spkBtn.classList.add("speaker-on");
-      break;
-    case "bluetooth":
-      spkIcon.textContent = "🎧 BT";
-      spkBtn.classList.add("bt-on");
-      break;
-    default:
-      spkIcon.textContent = "🔈 Earpiece";
-      break;
-  }
-}
-
-async function cycleAudioRoute() {
-  if (routeBusy) return; // debounce — Oboe restart takes ~60-400ms
-  routeBusy = true;
-  spkBtn.disabled = true;
-  try {
-    const btAvailable = await invoke<boolean>("is_bluetooth_available");
-    const routes: AudioRoute[] = btAvailable
-      ? ["earpiece", "speaker", "bluetooth"]
-      : ["earpiece", "speaker"];
-    const idx = routes.indexOf(currentAudioRoute);
-    const next = routes[(idx + 1) % routes.length];
-
-    // Tear down current route, then activate next.
-    // start_bluetooth_sco() already calls setSpeakerphoneOn(false)
-    // internally, so we skip the separate speakerphone toggle when
-    // transitioning to BT to avoid a redundant Oboe restart.
-    if (currentAudioRoute === "bluetooth") {
-      await invoke("set_bluetooth_sco", { on: false });
-    }
-    if (next === "speaker") {
-      await invoke("set_speakerphone", { on: true });
-    } else if (next === "bluetooth") {
-      // BT start handles speaker-off internally + waits for SCO link
-      await invoke("set_bluetooth_sco", { on: true });
-    } else {
-      // earpiece — turn everything off
-      await invoke("set_speakerphone", { on: false });
-    }
-
-    currentAudioRoute = next;
-    updateRouteLabel();
-  } catch (e) {
-    console.error("cycleAudioRoute failed:", e);
+    console.error("connect failed:", e);
+    showToast(`Join failed: ${errorMessage(e)}`);
   } finally {
-    spkBtn.disabled = false;
-    routeBusy = false;
+    connectPending = false;
+    joinVoiceBtn.textContent = origText;
+    (joinVoiceBtn as HTMLButtonElement).disabled = false;
   }
+});
+
+function enterVoice(isDirect: boolean) {
+  inVoice = true;
+  const s = loadSettings();
+  joinVoiceBtn.classList.add("hidden");
+  voiceDrawer.classList.remove("hidden");
+  vdRoom.textContent = isDirect && directCallPeer
+    ? (directCallPeer.alias || directCallPeer.fingerprint.substring(0, 16))
+    : (s.room || "general");
+  vdTimer.textContent = "0:00";
+  vdBadge.classList.add("hidden");
+  vdBadge.textContent = "";
+
+  if (isDirect && directCallPeer) {
+    vdDirectInfo.classList.remove("hidden");
+    vdDcIdenticon.innerHTML = "";
+    vdDcIdenticon.appendChild(createIdenticonEl(directCallPeer.fingerprint, 32, true));
+    vdDcName.textContent = directCallPeer.alias || directCallPeer.fingerprint.substring(0, 16);
+    vdDcBadge.textContent = "Connecting...";
+    vdDcBadge.className = "vd-dc-badge connecting";
+  } else {
+    vdDirectInfo.classList.add("hidden");
+  }
+
+  statusInterval = window.setInterval(pollStatus, 250);
 }
 
-spkBtn.addEventListener("click", cycleAudioRoute);
-hangupBtn.addEventListener("click", async () => {
-  userDisconnected = true;
-  // Use the new hangup_call command instead of raw disconnect —
-  // it sends a Hangup signal to the relay FIRST so the peer
-  // gets auto-dismissed from the call screen, then tears down
-  // our local engine. Plain `disconnect` would leave the peer
-  // stuck on the call screen with silent audio.
+function leaveVoice() {
+  inVoice = false;
+  callInProgress = false;
+  directCallPeer = null;
+  pendingCallId = null;
+  voiceDrawer.classList.add("hidden");
+  joinVoiceBtn.classList.remove("hidden");
+  vdLevelBar.style.width = "0%";
+  if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+  stopCamera();
+  remoteVideoActive = false;
+  vdVideoStrip.classList.add("hidden");
+  remoteCtx.clearRect(0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
+}
+
+// Drawer controls
+vdEndBtn.addEventListener("click", async () => {
+  try { await invoke("hangup_call"); } catch {}
+  try { await invoke("disconnect"); } catch {}
+  leaveVoice();
+});
+vdMicBtn.addEventListener("click", async () => {
+  try { await invoke("toggle_mic"); } catch {}
+});
+vdSpkBtn.addEventListener("click", async () => {
+  try { await invoke("toggle_speaker"); } catch {}
+});
+
+// ── Camera (Blocker 4 + 5) ────────────────────────────────────────
+const camCaptureCanvas = document.createElement("canvas");
+const camCaptureCtx = camCaptureCanvas.getContext("2d")!;
+
+async function startCamera() {
+  if (cameraActive) return;
   try {
-    await invoke("hangup_call");
-  } catch {
-    // Fall back to plain disconnect if hangup_call errors
-    // (older Rust build without the new command).
-    try {
-      await invoke("disconnect");
-    } catch {}
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    vdLocalVideo.srcObject = cameraStream;
+    vdVideoStrip.classList.remove("hidden");
+
+    const track = cameraStream.getVideoTracks()[0];
+    const settings = track.getSettings();
+    camCaptureCanvas.width = settings.width ?? 640;
+    camCaptureCanvas.height = settings.height ?? 360;
+
+    cameraActive = true;
+    vdCamIcon.textContent = "Cam ✓";
+    vdCamBtn.classList.add("active");
+
+    // Capture loop at ~15 fps
+    cameraFrameTimer = window.setInterval(async () => {
+      if (!cameraActive) return;
+      camCaptureCtx.drawImage(vdLocalVideo, 0, 0, camCaptureCanvas.width, camCaptureCanvas.height);
+      const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
+      const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      try { await invoke("push_camera_frame", { jpeg_b64: b64 }); } catch { /* call not active */ }
+    }, 67); // 67 ms ≈ 15 fps
+  } catch (e) {
+    console.warn("camera access denied or unavailable:", e);
   }
-  showConnectScreen();
+}
+
+function stopCamera() {
+  cameraActive = false;
+  if (cameraFrameTimer != null) { window.clearInterval(cameraFrameTimer); cameraFrameTimer = null; }
+  if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+  vdLocalVideo.srcObject = null;
+  vdCamIcon.textContent = "Cam";
+  vdCamBtn.classList.remove("active");
+  // Hide strip only if remote video is also gone
+  if (!remoteVideoActive) vdVideoStrip.classList.add("hidden");
+}
+
+vdCamBtn.addEventListener("click", () => {
+  if (cameraActive) { stopCamera(); } else { startCamera(); }
 });
 
-document.addEventListener("keydown", (e) => {
-  if (callScreen.classList.contains("hidden")) return;
-  if ((e.target as HTMLElement).tagName === "INPUT") return;
-  if (e.key === "m") micBtn.click();
-  if (e.key === "s") spkBtn.click();
-  if (e.key === "q") hangupBtn.click();
+// ── Remote video display (Blocker 5) ─────────────────────────────
+const remoteCtx = vdRemoteVideo.getContext("2d")!;
+
+listen("video:frame", (event: any) => {
+  const { width, height, jpeg_b64 } = event.payload;
+  if (!jpeg_b64) return;
+
+  remoteVideoActive = true;
+  vdVideoStrip.classList.remove("hidden");
+  vdRemoteVideo.width = width ?? vdRemoteVideo.width;
+  vdRemoteVideo.height = height ?? vdRemoteVideo.height;
+
+  const img = new Image();
+  img.onload = () => {
+    remoteCtx.drawImage(img, 0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
+  };
+  img.src = `data:image/jpeg;base64,${jpeg_b64}`;
 });
 
-// ── Status polling ──
+// ── Poll status ───────────────────────────────────────────────────
 interface CallStatusI {
-  active: boolean; mic_muted: boolean; spk_muted: boolean;
-  participants: { fingerprint: string; alias: string | null }[];
-  encode_fps: number; recv_fps: number; audio_level: number;
-  call_duration_secs: number; fingerprint: string;
+  active: boolean;
+  mic_muted: boolean;
+  spk_muted: boolean;
+  participants: any[];
+  encode_fps: number;
+  recv_fps: number;
+  audio_level: number;
+  call_duration_secs: number;
+  fingerprint: string;
+  tx_codec: string;
+  rx_codec: string;
 }
-
-function formatDuration(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-let reconnectAttempts = 0;
 
 async function pollStatus() {
   try {
     const st: CallStatusI = await invoke("get_status");
     if (!st.active) {
-      if (!userDisconnected && reconnectAttempts < 5) {
-        reconnectAttempts++;
-        callStatus.className = "status-dot reconnecting";
-        statsDiv.textContent = `Reconnecting (${reconnectAttempts}/5)...`;
-        const relay = getSelectedRelay();
-        if (relay) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
-          setTimeout(async () => {
-            try {
-              await invoke("connect", { relay: relay.address, room: roomInput.value, alias: aliasInput.value, osAec: osAecCheckbox.checked });
-              reconnectAttempts = 0; callStatus.className = "status-dot";
-            } catch {}
-          }, delay);
-        }
-        return;
-      }
-      reconnectAttempts = 0; showConnectScreen(); return;
+      leaveVoice();
+      return;
     }
-
-    reconnectAttempts = 0;
     if (st.fingerprint) myFingerprint = st.fingerprint;
 
-    micBtn.classList.toggle("muted", st.mic_muted);
-    micIcon.textContent = st.mic_muted ? "Mic Off" : "Mic";
-    // NB: spkBtn label is driven by the Android audio routing state
-    // (currentAudioRoute / updateRouteLabel), not by the engine's spk_muted.
-    // Skip that here so pollStatus doesn't clobber the routing UI.
-    callTimer.textContent = formatDuration(st.call_duration_secs);
+    // Update drawer controls
+    vdMicBtn.classList.toggle("muted", st.mic_muted);
+    vdMicIcon.textContent = st.mic_muted ? "Muted" : "Mic";
+    vdSpkBtn.classList.toggle("muted", st.spk_muted);
+    vdSpkIcon.textContent = st.spk_muted ? "Off" : "Spk";
 
-    const rms = st.audio_level;
-    const pct = rms > 0 ? Math.min(100, (Math.log(rms) / Math.log(32767)) * 100) : 0;
-    levelBar.style.width = `${pct}%`;
+    // Level meter
+    const pct = Math.min(100, (st.audio_level / 10000) * 100);
+    vdLevelBar.style.width = `${pct}%`;
 
-    // Direct-call phone-style layout: update the connection
-    // badge from the call-debug buffer or from participants.
+    // Duration
+    const m = Math.floor(st.call_duration_secs / 60);
+    const s = Math.floor(st.call_duration_secs % 60);
+    vdTimer.textContent = `${m}:${s.toString().padStart(2, "0")}`;
+
+    // P2P badge for direct calls
     if (directCallPeer) {
-      // Check the debug buffer for the race result to label
-      // the connection type (P2P Direct vs Relay).
-      // Use reverse search for MOST RECENT event (avoid stale data
-      // from previous calls). Spread+reverse instead of findLast for
-      // WebView compatibility (findLast requires Chrome 97+).
       const pathNeg = [...callDebugBuffer].reverse().find((e) => e.step === "connect:path_negotiated");
       const engineOk = [...callDebugBuffer].reverse().find((e) => e.step === "connect:call_engine_started");
       if (engineOk) {
         if (pathNeg?.details?.use_direct === true) {
-          dcBadge.textContent = "P2P Direct";
-          dcBadge.className = "dc-badge";
+          vdDcBadge.textContent = "P2P Direct";
+          vdDcBadge.className = "vd-dc-badge direct";
+          vdBadge.textContent = "P2P";
+          vdBadge.className = "vd-badge direct";
+          vdBadge.classList.remove("hidden");
         } else {
-          dcBadge.textContent = "Via Relay";
-          dcBadge.className = "dc-badge relay";
+          vdDcBadge.textContent = "Via Relay";
+          vdDcBadge.className = "vd-dc-badge relay";
+          vdBadge.textContent = "Relay";
+          vdBadge.className = "vd-badge relay";
+          vdBadge.classList.remove("hidden");
         }
       }
-      // Skip the group participant rendering — direct-call
-      // view is already visible and showing the peer.
     }
 
-    // Participants grouped by relay (group/room calls only).
-    // Hidden when directCallPeer is set — the phone-style
-    // layout above handles the 1:1 display.
-    if (directCallPeer) {
-      // no-op: direct call view handles it
-    } else if (st.participants.length === 0) {
-      participantsDiv.innerHTML = '<div class="participants-empty">Waiting for participants...</div>';
-    } else {
-      participantsDiv.innerHTML = "";
-      // Group by relay_label (null = this relay)
-      const groups: Record<string, typeof st.participants> = {};
-      st.participants.forEach((p: any) => {
-        const relay = p.relay_label || "This Relay";
-        if (!groups[relay]) groups[relay] = [];
-        groups[relay].push(p);
-      });
-
-      Object.entries(groups).forEach(([relay, members]) => {
-        // Relay header
-        const header = document.createElement("div");
-        header.className = "relay-group-header";
-        const isLocal = relay === "This Relay";
-        header.innerHTML = `<span class="relay-dot-small ${isLocal ? "green" : "blue"}"></span> ${escapeHtml(relay)}`;
-        participantsDiv.appendChild(header);
-
-        // Participants under this relay
-        (members as any[]).forEach((p) => {
-          const name = p.alias || "Anonymous";
-          const fp = p.fingerprint || "";
-          const isMe = fp && myFingerprint.includes(fp);
-
-          const row = document.createElement("div");
-          row.className = "participant";
-
-          const icon = createIdenticonEl(fp || name, 36, true);
-          if (isMe) icon.style.outline = "2px solid var(--accent)";
-          row.appendChild(icon);
-
-          const info = document.createElement("div");
-          info.className = "info";
-          info.innerHTML = `
-            <div class="name">${escapeHtml(name)} ${isMe ? '<span class="you-badge">you</span>' : ""}</div>
-            <div class="fp">${escapeHtml(fp ? fp.substring(0, 16) : "")}</div>
-          `;
-          row.appendChild(info);
-          participantsDiv.appendChild(row);
-        });
-      });
-    }
-
-    // Stats line with codec badges
-    const txBadge = (st as any).tx_codec ? `<span class="codec-badge tx">${escapeHtml((st as any).tx_codec)}</span>` : "";
-    const rxBadge = (st as any).rx_codec ? `<span class="codec-badge rx">${escapeHtml((st as any).rx_codec)}</span>` : "";
-    statsDiv.innerHTML = `${txBadge} ${rxBadge} TX: ${st.encode_fps} | RX: ${st.recv_fps}`;
+    // Stats with codec
+    vdStats.textContent = `TX: ${st.tx_codec || "?"} ${st.encode_fps || 0}fps | RX: ${st.rx_codec || "?"} ${st.recv_fps || 0}fps | Level: ${st.audio_level || 0}`;
   } catch {}
 }
 
-listen("call-event", (event: any) => {
-  const { kind } = event.payload;
-  if (kind === "room-update") pollStatus();
-  if (kind === "disconnected" && !userDisconnected) pollStatus();
-
-  // Phase 5.6: media health watchdog — show/clear a warning
-  // banner when the media path dies (e.g., P2P direct
-  // established but the network path changed, or cross-relay
-  // media forwarding isn't working).
-  if (kind === "media-degraded") {
-    // Show a warning banner on the call screen. Don't auto-
-    // disconnect — the user might be on a briefly-unstable
-    // network and recovery is possible (the engine tracks
-    // "media-recovered" and clears the banner if packets
-    // resume).
-    let banner = document.getElementById("media-degraded-banner");
-    if (!banner) {
-      banner = document.createElement("div");
-      banner.id = "media-degraded-banner";
-      banner.style.cssText =
-        "background:rgba(239,68,68,0.15);color:var(--red);padding:8px 12px;" +
-        "border-radius:8px;text-align:center;font-size:13px;margin:8px 0;";
-      banner.innerHTML =
-        '⚠ No audio — connection may be lost.<br>' +
-        '<small style="color:var(--text-dim)">Try hanging up and reconnecting, or switch to a different relay.</small>';
-      // Insert at the top of the call screen, below the header
-      const participants = document.getElementById("participants");
-      const directView = document.getElementById("direct-call-view");
-      const insertBefore = (directView && !directView.classList.contains("hidden"))
-        ? directView
-        : participants;
-      if (insertBefore?.parentNode) {
-        insertBefore.parentNode.insertBefore(banner, insertBefore);
+// ── Signal events ─────────────────────────────────────────────────
+listen("signal-event", (event: any) => {
+  const data = event.payload;
+  switch (data.type) {
+    case "presence_list":
+      // Relay sent updated user list
+      lobbyUsers.clear();
+      for (const u of data.users || []) {
+        if (u.fingerprint === myFingerprint) continue; // don't show self
+        lobbyUsers.set(u.fingerprint, {
+          fingerprint: u.fingerprint,
+          alias: u.alias || null,
+          inVoice: false,
+          speaking: false,
+        });
       }
-    }
-  }
-  if (kind === "media-recovered") {
-    const banner = document.getElementById("media-degraded-banner");
-    if (banner) banner.remove();
+      renderLobbyUsers();
+      break;
+    case "ringing":
+      // We placed a call, it's ringing
+      break;
+    case "incoming":
+      // Show incoming call banner
+      incomingBanner.classList.remove("hidden");
+      incomingCallerName.textContent = data.caller_alias || data.caller_fp?.substring(0, 16) || "Unknown";
+      incomingIdenticon.innerHTML = "";
+      incomingIdenticon.appendChild(createIdenticonEl(data.caller_fp || "?", 40, true));
+      directCallPeer = { fingerprint: data.caller_fp || "", alias: data.caller_alias || null };
+      pendingCallId = data.call_id || null;
+      ringer.start();
+      break;
+    case "answered":
+      ringer.stop();
+      break;
+    case "setup":
+      ringer.stop();
+      incomingBanner.classList.add("hidden");
+      // Auto-connect to the call
+      (async () => {
+        if (connectPending) return;
+        connectPending = true;
+        const s = loadSettings();
+        try {
+          await connectWithTimeout({
+            relay: data.relay_addr,
+            room: data.room,
+            alias: s.alias || "",
+            osAec: s.osAec,
+            quality: s.quality || "auto",
+            peerDirectAddr: data.peer_direct_addr ?? null,
+            peerLocalAddrs: data.peer_local_addrs ?? [],
+            peerMappedAddr: data.peer_mapped_addr ?? null,
+            directOnly: s.directOnly || false,
+            birthdayAttack: s.birthdayAttack || false,
+          });
+          enterVoice(true);
+        } catch (e: any) {
+          console.error("connect failed:", e);
+          showToast(`Call failed to connect: ${errorMessage(e)}`);
+        } finally {
+          connectPending = false;
+        }
+      })();
+      break;
+    case "hangup":
+      ringer.stop();
+      incomingBanner.classList.add("hidden");
+      (async () => {
+        try { await invoke("disconnect"); } catch {}
+        leaveVoice();
+      })();
+      break;
   }
 });
 
-// ── Settings ──
+// Accept/reject incoming call
+acceptCallBtn.addEventListener("click", async () => {
+  ringer.stop();
+  incomingBanner.classList.add("hidden");
+  if (pendingCallId) {
+    await invoke("answer_call", { callId: pendingCallId, mode: 1 });
+    pendingCallId = null;
+  }
+});
+
+rejectCallBtn.addEventListener("click", async () => {
+  ringer.stop();
+  incomingBanner.classList.add("hidden");
+  if (pendingCallId) {
+    await invoke("answer_call", { callId: pendingCallId, mode: 0 });
+    pendingCallId = null;
+    directCallPeer = null;
+  }
+});
+
+// ── Room updates (participants) ───────────────────────────────────
+listen("call-event", (event: any) => {
+  const data = event.payload;
+  if (data.kind === "participants" && data.participants) {
+    // Update lobby users from room participant list
+    const active = new Set<string>();
+    for (const p of data.participants) {
+      const fp = p.fingerprint || p.id || "";
+      active.add(fp);
+      if (!lobbyUsers.has(fp)) {
+        lobbyUsers.set(fp, { fingerprint: fp, alias: p.alias || null, inVoice: true, speaking: false });
+      } else {
+        const u = lobbyUsers.get(fp)!;
+        u.inVoice = true;
+        if (p.alias) u.alias = p.alias;
+      }
+    }
+    // Mark users not in participant list as not in voice
+    for (const [fp, u] of lobbyUsers) {
+      if (!active.has(fp)) u.inVoice = false;
+    }
+    renderLobbyUsers();
+  }
+});
+
+// ── Settings ──────────────────────────────────────────────────────
+// ── Relay list management ──────────────────────────────────────
+function renderRelayList() {
+  const s = loadSettings();
+  sRelayList.innerHTML = "";
+  for (let i = 0; i < s.relays.length; i++) {
+    const r = s.relays[i];
+    const isActive = i === s.selectedRelay;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;padding:8px;border-radius:6px;margin-bottom:4px;cursor:pointer;" +
+      (isActive ? "background:rgba(74,222,128,0.12);border:1px solid var(--green);" : "background:var(--surface);border:1px solid transparent;");
+    row.innerHTML = `
+      <span style="flex:1;font-size:13px;font-weight:${isActive ? '600' : '400'}">
+        <span style="color:${isActive ? 'var(--green)' : 'var(--text)'}">${r.name}</span>
+        <span style="color:var(--text-dim);font-size:11px;margin-left:4px">${r.address}</span>
+      </span>
+      ${isActive ? '<span style="color:var(--green);font-size:11px">ACTIVE</span>' : ''}
+      <button class="relay-rm-btn" data-idx="${i}" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:16px;padding:2px 6px">&times;</button>
+    `;
+    // Click to select (not on the X button)
+    row.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).classList.contains("relay-rm-btn")) return;
+      const settings = loadSettings();
+      if (i !== settings.selectedRelay) {
+        settings.selectedRelay = i;
+        saveSettings(settings);
+        renderRelayList();
+        // Reconnect to new relay
+        reconnectSignal();
+      }
+    });
+    sRelayList.appendChild(row);
+  }
+  // Wire remove buttons
+  sRelayList.querySelectorAll(".relay-rm-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt((btn as HTMLElement).dataset.idx || "0");
+      const settings = loadSettings();
+      if (settings.relays.length <= 1) return; // keep at least one
+      settings.relays.splice(idx, 1);
+      if (settings.selectedRelay >= settings.relays.length) {
+        settings.selectedRelay = 0;
+      }
+      saveSettings(settings);
+      renderRelayList();
+      reconnectSignal();
+    });
+  });
+}
+
+sRelayAdd.addEventListener("click", () => {
+  const name = sRelayName.value.trim();
+  const addr = sRelayAddr.value.trim();
+  if (!name || !addr) return;
+  if (!addr.includes(":")) return; // must be host:port
+  const s = loadSettings();
+  s.relays.push({ name, address: addr });
+  saveSettings(s);
+  sRelayName.value = "";
+  sRelayAddr.value = "";
+  renderRelayList();
+});
+
+async function reconnectSignal() {
+  // Deregister from current relay, then auto-connect to new one
+  try { await invoke("deregister"); } catch {}
+  lobbyUsers.clear();
+  renderLobbyUsers();
+  lobbyDot.style.background = "var(--yellow)";
+  lobbyRelayLabel.textContent = "Reconnecting...";
+  // Short delay to let deregister complete
+  setTimeout(() => autoConnect(), 500);
+}
+
 function openSettings() {
   const s = loadSettings();
-  sRoom.value = s.room; sAlias.value = s.alias; sOsAec.checked = s.osAec;
+  sRoom.value = s.room;
+  sAlias.value = s.alias;
+  sOsAec.checked = s.osAec;
   sDredDebug.checked = !!s.dredDebugLogs;
   sCallDebug.checked = !!s.callDebugLogs;
   sDirectOnly.checked = !!s.directOnly;
   sBirthdayAttack.checked = !!s.birthdayAttack;
-  // Show the debug-log panel only when the user has the flag on —
-  // keeps the settings panel short in normal use.
   sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
   renderCallDebugLog();
   const qi = qualityToIndex(s.quality || "auto");
   sQuality.value = String(qi);
   updateQualityUI(qi);
   sFingerprint.textContent = myFingerprint || "(loading...)";
-  renderSettingsRecentRooms(s.recentRooms);
+  renderRelayList();
   settingsPanel.classList.remove("hidden");
 }
-function closeSettings() { settingsPanel.classList.add("hidden"); }
 
-function renderSettingsRecentRooms(rooms: RecentRoom[]) {
-  if (rooms.length === 0) {
-    sRecentRooms.innerHTML = '<span style="color:var(--text-dim);font-size:12px">No recent rooms</span>';
-    return;
-  }
-  sRecentRooms.innerHTML = rooms.map((r, i) => `
-    <div class="recent-room-item">
-      <span>${escapeHtml(r.room)} <small style="color:var(--text-dim)">${escapeHtml(r.relay)}</small></span>
-      <button class="remove" data-idx="${i}">×</button>
-    </div>`).join("");
-  sRecentRooms.querySelectorAll(".remove").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const idx = parseInt((btn as HTMLElement).dataset.idx || "0");
-      const s = loadSettings();
-      s.recentRooms.splice(idx, 1);
-      saveSettingsObj(s);
-      renderSettingsRecentRooms(s.recentRooms);
-    });
-  });
-}
-
-settingsBtnHome.addEventListener("click", openSettings);
-settingsBtnCall.addEventListener("click", openSettings);
-// "STUN for QUIC" — ask the registered relay for our own public
-// address. Requires register_signal to have been run first
-// (otherwise the Rust side returns "not registered"). The button
-// shows its working state inline so the user knows it's waiting on
-// the relay rather than the network.
-// Phase 2 multi-relay NAT type detection. Probes every configured
-// relay in parallel and classifies the result.
-//
-//   Cone          = P2P direct path viable, green cue
-//   SymmetricPort = per-destination port mapping, informational
-//                   (P2P will fall back to relay but calls still work)
-//   Multiple      = classifier saw different public IPs; informational
-//   Unknown       = not enough public probes, neutral
-//
-// The classifier drops LAN / private / CGNAT reflex addrs before
-// deciding, so a mixed "LAN relay + internet relay" setup does NOT
-// falsely flag as symmetric. Failed probes are shown in the list
-// for transparency but dimmed, not highlighted.
-sNatDetectBtn.addEventListener("click", async () => {
-  const s = loadSettings();
-  if (!s.relays || s.relays.length === 0) {
-    sNatType.textContent = "⚠ no relays configured";
-    sNatType.style.color = "var(--yellow)";
-    return;
-  }
-  sNatType.textContent = "probing...";
-  sNatType.style.color = "var(--text)";
-  sNatProbes.innerHTML = "";
-  sNatDetectBtn.disabled = true;
-  try {
-    const detection = await invoke<{
-      probes: Array<{
-        relay_name: string;
-        relay_addr: string;
-        observed_addr: string | null;
-        latency_ms: number | null;
-        error: string | null;
-      }>;
-      nat_type: "Cone" | "SymmetricPort" | "Multiple" | "Unknown";
-      consensus_addr: string | null;
-    }>("detect_nat_type", {
-      relays: s.relays.map((r) => ({ name: r.name, address: r.address })),
-    });
-
-    const verdictLabel =
-      detection.nat_type === "Cone"
-        ? `✓ Cone NAT — P2P viable (${detection.consensus_addr})`
-        : detection.nat_type === "SymmetricPort"
-        ? "ℹ Symmetric NAT — P2P falls back to relay, calls still work"
-        : detection.nat_type === "Multiple"
-        ? "ℹ Multiple public IPs observed"
-        : "? Unknown (not enough public probes)";
-
-    // Only Cone is "good news green". Everything else is neutral
-    // informational — the user has configured relays so any
-    // classification result just describes their network; none
-    // are "wrong" per se.
-    const verdictColor =
-      detection.nat_type === "Cone"
-        ? "var(--green)"
-        : "var(--text-dim)";
-
-    sNatType.textContent = verdictLabel;
-    sNatType.style.color = verdictColor;
-
-    sNatProbes.innerHTML = detection.probes
-      .map((p) => {
-        if (p.observed_addr) {
-          return `<div>• ${escapeHtml(p.relay_name)} (${escapeHtml(
-            p.relay_addr
-          )}) → ${escapeHtml(p.observed_addr)} [${p.latency_ms ?? "?"}ms]</div>`;
-        } else {
-          // Failed probes are dimmed, not highlighted — the classifier
-          // already ignores them, and the user doesn't need to be
-          // alarmed by a momentarily-offline relay.
-          return `<div style="color:var(--text-dim);opacity:0.7">• ${escapeHtml(
-            p.relay_name
-          )} (${escapeHtml(p.relay_addr)}) → ${escapeHtml(
-            p.error ?? "probe failed"
-          )}</div>`;
-        }
-      })
-      .join("");
-  } catch (e: any) {
-    sNatType.textContent = `⚠ ${String(e)}`;
-    sNatType.style.color = "var(--red)";
-    sNatProbes.innerHTML = "";
-  } finally {
-    sNatDetectBtn.disabled = false;
-  }
-});
-
-sReflectBtn.addEventListener("click", async () => {
-  sReflectedAddr.textContent = "querying...";
-  sReflectBtn.disabled = true;
-  try {
-    const addr = await invoke<string>("get_reflected_address");
-    sReflectedAddr.textContent = addr;
-    sReflectedAddr.style.color = "var(--green)";
-  } catch (e: any) {
-    // Two main failure modes surfaced via the error string:
-    //  - "not registered"                 — user hasn't registered
-    //                                        against a relay yet
-    //  - "reflect timeout (relay may not support reflection)"
-    //                                       — old relay, pre-Phase-1
-    const msg = String(e);
-    sReflectedAddr.textContent = msg.includes("not registered")
-      ? "⚠ register first"
-      : msg.includes("timeout")
-      ? "⚠ relay does not support reflection"
-      : `⚠ ${msg}`;
-    sReflectedAddr.style.color = "var(--yellow)";
-  } finally {
-    sReflectBtn.disabled = false;
-  }
-});
-
-settingsClose.addEventListener("click", closeSettings);
-settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel) closeSettings(); });
+settingsBtn.addEventListener("click", openSettings);
+settingsBtnCall?.addEventListener("click", openSettings);
+settingsClose.addEventListener("click", () => settingsPanel.classList.add("hidden"));
+settingsPanel.addEventListener("click", (e) => { if (e.target === settingsPanel) settingsPanel.classList.add("hidden"); });
 
 settingsSave.addEventListener("click", () => {
   const s = loadSettings();
-  s.room = sRoom.value; s.alias = sAlias.value; s.osAec = sOsAec.checked;
+  s.room = sRoom.value;
+  s.alias = sAlias.value;
+  s.osAec = sOsAec.checked;
   s.quality = QUALITY_STEPS[parseInt(sQuality.value)] || "auto";
   s.dredDebugLogs = sDredDebug.checked;
   s.callDebugLogs = sCallDebug.checked;
   s.directOnly = sDirectOnly.checked;
   s.birthdayAttack = sBirthdayAttack.checked;
-  saveSettingsObj(s);
-  // Push the new flags to the Rust side immediately so the next
-  // frame / call already honors them without waiting for a restart.
+  saveSettings(s);
   invoke("set_dred_verbose_logs", { enabled: s.dredDebugLogs }).catch(() => {});
   invoke("set_call_debug_logs", { enabled: s.callDebugLogs }).catch(() => {});
-  // Reveal or hide the debug-log panel based on the new setting.
   sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
-  roomInput.value = s.room; aliasInput.value = s.alias; osAecCheckbox.checked = s.osAec;
-  renderRecentRooms(s.recentRooms);
-  closeSettings();
+  // Update lobby room label
+  lobbyRoomLabel.textContent = s.room || "general";
+  settingsPanel.classList.add("hidden");
 });
 
-sClearRecent.addEventListener("click", () => {
+// Debug log actions
+sCallDebugClearBtn?.addEventListener("click", () => {
+  callDebugBuffer.length = 0;
+  sCallDebugLogEl.textContent = "";
+});
+sCallDebugCopyBtn?.addEventListener("click", () => {
+  const text = callDebugBuffer.map((e) => {
+    const t = new Date(e.ts_ms).toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return `${t} ${e.step} ${JSON.stringify(e.details)}`;
+  }).join("\n");
+  navigator.clipboard?.writeText(text).catch(() => {});
+});
+sCallDebugShareBtn?.addEventListener("click", async () => {
+  const text = callDebugBuffer.map((e) => {
+    const t = new Date(e.ts_ms).toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return `${t} ${e.step} ${JSON.stringify(e.details)}`;
+  }).join("\n");
+  try { await (navigator as any).share({ text }); } catch {}
+});
+
+// NAT detect
+sReflectBtn?.addEventListener("click", async () => {
+  try {
+    const addr: string = await invoke("get_reflected_address");
+    sPublicAddr.textContent = addr;
+  } catch (e: any) {
+    sPublicAddr.textContent = String(e);
+  }
+});
+
+sNatDetectBtn?.addEventListener("click", async () => {
+  sNatResult.textContent = "Detecting...";
+  try {
+    const relay = getRelay();
+    const relays = relay ? [{ name: relay.name, address: relay.address }] : [];
+    const result: any = await invoke("detect_nat_type", { relays });
+    let text = `NAT: ${result.nat_type}`;
+    if (result.consensus_addr) text += ` (${result.consensus_addr})`;
+    text += "\n";
+    for (const p of result.probes || []) {
+      text += `  ${p.relay_name} (${p.relay_addr}) → ${p.observed_addr || "failed"} [${p.latency_ms || "-"}ms]`;
+      if (p.error) text += ` [${p.error}]`;
+      text += "\n";
+    }
+    sNatResult.textContent = text;
+  } catch (e: any) {
+    sNatResult.textContent = String(e);
+  }
+});
+
+// ── Auto-connect signal on launch ─────────────────────────────────
+async function autoConnect() {
+  const relay = getRelay();
   const s = loadSettings();
-  s.recentRooms = [];
-  saveSettingsObj(s);
-  renderSettingsRecentRooms([]);
-  renderRecentRooms([]);
-});
+  if (!relay) {
+    lobbyRelayLabel.textContent = "No relay configured";
+    lobbyDot.style.background = "var(--red)";
+    return;
+  }
 
+  lobbyRelayLabel.textContent = `${relay.name} (${relay.address})`;
+  lobbyRoomLabel.textContent = s.room || "general";
+  lobbyDot.style.background = "var(--yellow)";
+
+  try {
+    // Register signal for presence + direct calls
+    await invoke("register_signal", { relay: relay.address });
+    lobbyDot.style.background = "var(--green)";
+    lobbyRelayLabel.textContent = `${relay.name} — connected`;
+
+    // Get identity + alias
+    const appInfo: any = await invoke("get_app_info");
+    if (appInfo?.fingerprint) {
+      myFingerprint = appInfo.fingerprint;
+      lobbyFp.textContent = appInfo.alias || appInfo.fingerprint;
+      lobbyIdenticon.innerHTML = "";
+      lobbyIdenticon.appendChild(createIdenticonEl(appInfo.fingerprint, 20, true));
+    }
+  } catch (e: any) {
+    lobbyDot.style.background = "var(--red)";
+    lobbyRelayLabel.textContent = `Failed: ${e}`;
+  }
+}
+
+// Push debug log setting to Rust on startup
+invoke("set_call_debug_logs", { enabled: !!loadSettings().callDebugLogs }).catch(() => {});
+
+// Keyboard shortcuts
 document.addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === ",") {
-    e.preventDefault();
-    settingsPanel.classList.contains("hidden") ? openSettings() : closeSettings();
-  }
-  if (e.key === "Escape") {
-    if (!relayDialog.classList.contains("hidden")) closeRelayDialog();
-    else if (!settingsPanel.classList.contains("hidden")) closeSettings();
-  }
+  if ((e.target as HTMLElement).tagName === "INPUT") return;
+  if (e.key === "m") vdMicBtn.click();
+  if (e.key === "q") vdEndBtn.click();
+  if (e.key === "s") vdSpkBtn.click();
+  if (e.key === "v") vdCamBtn.click();
+  if (e.key === "," && (e.metaKey || e.ctrlKey)) { e.preventDefault(); openSettings(); }
 });
 
-// ── Direct Calling UI ──
-const modeRoom = document.getElementById("mode-room")!;
-const modeDirect = document.getElementById("mode-direct")!;
-const roomModeDiv = document.getElementById("room-mode")!;
-const directModeDiv = document.getElementById("direct-mode")!;
-const registerBtn = document.getElementById("register-btn") as HTMLButtonElement;
-const deregisterBtn = document.getElementById("deregister-btn") as HTMLButtonElement;
-const directRegistered = document.getElementById("direct-registered")!;
-const incomingCallPanel = document.getElementById("incoming-call-panel")!;
-const incomingCaller = document.getElementById("incoming-caller")!;
-const acceptCallBtn = document.getElementById("accept-call-btn")!;
-const rejectCallBtn = document.getElementById("reject-call-btn")!;
-const targetFpInput = document.getElementById("target-fp") as HTMLInputElement;
-const callBtn = document.getElementById("call-btn") as HTMLButtonElement;
-const callStatusText = document.getElementById("call-status-text")!;
-const recentContactsSection = document.getElementById("recent-contacts-section")!;
-const recentContactsList = document.getElementById("recent-contacts-list")!;
-const callHistorySection = document.getElementById("call-history-section")!;
-const callHistoryList = document.getElementById("call-history-list")!;
-const clearHistoryBtn = document.getElementById("clear-history-btn") as HTMLButtonElement;
-
-let currentCallMode = "room";
-
-modeRoom.addEventListener("click", () => {
-  currentCallMode = "room";
-  modeRoom.classList.add("active");
-  modeDirect.classList.remove("active");
-  roomModeDiv.classList.remove("hidden");
-  directModeDiv.classList.add("hidden");
-  // Show room/alias inputs
-  (document.querySelector('label:has(#room)') as HTMLElement)?.classList.remove("hidden");
-  (document.querySelector('label:has(#alias)') as HTMLElement)?.classList.remove("hidden");
-});
-
-modeDirect.addEventListener("click", () => {
-  currentCallMode = "direct";
-  modeDirect.classList.add("active");
-  modeRoom.classList.remove("active");
-  directModeDiv.classList.remove("hidden");
-  roomModeDiv.classList.add("hidden");
-  // Hide room input, keep alias
-  (document.querySelector('label:has(#room)') as HTMLElement)?.classList.add("hidden");
-});
-
-// ── Call history + recent contacts rendering ──
-interface CallHistoryEntry {
-  call_id: string;
-  peer_fp: string;
-  peer_alias: string | null;
-  direction: "placed" | "received" | "missed";
-  timestamp_unix: number;
-}
-
-function fmtTimestamp(unix: number): string {
-  const d = new Date(unix * 1000);
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  if (sameDay) {
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  return d.toLocaleDateString([], { month: "short", day: "numeric" }) +
-    " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function directionIcon(dir: string): string {
-  switch (dir) {
-    case "placed":   return "↗";
-    case "received": return "↙";
-    case "missed":   return "✗";
-    default:         return "•";
-  }
-}
-
-function directionLabel(dir: string): string {
-  switch (dir) {
-    case "placed":   return "Outgoing";
-    case "received": return "Incoming";
-    case "missed":   return "Missed";
-    default:         return dir;
-  }
-}
-
-function directionClass(dir: string): string {
-  return `dir-${dir}`;
-}
-
-function callByFingerprint(fp: string) {
-  targetFpInput.value = fp;
-  callBtn.click();
-}
-
-async function refreshHistory() {
-  try {
-    const [history, contacts] = await Promise.all([
-      invoke<CallHistoryEntry[]>("get_call_history"),
-      invoke<CallHistoryEntry[]>("get_recent_contacts"),
-    ]);
-
-    // Recent contacts (top 6)
-    if (contacts.length === 0) {
-      recentContactsSection.classList.add("hidden");
-    } else {
-      recentContactsSection.classList.remove("hidden");
-      recentContactsList.innerHTML = "";
-      contacts.slice(0, 6).forEach((c) => {
-        const btn = document.createElement("button");
-        btn.className = "contact-chip";
-        const label = c.peer_alias || c.peer_fp.substring(0, 16);
-        btn.innerHTML = `<span class="contact-dot"></span><span class="contact-label">${label}</span>`;
-        btn.title = c.peer_fp;
-        btn.addEventListener("click", () => callByFingerprint(c.peer_fp));
-        recentContactsList.appendChild(btn);
-      });
-    }
-
-    // Full history
-    if (history.length === 0) {
-      callHistorySection.classList.add("hidden");
-    } else {
-      callHistorySection.classList.remove("hidden");
-      callHistoryList.innerHTML = "";
-      history.slice(0, 50).forEach((e) => {
-        const row = document.createElement("div");
-        row.className = `history-row ${directionClass(e.direction)}`;
-        const label = e.peer_alias || e.peer_fp.substring(0, 16);
-        row.innerHTML = `
-          <span class="history-dir">${directionIcon(e.direction)}</span>
-          <div class="history-meta">
-            <span class="history-peer">${label}</span>
-            <span class="history-time">${directionLabel(e.direction)} · ${fmtTimestamp(e.timestamp_unix)}</span>
-          </div>
-          <button class="history-call-btn" title="Call back">Call</button>
-        `;
-        row.title = e.peer_fp;
-        const cb = row.querySelector(".history-call-btn") as HTMLButtonElement;
-        cb.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          callByFingerprint(e.peer_fp);
-        });
-        callHistoryList.appendChild(row);
-      });
-    }
-  } catch (e) {
-    console.error("refreshHistory failed:", e);
-  }
-}
-
-// Live-refresh whenever the backend logs a new entry
-listen("history-changed", () => { refreshHistory(); });
-
-clearHistoryBtn.addEventListener("click", async () => {
-  if (!confirm("Clear call history?")) return;
-  try {
-    await invoke("clear_call_history");
-    refreshHistory();
-  } catch (e) { console.error(e); }
-});
-
-// Track whether a registration is in flight so the same button
-// can toggle between "Register" and "Cancel". The cancel path
-// calls deregister which closes the transport and makes the
-// in-flight connect fail, breaking the await cleanly.
-let registerInFlight = false;
-
-registerBtn.addEventListener("click", async () => {
-  // ── Cancel path: user tapped the button while registration
-  // is in flight (it says "Cancel") → tear down the attempt
-  // so we don't block for 30s on an unreachable relay.
-  if (registerInFlight) {
-    registerInFlight = false;
-    try { await invoke("deregister"); } catch {}
-    registerBtn.textContent = "Register on Relay";
-    registerBtn.disabled = false;
-    connectError.textContent = "Registration cancelled";
-    return;
-  }
-
-  const relay = getSelectedRelay();
-  if (!relay) { connectError.textContent = "No relay selected"; return; }
-  connectError.textContent = "";
-
-  // ── Pre-flight ping: quick 3s QUIC handshake to check if
-  // the relay is reachable BEFORE committing to the full
-  // register flow (which takes ~10s to time out against a dead
-  // host). If the ping fails, show "server unavailable"
-  // immediately without blocking.
-  registerBtn.textContent = "Checking...";
-  registerBtn.disabled = true;
-  try {
-    await invoke("ping_relay", { relay: relay.address });
-  } catch (e: any) {
-    connectError.textContent = `Server unavailable: ${String(e)}`;
-    registerBtn.disabled = false;
-    registerBtn.textContent = "Register on Relay";
-    return;
-  }
-
-  // ── Register path: ping succeeded, proceed with the full
-  // registration. Show "Cancel" on the button so the user
-  // can bail if the relay goes unreachable mid-handshake.
-  registerInFlight = true;
-  registerBtn.disabled = false;
-  registerBtn.textContent = "Cancel";
-  try {
-    const fp = await invoke<string>("register_signal", { relay: relay.address });
-    registerBtn.classList.add("hidden");
-    directRegistered.classList.remove("hidden");
-    callStatusText.textContent = `Your fingerprint: ${fp}`;
-    refreshHistory();
-  } catch (e: any) {
-    if (registerInFlight) {
-      // Real failure, not a user cancel
-      connectError.textContent = String(e);
-    }
-    registerBtn.disabled = false;
-    registerBtn.textContent = "Register on Relay";
-  } finally {
-    registerInFlight = false;
-  }
-});
-
-deregisterBtn.addEventListener("click", async () => {
-  try {
-    await invoke("deregister");
-    directRegistered.classList.add("hidden");
-    registerBtn.classList.remove("hidden");
-    registerBtn.disabled = false;
-    registerBtn.textContent = "Register on Relay";
-    callStatusText.textContent = "";
-    incomingCallPanel.classList.add("hidden");
-  } catch (e) {
-    console.error("deregister failed:", e);
-  }
-});
-
-callBtn.addEventListener("click", async () => {
-  const target = targetFpInput.value.trim();
-  if (!target) return;
-  callStatusText.textContent = "Calling...";
-  // Remember the target for P2P participant display — on a
-  // direct call the relay never sends RoomUpdate so pollStatus
-  // would otherwise show "Waiting for participants...".
-  directCallPeer = { fingerprint: target, alias: null };
-  try {
-    await invoke("place_call", { targetFp: target });
-  } catch (e: any) {
-    callStatusText.textContent = `Error: ${e}`;
-  }
-});
-
-acceptCallBtn.addEventListener("click", async () => {
-  ringer.stop();
-  const status = await invoke<any>("get_signal_status");
-  if (status.incoming_call_id) {
-    // mode=1 → AcceptTrusted — enables P2P direct path by
-    // querying + advertising the callee's reflex addr in the
-    // answer. The alternative is mode=2 → AcceptGeneric
-    // (privacy mode) which intentionally skips the reflex query
-    // to keep the callee's IP hidden from the caller but forces
-    // the call onto the relay path. Default to trusted so the
-    // Accept button gets real P2P; privacy can be a future
-    // dedicated button if anyone needs it.
-    await invoke("answer_call", { callId: status.incoming_call_id, mode: 1 });
-    incomingCallPanel.classList.add("hidden");
-  }
-});
-
-rejectCallBtn.addEventListener("click", async () => {
-  ringer.stop();
-  const status = await invoke<any>("get_signal_status");
-  if (status.incoming_call_id) {
-    await invoke("answer_call", { callId: status.incoming_call_id, mode: 0 });
-    incomingCallPanel.classList.add("hidden");
-  }
-});
-
-// Listen for signal events from Rust backend
-listen("signal-event", (event: any) => {
-  const data = event.payload;
-  switch (data.type) {
-    case "ringing":
-      callStatusText.textContent = "🔔 Ringing...";
-      break;
-    case "incoming":
-      incomingCallPanel.classList.remove("hidden");
-      incomingCaller.textContent = `From: ${data.caller_alias || data.caller_fp?.substring(0, 16) || "unknown"}`;
-      // Remember the peer for the P2P participant display.
-      directCallPeer = {
-        fingerprint: data.caller_fp || "",
-        alias: data.caller_alias || null,
-      };
-      // Start ringing + fire a system notification. Both stop in
-      // the hangup/answered/accepted paths below (and via the
-      // accept/reject button handlers).
-      ringer.start();
-      notifyIncomingCall(
-        data.caller_alias || data.caller_fp?.substring(0, 16) || "unknown",
-      );
-      break;
-    case "answered":
-      callStatusText.textContent = `Call answered (${data.mode})`;
-      ringer.stop();
-      break;
-    case "setup":
-      callStatusText.textContent = "Connecting to media...";
-      ringer.stop();
-      // Phase 3 hole-punching: peer_direct_addr carries the OTHER
-      // party's reflex addr when both sides advertised one. Forward
-      // to Rust connect() which currently logs it + takes the relay
-      // path; Phase 3.5 will race direct vs relay here.
-      (async () => {
-        try {
-          await invoke("connect", {
-            relay: data.relay_addr,
-            room: data.room,
-            alias: aliasInput.value,
-            osAec: osAecCheckbox.checked,
-            quality: loadSettings().quality || "auto",
-            peerDirectAddr: data.peer_direct_addr ?? null,
-            peerLocalAddrs: data.peer_local_addrs ?? [],
-            peerMappedAddr: data.peer_mapped_addr ?? null,
-            directOnly: loadSettings().directOnly || false,
-            birthdayAttack: loadSettings().birthdayAttack || false,
-          });
-          showCallScreen();
-        } catch (e: any) {
-          callStatusText.textContent = `Media connect failed: ${e}`;
-        }
-      })();
-      break;
-    case "hangup":
-      // Peer (or the relay) ended the call. Tear down OUR side
-      // of the media engine and return to the connect screen
-      // automatically — the user shouldn't have to hit End Call
-      // on a call that's already over.
-      //
-      // Scenarios this handles:
-      //   * active direct call, peer hung up → disconnect + back
-      //     to connect screen
-      //   * incoming call was ringing but caller bailed → hide
-      //     incoming panel (no engine to disconnect)
-      //   * setup failure mid-handshake → same as above
-      callStatusText.textContent = "";
-      incomingCallPanel.classList.add("hidden");
-      ringer.stop();
-      (async () => {
-        try {
-          // disconnect errors out with "not connected" if there's
-          // no active engine — safe to ignore, we just want to
-          // make sure any engine IS torn down.
-          await invoke("disconnect");
-        } catch {}
-        // Suppress the call-event "disconnected" auto-reconnect
-        // path since this was a peer-initiated hangup, not a
-        // transport drop.
-        userDisconnected = true;
-        if (!callScreen.classList.contains("hidden")) {
-          showConnectScreen();
-        }
-      })();
-      break;
-    case "reconnecting":
-      // Signal supervisor is retrying the relay connection. Show
-      // a non-blocking indicator on the small status line INSIDE
-      // the registered panel — do NOT touch directRegistered
-      // itself, that's the parent that holds the entire
-      // registered UI (address bar, call button, history, ...)
-      // and overwriting its textContent wipes all children.
-      {
-        const relay = typeof data.relay === "string" ? data.relay : "relay";
-        const status = document.getElementById("registered-status");
-        if (status) {
-          status.textContent = `🔄 reconnecting to ${relay}…`;
-          (status as HTMLElement).style.color = "var(--yellow)";
-        }
-      }
-      break;
-    case "registered":
-      // Supervisor (re-)succeeded, or the first register landed.
-      // Clear the reconnecting badge and keep the registered UI.
-      {
-        const fp = typeof data.fingerprint === "string" ? data.fingerprint : "";
-        const status = document.getElementById("registered-status");
-        if (status) {
-          status.textContent = fp
-            ? `✅ Registered (${fp.slice(0, 16)}…)`
-            : "✅ Registered — waiting for calls";
-          (status as HTMLElement).style.color = "var(--green)";
-        }
-        // Make sure the registered panel is visible and the
-        // Register button is hidden. This is the critical path
-        // both for the first register and for a transparent
-        // supervisor-driven reconnect.
-        directRegistered.classList.remove("hidden");
-        registerBtn.classList.add("hidden");
-      }
-      break;
-  }
-});
+// Launch
+autoConnect();

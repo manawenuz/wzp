@@ -10,19 +10,19 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
-use futures::stream::StreamExt;
 use futures::SinkExt;
+use futures::stream::StreamExt;
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
-use wzp_proto::MediaTransport;
+use wzp_proto::{MediaTransport, default_signal_version};
 
 mod metrics;
 use metrics::WebMetrics;
@@ -54,22 +54,45 @@ async fn main() -> anyhow::Result<()> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--port" => { i += 1; port = args[i].parse().expect("invalid port"); }
-            "--relay" => { i += 1; relay_addr = args[i].parse().expect("invalid relay address"); }
-            "--tls" => { use_tls = true; }
-            "--auth-url" => { i += 1; auth_url = Some(args[i].clone()); }
-            "--cert" => { i += 1; cert_path = Some(args[i].clone()); }
-            "--key" => { i += 1; key_path = Some(args[i].clone()); }
+            "--port" => {
+                i += 1;
+                port = args[i].parse().expect("invalid port");
+            }
+            "--relay" => {
+                i += 1;
+                relay_addr = args[i].parse().expect("invalid relay address");
+            }
+            "--tls" => {
+                use_tls = true;
+            }
+            "--auth-url" => {
+                i += 1;
+                auth_url = Some(args[i].clone());
+            }
+            "--cert" => {
+                i += 1;
+                cert_path = Some(args[i].clone());
+            }
+            "--key" => {
+                i += 1;
+                key_path = Some(args[i].clone());
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433] [--tls] [--auth-url <url>]");
+                eprintln!(
+                    "Usage: wzp-web [--port 8080] [--relay 127.0.0.1:4433] [--tls] [--auth-url <url>]"
+                );
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --port <port>      HTTP/WebSocket port (default: 8080)");
                 eprintln!("  --relay <addr>     WZP relay address (default: 127.0.0.1:4433)");
                 eprintln!("  --tls              Enable HTTPS (required for mic on Android)");
                 eprintln!("  --auth-url <url>   featherChat auth endpoint for token validation");
-                eprintln!("  --cert <path>      TLS certificate PEM file (optional, overrides self-signed)");
-                eprintln!("  --key <path>       TLS private key PEM file (optional, overrides self-signed)");
+                eprintln!(
+                    "  --cert <path>      TLS certificate PEM file (optional, overrides self-signed)"
+                );
+                eprintln!(
+                    "  --key <path>       TLS private key PEM file (optional, overrides self-signed)"
+                );
                 eprintln!();
                 eprintln!("Rooms: open https://host:port/<room-name> to join a room.");
                 eprintln!("Browser sends auth JSON as first WS message when --auth-url is set.");
@@ -81,7 +104,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(ref url) = auth_url {
-        info!(url, "auth enabled — browsers must send token as first WS message");
+        info!(
+            url,
+            "auth enabled — browsers must send token as first WS message"
+        );
     }
 
     let web_metrics = WebMetrics::new();
@@ -101,10 +127,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Serve index.html for any path that isn't /ws/, /metrics, or a static file.
     // This lets URLs like /manwe load the SPA which reads the room from the path.
-    let static_service = ServeDir::new(static_dir)
-        .fallback(tower_http::services::ServeFile::new(
-            format!("{}/index.html", static_dir),
-        ));
+    let static_service = ServeDir::new(static_dir).fallback(tower_http::services::ServeFile::new(
+        format!("{}/index.html", static_dir),
+    ));
 
     let app = Router::new()
         .route("/ws/{room}", get(ws_handler))
@@ -130,7 +155,8 @@ async fn main() -> anyhow::Result<()> {
             // Generate self-signed for development
             info!("generating self-signed TLS certificate (use --cert/--key for production)");
             let cert_key = rcgen::generate_simple_self_signed(vec![
-                "localhost".to_string(), "wzp".to_string(),
+                "localhost".to_string(),
+                "wzp".to_string(),
             ])?;
             let cert = rustls_pki_types::CertificateDer::from(cert_key.cert);
             let key = rustls_pki_types::PrivateKeyDer::try_from(cert_key.key_pair.serialize_der())
@@ -186,7 +212,11 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
             Some(Ok(Message::Text(text))) => {
                 match serde_json::from_str::<serde_json::Value>(&text) {
                     Ok(v) if v.get("type").and_then(|t| t.as_str()) == Some("auth") => {
-                        let token = v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                        let token = v
+                            .get("token")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if token.is_empty() {
                             error!(room = %room, "empty auth token");
                             state.metrics.auth_failures.inc();
@@ -239,7 +269,10 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     let client_config = wzp_transport::client_config();
     let endpoint = match wzp_transport::create_endpoint(bind_addr, None) {
         Ok(e) => e,
-        Err(e) => { error!("create endpoint: {e}"); return; }
+        Err(e) => {
+            error!("create endpoint: {e}");
+            return;
+        }
     };
 
     // Hash room name for SNI privacy
@@ -248,11 +281,14 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     } else {
         wzp_crypto::hash_room_name(&room)
     };
-    let connection =
-        match wzp_transport::connect(&endpoint, relay_addr, &sni, client_config).await {
-            Ok(c) => c,
-            Err(e) => { error!("connect to relay: {e}"); return; }
-        };
+    let connection = match wzp_transport::connect(&endpoint, relay_addr, &sni, client_config).await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("connect to relay: {e}");
+            return;
+        }
+    };
 
     info!(room = %room, "connected to relay");
 
@@ -261,6 +297,7 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     // Send auth token to relay (if auth is enabled)
     if let Some(ref token) = browser_token {
         let auth = wzp_proto::SignalMessage::AuthToken {
+            version: default_signal_version(),
             token: token.clone(),
         };
         if let Err(e) = transport.send_signal(&auth).await {
@@ -290,9 +327,9 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
     // (PTT handles silence at the browser level, no need to suppress here)
     let config = CallConfig {
         suppression_enabled: false,
-        jitter_target: 3,   // 60ms instead of default (~1s)
-        jitter_max: 20,     // 400ms cap
-        jitter_min: 1,      // start playing after 20ms
+        jitter_target: 3, // 60ms instead of default (~1s)
+        jitter_max: 20,   // 400ms cap
+        jitter_min: 1,    // start playing after 20ms
         ..CallConfig::default()
     };
     let encoder = Arc::new(Mutex::new(CallEncoder::new(&config)));
@@ -308,8 +345,11 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Binary(data) => {
-                    if data.len() < FRAME_SAMPLES * 2 { continue; }
-                    let pcm: Vec<i16> = data.chunks_exact(2)
+                    if data.len() < FRAME_SAMPLES * 2 {
+                        continue;
+                    }
+                    let pcm: Vec<i16> = data
+                        .chunks_exact(2)
                         .take(FRAME_SAMPLES)
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect();
@@ -318,7 +358,10 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                         let mut enc = send_encoder.lock().await;
                         match enc.encode_frame(&pcm) {
                             Ok(p) => p,
-                            Err(e) => { warn!("encode: {e}"); continue; }
+                            Err(e) => {
+                                warn!("encode: {e}");
+                                continue;
+                            }
                         }
                     };
 
@@ -352,19 +395,21 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
         loop {
             match recv_transport.recv_media().await {
                 Ok(Some(pkt)) => {
-                    let is_repair = pkt.header.is_repair;
+                    let is_repair = pkt.header.is_repair();
                     let mut dec = recv_decoder.lock().await;
                     dec.ingest(pkt);
                     if !is_repair {
                         if let Some(_n) = dec.decode_next(&mut pcm_buf) {
-                            let bytes: Vec<u8> = pcm_buf.iter()
-                                .flat_map(|s| s.to_le_bytes())
-                                .collect();
+                            let bytes: Vec<u8> =
+                                pcm_buf.iter().flat_map(|s| s.to_le_bytes()).collect();
                             if let Err(e) = ws_sender.send(Message::Binary(bytes.into())).await {
                                 error!("ws send: {e}");
                                 return;
                             }
-                            recv_metrics.frames_bridged.with_label_values(&["down"]).inc();
+                            recv_metrics
+                                .frames_bridged
+                                .with_label_values(&["down"])
+                                .inc();
                             frames_recv += 1;
                             if frames_recv % 500 == 0 {
                                 info!(room = %recv_room, frames_recv, "relay → browser");
@@ -372,8 +417,14 @@ async fn handle_ws(socket: WebSocket, room: String, state: AppState) {
                         }
                     }
                 }
-                Ok(None) => { info!(room = %recv_room, "relay closed"); break; }
-                Err(e) => { error!(room = %recv_room, "relay recv: {e}"); break; }
+                Ok(None) => {
+                    info!(room = %recv_room, "relay closed");
+                    break;
+                }
+                Err(e) => {
+                    error!(room = %recv_room, "relay recv: {e}");
+                    break;
+                }
             }
         }
         info!(room = %recv_room, frames_recv, "recv ended");

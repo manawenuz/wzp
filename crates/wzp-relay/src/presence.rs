@@ -63,6 +63,12 @@ pub struct PresenceRegistry {
     peers: HashMap<SocketAddr, PeerRelay>,
 }
 
+impl Default for PresenceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PresenceRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -74,13 +80,21 @@ impl PresenceRegistry {
     }
 
     /// Register a fingerprint as locally connected (called after auth + handshake).
-    pub fn register_local(&mut self, fingerprint: &str, alias: Option<String>, room: Option<String>) {
-        self.local.insert(fingerprint.to_string(), LocalPresence {
-            fingerprint: fingerprint.to_string(),
-            alias,
-            connected_at: Instant::now(),
-            room,
-        });
+    pub fn register_local(
+        &mut self,
+        fingerprint: &str,
+        alias: Option<String>,
+        room: Option<String>,
+    ) {
+        self.local.insert(
+            fingerprint.to_string(),
+            LocalPresence {
+                fingerprint: fingerprint.to_string(),
+                alias,
+                connected_at: Instant::now(),
+                room,
+            },
+        );
     }
 
     /// Unregister a locally connected fingerprint (called on disconnect).
@@ -98,11 +112,14 @@ impl PresenceRegistry {
 
         // Insert new remote entries
         for fp in &fingerprints {
-            self.remote.insert(fp.clone(), RemotePresence {
-                fingerprint: fp.clone(),
-                relay_addr: addr,
-                last_seen: now,
-            });
+            self.remote.insert(
+                fp.clone(),
+                RemotePresence {
+                    fingerprint: fp.clone(),
+                    relay_addr: addr,
+                    last_seen: now,
+                },
+            );
         }
 
         // Update the peer record
@@ -156,7 +173,8 @@ impl PresenceRegistry {
         self.remote.retain(|_, rp| rp.last_seen > cutoff);
 
         // Expire peer relay records and their fingerprint sets
-        let stale_peers: Vec<SocketAddr> = self.peers
+        let stale_peers: Vec<SocketAddr> = self
+            .peers
             .iter()
             .filter(|(_, p)| p.last_update <= cutoff)
             .map(|(addr, _)| *addr)
@@ -280,13 +298,15 @@ mod tests {
         let all = reg.all_known();
         assert_eq!(all.len(), 2);
 
-        let local_entries: Vec<_> = all.iter()
+        let local_entries: Vec<_> = all
+            .iter()
             .filter(|(_, loc)| *loc == PresenceLocation::Local)
             .collect();
         assert_eq!(local_entries.len(), 1);
         assert_eq!(local_entries[0].0, "local1");
 
-        let remote_entries: Vec<_> = all.iter()
+        let remote_entries: Vec<_> = all
+            .iter()
             .filter(|(_, loc)| matches!(loc, PresenceLocation::Remote(_)))
             .collect();
         assert_eq!(remote_entries.len(), 1);

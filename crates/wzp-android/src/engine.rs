@@ -22,7 +22,8 @@ use wzp_crypto::{KeyExchange, WarzoneKeyExchange};
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
 use wzp_proto::{
     AdaptiveQualityController, AudioDecoder, AudioEncoder, CodecId, FecDecoder, FecEncoder,
-    MediaHeader, MediaPacket, MediaTransport, QualityController, QualityProfile, SignalMessage,
+    MediaHeader, MediaPacket, MediaTransport, MediaType, QualityController, QualityProfile,
+    SignalMessage, default_signal_version,
 };
 
 use crate::audio_ring::AudioRing;
@@ -46,7 +47,11 @@ const PROFILES: [QualityProfile; 6] = [
 ];
 
 fn profile_to_index(p: &QualityProfile) -> u8 {
-    PROFILES.iter().position(|pp| pp.codec == p.codec).map(|i| i as u8).unwrap_or(3)
+    PROFILES
+        .iter()
+        .position(|pp| pp.codec == p.codec)
+        .map(|i| i as u8)
+        .unwrap_or(3)
 }
 
 fn index_to_profile(idx: u8) -> Option<QualityProfile> {
@@ -149,9 +154,10 @@ impl WzpEngine {
             .enable_all()
             .build()?;
 
-        let relay_addr: SocketAddr = config.relay_addr.parse().map_err(|e| {
-            anyhow::anyhow!("invalid relay address '{}': {e}", config.relay_addr)
-        })?;
+        let relay_addr: SocketAddr = config
+            .relay_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid relay address '{}': {e}", config.relay_addr))?;
 
         let room = config.room.clone();
         let identity_seed = config.identity_seed;
@@ -165,7 +171,16 @@ impl WzpEngine {
 
         let state_clone = state.clone();
         runtime.block_on(async move {
-            if let Err(e) = run_call(relay_addr, &room, &identity_seed, profile, auto_profile, alias.as_deref(), state_clone).await
+            if let Err(e) = run_call(
+                relay_addr,
+                &room,
+                &identity_seed,
+                profile,
+                auto_profile,
+                alias.as_deref(),
+                state_clone,
+            )
+            .await
             {
                 error!("call failed: {e}");
             }
@@ -233,16 +248,21 @@ impl WzpEngine {
             let server_fp = conn
                 .peer_identity()
                 .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok())
-                .and_then(|certs| certs.first().map(|c| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    c.as_ref().hash(&mut h);
-                    format!("{:016x}", h.finish())
-                }))
+                .and_then(|certs| {
+                    certs.first().map(|c| {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        c.as_ref().hash(&mut h);
+                        format!("{:016x}", h.finish())
+                    })
+                })
                 .unwrap_or_default();
             conn.close(0u32.into(), b"ping");
 
-            Ok::<_, anyhow::Error>(format!(r#"{{"rtt_ms":{},"server_fingerprint":"{}"}}"#, rtt_ms, server_fp))
+            Ok::<_, anyhow::Error>(format!(
+                r#"{{"rtt_ms":{},"server_fingerprint":"{}"}}"#,
+                rtt_ms, server_fp
+            ))
         });
 
         // Shutdown runtime cleanly with timeout
@@ -301,11 +321,12 @@ impl WzpEngine {
 
             // Auth if token provided
             if let Some(ref tok) = token {
-                let _ = transport.send_signal(&SignalMessage::AuthToken { token: tok.clone() }).await;
+                let _ = transport.send_signal(&SignalMessage::AuthToken { version: default_signal_version(),  token: tok.clone() }).await;
             }
 
             // Register presence
             let _ = transport.send_signal(&SignalMessage::RegisterPresence {
+                version: default_signal_version(),
                 identity_pub,
                 signature: vec![],
                 alias: alias.clone(),
@@ -330,7 +351,7 @@ impl WzpEngine {
                     break;
                 }
                 match transport.recv_signal().await {
-                    Ok(Some(SignalMessage::CallRinging { call_id })) => {
+                    Ok(Some(SignalMessage::CallRinging { call_id, ..})) => {
                         info!(call_id = %call_id, "signal: ringing");
                         let mut stats = signal_state.stats.lock().unwrap();
                         stats.state = crate::stats::CallState::Ringing;
@@ -392,7 +413,11 @@ impl WzpEngine {
     }
 
     /// Answer an incoming direct call.
-    pub fn answer_call(&self, call_id: &str, mode: wzp_proto::CallAcceptMode) -> Result<(), anyhow::Error> {
+    pub fn answer_call(
+        &self,
+        call_id: &str,
+        mode: wzp_proto::CallAcceptMode,
+    ) -> Result<(), anyhow::Error> {
         let _ = self.state.command_tx.send(EngineCommand::AnswerCall {
             call_id: call_id.to_string(),
             accept_mode: mode,
@@ -412,7 +437,9 @@ impl WzpEngine {
     /// Stores the type atomically; the recv task polls it on each packet.
     pub fn on_network_changed(&self, network_type: u8, bandwidth_kbps: u32) {
         info!(network_type, bandwidth_kbps, "on_network_changed");
-        self.state.pending_network_type.store(network_type, Ordering::Release);
+        self.state
+            .pending_network_type
+            .store(network_type, Ordering::Release);
     }
 
     pub fn get_stats(&self) -> CallStats {
@@ -496,6 +523,7 @@ async fn run_call(
     let signature = kx.sign(&sign_data);
 
     let offer = SignalMessage::CallOffer {
+        version: default_signal_version(),
         identity_pub,
         ephemeral_pub,
         signature,
@@ -508,6 +536,9 @@ async fn run_call(
             QualityProfile::CATASTROPHIC,
         ],
         alias: alias.map(|s| s.to_string()),
+        protocol_version: 2,
+        supported_versions: vec![2],
+        video_codecs: vec![],
     };
     transport.send_signal(&offer).await?;
     info!("CallOffer sent, waiting for CallAnswer...");
@@ -518,12 +549,16 @@ async fn run_call(
         .ok_or_else(|| anyhow::anyhow!("connection closed before CallAnswer"))?;
 
     let (relay_ephemeral_pub, chosen_profile) = match answer {
-        SignalMessage::CallAnswer { ephemeral_pub, chosen_profile, .. } => (ephemeral_pub, chosen_profile),
+        SignalMessage::CallAnswer {
+            ephemeral_pub,
+            chosen_profile,
+            ..
+        } => (ephemeral_pub, chosen_profile),
         other => {
             return Err(anyhow::anyhow!(
                 "expected CallAnswer, got {:?}",
                 std::mem::discriminant(&other)
-            ))
+            ));
         }
     };
 
@@ -574,7 +609,7 @@ async fn run_call(
         stats.auto_mode = auto_profile;
     }
 
-    let seq = AtomicU16::new(0);
+    let seq = AtomicU32::new(0);
     let ts = AtomicU32::new(0);
     let transport_recv = transport.clone();
 
@@ -700,17 +735,15 @@ async fn run_call(
 
             let source_pkt = MediaPacket {
                 header: MediaHeader {
-                    version: 0,
-                    is_repair: false,
+                    version: MediaHeader::VERSION,
+                    flags: 0,
+                    media_type: MediaType::Audio,
                     codec_id: current_profile.codec,
-                    has_quality_report: false,
-                    fec_ratio_encoded: hdr_fec_ratio,
+                    stream_id: 0,
+                    fec_ratio: hdr_fec_ratio,
                     seq: s,
                     timestamp: t,
-                    fec_block: hdr_fec_block,
-                    fec_symbol: hdr_fec_symbol,
-                    reserved: 0,
-                    csrc_count: 0,
+                    fec_block: ((hdr_fec_symbol as u16) << 8) | (hdr_fec_block as u16),
                 },
                 payload: Bytes::copy_from_slice(encoded),
                 quality_report: None,
@@ -725,9 +758,7 @@ async fn run_call(
                 if send_errors <= 3 || last_send_error_log.elapsed().as_secs() >= 1 {
                     warn!(
                         seq = s,
-                        send_errors,
-                        frames_dropped,
-                        "send_media error (dropping packet): {e}"
+                        send_errors, frames_dropped, "send_media error (dropping packet): {e}"
                     );
                     last_send_error_log = Instant::now();
                 }
@@ -756,19 +787,17 @@ async fn run_call(
                                 let rs = seq.fetch_add(1, Ordering::Relaxed);
                                 let repair_pkt = MediaPacket {
                                     header: MediaHeader {
-                                        version: 0,
-                                        is_repair: true,
+                                        version: MediaHeader::VERSION,
+                                        flags: MediaHeader::FLAG_REPAIR,
+                                        media_type: MediaType::Audio,
                                         codec_id: current_profile.codec,
-                                        has_quality_report: false,
-                                        fec_ratio_encoded: MediaHeader::encode_fec_ratio(
+                                        stream_id: 0,
+                                        fec_ratio: MediaHeader::encode_fec_ratio(
                                             current_profile.fec_ratio,
                                         ),
                                         seq: rs,
                                         timestamp: t,
-                                        fec_block: block_id,
-                                        fec_symbol: sym_idx,
-                                        reserved: 0,
-                                        csrc_count: 0,
+                                        fec_block: (sym_idx << 8) | (block_id as u16),
                                     },
                                     payload: Bytes::from(repair_data),
                                     quality_report: None,
@@ -820,7 +849,11 @@ async fn run_call(
                     avg_total_us = avg(t_agc_us + t_opus_us + t_fec_us + t_send_us),
                     "send stats"
                 );
-                t_agc_us = 0; t_opus_us = 0; t_fec_us = 0; t_send_us = 0; t_frames = 0;
+                t_agc_us = 0;
+                t_opus_us = 0;
+                t_fec_us = 0;
+                t_send_us = 0;
+                t_frames = 0;
                 last_stats_log = Instant::now();
             }
         }
@@ -849,14 +882,11 @@ async fn run_call(
         // when a packet arrives with seq > expected_seq, the frames in
         // between are missing and we attempt to reconstruct them via
         // DRED before decoding the newly-arrived packet.
-        let mut dred_decoder =
-            DredDecoderHandle::new().expect("opus_dred_decoder_create failed");
-        let mut dred_parse_scratch =
-            DredState::new().expect("opus_dred_alloc failed (scratch)");
-        let mut last_good_dred =
-            DredState::new().expect("opus_dred_alloc failed (good state)");
-        let mut last_good_dred_seq: Option<u16> = None;
-        let mut expected_seq: Option<u16> = None;
+        let mut dred_decoder = DredDecoderHandle::new().expect("opus_dred_decoder_create failed");
+        let mut dred_parse_scratch = DredState::new().expect("opus_dred_alloc failed (scratch)");
+        let mut last_good_dred = DredState::new().expect("opus_dred_alloc failed (good state)");
+        let mut last_good_dred_seq: Option<u32> = None;
+        let mut expected_seq: Option<u32> = None;
         let mut dred_reconstructions: u64 = 0;
         let mut classical_plc_invocations: u64 = 0;
 
@@ -877,14 +907,16 @@ async fn run_call(
                         warn!(
                             recv_gap_ms,
                             seq = pkt.header.seq,
-                            is_repair = pkt.header.is_repair,
+                            is_repair = pkt.header.is_repair(),
                             "large recv gap — possible network stall"
                         );
                     }
 
                     // Check for network transport change from ConnectivityManager
                     {
-                        let net = state.pending_network_type.swap(PROFILE_NO_CHANGE, Ordering::Acquire);
+                        let net = state
+                            .pending_network_type
+                            .swap(PROFILE_NO_CHANGE, Ordering::Acquire);
                         if net != PROFILE_NO_CHANGE {
                             use wzp_proto::NetworkContext;
                             let ctx = match net {
@@ -916,9 +948,9 @@ async fn run_call(
                         }
                     }
 
-                    let is_repair = pkt.header.is_repair;
+                    let is_repair = pkt.header.is_repair();
                     let pkt_block = pkt.header.fec_block;
-                    let pkt_symbol = pkt.header.fec_symbol;
+                    let pkt_symbol = (pkt.header.fec_block >> 8) as u16;
                     let pkt_is_opus = pkt.header.codec_id.is_opus();
 
                     // Phase 2: Opus packets bypass RaptorQ entirely — DRED
@@ -927,12 +959,7 @@ async fn run_call(
                     // would accumulate block_id=0 duplicates that never
                     // decode. Codec2 packets still feed RaptorQ.
                     if !pkt_is_opus {
-                        let _ = fec_dec.add_symbol(
-                            pkt_block,
-                            pkt_symbol,
-                            is_repair,
-                            &pkt.payload,
-                        );
+                        let _ = fec_dec.add_symbol(pkt_block, pkt_symbol, is_repair, &pkt.payload);
                     }
 
                     // Source packets: decode directly
@@ -951,8 +978,12 @@ async fn run_call(
                                     fec_ratio: 0.5,
                                     frame_duration_ms: 20,
                                     frames_per_block: 5,
+                                    ..QualityProfile::GOOD
                                 },
-                                other => QualityProfile { codec: other, ..QualityProfile::GOOD },
+                                other => QualityProfile {
+                                    codec: other,
+                                    ..QualityProfile::GOOD
+                                },
                             };
                             info!(from = ?decoder.codec_id(), to = ?pkt.header.codec_id, "recv: switching decoder");
                             let _ = decoder.set_profile(switch_profile);
@@ -984,10 +1015,7 @@ async fn run_call(
                             // Update DRED state from the current packet.
                             match dred_decoder.parse_into(&mut dred_parse_scratch, &pkt.payload) {
                                 Ok(available) if available > 0 => {
-                                    std::mem::swap(
-                                        &mut dred_parse_scratch,
-                                        &mut last_good_dred,
-                                    );
+                                    std::mem::swap(&mut dred_parse_scratch, &mut last_good_dred);
                                     last_good_dred_seq = Some(pkt.header.seq);
                                 }
                                 Ok(_) => {
@@ -999,15 +1027,14 @@ async fn run_call(
                             }
 
                             // Detect and fill gap from last-expected to this packet.
-                            const MAX_GAP_FRAMES: u16 = 16;
+                            const MAX_GAP_FRAMES: u32 = 16;
                             if let Some(expected) = expected_seq {
                                 let gap = pkt.header.seq.wrapping_sub(expected);
                                 if gap > 0 && gap <= MAX_GAP_FRAMES {
                                     let current_profile_frame_samples =
                                         (48_000 * profile.frame_duration_ms as i32) / 1000;
                                     let available = last_good_dred.samples_available();
-                                    let pcm_slice_len =
-                                        current_profile_frame_samples as usize;
+                                    let pcm_slice_len = current_profile_frame_samples as usize;
 
                                     for gap_idx in 0..gap {
                                         let missing_seq = expected.wrapping_add(gap_idx);
@@ -1026,28 +1053,24 @@ async fn run_call(
                                             None => -1,
                                         };
 
-                                        let reconstructed = if offset_samples > 0
-                                            && offset_samples <= available
-                                        {
-                                            decoder
-                                                .reconstruct_from_dred(
-                                                    &last_good_dred,
-                                                    offset_samples,
-                                                    &mut decode_buf[..pcm_slice_len],
-                                                )
-                                                .ok()
-                                        } else {
-                                            None
-                                        };
+                                        let reconstructed =
+                                            if offset_samples > 0 && offset_samples <= available {
+                                                decoder
+                                                    .reconstruct_from_dred(
+                                                        &last_good_dred,
+                                                        offset_samples,
+                                                        &mut decode_buf[..pcm_slice_len],
+                                                    )
+                                                    .ok()
+                                            } else {
+                                                None
+                                            };
 
                                         match reconstructed {
                                             Some(samples) => {
-                                                playout_agc.process_frame(
-                                                    &mut decode_buf[..samples],
-                                                );
-                                                state
-                                                    .playout_ring
-                                                    .write(&decode_buf[..samples]);
+                                                playout_agc
+                                                    .process_frame(&mut decode_buf[..samples]);
+                                                state.playout_ring.write(&decode_buf[..samples]);
                                                 dred_reconstructions += 1;
                                                 frames_decoded += 1;
                                             }
@@ -1144,7 +1167,10 @@ async fn run_call(
                     }
                 }
                 Ok(None) => {
-                    info!(frames_decoded, fec_recovered, "relay disconnected (stream ended)");
+                    info!(
+                        frames_decoded,
+                        fec_recovered, "relay disconnected (stream ended)"
+                    );
                     break;
                 }
                 Err(e) => {
@@ -1162,7 +1188,10 @@ async fn run_call(
                 }
             }
         }
-        info!(frames_decoded, fec_recovered, recv_errors, "recv task ended");
+        info!(
+            frames_decoded,
+            fec_recovered, recv_errors, "recv task ended"
+        );
     };
 
     // Stats task — polls path quality + quinn RTT every 500ms
@@ -1195,7 +1224,11 @@ async fn run_call(
     let signal_task = async {
         loop {
             match transport_signal.recv_signal().await {
-                Ok(Some(SignalMessage::RoomUpdate { count, participants })) => {
+                Ok(Some(SignalMessage::RoomUpdate {
+                    count,
+                    participants,
+                    ..
+                })) => {
                     info!(count, "RoomUpdate received");
                     let members: Vec<crate::stats::RoomMember> = participants
                         .iter()
@@ -1209,7 +1242,11 @@ async fn run_call(
                     stats.room_participant_count = count;
                     stats.room_participants = members;
                 }
-                Ok(Some(SignalMessage::QualityDirective { recommended_profile, reason })) => {
+                Ok(Some(SignalMessage::QualityDirective {
+                    recommended_profile,
+                    reason,
+                    ..
+                })) => {
                     let idx = profile_to_index(&recommended_profile);
                     info!(
                         codec = ?recommended_profile.codec,
@@ -1247,7 +1284,9 @@ async fn run_call(
     match tokio::time::timeout(
         std::time::Duration::from_millis(500),
         transport.connection().closed(),
-    ).await {
+    )
+    .await
+    {
         Ok(_) => info!("QUIC connection closed cleanly"),
         Err(_) => info!("QUIC close timed out (relay may not have ack'd)"),
     }

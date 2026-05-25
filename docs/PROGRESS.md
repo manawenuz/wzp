@@ -389,3 +389,107 @@ Run with `wzp-bench --all`. Representative results (Apple M-series, single core)
 - `RegisterPresenceAck` populates `relay_region` from config, `available_relays` from federation peers
 - Desktop `place_call`/`answer_call` call `acquire_port_mapping()` and fill mapped addr fields
 - Legacy `build-android-docker.sh` renamed to `build-android-docker-LEGACY.sh` to prevent accidental use
+
+## Wave 5: Video Infrastructure (2026-05-12)
+
+**Tasks completed:** T5.1, T5.1.1, T5.2, T5.3, T5.4, T5.5, T5.6, T5.7, T5.7.1, T5.8
+
+### Relay: Audio + Video Scoring
+
+New files in `crates/wzp-relay/src/`:
+
+- `audio_scorer.rs` — per-stream audio quality scorer tracking packet loss, codec consistency, bitrate stability
+- `response_policy.rs` — relay response policy engine mapping scores to action thresholds
+- `verdict.rs` — `Verdict` enum: `Allow`, `RateLimit`, `Drop`, `Malicious`
+- `video_scorer.rs` — `VideoScorer` with legitimacy scoring: keyframe regularity, I/P ratio, bandwidth responsiveness. **Note: wired but `observe()` not yet called from room forwarding path — T6.2 follow-up open.**
+
+### Video: H.265 + Quality Controller
+
+New files in `crates/wzp-video/src/`:
+
+- `controller.rs` — `VideoQualityController`: maps (bwe_bps, loss_pct, rtt_ms, priority_mode) to (target_bitrate, target_fps, target_resolution, simulcast_layer)
+- `simulcast.rs` — simulcast layer management (base + enhancement layers)
+- `encoder_mode.rs` — encoder mode selection (CBR/VBR, keyframe intervals, quality presets)
+
+H.265 encode/decode path added to:
+- `videotoolbox.rs` — VideoToolbox H.265 encoder + decoder (macOS/iOS)
+- `mediacodec.rs` — MediaCodec H.265 encoder + decoder (Android; NDK 0.9 compile errors pending in T4.3.1.1)
+
+**Test delta:** wzp-relay 99→127, wzp-video 43→71
+
+---
+
+## Wave 6: AV1 + Federation Gossip Design (2026-05-12)
+
+**Tasks completed:** T6.1, T6.1.2, T6.2
+
+### Video: AV1 Codec Support
+
+New files in `crates/wzp-video/src/`:
+
+- `av1_obu.rs` — AV1 OBU (Open Bitstream Unit) framing and depacketizer
+- `dav1d.rs` — dav1d AV1 software decoder (non-Android; gated via cfg)
+- `svt_av1.rs` — SVT-AV1 software encoder (non-Android; gated via cfg)
+
+Updated files:
+- `videotoolbox.rs` — VideoToolbox AV1 decoder + encoder (macOS M3+, iOS A17+)
+- `mediacodec.rs` — MediaCodec AV1 (Android; compile errors pending)
+- `factory.rs` — `create_video_encoder(codec, platform)` dispatcher added; H.264, H.265, AV1 wired
+
+**T6.1.2 follow-up open:** `create_video_encoder(Av1Main, ...)` has no caller in the call engine yet — wiring step is unstarted.
+
+### Relay: Federation Reputation Gossip (Design Phase)
+
+- T6.3 design exploration committed at `1e729e4`
+- `docs/PRD/PRD-relay-federation-gossip.md` — Ban-List Distribution approach selected (Approach 3)
+- Implementation not started; task spec pending conversion
+
+### Test Counts
+
+**Test delta Wave 6:** wzp-video 76→88, wzp-relay 127→137
+
+**Total workspace tests: 702** (excluding `wzp-android`)
+
+| Crate | Tests |
+|---|---|
+| wzp-proto | 112 |
+| wzp-codec | 69 |
+| wzp-fec | 21 |
+| wzp-crypto | 64 |
+| wzp-transport | 11 |
+| wzp-relay | 137 |
+| wzp-client | 200 |
+| wzp-video | 88 |
+| wzp-web | 2 |
+| wzp-native | 0 |
+
+---
+
+## Current Status (2026-05-25)
+
+### What Works (Audio)
+
+All audio path items from previous status section remain working. Additionally:
+
+- MediaHeader v2 (16 bytes) deployed across all paths
+- MiniHeader v2 (5 bytes with seq_delta) deployed
+- Anti-replay windows per stream with media-type-aware sizing (audio 64, video 1024)
+- Relay DashMap + RwLock concurrency model (T3.1 resolved the Mutex bottleneck)
+
+### What Works (Video — partial)
+
+- H.264 framer/depacketizer with FU-A fragmentation handling
+- H.264, H.265, AV1 VideoToolbox encode/decode (macOS)
+- AV1 dav1d + SVT-AV1 software path (non-Android)
+- Video quality controller, simulcast, encoder mode selection (controller only; no active call wiring yet)
+- Video scorer (scoring logic complete; not yet wired into relay forwarding)
+- NACK framework (`nack.rs`; not yet wired into room forwarding)
+
+### Open Blockers
+
+- **Android video:** `mediacodec.rs` has 31 NDK 0.9 compile errors (T4.3.1.1 in progress)
+- **AV1 call wiring:** `create_video_encoder(Av1Main, ...)` has no caller (T6.1.2 follow-up)
+- **VideoScorer wiring:** `VideoScorer::observe()` commented out at `room.rs:1263` (T6.2 follow-up)
+- **NACK wiring:** NACK path not wired into room forwarding (Phase V2/V4)
+- **BWE:** `AdaptiveQualityController` does not consume `cwnd`/`bytes_in_flight` (Phase V2)
+- **Crypto nonce bug:** `decrypt()` uses `recv_seq` instead of `MediaHeader.seq` (see AUDIT-2026-05-25.md C1)

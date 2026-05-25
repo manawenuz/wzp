@@ -26,7 +26,7 @@ pub struct QuinnPathSnapshot {
     /// Total congestion events observed by the QUIC stack.
     pub congestion_events: u64,
     /// Current congestion window in bytes.
-    pub cwnd: u64,
+    pub cwnd_bytes: u64,
     /// Total packets sent on this path.
     pub sent_packets: u64,
     /// Total packets lost on this path.
@@ -34,6 +34,8 @@ pub struct QuinnPathSnapshot {
     /// Current PMTUD-discovered maximum datagram payload size (bytes).
     /// Starts at `initial_mtu` (1200) and grows as PMTUD probes succeed.
     pub current_mtu: usize,
+    /// Bytes currently in flight (unacknowledged).
+    pub bytes_in_flight: u64,
 }
 
 /// QUIC-based transport implementing the `MediaTransport` trait.
@@ -107,10 +109,13 @@ impl QuinnTransport {
             rtt_ms,
             loss_pct,
             congestion_events: stats.path.congestion_events,
-            cwnd: stats.path.cwnd,
+            cwnd_bytes: stats.path.cwnd,
             sent_packets: stats.path.sent_packets,
             lost_packets: stats.path.lost_packets,
             current_mtu,
+            // quinn 0.11 does not expose bytes_in_flight on PathStats;
+            // reserved for when the underlying stat becomes available.
+            bytes_in_flight: 0,
         }
     }
 
@@ -127,9 +132,9 @@ impl QuinnTransport {
             }
         }
 
-        self.connection.send_datagram(data).map_err(|e| {
-            TransportError::Internal(format!("send trunk datagram error: {e}"))
-        })?;
+        self.connection
+            .send_datagram(data)
+            .map_err(|e| TransportError::Internal(format!("send trunk datagram error: {e}")))?;
 
         Ok(())
     }
@@ -146,7 +151,7 @@ impl QuinnTransport {
             Err(e) => {
                 return Err(TransportError::Internal(format!(
                     "recv trunk datagram error: {e}"
-                )))
+                )));
             }
         };
 
@@ -177,9 +182,9 @@ impl MediaTransport for QuinnTransport {
             monitor.observe_sent(packet.header.seq, packet.header.timestamp as u64);
         }
 
-        self.connection.send_datagram(data).map_err(|e| {
-            TransportError::Internal(format!("send datagram error: {e}"))
-        })?;
+        self.connection
+            .send_datagram(data)
+            .map_err(|e| TransportError::Internal(format!("send datagram error: {e}")))?;
 
         Ok(())
     }
@@ -192,7 +197,7 @@ impl MediaTransport for QuinnTransport {
             Err(e) => {
                 return Err(TransportError::Internal(format!(
                     "recv datagram error: {e}"
-                )))
+                )));
             }
         };
 
@@ -201,15 +206,15 @@ impl MediaTransport for QuinnTransport {
                 // Record receive observation
                 {
                     let mut monitor = self.path_monitor.lock().unwrap();
-                    monitor.observe_received(
-                        packet.header.seq,
-                        packet.header.timestamp as u64,
-                    );
+                    monitor.observe_received(packet.header.seq, packet.header.timestamp as u64);
                 }
                 Ok(Some(packet))
             }
             None => {
-                tracing::warn!(len = data.len(), "skipping malformed media datagram, continuing");
+                tracing::warn!(
+                    len = data.len(),
+                    "skipping malformed media datagram, continuing"
+                );
                 // Don't return Ok(None) — that signals connection closed.
                 // Recurse to read the next datagram instead.
                 Box::pin(self.recv_media()).await
@@ -241,10 +246,8 @@ impl MediaTransport for QuinnTransport {
     }
 
     async fn close(&self) -> Result<(), TransportError> {
-        self.connection.close(
-            quinn::VarInt::from_u32(0),
-            b"normal close",
-        );
+        self.connection
+            .close(quinn::VarInt::from_u32(0), b"normal close");
         Ok(())
     }
 }

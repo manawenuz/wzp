@@ -30,7 +30,7 @@ pub struct PathMonitor {
     first_recv_time_ms: Option<u64>,
     last_recv_time_ms: Option<u64>,
     /// Sequence tracking for loss detection.
-    highest_sent_seq: Option<u16>,
+    highest_sent_seq: Option<u32>,
     total_sent: u64,
     total_received: u64,
     /// Last observed RTT for jitter calculation.
@@ -64,7 +64,7 @@ impl PathMonitor {
     }
 
     /// Record that we sent a packet with the given sequence number and timestamp.
-    pub fn observe_sent(&mut self, seq: u16, timestamp_ms: u64) {
+    pub fn observe_sent(&mut self, seq: u32, timestamp_ms: u64) {
         self.total_sent += 1;
         self.highest_sent_seq = Some(seq);
 
@@ -78,7 +78,7 @@ impl PathMonitor {
     }
 
     /// Record that we received a packet with the given sequence number and timestamp.
-    pub fn observe_received(&mut self, seq: u16, timestamp_ms: u64) {
+    pub fn observe_received(&mut self, seq: u32, timestamp_ms: u64) {
         self.total_received += 1;
 
         if self.first_recv_time_ms.is_none() {
@@ -180,7 +180,12 @@ impl PathMonitor {
             return 0.0;
         }
         let mean = self.rtt_window.iter().sum::<f64>() / n as f64;
-        let var = self.rtt_window.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n as f64;
+        let var = self
+            .rtt_window
+            .iter()
+            .map(|r| (r - mean).powi(2))
+            .sum::<f64>()
+            / n as f64;
         var.sqrt()
     }
 
@@ -274,7 +279,7 @@ mod tests {
         }
 
         // Receive only 7 of them (30% loss)
-        for i in [0u16, 1, 2, 3, 5, 7, 9] {
+        for i in [0u32, 1, 2, 3, 5, 7, 9] {
             monitor.observe_received(i, i as u64 * 20 + 50);
         }
 

@@ -32,7 +32,417 @@ body {
 
 .hidden { display: none !important; }
 
-/* ── Connect screen ── */
+/* ── Lobby screen (IRC-style) ── */
+#lobby-screen {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 0;
+  max-width: 480px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.lobby-header {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--surface2);
+}
+
+.lobby-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lobby-title-row h1 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.lobby-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.lobby-relay { opacity: 0.7; }
+.lobby-room { color: var(--green); font-weight: 500; }
+
+.lobby-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+/* User list */
+.lobby-users-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  min-height: 0;
+}
+
+.lobby-users-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.badge {
+  background: var(--surface2);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.lobby-user-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lobby-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+  padding: 40px 20px;
+  opacity: 0.6;
+}
+
+/* Single user row */
+.user-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.user-row:hover, .user-row:active {
+  background: var(--surface);
+}
+
+.user-identicon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.user-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.user-name {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-fp {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.user-status-icon {
+  font-size: 16px;
+}
+
+/* Speaking indicator */
+.user-row.speaking {
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.user-row.speaking .user-name {
+  color: var(--green);
+}
+
+/* In-voice indicator */
+.user-row.in-voice .user-status-icon {
+  color: var(--green);
+}
+
+/* Voice join FAB */
+.lobby-fab-row {
+  padding: 12px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.fab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--green);
+  color: #111;
+  border: none;
+  padding: 12px 28px;
+  border-radius: 24px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(74, 222, 128, 0.3);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.fab:hover {
+  transform: scale(1.03);
+  box-shadow: 0 6px 20px rgba(74, 222, 128, 0.4);
+}
+
+.fab:active {
+  transform: scale(0.97);
+}
+
+.fab.active {
+  background: var(--red);
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3);
+}
+
+.fab-icon { font-size: 18px; }
+
+/* ── Voice Drawer (bottom bar) ── */
+.voice-drawer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--surface2);
+  padding: 0 16px;
+  padding-bottom: env(safe-area-inset-bottom, 8px);
+  z-index: 50;
+  animation: drawerUp 0.25s ease-out;
+  box-shadow: 0 -4px 20px rgba(0,0,0,0.4);
+}
+@keyframes drawerUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.voice-drawer-bar {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 0 6px;
+}
+.vd-info {
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+}
+.vd-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0;
+}
+.vd-room { color: var(--green); font-weight: 600; }
+.vd-timer { color: var(--text-dim); font-family: ui-monospace, monospace; font-size: 12px; }
+.vd-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 6px; font-weight: 500;
+}
+.vd-badge.direct { background: rgba(74,222,128,0.15); color: var(--green); }
+.vd-badge.relay { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.vd-level { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.vd-level-fill {
+  height: 100%; width: 0%; background: var(--green); border-radius: 2px; transition: width 0.1s;
+}
+.vd-controls {
+  display: flex; align-items: center; justify-content: center; gap: 12px; padding: 4px 0;
+}
+.vd-btn {
+  width: 44px; height: 44px; border-radius: 50%; border: none;
+  background: var(--surface2); color: var(--text); font-size: 18px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.vd-btn:hover { background: var(--primary); }
+.vd-btn.muted { background: var(--red); color: white; }
+.vd-end { background: var(--red); color: white; }
+.vd-end:hover { background: #dc2626; }
+.vd-direct-info {
+  display: flex; align-items: center; gap: 10px; padding: 8px 0 4px;
+  border-top: 1px solid var(--surface2); margin-top: 4px;
+}
+.vd-dc-identicon { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; }
+.vd-dc-name { font-size: 13px; font-weight: 600; }
+.vd-dc-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 6px;
+}
+.vd-dc-badge.direct { background: rgba(74,222,128,0.15); color: var(--green); }
+.vd-dc-badge.relay { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.vd-dc-badge.connecting { background: rgba(250,204,21,0.15); color: var(--yellow); }
+.vd-stats {
+  font-size: 10px; color: var(--text-dim); font-family: ui-monospace, monospace;
+  padding: 2px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Video strip in voice drawer */
+.vd-video-strip {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0 2px;
+  overflow-x: auto;
+}
+.vd-video-tile {
+  width: 160px;
+  height: 90px;
+  border-radius: 6px;
+  background: #000;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+/* Incoming call banner */
+.incoming-banner {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  right: 20px;
+  max-width: 440px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--green);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  z-index: 100;
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.incoming-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.incoming-identicon { width: 40px; height: 40px; border-radius: 50%; }
+.incoming-name { font-weight: 600; font-size: 15px; }
+.incoming-subtitle { font-size: 12px; color: var(--green); }
+
+.incoming-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-accept {
+  flex: 1;
+  background: var(--green);
+  color: #111;
+  border: none;
+  padding: 10px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-reject {
+  flex: 1;
+  background: var(--red);
+  color: white;
+  border: none;
+  padding: 10px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Context menu */
+.context-menu {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--surface);
+  border: 1px solid var(--surface2);
+  border-radius: 16px;
+  padding: 20px;
+  min-width: 260px;
+  z-index: 200;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+}
+
+.context-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--surface2);
+}
+
+.ctx-identicon { width: 40px; height: 40px; border-radius: 50%; }
+.ctx-name { font-weight: 600; font-size: 15px; }
+.ctx-fp { font-size: 10px; color: var(--text-dim); font-family: monospace; }
+
+.context-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 10px 8px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.context-action:hover:not(:disabled) {
+  background: var(--surface2);
+}
+
+.context-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.context-action.dim {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Legacy compat — keep old connect-screen ID working for JS that
+   references it (the old connect screen is now the lobby). */
 #connect-screen {
   display: flex;
   flex-direction: column;

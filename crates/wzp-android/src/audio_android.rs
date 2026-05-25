@@ -326,7 +326,10 @@ pub fn pin_to_big_core() {
                 &set,
             );
             if ret != 0 {
-                warn!("sched_setaffinity failed: {}", std::io::Error::last_os_error());
+                warn!(
+                    "sched_setaffinity failed: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 info!(start, num_cpus, "pinned to big cores");
             }

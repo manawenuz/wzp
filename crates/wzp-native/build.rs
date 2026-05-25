@@ -24,7 +24,10 @@ fn main() {
         let oboe_dir = fetch_oboe();
         match oboe_dir {
             Some(oboe_path) => {
-                println!("cargo:warning=wzp-native: building with Oboe from {:?}", oboe_path);
+                println!(
+                    "cargo:warning=wzp-native: building with Oboe from {:?}",
+                    oboe_path
+                );
                 let mut build = cc::Build::new();
                 build
                     .cpp(true)
@@ -96,7 +99,12 @@ fn fetch_oboe() -> Option<PathBuf> {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let oboe_dir = out_dir.join("oboe");
 
-    if oboe_dir.join("include").join("oboe").join("Oboe.h").exists() {
+    if oboe_dir
+        .join("include")
+        .join("oboe")
+        .join("Oboe.h")
+        .exists()
+    {
         return Some(oboe_dir);
     }
 
@@ -111,7 +119,14 @@ fn fetch_oboe() -> Option<PathBuf> {
         .status();
 
     match status {
-        Ok(s) if s.success() && oboe_dir.join("include").join("oboe").join("Oboe.h").exists() => {
+        Ok(s)
+            if s.success()
+                && oboe_dir
+                    .join("include")
+                    .join("oboe")
+                    .join("Oboe.h")
+                    .exists() =>
+        {
             Some(oboe_dir)
         }
         _ => None,

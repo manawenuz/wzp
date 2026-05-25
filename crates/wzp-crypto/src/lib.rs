@@ -16,8 +16,8 @@ pub mod session;
 
 pub use anti_replay::AntiReplayWindow;
 pub use handshake::WarzoneKeyExchange;
-pub use identity::{hash_room_name, Fingerprint, IdentityKeyPair, PublicIdentity, Seed};
-pub use nonce::{build_nonce, Direction};
+pub use identity::{Fingerprint, IdentityKeyPair, PublicIdentity, Seed, hash_room_name};
+pub use nonce::{Direction, build_nonce};
 pub use rekey::RekeyManager;
 pub use session::ChaChaSession;
 

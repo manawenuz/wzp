@@ -85,8 +85,13 @@ pub fn dred_duration_for(codec: CodecId) -> u8 {
         // offsets, so the extra window costs only ~1-2 kbps additional overhead
         // while buying substantially better burst resilience (up from 500 ms).
         CodecId::Opus6k => 104,
-        // Non-Opus (Codec2 / CN): DRED is N/A.
-        CodecId::Codec2_1200 | CodecId::Codec2_3200 | CodecId::ComfortNoise => 0,
+        // Non-Opus (Codec2 / CN / video): DRED is N/A.
+        CodecId::Codec2_1200
+        | CodecId::Codec2_3200
+        | CodecId::ComfortNoise
+        | CodecId::H264Baseline
+        | CodecId::H265Main
+        | CodecId::Av1Main => 0,
     }
 }
 
@@ -96,7 +101,7 @@ pub fn dred_duration_for(codec: CodecId) -> u8 {
 /// mode; unset or empty leaves DRED enabled.
 fn read_legacy_fec_env() -> bool {
     match std::env::var(LEGACY_FEC_ENV) {
-        Ok(v) => !v.is_empty() && v != "0" && v.to_ascii_lowercase() != "false",
+        Ok(v) => !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"),
         Err(_) => false,
     }
 }
@@ -247,7 +252,7 @@ impl OpusEncoder {
         let clamped = if self.legacy_fec_mode {
             loss_pct.min(100)
         } else {
-            loss_pct.max(DRED_LOSS_FLOOR_PCT).min(100)
+            loss_pct.clamp(DRED_LOSS_FLOOR_PCT, 100)
         };
         let _ = self.inner.set_packet_loss(clamped);
     }
@@ -332,7 +337,11 @@ impl AudioEncoder for OpusEncoder {
             );
             return;
         }
-        let mode = if enabled { InbandFec::Mode1 } else { InbandFec::Off };
+        let mode = if enabled {
+            InbandFec::Mode1
+        } else {
+            InbandFec::Off
+        };
         let _ = self.inner.set_inband_fec(mode);
     }
 

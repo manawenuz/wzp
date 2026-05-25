@@ -26,22 +26,20 @@ pub fn max_datagram_payload(connection: &quinn::Connection) -> Option<usize> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use wzp_proto::{CodecId, MediaHeader};
+    use wzp_proto::{CodecId, MediaHeader, MediaType};
 
     fn test_packet() -> MediaPacket {
         MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: MediaType::Audio,
                 codec_id: CodecId::Opus16k,
-                has_quality_report: false,
-                fec_ratio_encoded: 16,
+                stream_id: 0,
+                fec_ratio: 16,
                 seq: 42,
                 timestamp: 1000,
                 fec_block: 1,
-                fec_symbol: 0,
-                reserved: 0,
-                csrc_count: 0,
             },
             payload: Bytes::from_static(b"fake opus frame data"),
             quality_report: None,
@@ -61,7 +59,7 @@ mod tests {
     #[test]
     fn serialize_deserialize_with_quality_report() {
         let mut packet = test_packet();
-        packet.header.has_quality_report = true;
+        packet.header.flags |= MediaHeader::FLAG_QUALITY;
         packet.quality_report = Some(wzp_proto::QualityReport {
             loss_pct: 50,
             rtt_4ms: 75,

@@ -16,7 +16,9 @@ pub mod encoder;
 pub mod interleave;
 
 pub use adaptive::AdaptiveFec;
-pub use block_manager::{DecoderBlockManager, DecoderBlockState, EncoderBlockManager, EncoderBlockState};
+pub use block_manager::{
+    DecoderBlockManager, DecoderBlockState, EncoderBlockManager, EncoderBlockState,
+};
 pub use decoder::RaptorQFecDecoder;
 pub use encoder::RaptorQFecEncoder;
 pub use interleave::Interleaver;
@@ -24,9 +26,7 @@ pub use interleave::Interleaver;
 pub use wzp_proto::{FecDecoder, FecEncoder, QualityProfile};
 
 /// Create an encoder/decoder pair configured for the given quality profile.
-pub fn create_fec_pair(
-    profile: &QualityProfile,
-) -> (RaptorQFecEncoder, RaptorQFecDecoder) {
+pub fn create_fec_pair(profile: &QualityProfile) -> (RaptorQFecEncoder, RaptorQFecDecoder) {
     let cfg = AdaptiveFec::from_profile(profile);
     let encoder = cfg.build_encoder();
     let decoder = RaptorQFecDecoder::new(cfg.frames_per_block, cfg.symbol_size);

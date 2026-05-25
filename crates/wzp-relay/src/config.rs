@@ -145,7 +145,10 @@ pub struct RelayInfo {
 }
 
 /// Load config from path, or create a personalized example config if it doesn't exist.
-pub fn load_or_create_config(path: &str, info: Option<&RelayInfo>) -> Result<RelayConfig, anyhow::Error> {
+pub fn load_or_create_config(
+    path: &str,
+    info: Option<&RelayInfo>,
+) -> Result<RelayConfig, anyhow::Error> {
     let p = std::path::Path::new(path);
     if p.exists() {
         return load_config(path);
@@ -164,7 +167,9 @@ pub fn load_or_create_config(path: &str, info: Option<&RelayInfo>) -> Result<Rel
 
 /// Generate an example TOML config, personalized with this relay's info if available.
 fn generate_example_config(info: Option<&RelayInfo>) -> String {
-    let listen = info.map(|i| i.listen_addr.as_str()).unwrap_or("0.0.0.0:4433");
+    let listen = info
+        .map(|i| i.listen_addr.as_str())
+        .unwrap_or("0.0.0.0:4433");
     let peer_example = if let Some(i) = info {
         let ip = i.public_ip.as_deref().unwrap_or("this-relay-ip");
         format!(

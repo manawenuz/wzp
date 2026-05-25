@@ -65,9 +65,8 @@ fn main() {
             } else {
                 "aarch64-linux-android"
             };
-            let lib_dir = format!(
-                "{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{arch}"
-            );
+            let lib_dir =
+                format!("{ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{arch}");
             println!("cargo:rustc-link-search=native={lib_dir}");
 
             // Copy libc++_shared.so to the jniLibs directory
@@ -82,9 +81,7 @@ fn main() {
                 };
                 // Try to copy to the Gradle jniLibs directory
                 let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-                let jni_dir = format!(
-                    "{manifest}/../../android/app/src/main/jniLibs/{jni_abi}"
-                );
+                let jni_dir = format!("{manifest}/../../android/app/src/main/jniLibs/{jni_abi}");
                 if let Ok(_) = std::fs::create_dir_all(&jni_dir) {
                     let _ = std::fs::copy(&shared_so, format!("{jni_dir}/libc++_shared.so"));
                     println!("cargo:warning=Copied libc++_shared.so to {jni_dir}");
@@ -127,7 +124,12 @@ fn fetch_oboe() -> Option<PathBuf> {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let oboe_dir = out_dir.join("oboe");
 
-    if oboe_dir.join("include").join("oboe").join("Oboe.h").exists() {
+    if oboe_dir
+        .join("include")
+        .join("oboe")
+        .join("Oboe.h")
+        .exists()
+    {
         return Some(oboe_dir);
     }
 
@@ -143,7 +145,12 @@ fn fetch_oboe() -> Option<PathBuf> {
 
     match status {
         Ok(s) if s.success() => {
-            if oboe_dir.join("include").join("oboe").join("Oboe.h").exists() {
+            if oboe_dir
+                .join("include")
+                .join("oboe")
+                .join("Oboe.h")
+                .exists()
+            {
                 Some(oboe_dir)
             } else {
                 None

@@ -49,7 +49,7 @@ fn baseline_dred_frames(codec: CodecId) -> u8 {
     match codec {
         CodecId::Opus32k | CodecId::Opus48k | CodecId::Opus64k => 10, // 100 ms
         CodecId::Opus16k | CodecId::Opus24k => 20,                    // 200 ms
-        CodecId::Opus6k => 50,                                         // 500 ms
+        CodecId::Opus6k => 50,                                        // 500 ms
         _ => 0,
     }
 }
@@ -128,7 +128,11 @@ impl DredTuner {
             self.initialized = true;
         } else {
             // Fast-up (alpha=0.3), slow-down (alpha=0.05) asymmetric EWMA
-            let alpha = if jitter_f > self.jitter_ewma { 0.3 } else { 0.05 };
+            let alpha = if jitter_f > self.jitter_ewma {
+                0.3
+            } else {
+                0.05
+            };
             self.jitter_ewma = alpha * jitter_f + (1.0 - alpha) * self.jitter_ewma;
         }
 

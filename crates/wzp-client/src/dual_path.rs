@@ -43,7 +43,7 @@ pub enum WinningPath {
 pub struct CandidateDiag {
     pub index: usize,
     pub addr: String,
-    pub result: String,  // "ok", "skipped:ipv6", "error:..."
+    pub result: String, // "ok", "skipped:ipv6", "error:..."
     pub elapsed_ms: Option<u32>,
 }
 
@@ -299,10 +299,16 @@ pub async fn race(
                                 socket2::Domain::IPV4,
                                 socket2::Type::DGRAM,
                                 Some(socket2::Protocol::UDP),
-                            ).map_err(|e| format!("socket: {e}"))?;
-                            sock.set_reuse_address(true).map_err(|e| format!("reuseaddr: {e}"))?;
+                            )
+                            .map_err(|e| format!("socket: {e}"))?;
+                            sock.set_reuse_address(true)
+                                .map_err(|e| format!("reuseaddr: {e}"))?;
                             // macOS/BSD/Linux also need SO_REUSEPORT
-                            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+                            #[cfg(any(
+                                target_os = "macos",
+                                target_os = "linux",
+                                target_os = "android"
+                            ))]
                             {
                                 // socket2 exposes set_reuse_port on unix
                                 unsafe {
@@ -316,12 +322,14 @@ pub async fn race(
                                     );
                                 }
                             }
-                            sock.set_nonblocking(true).map_err(|e| format!("nonblock: {e}"))?;
+                            sock.set_nonblocking(true)
+                                .map_err(|e| format!("nonblock: {e}"))?;
                             let bind_addr: SocketAddr = SocketAddr::new(
                                 std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                                 local_addr.port(),
                             );
-                            sock.bind(&bind_addr.into()).map_err(|e| format!("bind :{}: {e}", local_addr.port()))?;
+                            sock.bind(&bind_addr.into())
+                                .map_err(|e| format!("bind :{}: {e}", local_addr.port()))?;
                             let std_sock: StdUdpSocket = sock.into();
                             for addr in &tickle_addrs {
                                 let _ = std_sock.send_to(&[0u8; 1], addr);
@@ -469,13 +477,8 @@ pub async fn race(
                                 candidate_idx = idx,
                                 "dual_path: dialing candidate"
                             );
-                            let result = wzp_transport::connect(
-                                &ep,
-                                candidate,
-                                &sni,
-                                client_cfg,
-                            )
-                            .await;
+                            let result =
+                                wzp_transport::connect(&ep, candidate, &sni, client_cfg).await;
                             let elapsed = start.elapsed().as_millis() as u32;
                             let diag_result = match &result {
                                 Ok(_) => "ok".to_string(),
@@ -604,9 +607,7 @@ pub async fn race(
         "dual_path: racing direct vs relay"
     );
 
-    let mut direct_task = tokio::spawn(
-        tokio::time::timeout(Duration::from_secs(4), direct_fut),
-    );
+    let mut direct_task = tokio::spawn(tokio::time::timeout(Duration::from_secs(4), direct_fut));
     let mut relay_task = tokio::spawn(async move {
         // Keep the 500ms head start so direct has a chance
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -695,8 +696,12 @@ pub async fn race(
     // If it doesn't, we still proceed with just the winner.
     if direct_result.is_none() {
         match tokio::time::timeout(Duration::from_secs(1), direct_task).await {
-            Ok(Ok(Ok(Ok(t)))) => { direct_result = Some(Ok(t)); }
-            Ok(Ok(Ok(Err(e)))) => { direct_result = Some(Err(anyhow::anyhow!("{e}"))); }
+            Ok(Ok(Ok(Ok(t)))) => {
+                direct_result = Some(Ok(t));
+            }
+            Ok(Ok(Ok(Err(e)))) => {
+                direct_result = Some(Err(anyhow::anyhow!("{e}")));
+            }
             _ => {
                 direct_result = Some(Err(anyhow::anyhow!("direct: no result in grace period")));
                 // Fill timeout diags for candidates that never reported.
@@ -719,9 +724,15 @@ pub async fn race(
     }
     if relay_result.is_none() {
         match tokio::time::timeout(Duration::from_secs(1), relay_task).await {
-            Ok(Ok(Ok(Ok(t)))) => { relay_result = Some(Ok(t)); }
-            Ok(Ok(Ok(Err(e)))) => { relay_result = Some(Err(anyhow::anyhow!("{e}"))); }
-            _ => { relay_result = Some(Err(anyhow::anyhow!("relay: no result in grace period"))); }
+            Ok(Ok(Ok(Ok(t)))) => {
+                relay_result = Some(Ok(t));
+            }
+            Ok(Ok(Ok(Err(e)))) => {
+                relay_result = Some(Err(anyhow::anyhow!("{e}")));
+            }
+            _ => {
+                relay_result = Some(Err(anyhow::anyhow!("relay: no result in grace period")));
+            }
         }
     }
 
@@ -736,22 +747,21 @@ pub async fn race(
     );
 
     if !direct_ok && !relay_ok {
-        return Err(anyhow::anyhow!("both paths failed: no media transport available"));
+        return Err(anyhow::anyhow!(
+            "both paths failed: no media transport available"
+        ));
     }
 
     let _ = (direct_ep, relay_ep, ipv6_endpoint);
 
-    let candidate_diags = diags_collector.lock()
+    let candidate_diags = diags_collector
+        .lock()
         .map(|d| d.clone())
         .unwrap_or_default();
 
     Ok(RaceResult {
-        direct_transport: direct_result
-            .and_then(|r| r.ok())
-            .map(|t| Arc::new(t)),
-        relay_transport: relay_result
-            .and_then(|r| r.ok())
-            .map(|t| Arc::new(t)),
+        direct_transport: direct_result.and_then(|r| r.ok()).map(|t| Arc::new(t)),
+        relay_transport: relay_result.and_then(|r| r.ok()).map(|t| Arc::new(t)),
         local_winner,
         candidate_diags,
     })
@@ -777,7 +787,10 @@ mod tests {
         assert_eq!(order.len(), 4);
         assert_eq!(order[0], "192.168.1.10:4433".parse::<SocketAddr>().unwrap());
         assert_eq!(order[1], "10.0.0.5:4433".parse::<SocketAddr>().unwrap());
-        assert_eq!(order[2], "198.51.100.42:12345".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            order[2],
+            "198.51.100.42:12345".parse::<SocketAddr>().unwrap()
+        );
         assert_eq!(order[3], "203.0.113.5:4433".parse::<SocketAddr>().unwrap());
     }
 
@@ -805,7 +818,10 @@ mod tests {
 
         let order = candidates.dial_order();
         assert_eq!(order.len(), 1);
-        assert_eq!(order[0], "198.51.100.42:12345".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            order[0],
+            "198.51.100.42:12345".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]

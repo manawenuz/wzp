@@ -279,8 +279,15 @@ async fn try_natpmp(
 
     // Step 2: request port mapping
     // Request same port as internal (preferred); 7200s lifetime (standard)
-    let (mapped_port, lifetime) =
-        natpmp_map_udp(&socket, gw_addr, internal_port, internal_port, 7200, timeout).await?;
+    let (mapped_port, lifetime) = natpmp_map_udp(
+        &socket,
+        gw_addr,
+        internal_port,
+        internal_port,
+        7200,
+        timeout,
+    )
+    .await?;
 
     let lifetime_dur = Duration::from_secs(lifetime as u64);
     Ok(PortMapping {
@@ -533,17 +540,12 @@ async fn fetch_url_simple(url: &str, timeout: Duration) -> Result<String, PortMa
             .map_err(|e| PortMapError::Protocol(format!("parse {host_port}:80: {e}")))?
     };
 
-    let mut stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .map_err(|_| PortMapError::Timeout)?
-    .map_err(|e| PortMapError::Io(e.to_string()))?;
+    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
+        .await
+        .map_err(|_| PortMapError::Timeout)?
+        .map_err(|e| PortMapError::Io(e.to_string()))?;
 
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -593,13 +595,10 @@ async fn soap_post(
             .map_err(|e| PortMapError::Protocol(format!("parse {host_port}:80: {e}")))?
     };
 
-    let mut stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .map_err(|_| PortMapError::Timeout)?
-    .map_err(|e| PortMapError::Io(e.to_string()))?;
+    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
+        .await
+        .map_err(|_| PortMapError::Timeout)?
+        .map_err(|e| PortMapError::Io(e.to_string()))?;
 
     let soap_body = format!(
         "<?xml version=\"1.0\"?>\
@@ -662,9 +661,7 @@ fn extract_control_url(xml: &str, base_url: &str) -> Result<String, PortMapError
                         return Ok(control_path.to_string());
                     }
                     // Build absolute URL from base
-                    let base = base_url
-                        .strip_prefix("http://")
-                        .unwrap_or(base_url);
+                    let base = base_url.strip_prefix("http://").unwrap_or(base_url);
                     let host_port = base.split('/').next().unwrap_or(base);
                     return Ok(format!("http://{host_port}{control_path}"));
                 }
@@ -681,7 +678,8 @@ async fn upnp_get_external_ip(
     control_url: &str,
     timeout: Duration,
 ) -> Result<Ipv4Addr, PortMapError> {
-    let body = "<u:GetExternalIPAddress xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"/>";
+    let body =
+        "<u:GetExternalIPAddress xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"/>";
     let action = "urn:schemas-upnp-org:service:WANIPConnection:1#GetExternalIPAddress";
 
     let response = soap_post(control_url, action, body, timeout).await?;
@@ -933,7 +931,10 @@ mod tests {
         assert_eq!(request[0], 0);
         assert_eq!(request[1], 1);
         assert_eq!(u16::from_be_bytes([request[4], request[5]]), 12345);
-        assert_eq!(u32::from_be_bytes([request[8], request[9], request[10], request[11]]), 7200);
+        assert_eq!(
+            u32::from_be_bytes([request[8], request[9], request[10], request[11]]),
+            7200
+        );
     }
 
     #[test]

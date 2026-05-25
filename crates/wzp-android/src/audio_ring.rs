@@ -77,7 +77,8 @@ impl AudioRing {
             }
         }
 
-        self.write_pos.store(w.wrapping_add(count), Ordering::Release);
+        self.write_pos
+            .store(w.wrapping_add(count), Ordering::Release);
         count
     }
 
@@ -112,7 +113,8 @@ impl AudioRing {
             out[i] = unsafe { *self.buf.as_ptr().add((r + i) & RING_MASK) };
         }
 
-        self.read_pos.store(r.wrapping_add(count), Ordering::Release);
+        self.read_pos
+            .store(r.wrapping_add(count), Ordering::Release);
         count
     }
 

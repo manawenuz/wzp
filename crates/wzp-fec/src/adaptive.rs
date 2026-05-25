@@ -13,11 +13,17 @@ pub struct AdaptiveFec {
     pub repair_ratio: f32,
     /// Symbol size in bytes.
     pub symbol_size: u16,
+    /// Repair ratio to use when the block contains a keyframe.
+    /// Default 0.5 (50% overhead) — keyframes are critical and worth
+    /// the extra bandwidth.
+    pub keyframe_repair_ratio: f32,
 }
 
 impl AdaptiveFec {
     /// Default symbol size for adaptive configuration.
     const DEFAULT_SYMBOL_SIZE: u16 = 256;
+    /// Default keyframe repair ratio (PRD-video-v1 T4.5).
+    const DEFAULT_KEYFRAME_REPAIR_RATIO: f32 = 0.5;
 
     /// Create an adaptive FEC configuration from a quality profile.
     ///
@@ -30,12 +36,15 @@ impl AdaptiveFec {
             frames_per_block: profile.frames_per_block as usize,
             repair_ratio: profile.fec_ratio,
             symbol_size: Self::DEFAULT_SYMBOL_SIZE,
+            keyframe_repair_ratio: Self::DEFAULT_KEYFRAME_REPAIR_RATIO,
         }
     }
 
     /// Build a configured FEC encoder from this adaptive configuration.
     pub fn build_encoder(&self) -> RaptorQFecEncoder {
-        RaptorQFecEncoder::new(self.frames_per_block, self.symbol_size)
+        let mut enc = RaptorQFecEncoder::new(self.frames_per_block, self.symbol_size);
+        enc.set_keyframe_ratio(self.keyframe_repair_ratio);
+        enc
     }
 
     /// Get the repair ratio for use with `FecEncoder::generate_repair()`.
@@ -59,6 +68,7 @@ mod tests {
         let cfg = AdaptiveFec::from_profile(&QualityProfile::GOOD);
         assert_eq!(cfg.frames_per_block, 5);
         assert!((cfg.repair_ratio - 0.2).abs() < f32::EPSILON);
+        assert!((cfg.keyframe_repair_ratio - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

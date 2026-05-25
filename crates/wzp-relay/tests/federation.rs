@@ -18,13 +18,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use wzp_proto::{MediaTransport, SignalMessage};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
 use wzp_relay::config::{PeerConfig, TrustedConfig};
 use wzp_relay::event_log::EventLogger;
-use wzp_relay::federation::{room_hash, FederationManager};
+use wzp_relay::federation::{FederationManager, room_hash};
 use wzp_relay::metrics::RelayMetrics;
 use wzp_relay::room::RoomManager;
-use wzp_transport::{client_config, create_endpoint, server_config, QuinnTransport};
+use wzp_transport::{QuinnTransport, client_config, create_endpoint, server_config};
 
 // ───────────────────────────── helpers ──────────────────────────────
 
@@ -41,8 +41,7 @@ fn create_test_fm_full(
 ) -> Arc<FederationManager> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (sc, _cert) = server_config();
-    let ep = create_endpoint((Ipv4Addr::LOCALHOST, 0).into(), Some(sc))
-        .expect("test endpoint");
+    let ep = create_endpoint((Ipv4Addr::LOCALHOST, 0).into(), Some(sc)).expect("test endpoint");
     let room_mgr = Arc::new(RoomManager::new());
     let metrics = Arc::new(RelayMetrics::new());
     let event_log = EventLogger::Noop;
@@ -219,7 +218,10 @@ async fn forward_to_peers_empty_returns_immediately() {
         fm.forward_to_peers("room", &hash, &data),
     )
     .await;
-    assert!(result.is_ok(), "forward_to_peers should return immediately with no peers");
+    assert!(
+        result.is_ok(),
+        "forward_to_peers should return immediately with no peers"
+    );
 }
 
 // ─────────── 4. forward_to_peers with live QUIC peer links ──────────
@@ -339,20 +341,22 @@ async fn broadcast_signal_sends_to_all_peers() {
     .expect("FM should connect to mock peer within 5s");
 
     // The FM sends FederationHello as the first signal. Read it.
-    let hello = tokio::time::timeout(
-        Duration::from_secs(2),
-        peer_transport.recv_signal(),
-    )
-    .await
-    .expect("hello timeout")
-    .expect("recv ok")
-    .expect("some message");
+    let hello = tokio::time::timeout(Duration::from_secs(2), peer_transport.recv_signal())
+        .await
+        .expect("hello timeout")
+        .expect("recv ok")
+        .expect("some message");
 
     match hello {
-        SignalMessage::FederationHello { tls_fingerprint } => {
+        SignalMessage::FederationHello {
+            tls_fingerprint, ..
+        } => {
             assert_eq!(tls_fingerprint, "test-relay-fp-abc123");
         }
-        other => panic!("expected FederationHello, got: {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "expected FederationHello, got: {:?}",
+            std::mem::discriminant(&other)
+        ),
     }
 
     // Now the FM's run_federation_link registered the peer in peer_links
@@ -365,6 +369,7 @@ async fn broadcast_signal_sends_to_all_peers() {
 
     // Now call broadcast_signal on the FM
     let test_msg = SignalMessage::FederatedSignalForward {
+        version: default_signal_version(),
         inner: Box::new(SignalMessage::Reflect),
         origin_relay_fp: "other-relay-fp".into(),
     };
@@ -372,20 +377,22 @@ async fn broadcast_signal_sends_to_all_peers() {
     assert_eq!(count, 1, "should have broadcast to exactly 1 peer");
 
     // Read the signal on the peer side
-    let received = tokio::time::timeout(
-        Duration::from_secs(2),
-        peer_transport.recv_signal(),
-    )
-    .await
-    .expect("broadcast signal timeout")
-    .expect("recv ok")
-    .expect("some message");
+    let received = tokio::time::timeout(Duration::from_secs(2), peer_transport.recv_signal())
+        .await
+        .expect("broadcast signal timeout")
+        .expect("recv ok")
+        .expect("some message");
 
     match received {
-        SignalMessage::FederatedSignalForward { origin_relay_fp, .. } => {
+        SignalMessage::FederatedSignalForward {
+            origin_relay_fp, ..
+        } => {
             assert_eq!(origin_relay_fp, "other-relay-fp");
         }
-        other => panic!("expected FederatedSignalForward, got: {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "expected FederatedSignalForward, got: {:?}",
+            std::mem::discriminant(&other)
+        ),
     }
 
     drop(peer_transport);
@@ -585,14 +592,11 @@ async fn federation_media_egress_forwards_to_peer() {
     .expect("FM should connect within 5s");
 
     // Read the FederationHello
-    let _hello = tokio::time::timeout(
-        Duration::from_secs(2),
-        peer_transport.recv_signal(),
-    )
-    .await
-    .expect("hello timeout")
-    .expect("recv ok")
-    .expect("some message");
+    let _hello = tokio::time::timeout(Duration::from_secs(2), peer_transport.recv_signal())
+        .await
+        .expect("hello timeout")
+        .expect("recv ok")
+        .expect("some message");
 
     // Wait for link setup
     tokio::time::sleep(Duration::from_millis(100)).await;

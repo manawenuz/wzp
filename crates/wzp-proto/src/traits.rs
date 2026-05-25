@@ -61,18 +61,34 @@ pub trait FecEncoder: Send + Sync {
     /// Add a source symbol (one audio frame) to the current block.
     fn add_source_symbol(&mut self, data: &[u8]) -> Result<(), FecError>;
 
+    /// Add a source symbol and mark whether it belongs to a keyframe.
+    ///
+    /// When the block contains at least one keyframe source symbol,
+    /// [`generate_repair`] uses the configured keyframe ratio instead of the
+    /// nominal ratio.
+    ///
+    /// Default implementation delegates to [`add_source_symbol`] and ignores
+    /// the keyframe flag.
+    fn add_source_symbol_with_keyframe(
+        &mut self,
+        data: &[u8],
+        _is_keyframe: bool,
+    ) -> Result<(), FecError> {
+        self.add_source_symbol(data)
+    }
+
     /// Generate repair symbols for the current block.
     ///
     /// `ratio` is the repair overhead (e.g., 0.5 = 50% more symbols than source).
     /// Returns `(fec_symbol_index, repair_data)` pairs.
-    fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u8, Vec<u8>)>, FecError>;
+    fn generate_repair(&mut self, ratio: f32) -> Result<Vec<(u16, Vec<u8>)>, FecError>;
 
     /// Finalize the current block and start a new one.
     /// Returns the block ID of the finalized block.
-    fn finalize_block(&mut self) -> Result<u8, FecError>;
+    fn finalize_block(&mut self) -> Result<u16, FecError>;
 
     /// Current block ID being built.
-    fn current_block_id(&self) -> u8;
+    fn current_block_id(&self) -> u16;
 
     /// Number of source symbols in the current block.
     fn current_block_size(&self) -> usize;
@@ -83,8 +99,8 @@ pub trait FecDecoder: Send + Sync {
     /// Feed a received symbol (source or repair) into the decoder.
     fn add_symbol(
         &mut self,
-        block_id: u8,
-        symbol_index: u8,
+        block_id: u16,
+        symbol_index: u16,
         is_repair: bool,
         data: &[u8],
     ) -> Result<(), FecError>;
@@ -93,10 +109,10 @@ pub trait FecDecoder: Send + Sync {
     ///
     /// Returns `None` if not yet decodable (insufficient symbols).
     /// Returns `Some(Vec<source_frames>)` on success.
-    fn try_decode(&mut self, block_id: u8) -> Result<Option<Vec<Vec<u8>>>, FecError>;
+    fn try_decode(&mut self, block_id: u16) -> Result<Option<Vec<Vec<u8>>>, FecError>;
 
     /// Drop state for blocks older than `block_id`.
-    fn expire_before(&mut self, block_id: u8);
+    fn expire_before(&mut self, block_id: u16);
 }
 
 // ─── Crypto Traits ───────────────────────────────────────────────────────────

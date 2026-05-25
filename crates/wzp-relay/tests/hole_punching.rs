@@ -20,7 +20,7 @@
 //! to reason about, no real network, and what we actually want to
 //! test is the cross-wiring logic, not the whole signal stack.
 
-use wzp_proto::{CallAcceptMode, SignalMessage};
+use wzp_proto::{CallAcceptMode, SignalMessage, default_signal_version};
 use wzp_relay::call_registry::CallRegistry;
 
 /// Helper: simulate the relay's handling of a DirectCallOffer. In
@@ -77,6 +77,7 @@ fn handle_answer_and_build_setups(
     };
 
     let setup_for_caller = SignalMessage::CallSetup {
+        version: default_signal_version(),
         call_id: call_id.clone(),
         room: room.clone(),
         relay_addr: "203.0.113.5:4433".into(),
@@ -85,6 +86,7 @@ fn handle_answer_and_build_setups(
         peer_mapped_addr: None,
     };
     let setup_for_callee = SignalMessage::CallSetup {
+        version: default_signal_version(),
         call_id,
         room,
         relay_addr: "203.0.113.5:4433".into(),
@@ -97,6 +99,7 @@ fn handle_answer_and_build_setups(
 
 fn mk_offer(call_id: &str, caller_reflexive_addr: Option<&str>) -> SignalMessage {
     SignalMessage::DirectCallOffer {
+        version: default_signal_version(),
         caller_fingerprint: "alice".into(),
         caller_alias: None,
         target_fingerprint: "bob".into(),
@@ -118,6 +121,7 @@ fn mk_answer(
     callee_reflexive_addr: Option<&str>,
 ) -> SignalMessage {
     SignalMessage::DirectCallAnswer {
+        version: default_signal_version(),
         call_id: call_id.into(),
         accept_mode: mode,
         identity_pub: None,
@@ -151,12 +155,13 @@ fn both_peers_advertise_reflex_addrs_cross_wire_in_setup() {
     );
 
     let answer = mk_answer("c1", CallAcceptMode::AcceptTrusted, Some(callee_addr));
-    let (setup_caller, setup_callee) =
-        handle_answer_and_build_setups(&mut reg, &answer);
+    let (setup_caller, setup_callee) = handle_answer_and_build_setups(&mut reg, &answer);
 
     // The CALLER's setup should carry the CALLEE's addr as peer_direct_addr.
     match setup_caller {
-        SignalMessage::CallSetup { peer_direct_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr, ..
+        } => {
             assert_eq!(
                 peer_direct_addr.as_deref(),
                 Some(callee_addr),
@@ -168,7 +173,9 @@ fn both_peers_advertise_reflex_addrs_cross_wire_in_setup() {
 
     // The CALLEE's setup should carry the CALLER's addr.
     match setup_callee {
-        SignalMessage::CallSetup { peer_direct_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr, ..
+        } => {
             assert_eq!(
                 peer_direct_addr.as_deref(),
                 Some(caller_addr),
@@ -193,12 +200,13 @@ fn privacy_mode_answer_omits_callee_addr_from_setup() {
     // AcceptGeneric explicitly passes None for callee_reflexive_addr —
     // the whole point is to hide the callee's IP from the caller.
     let answer = mk_answer("c2", CallAcceptMode::AcceptGeneric, None);
-    let (setup_caller, setup_callee) =
-        handle_answer_and_build_setups(&mut reg, &answer);
+    let (setup_caller, setup_callee) = handle_answer_and_build_setups(&mut reg, &answer);
 
     // CALLER should see peer_direct_addr = None (privacy preserved).
     match setup_caller {
-        SignalMessage::CallSetup { peer_direct_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr, ..
+        } => {
             assert!(
                 peer_direct_addr.is_none(),
                 "privacy mode must not leak callee addr to caller"
@@ -210,7 +218,9 @@ fn privacy_mode_answer_omits_callee_addr_from_setup() {
     // CALLEE still gets the caller's addr — only the callee opted for
     // privacy, the caller already volunteered its addr in the offer.
     match setup_callee {
-        SignalMessage::CallSetup { peer_direct_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr, ..
+        } => {
             assert_eq!(
                 peer_direct_addr.as_deref(),
                 Some(caller_addr),
@@ -242,11 +252,12 @@ fn pre_phase3_caller_leaves_both_setups_relay_only() {
         CallAcceptMode::AcceptTrusted,
         Some("198.51.100.9:4433"),
     );
-    let (setup_caller, setup_callee) =
-        handle_answer_and_build_setups(&mut reg, &answer);
+    let (setup_caller, setup_callee) = handle_answer_and_build_setups(&mut reg, &answer);
 
     match setup_caller {
-        SignalMessage::CallSetup { peer_direct_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr, ..
+        } => {
             // Phase 3 relay behavior: we always inject whatever
             // addrs are in the registry, regardless of who
             // advertised. The caller here gets the callee's addr
@@ -258,7 +269,9 @@ fn pre_phase3_caller_leaves_both_setups_relay_only() {
 
     // The callee's setup has no caller addr (pre-Phase-3 offer).
     match setup_callee {
-        SignalMessage::CallSetup { peer_direct_addr, .. } => {
+        SignalMessage::CallSetup {
+            peer_direct_addr, ..
+        } => {
             assert!(
                 peer_direct_addr.is_none(),
                 "callee should see no caller addr when offer was pre-Phase-3"
@@ -278,12 +291,15 @@ fn neither_peer_advertises_both_setups_are_relay_only() {
 
     handle_offer(&mut reg, &mk_offer("c4", None));
     let answer = mk_answer("c4", CallAcceptMode::AcceptTrusted, None);
-    let (setup_caller, setup_callee) =
-        handle_answer_and_build_setups(&mut reg, &answer);
+    let (setup_caller, setup_callee) = handle_answer_and_build_setups(&mut reg, &answer);
 
     for (label, setup) in [("caller", setup_caller), ("callee", setup_callee)] {
         match setup {
-            SignalMessage::CallSetup { peer_direct_addr, relay_addr, .. } => {
+            SignalMessage::CallSetup {
+                peer_direct_addr,
+                relay_addr,
+                ..
+            } => {
                 assert!(
                     peer_direct_addr.is_none(),
                     "{label}'s CallSetup must have no peer_direct_addr"

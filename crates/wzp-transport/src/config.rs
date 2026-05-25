@@ -22,8 +22,8 @@ pub fn server_config() -> (quinn::ServerConfig, Vec<u8>) {
 /// Create a server configuration with a deterministic self-signed certificate
 /// derived from a 32-byte seed. Same seed = same cert = same TLS fingerprint.
 pub fn server_config_from_seed(seed: &[u8; 32]) -> (quinn::ServerConfig, Vec<u8>) {
-    use ed25519_dalek::pkcs8::EncodePrivateKey;
     use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
     use hkdf::Hkdf;
     use sha2::Sha256;
 
@@ -35,22 +35,23 @@ pub fn server_config_from_seed(seed: &[u8; 32]) -> (quinn::ServerConfig, Vec<u8>
 
     // Create Ed25519 signing key and export as PKCS8 DER
     let signing_key = SigningKey::from_bytes(&ed_bytes);
-    let pkcs8_doc = signing_key.to_pkcs8_der()
+    let pkcs8_doc = signing_key
+        .to_pkcs8_der()
         .expect("failed to encode Ed25519 key as PKCS8");
-    let key_der_for_rcgen = rustls::pki_types::PrivateKeyDer::try_from(pkcs8_doc.as_bytes().to_vec())
-        .expect("failed to wrap PKCS8 DER");
+    let key_der_for_rcgen =
+        rustls::pki_types::PrivateKeyDer::try_from(pkcs8_doc.as_bytes().to_vec())
+            .expect("failed to wrap PKCS8 DER");
 
     // Create rcgen KeyPair from DER
-    let key_pair = rcgen::KeyPair::from_der_and_sign_algo(
-        &key_der_for_rcgen,
-        &rcgen::PKCS_ED25519,
-    )
-    .expect("failed to create KeyPair from seed-derived Ed25519 key");
+    let key_pair = rcgen::KeyPair::from_der_and_sign_algo(&key_der_for_rcgen, &rcgen::PKCS_ED25519)
+        .expect("failed to create KeyPair from seed-derived Ed25519 key");
 
     // Build self-signed cert with this deterministic keypair
     let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
         .expect("failed to create CertificateParams");
-    let cert = params.self_signed(&key_pair).expect("failed to self-sign cert");
+    let cert = params
+        .self_signed(&key_pair)
+        .expect("failed to self-sign cert");
     let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
         .expect("failed to serialize key DER");
@@ -62,7 +63,7 @@ pub fn server_config_from_seed(seed: &[u8; 32]) -> (quinn::ServerConfig, Vec<u8>
 ///
 /// Format: `xx:xx:xx:xx:...` (32 bytes = 64 hex chars with colons).
 pub fn tls_fingerprint(cert_der: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let hash = Sha256::digest(cert_der);
     hash.iter()
         .map(|b| format!("{b:02x}"))
@@ -148,7 +149,7 @@ fn transport_config() -> quinn::TransportConfig {
     let mut mtu_config = quinn::MtuDiscoveryConfig::default();
     mtu_config
         .upper_bound(1452)
-        .interval(Duration::from_secs(300))       // re-probe every 5 min
+        .interval(Duration::from_secs(300)) // re-probe every 5 min
         .black_hole_cooldown(Duration::from_secs(30)); // retry faster on lossy links
     config.mtu_discovery_config(Some(mtu_config));
     config.initial_mtu(1200); // safe starting point

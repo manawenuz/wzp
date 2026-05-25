@@ -143,18 +143,18 @@ impl SessionManager {
         fingerprint: Option<String>,
     ) -> Result<SessionId, String> {
         if self.total_count() >= self.max_sessions {
-            return Err(format!(
-                "max sessions ({}) exceeded",
-                self.max_sessions
-            ));
+            return Err(format!("max sessions ({}) exceeded", self.max_sessions));
         }
         let id = rand_session_id();
-        self.tracked.insert(id, SessionInfo {
-            room_name: room.to_string(),
-            fingerprint,
-            connected_at: Instant::now(),
-            state: SessionState::Active,
-        });
+        self.tracked.insert(
+            id,
+            SessionInfo {
+                room_name: room.to_string(),
+                fingerprint,
+                connected_at: Instant::now(),
+                state: SessionState::Active,
+            },
+        );
         Ok(id)
     }
 
@@ -165,7 +165,10 @@ impl SessionManager {
 
     /// Number of currently tracked (room-mode) sessions.
     pub fn active_count(&self) -> usize {
-        self.tracked.values().filter(|s| s.state == SessionState::Active).count()
+        self.tracked
+            .values()
+            .filter(|s| s.state == SessionState::Active)
+            .count()
     }
 
     /// Return all session IDs that belong to a given room.
@@ -278,7 +281,9 @@ mod tests {
     #[test]
     fn session_info_returns_correct_data() {
         let mut mgr = SessionManager::new(10);
-        let id = mgr.create_session("room-x", Some("alice-fp".into())).unwrap();
+        let id = mgr
+            .create_session("room-x", Some("alice-fp".into()))
+            .unwrap();
 
         let info = mgr.session_info(id).expect("session should exist");
         assert_eq!(info.room_name, "room-x");
@@ -297,6 +302,9 @@ mod tests {
         mgr.create_session("room", None).unwrap();
         // Both layers should now reject
         assert!(mgr.create_session("room", None).is_err());
-        assert!(mgr.create_pipeline_session([2u8; 16], PipelineConfig::default()).is_none());
+        assert!(
+            mgr.create_pipeline_session([2u8; 16], PipelineConfig::default())
+                .is_none()
+        );
     }
 }

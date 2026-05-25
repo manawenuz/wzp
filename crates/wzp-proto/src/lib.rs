@@ -17,21 +17,25 @@ pub mod codec_id;
 pub mod dred_tuner;
 pub mod error;
 pub mod jitter;
+pub mod media_type;
 pub mod packet;
+pub mod priority_mode;
 pub mod quality;
 pub mod session;
 pub mod traits;
 
 // Re-export key types at crate root for convenience.
-pub use codec_id::{CodecId, QualityProfile};
-pub use error::*;
-pub use packet::{
-    CallAcceptMode, HangupReason, MediaHeader, MediaPacket, MiniFrameContext, MiniHeader,
-    PresenceUser, QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, FRAME_TYPE_FULL,
-    FRAME_TYPE_MINI,
-};
 pub use bandwidth::{BandwidthEstimator, CongestionState};
+pub use codec_id::{CodecId, QualityProfile};
 pub use dred_tuner::{DredTuner, DredTuning};
+pub use error::*;
+pub use media_type::MediaType;
+pub use packet::{
+    CallAcceptMode, FRAME_TYPE_FULL, FRAME_TYPE_MINI, HangupReason, MediaHeader, MediaHeaderV2,
+    MediaPacket, MiniFrameContext, MiniFrameContextV2, MiniHeader, MiniHeaderV2, PresenceUser,
+    QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, default_signal_version,
+};
+pub use priority_mode::PriorityMode;
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};
 pub use session::{Session, SessionEvent, SessionState};
 pub use traits::*;

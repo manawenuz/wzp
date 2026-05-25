@@ -53,10 +53,7 @@ pub fn set_dred_verbose_logs(enabled: bool) {
 /// The returned encoder accepts 48 kHz mono PCM regardless of the active
 /// codec; resampling is handled internally when Codec2 is selected.
 pub fn create_encoder(profile: QualityProfile) -> Box<dyn AudioEncoder> {
-    Box::new(
-        AdaptiveEncoder::new(profile)
-            .expect("failed to create adaptive encoder"),
-    )
+    Box::new(AdaptiveEncoder::new(profile).expect("failed to create adaptive encoder"))
 }
 
 /// Create an adaptive decoder starting at the given quality profile.
@@ -64,10 +61,7 @@ pub fn create_encoder(profile: QualityProfile) -> Box<dyn AudioEncoder> {
 /// The returned decoder always produces 48 kHz mono PCM; upsampling from
 /// Codec2's native 8 kHz is handled internally.
 pub fn create_decoder(profile: QualityProfile) -> Box<dyn AudioDecoder> {
-    Box::new(
-        AdaptiveDecoder::new(profile)
-            .expect("failed to create adaptive decoder"),
-    )
+    Box::new(AdaptiveDecoder::new(profile).expect("failed to create adaptive decoder"))
 }
 
 #[cfg(test)]
@@ -82,6 +76,10 @@ mod codec2_tests {
             fec_ratio: 0.5,
             frame_duration_ms: 20,
             frames_per_block: 5,
+            priority_mode: wzp_proto::PriorityMode::AudioFirst,
+            video_bitrate_kbps: None,
+            video_resolution: None,
+            video_fps: None,
         }
     }
 
@@ -210,7 +208,10 @@ mod codec2_tests {
 
         let mut pcm_out_c2 = vec![0i16; 1920];
         let samples_c2 = dec.decode(&encoded_c2[..n_c2], &mut pcm_out_c2).unwrap();
-        assert_eq!(samples_c2, 1920, "should get 1920 samples at 48kHz after upsample");
+        assert_eq!(
+            samples_c2, 1920,
+            "should get 1920 samples at 48kHz after upsample"
+        );
 
         // Step 3: Switch back to Opus.
         enc.set_profile(QualityProfile::GOOD).unwrap();

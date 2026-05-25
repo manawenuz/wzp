@@ -151,7 +151,10 @@ mod tests {
         for _ in 0..4 {
             det.is_silent(&silence);
         }
-        assert!(det.is_silent(&silence), "should be suppressing after hangover");
+        assert!(
+            det.is_silent(&silence),
+            "should be suppressing after hangover"
+        );
 
         // Speech arrives — should immediately stop suppressing.
         assert!(!det.is_silent(&speech));
@@ -165,10 +168,16 @@ mod tests {
         cn.generate(&mut pcm);
 
         // At least some samples should be non-zero.
-        assert!(pcm.iter().any(|&s| s != 0), "CN output should not be all zeros");
+        assert!(
+            pcm.iter().any(|&s| s != 0),
+            "CN output should not be all zeros"
+        );
 
         // All samples should be within [-50, 50].
-        assert!(pcm.iter().all(|&s| s.abs() <= 50), "CN samples out of range");
+        assert!(
+            pcm.iter().all(|&s| s.abs() <= 50),
+            "CN samples out of range"
+        );
     }
 
     #[test]
@@ -179,11 +188,17 @@ mod tests {
         // Constant value: RMS of [v, v, v, ...] = |v|.
         let pcm = vec![100i16; 100];
         let rms = SilenceDetector::rms(&pcm);
-        assert!((rms - 100.0).abs() < 0.01, "RMS of constant 100 should be 100, got {rms}");
+        assert!(
+            (rms - 100.0).abs() < 0.01,
+            "RMS of constant 100 should be 100, got {rms}"
+        );
 
         // Known pattern: [3, 4] → sqrt((9+16)/2) = sqrt(12.5) ≈ 3.5355
         let rms2 = SilenceDetector::rms(&[3, 4]);
-        assert!((rms2 - 3.5355).abs() < 0.01, "RMS of [3,4] should be ~3.5355, got {rms2}");
+        assert!(
+            (rms2 - 3.5355).abs() < 0.01,
+            "RMS of [3,4] should be ~3.5355, got {rms2}"
+        );
 
         // Empty buffer → 0.
         assert_eq!(SilenceDetector::rms(&[]), 0.0);

@@ -71,9 +71,8 @@ impl DecoderHandle {
                 "opus_decoder_create failed: err={error}"
             )));
         }
-        let inner = NonNull::new(ptr).ok_or_else(|| {
-            CodecError::DecodeFailed("opus_decoder_create returned null".into())
-        })?;
+        let inner = NonNull::new(ptr)
+            .ok_or_else(|| CodecError::DecodeFailed("opus_decoder_create returned null".into()))?;
         Ok(Self { inner })
     }
 
@@ -257,11 +256,7 @@ impl DredDecoderHandle {
     /// The `dred_end` output is the silence gap at the tail of the DRED
     /// window; we subtract it from the total offset to give callers the
     /// truly usable sample count.
-    pub fn parse_into(
-        &mut self,
-        state: &mut DredState,
-        packet: &[u8],
-    ) -> Result<i32, CodecError> {
+    pub fn parse_into(&mut self, state: &mut DredState, packet: &[u8]) -> Result<i32, CodecError> {
         if packet.is_empty() {
             state.samples_available = 0;
             return Ok(0);
@@ -545,7 +540,10 @@ mod tests {
         // to our sine wave because we fed a cold decoder only one warmup
         // frame, but it should still produce non-silent speech-like output
         // since the DRED state was parsed from real speech content.
-        let energy: u64 = recon_pcm.iter().map(|&s| (s as i32).unsigned_abs() as u64).sum();
+        let energy: u64 = recon_pcm
+            .iter()
+            .map(|&s| (s as i32).unsigned_abs() as u64)
+            .sum();
         assert!(
             energy > 0,
             "reconstructed audio has zero total energy — DRED reconstruction produced silence"

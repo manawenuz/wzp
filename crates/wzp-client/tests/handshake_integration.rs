@@ -6,12 +6,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 use wzp_proto::packet::MediaPacket;
 use wzp_proto::traits::{MediaTransport, PathQuality};
-use wzp_proto::{SignalMessage, TransportError};
+use wzp_proto::{SignalMessage, TransportError, default_signal_version};
 
 /// A mock transport backed by two mpsc channels (one per direction).
 ///
@@ -83,11 +83,15 @@ async fn full_handshake_both_sides_derive_same_session() {
 
     // Run client and relay handshakes concurrently.
     let (client_result, relay_result) = tokio::join!(
-        wzp_client::handshake::perform_handshake(client_transport_clone.as_ref(), &client_seed, None),
+        wzp_client::handshake::perform_handshake(
+            client_transport_clone.as_ref(),
+            &client_seed,
+            None
+        ),
         wzp_relay::handshake::accept_handshake(relay_transport_clone.as_ref(), &relay_seed),
     );
 
-    let mut client_session = client_result.expect("client handshake should succeed");
+    let client_hs = client_result.expect("client handshake should succeed");
     let (mut relay_session, chosen_profile, _caller_fp, _caller_alias) =
         relay_result.expect("relay handshake should succeed");
 
@@ -95,31 +99,53 @@ async fn full_handshake_both_sides_derive_same_session() {
     assert_eq!(chosen_profile, wzp_proto::QualityProfile::GOOD);
 
     // Verify both sides can communicate: client encrypts, relay decrypts.
-    let header = b"test-header";
+    // encrypt/decrypt derive nonces from MediaHeader.seq, so we need valid headers.
+    use wzp_proto::packet::MediaHeader;
+    use wzp_proto::{CodecId, MediaType};
+    let make_hdr = |seq: u32| {
+        let h = MediaHeader {
+            version: 2,
+            flags: 0,
+            media_type: MediaType::Audio,
+            codec_id: CodecId::Opus24k,
+            stream_id: 0,
+            fec_ratio: 0,
+            seq,
+            timestamp: seq.wrapping_mul(20),
+            fec_block: 0,
+        };
+        let mut b = Vec::new();
+        h.write_to(&mut b);
+        b
+    };
+
+    let header = make_hdr(0);
     let plaintext = b"hello from client to relay";
 
+    let mut client_session = client_hs.session;
     let mut ciphertext = Vec::new();
     client_session
-        .encrypt(header, plaintext, &mut ciphertext)
+        .encrypt(&header, plaintext, &mut ciphertext)
         .expect("client encrypt should succeed");
 
     let mut decrypted = Vec::new();
     relay_session
-        .decrypt(header, &ciphertext, &mut decrypted)
+        .decrypt(&header, &ciphertext, &mut decrypted)
         .expect("relay decrypt should succeed");
 
     assert_eq!(&decrypted[..], plaintext);
 
     // Verify reverse direction: relay encrypts, client decrypts.
+    let header2 = make_hdr(0); // relay's send_seq starts at 0
     let plaintext2 = b"hello from relay to client";
     let mut ciphertext2 = Vec::new();
     relay_session
-        .encrypt(header, plaintext2, &mut ciphertext2)
+        .encrypt(&header2, plaintext2, &mut ciphertext2)
         .expect("relay encrypt should succeed");
 
     let mut decrypted2 = Vec::new();
     client_session
-        .decrypt(header, &ciphertext2, &mut decrypted2)
+        .decrypt(&header2, &ciphertext2, &mut decrypted2)
         .expect("client decrypt should succeed");
 
     assert_eq!(&decrypted2[..], plaintext2);
@@ -147,11 +173,15 @@ async fn handshake_rejects_tampered_signature() {
         let bad_signature = kx.sign(b"wrong-data-intentionally");
 
         let offer = SignalMessage::CallOffer {
+            version: default_signal_version(),
             identity_pub,
             ephemeral_pub,
             signature: bad_signature,
             supported_profiles: vec![wzp_proto::QualityProfile::GOOD],
             alias: None,
+            protocol_version: 2,
+            supported_versions: vec![2],
+            video_codecs: vec![],
         };
         client_transport_clone
             .send_signal(&offer)
@@ -173,5 +203,44 @@ async fn handshake_rejects_tampered_signature() {
             );
         }
         Ok(_) => panic!("relay should reject tampered signature"),
+    }
+}
+
+#[tokio::test]
+async fn client_receives_protocol_version_mismatch() {
+    let (client_transport, relay_transport) = MockTransport::pair();
+
+    let client_seed = [0xAA_u8; 32];
+
+    // Spawn a fake relay that sends ProtocolVersionMismatch.
+    let relay_clone = Arc::clone(&relay_transport);
+    tokio::spawn(async move {
+        // Wait for the client's CallOffer.
+        let offer = relay_clone.recv_signal().await.unwrap().unwrap();
+        assert!(matches!(offer, SignalMessage::CallOffer { .. }));
+
+        // Respond with ProtocolVersionMismatch.
+        let mismatch = SignalMessage::Hangup {
+            version: default_signal_version(),
+            reason: wzp_proto::HangupReason::ProtocolVersionMismatch {
+                server_supported: vec![3],
+            },
+            call_id: None,
+        };
+        relay_clone.send_signal(&mismatch).await.unwrap();
+    });
+
+    let result =
+        wzp_client::handshake::perform_handshake(client_transport.as_ref(), &client_seed, None)
+            .await;
+
+    match result {
+        Err(wzp_client::handshake::HandshakeError::ProtocolVersionMismatch {
+            server_supported,
+        }) => {
+            assert_eq!(server_supported, vec![3]);
+        }
+        Err(other) => panic!("expected ProtocolVersionMismatch, got: {other:?}"),
+        Ok(_) => panic!("expected handshake to fail with ProtocolVersionMismatch"),
     }
 }

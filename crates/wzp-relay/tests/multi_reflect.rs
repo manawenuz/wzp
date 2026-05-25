@@ -24,9 +24,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use wzp_client::reflect::{detect_nat_type, probe_reflect_addr, NatType};
+use wzp_client::reflect::{NatType, detect_nat_type, probe_reflect_addr};
 use wzp_proto::{MediaTransport, SignalMessage};
-use wzp_transport::{create_endpoint, server_config, QuinnTransport};
+use wzp_transport::{QuinnTransport, create_endpoint, server_config};
 
 /// Minimal mock relay that loops accepting connections, handles
 /// RegisterPresence + Reflect, and responds correctly. Mirrors the
@@ -63,6 +63,7 @@ async fn spawn_mock_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
                         Ok(Some(SignalMessage::RegisterPresence { .. })) => {
                             let _ = t
                                 .send_signal(&SignalMessage::RegisterPresenceAck {
+                                    version: 1,
                                     success: true,
                                     error: None,
                                     relay_build: None,
@@ -74,6 +75,7 @@ async fn spawn_mock_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
                         Ok(Some(SignalMessage::Reflect)) => {
                             let _ = t
                                 .send_signal(&SignalMessage::ReflectResponse {
+                                    version: 1,
                                     observed_addr: observed_addr.to_string(),
                                 })
                                 .await;
@@ -136,10 +138,7 @@ async fn detect_nat_type_two_loopback_relays_probes_work_but_classify_unknown() 
     let (addr_b, _h_b) = spawn_mock_relay().await;
 
     let detection = detect_nat_type(
-        vec![
-            ("RelayA".into(), addr_a),
-            ("RelayB".into(), addr_b),
-        ],
+        vec![("RelayA".into(), addr_a), ("RelayB".into(), addr_b)],
         2000,
         None,
     )
@@ -194,10 +193,7 @@ async fn detect_nat_type_dead_relay_is_unknown() {
     let dead_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
 
     let detection = detect_nat_type(
-        vec![
-            ("Alive".into(), alive_addr),
-            ("Dead".into(), dead_addr),
-        ],
+        vec![("Alive".into(), alive_addr), ("Dead".into(), dead_addr)],
         600, // tight timeout so the dead probe fails fast
         None,
     )
@@ -207,8 +203,16 @@ async fn detect_nat_type_dead_relay_is_unknown() {
 
     // Find the alive and dead probes by name (order of JoinSet
     // completions is not guaranteed).
-    let alive = detection.probes.iter().find(|p| p.relay_name == "Alive").unwrap();
-    let dead = detection.probes.iter().find(|p| p.relay_name == "Dead").unwrap();
+    let alive = detection
+        .probes
+        .iter()
+        .find(|p| p.relay_name == "Alive")
+        .unwrap();
+    let dead = detection
+        .probes
+        .iter()
+        .find(|p| p.relay_name == "Dead")
+        .unwrap();
 
     assert!(
         alive.observed_addr.is_some(),

@@ -15,24 +15,24 @@
 //! `wzp-client`'s lib.rs can transparently re-export either one as
 //! `AudioCapture`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use tracing::{info, warn};
-use windows::core::{Interface, GUID};
-use windows::Win32::Foundation::{CloseHandle, BOOL, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{BOOL, CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    eCapture, eCommunications, AudioCategory_Communications, AudioClientProperties,
-    IAudioCaptureClient, IAudioClient, IAudioClient2, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
-    WAVE_FORMAT_PCM,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    AudioCategory_Communications, AudioClientProperties, IAudioCaptureClient, IAudioClient,
+    IAudioClient2, IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
+    eCapture, eCommunications,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+use windows::core::{GUID, Interface};
 
 use crate::audio_ring::AudioRing;
 
@@ -138,9 +138,8 @@ unsafe fn capture_thread_main(
     }
     let _com_guard = ComGuard;
 
-    let enumerator: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .context("CoCreateInstance(MMDeviceEnumerator) failed")?;
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        .context("CoCreateInstance(MMDeviceEnumerator) failed")?;
 
     // eCommunications role (not eConsole) — this picks the device the user
     // has designated for communications in Sound Settings. It's the one
@@ -206,12 +205,13 @@ unsafe fn capture_thread_main(
             &wave_format,
             Some(&GUID::zeroed()),
         )
-        .context("IAudioClient::Initialize failed — Windows rejected communications-mode 48k mono i16")?;
+        .context(
+            "IAudioClient::Initialize failed — Windows rejected communications-mode 48k mono i16",
+        )?;
 
     // Event-driven capture: Windows signals this handle each time a new
     // audio packet is available. We wait on it from the loop below.
-    let event = CreateEventW(None, false, false, None)
-        .context("CreateEventW failed")?;
+    let event = CreateEventW(None, false, false, None).context("CreateEventW failed")?;
     audio_client
         .SetEventHandle(event)
         .context("SetEventHandle failed")?;
@@ -285,10 +285,8 @@ unsafe fn capture_thread_main(
                 // Because we asked for 48 kHz mono i16, each frame is
                 // exactly one i16. Windows's AUTOCONVERTPCM handles the
                 // conversion from whatever the engine mix format is.
-                let samples = std::slice::from_raw_parts(
-                    buffer_ptr as *const i16,
-                    num_frames as usize,
-                );
+                let samples =
+                    std::slice::from_raw_parts(buffer_ptr as *const i16, num_frames as usize);
                 ring.write(samples);
             }
 

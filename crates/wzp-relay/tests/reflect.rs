@@ -30,8 +30,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use wzp_proto::{MediaTransport, SignalMessage};
-use wzp_transport::{client_config, create_endpoint, server_config, QuinnTransport};
+use wzp_proto::{MediaTransport, SignalMessage, default_signal_version};
+use wzp_transport::{QuinnTransport, client_config, create_endpoint, server_config};
 
 /// Spawn a minimal mock relay that loops over `recv_signal`,
 /// matches on `Reflect`, and responds with `ReflectResponse` using
@@ -49,6 +49,7 @@ async fn spawn_mock_relay_with_reflect(
             match server_transport.recv_signal().await {
                 Ok(Some(SignalMessage::Reflect)) => {
                     let resp = SignalMessage::ReflectResponse {
+                        version: default_signal_version(),
                         observed_addr: observed.to_string(),
                     };
                     // If the send fails the client has gone; just exit.
@@ -94,7 +95,11 @@ async fn spawn_mock_relay_without_reflect(
 /// distinct-ports test).
 async fn connected_pair_with_port(
     _client_port_hint: u16,
-) -> (Arc<QuinnTransport>, Arc<QuinnTransport>, (quinn::Endpoint, quinn::Endpoint)) {
+) -> (
+    Arc<QuinnTransport>,
+    Arc<QuinnTransport>,
+    (quinn::Endpoint, quinn::Endpoint),
+) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let (sc, _cert_der) = server_config();
@@ -109,7 +114,9 @@ async fn connected_pair_with_port(
 
     let server_ep_clone = server_ep.clone();
     let accept_fut = tokio::spawn(async move {
-        let conn = wzp_transport::accept(&server_ep_clone).await.expect("accept");
+        let conn = wzp_transport::accept(&server_ep_clone)
+            .await
+            .expect("accept");
         Arc::new(QuinnTransport::new(conn))
     });
 
@@ -134,10 +141,7 @@ async fn reflect_happy_path() {
 
     // Grab the client's actual bound port so we can cross-check
     // against the reflected response.
-    let client_port = client_ep
-        .local_addr()
-        .expect("client local addr")
-        .port();
+    let client_port = client_ep.local_addr().expect("client local addr").port();
     assert_ne!(client_port, 0, "client must have a real bound port");
 
     // Start the mock relay's reflect handler.
@@ -161,8 +165,11 @@ async fn reflect_happy_path() {
         .expect("some message");
 
     let observed_addr = match resp {
-        SignalMessage::ReflectResponse { observed_addr } => observed_addr,
-        other => panic!("expected ReflectResponse, got {:?}", std::mem::discriminant(&other)),
+        SignalMessage::ReflectResponse { observed_addr, .. } => observed_addr,
+        other => panic!(
+            "expected ReflectResponse, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
 
     let parsed: SocketAddr = observed_addr
@@ -210,19 +217,17 @@ async fn reflect_two_clients_distinct_ports() {
 
     // Client A
     let client_ep_a = create_endpoint((Ipv4Addr::LOCALHOST, 0).into(), None).expect("ep A");
-    let conn_a =
-        wzp_transport::connect(&client_ep_a, server_listen, "localhost", client_config())
-            .await
-            .expect("connect A");
+    let conn_a = wzp_transport::connect(&client_ep_a, server_listen, "localhost", client_config())
+        .await
+        .expect("connect A");
     let client_a = Arc::new(QuinnTransport::new(conn_a));
     let port_a = client_ep_a.local_addr().unwrap().port();
 
     // Client B
     let client_ep_b = create_endpoint((Ipv4Addr::LOCALHOST, 0).into(), None).expect("ep B");
-    let conn_b =
-        wzp_transport::connect(&client_ep_b, server_listen, "localhost", client_config())
-            .await
-            .expect("connect B");
+    let conn_b = wzp_transport::connect(&client_ep_b, server_listen, "localhost", client_config())
+        .await
+        .expect("connect B");
     let client_b = Arc::new(QuinnTransport::new(conn_b));
     let port_b = client_ep_b.local_addr().unwrap().port();
 
@@ -247,12 +252,13 @@ async fn reflect_two_clients_distinct_ports() {
             .expect("ok")
             .expect("some");
         match resp {
-            SignalMessage::ReflectResponse { observed_addr } => observed_addr,
+            SignalMessage::ReflectResponse { observed_addr, .. } => observed_addr,
             _ => panic!("wrong variant"),
         }
     };
 
-    let (addr_a, addr_b) = tokio::join!(reflect_for(client_a.clone()), reflect_for(client_b.clone()));
+    let (addr_a, addr_b) =
+        tokio::join!(reflect_for(client_a.clone()), reflect_for(client_b.clone()));
 
     let parsed_a: SocketAddr = addr_a.parse().unwrap();
     let parsed_b: SocketAddr = addr_b.parse().unwrap();
@@ -277,12 +283,10 @@ async fn reflect_two_clients_distinct_ports() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reflect_old_relay_times_out() {
-    let (client_transport, server_transport, _endpoints) =
-        connected_pair_with_port(0).await;
+    let (client_transport, server_transport, _endpoints) = connected_pair_with_port(0).await;
 
     // Mock relay that ignores Reflect — simulates a pre-Phase-1 build.
-    let _relay_handle =
-        spawn_mock_relay_without_reflect(Arc::clone(&server_transport)).await;
+    let _relay_handle = spawn_mock_relay_without_reflect(Arc::clone(&server_transport)).await;
 
     client_transport
         .send_signal(&SignalMessage::Reflect)

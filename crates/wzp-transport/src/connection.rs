@@ -28,13 +28,13 @@ pub async fn connect(
     server_name: &str,
     config: quinn::ClientConfig,
 ) -> Result<quinn::Connection, TransportError> {
-    let connecting = endpoint.connect_with(config, addr, server_name).map_err(|e| {
-        TransportError::Internal(format!("connect error: {e}"))
-    })?;
+    let connecting = endpoint
+        .connect_with(config, addr, server_name)
+        .map_err(|e| TransportError::Internal(format!("connect error: {e}")))?;
 
-    let connection = connecting.await.map_err(|e| {
-        TransportError::Internal(format!("connection failed: {e}"))
-    })?;
+    let connection = connecting
+        .await
+        .map_err(|e| TransportError::Internal(format!("connection failed: {e}")))?;
 
     Ok(connection)
 }
@@ -111,9 +111,9 @@ pub async fn accept(endpoint: &quinn::Endpoint) -> Result<quinn::Connection, Tra
         .await
         .ok_or(TransportError::ConnectionLost)?;
 
-    let connection = incoming.await.map_err(|e| {
-        TransportError::Internal(format!("accept failed: {e}"))
-    })?;
+    let connection = incoming
+        .await
+        .map_err(|e| TransportError::Internal(format!("accept failed: {e}")))?;
 
     Ok(connection)
 }

@@ -7,10 +7,11 @@
 //! Control (GCC).
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::packet::QualityReport;
 use crate::QualityProfile;
+use crate::packet::QualityReport;
 
 /// Network congestion state derived from delay and loss signals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +159,16 @@ pub struct BandwidthEstimator {
     loss_detector: LossBasedDetector,
     /// Last update timestamp.
     last_update: Option<Instant>,
+
+    // ── Transport-feedback BWE (T2.2) ──
+    /// Congestion-window-derived bandwidth estimate in bits per second.
+    cwnd_bps: AtomicU64,
+    /// Peer REMB (Receiver Estimated Maximum Bitrate) in bits per second.
+    peer_remb_bps: AtomicU64,
+    /// EWMA-smoothed bandwidth estimate in bits per second.
+    smoothed_bps: AtomicU64,
+    /// Last time `smoothed_bps` was updated (UNIX epoch millis).
+    last_smoothed_ms: AtomicU64,
 }
 
 /// Multiplicative decrease factor applied on congestion (15% reduction).
@@ -179,6 +190,10 @@ impl BandwidthEstimator {
             delay_detector: DelayBasedDetector::new(),
             loss_detector: LossBasedDetector::new(),
             last_update: None,
+            cwnd_bps: AtomicU64::new(0),
+            peer_remb_bps: AtomicU64::new(u64::MAX),
+            smoothed_bps: AtomicU64::new(0),
+            last_smoothed_ms: AtomicU64::new(0),
         }
     }
 
@@ -249,6 +264,64 @@ impl BandwidthEstimator {
         } else {
             QualityProfile::CATASTROPHIC
         }
+    }
+
+    // ── Transport-feedback BWE (T2.2) ──
+
+    /// Update from QUIC path stats.
+    ///
+    /// Computes `cwnd_bps = cwnd_bytes * 8 / rtt_s` and feeds it into the
+    /// smoothed estimate.
+    pub fn update_from_path(&self, cwnd_bytes: u64, _bytes_in_flight: u64, rtt_ms: u32) {
+        let rtt_s = rtt_ms.max(1) as f64 / 1000.0;
+        let cwnd_bps = ((cwnd_bytes * 8) as f64 / rtt_s) as u64;
+        self.cwnd_bps.store(cwnd_bps, Relaxed);
+        self.update_smoothed(cwnd_bps);
+    }
+
+    /// Update from a peer's `TransportFeedback` REMB value.
+    pub fn update_from_peer(&self, fb_remb_bps: u32) {
+        let remb = fb_remb_bps as u64;
+        self.peer_remb_bps.store(remb, Relaxed);
+        self.update_smoothed(remb);
+    }
+
+    /// Target sending bitrate in bits per second.
+    ///
+    /// Returns 90% of the minimum between the congestion-window estimate
+    /// and the peer REMB estimate.
+    pub fn target_send_bps(&self) -> u64 {
+        let cwnd = self.cwnd_bps.load(Relaxed);
+        let remb = self.peer_remb_bps.load(Relaxed);
+        let m = cwnd.min(remb);
+        (m as f64 * 0.9) as u64
+    }
+
+    /// EWMA-smoothed bandwidth estimate in bits per second.
+    pub fn smoothed_bps(&self) -> u64 {
+        self.smoothed_bps.load(Relaxed)
+    }
+
+    /// Apply EWMA smoothing with a 2-second half-life.
+    fn update_smoothed(&self, new_bps: u64) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last_ms = self.last_smoothed_ms.load(Relaxed);
+        let dt_ms = now_ms.saturating_sub(last_ms);
+
+        let current = self.smoothed_bps.load(Relaxed);
+        let updated = if current == 0 || dt_ms == 0 {
+            new_bps
+        } else {
+            let alpha = 1.0 - 0.5_f64.powf(dt_ms as f64 / 2000.0);
+            let s = current as f64 * (1.0 - alpha) + new_bps as f64 * alpha;
+            s as u64
+        };
+
+        self.smoothed_bps.store(updated, Relaxed);
+        self.last_smoothed_ms.store(now_ms, Relaxed);
     }
 }
 
@@ -396,10 +469,7 @@ mod tests {
 
         // Below 8 => CATASTROPHIC
         let bwe_cat = BandwidthEstimator::new(7.9, 2.0, 100.0);
-        assert_eq!(
-            bwe_cat.recommended_profile(),
-            QualityProfile::CATASTROPHIC
-        );
+        assert_eq!(bwe_cat.recommended_profile(), QualityProfile::CATASTROPHIC);
 
         // High bandwidth
         let bwe_high = BandwidthEstimator::new(80.0, 2.0, 100.0);
@@ -413,7 +483,7 @@ mod tests {
         // Build a QualityReport with moderate loss and RTT.
         let report = QualityReport {
             loss_pct: (10.0_f32 / 100.0 * 255.0) as u8, // ~10% loss
-            rtt_4ms: 25,                                   // 100ms RTT
+            rtt_4ms: 25,                                // 100ms RTT
             jitter_ms: 10,
             bitrate_cap_kbps: 200,
         };
@@ -450,5 +520,47 @@ mod tests {
             det.update(8.0); // 8% loss, above 5% threshold
         }
         assert!(det.is_congested());
+    }
+
+    #[test]
+    fn target_send_bps_uses_min_of_cwnd_and_remb() {
+        let bwe = BandwidthEstimator::new(50.0, 2.0, 100.0);
+        // cwnd_bps = 100_000, remb = 200_000 → min = 100_000 → 90%
+        bwe.update_from_path(1250, 0, 100); // 1250*8 / 0.1 = 100_000
+        bwe.update_from_peer(200_000);
+        assert_eq!(bwe.target_send_bps(), 90_000);
+    }
+
+    #[test]
+    fn target_send_bps_with_zero_cwnd_uses_remb() {
+        let bwe = BandwidthEstimator::new(50.0, 2.0, 100.0);
+        // Default cwnd is 0, remb is u64::MAX (default).
+        // 0.min(u64::MAX) = 0 → 90% = 0
+        assert_eq!(bwe.target_send_bps(), 0);
+
+        bwe.update_from_peer(100_000);
+        // cwnd still 0
+        assert_eq!(bwe.target_send_bps(), 0);
+    }
+
+    #[test]
+    fn smoothed_bps_ewma_converges() {
+        let bwe = BandwidthEstimator::new(50.0, 2.0, 100.0);
+        bwe.update_from_path(1250, 0, 100); // 100_000 bps
+        let s1 = bwe.smoothed_bps();
+        assert_eq!(s1, 100_000);
+
+        // Immediately update with same value — dt ≈ 0, so should stay at 100_000
+        bwe.update_from_path(1250, 0, 100);
+        let s2 = bwe.smoothed_bps();
+        assert_eq!(s2, 100_000);
+
+        // Sleep a bit so dt is non-zero, then update with a much higher value.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        bwe.update_from_path(12500, 0, 100); // 1_000_000 bps
+        let s3 = bwe.smoothed_bps();
+        assert!(s3 > 100_000, "smoothed should increase toward 1M: {s3}");
+        // With 100ms dt, alpha ≈ 0.03, so smoothed should be ~100k * 0.97 + 1M * 0.03 ≈ 127k
+        assert!(s3 < 500_000, "smoothed should not jump too far: {s3}");
     }
 }

@@ -45,7 +45,7 @@ impl Codec2Encoder {
 
     /// Number of compressed bytes per frame.
     fn bytes_per_frame(&self) -> usize {
-        (self.inner.bits_per_frame() + 7) / 8
+        self.inner.bits_per_frame().div_ceil(8)
     }
 }
 

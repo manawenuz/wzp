@@ -5,8 +5,8 @@
 //! to the speaker, so it can cancel the echo from the mic signal internally.
 //! This is the same engine FaceTime and other Apple apps use.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::Context;
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
@@ -28,6 +28,60 @@ pub struct VpioAudio {
     playout_ring: Arc<AudioRing>,
     _audio_unit: AudioUnit,
     running: Arc<AtomicBool>,
+    stats: Arc<VpioStats>,
+}
+
+/// Render/capture counters for diagnosing macOS VoiceProcessingIO.
+///
+/// These are atomics because CoreAudio callbacks run on realtime audio
+/// threads. The Tauri engine polls snapshots from a normal async task and
+/// emits them to the call debug log.
+#[derive(Default)]
+pub struct VpioStats {
+    capture_callbacks: AtomicU64,
+    capture_samples: AtomicU64,
+    render_callbacks: AtomicU64,
+    render_requested_samples: AtomicU64,
+    render_read_samples: AtomicU64,
+    render_underrun_callbacks: AtomicU64,
+    render_nonzero_callbacks: AtomicU64,
+    render_last_requested: AtomicU64,
+    render_last_read: AtomicU64,
+    render_last_rms: AtomicU64,
+    render_last_ring_available: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VpioStatsSnapshot {
+    pub capture_callbacks: u64,
+    pub capture_samples: u64,
+    pub render_callbacks: u64,
+    pub render_requested_samples: u64,
+    pub render_read_samples: u64,
+    pub render_underrun_callbacks: u64,
+    pub render_nonzero_callbacks: u64,
+    pub render_last_requested: u64,
+    pub render_last_read: u64,
+    pub render_last_rms: u64,
+    pub render_last_ring_available: u64,
+}
+
+impl VpioStats {
+    pub fn snapshot(&self) -> VpioStatsSnapshot {
+        VpioStatsSnapshot {
+            capture_callbacks: self.capture_callbacks.load(Ordering::Relaxed),
+            capture_samples: self.capture_samples.load(Ordering::Relaxed),
+            render_callbacks: self.render_callbacks.load(Ordering::Relaxed),
+            render_requested_samples: self.render_requested_samples.load(Ordering::Relaxed),
+            render_read_samples: self.render_read_samples.load(Ordering::Relaxed),
+            render_underrun_callbacks: self.render_underrun_callbacks.load(Ordering::Relaxed),
+            render_nonzero_callbacks: self.render_nonzero_callbacks.load(Ordering::Relaxed),
+            render_last_requested: self.render_last_requested.load(Ordering::Relaxed),
+            render_last_read: self.render_last_read.load(Ordering::Relaxed),
+            render_last_rms: self.render_last_rms.load(Ordering::Relaxed),
+            render_last_ring_available: self.render_last_ring_available.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl VpioAudio {
@@ -36,6 +90,7 @@ impl VpioAudio {
         let capture_ring = Arc::new(AudioRing::new());
         let playout_ring = Arc::new(AudioRing::new());
         let running = Arc::new(AtomicBool::new(true));
+        let stats = Arc::new(VpioStats::default());
 
         let mut au = AudioUnit::new(IOType::VoiceProcessingIO)
             .context("failed to create VoiceProcessingIO audio unit")?;
@@ -98,6 +153,7 @@ impl VpioAudio {
         // Set up input callback (mic capture with AEC applied)
         let cap_ring = capture_ring.clone();
         let cap_running = running.clone();
+        let cap_stats = stats.clone();
         let logged = Arc::new(AtomicBool::new(false));
         au.set_input_callback(
             move |args: render_callback::Args<data::NonInterleaved<f32>>| {
@@ -106,6 +162,10 @@ impl VpioAudio {
                 }
                 let mut buffers = args.data.channels();
                 if let Some(ch) = buffers.next() {
+                    cap_stats.capture_callbacks.fetch_add(1, Ordering::Relaxed);
+                    cap_stats
+                        .capture_samples
+                        .fetch_add(ch.len() as u64, Ordering::Relaxed);
                     if !logged.swap(true, Ordering::Relaxed) {
                         eprintln!("[vpio] capture callback: {} f32 samples", ch.len());
                     }
@@ -125,20 +185,71 @@ impl VpioAudio {
 
         // Set up output callback (speaker playback — AEC uses this as reference)
         let play_ring = playout_ring.clone();
+        let render_stats = stats.clone();
+        let logged_render = Arc::new(AtomicBool::new(false));
         au.set_render_callback(
             move |mut args: render_callback::Args<data::NonInterleaved<f32>>| {
                 let mut buffers = args.data.channels_mut();
                 if let Some(ch) = buffers.next() {
+                    render_stats
+                        .render_callbacks
+                        .fetch_add(1, Ordering::Relaxed);
+                    render_stats
+                        .render_requested_samples
+                        .fetch_add(ch.len() as u64, Ordering::Relaxed);
+                    render_stats
+                        .render_last_requested
+                        .store(ch.len() as u64, Ordering::Relaxed);
                     let mut tmp = [0i16; FRAME_SAMPLES];
+                    let mut total_read = 0usize;
+                    let mut sum_sq = 0u64;
+                    let ring_available = play_ring.available();
                     for chunk in ch.chunks_mut(FRAME_SAMPLES) {
                         let n = chunk.len();
                         let read = play_ring.read(&mut tmp[..n]);
+                        total_read += read;
                         for i in 0..read {
+                            let s = tmp[i] as i64;
+                            sum_sq = sum_sq.saturating_add((s * s) as u64);
                             chunk[i] = tmp[i] as f32 / i16::MAX as f32;
                         }
                         for i in read..n {
                             chunk[i] = 0.0;
                         }
+                    }
+                    render_stats
+                        .render_read_samples
+                        .fetch_add(total_read as u64, Ordering::Relaxed);
+                    render_stats
+                        .render_last_read
+                        .store(total_read as u64, Ordering::Relaxed);
+                    render_stats
+                        .render_last_ring_available
+                        .store(ring_available as u64, Ordering::Relaxed);
+                    if total_read == 0 {
+                        render_stats
+                            .render_underrun_callbacks
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    let rms = if total_read > 0 {
+                        ((sum_sq as f64 / total_read as f64).sqrt()) as u64
+                    } else {
+                        0
+                    };
+                    render_stats.render_last_rms.store(rms, Ordering::Relaxed);
+                    if rms > 0 {
+                        render_stats
+                            .render_nonzero_callbacks
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    if !logged_render.swap(true, Ordering::Relaxed) {
+                        eprintln!(
+                            "[vpio] render callback: {} f32 samples, ring_available={}, ring_read={}, rms={}",
+                            ch.len(),
+                            ring_available,
+                            total_read,
+                            rms
+                        );
                     }
                 }
                 Ok(())
@@ -146,7 +257,8 @@ impl VpioAudio {
         )
         .context("failed to set render callback")?;
 
-        au.initialize().context("failed to initialize VoiceProcessingIO")?;
+        au.initialize()
+            .context("failed to initialize VoiceProcessingIO")?;
         au.start().context("failed to start VoiceProcessingIO")?;
 
         info!("VoiceProcessingIO started (OS-level AEC enabled)");
@@ -156,6 +268,7 @@ impl VpioAudio {
             playout_ring,
             _audio_unit: au,
             running,
+            stats,
         })
     }
 
@@ -165,6 +278,10 @@ impl VpioAudio {
 
     pub fn playout_ring(&self) -> &Arc<AudioRing> {
         &self.playout_ring
+    }
+
+    pub fn stats(&self) -> Arc<VpioStats> {
+        self.stats.clone()
     }
 
     pub fn stop(&self) {

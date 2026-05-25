@@ -11,11 +11,11 @@
 use tracing::{debug, info};
 
 use wzp_fec::{RaptorQFecDecoder, RaptorQFecEncoder};
+use wzp_proto::QualityProfile;
 use wzp_proto::jitter::{JitterBuffer, PlayoutResult};
 use wzp_proto::packet::{MediaHeader, MediaPacket};
 use wzp_proto::quality::AdaptiveQualityController;
 use wzp_proto::traits::{FecDecoder, FecEncoder, QualityController};
-use wzp_proto::QualityProfile;
 
 /// Configuration for a relay pipeline instance.
 pub struct PipelineConfig {
@@ -51,7 +51,7 @@ pub struct RelayPipeline {
     /// Current quality profile.
     profile: QualityProfile,
     /// Outbound sequence counter.
-    out_seq: u16,
+    out_seq: u32,
     /// Packets processed count.
     stats: PipelineStats,
 }
@@ -111,8 +111,8 @@ impl RelayPipeline {
         let header = &packet.header;
         let _ = self.fec_decoder.add_symbol(
             header.fec_block,
-            header.fec_symbol,
-            header.is_repair,
+            header.fec_block >> 8,
+            header.is_repair(),
             &packet.payload,
         );
 
@@ -128,22 +128,21 @@ impl RelayPipeline {
             for (i, frame) in frames.into_iter().enumerate() {
                 let reconstructed = MediaPacket {
                     header: MediaHeader {
-                        version: 0,
-                        is_repair: false,
+                        version: 2,
+                        flags: 0,
+                        media_type: wzp_proto::MediaType::Audio,
                         codec_id: header.codec_id,
-                        has_quality_report: false,
-                        fec_ratio_encoded: header.fec_ratio_encoded,
+                        stream_id: 0,
+                        fec_ratio: header.fec_ratio,
                         // Reconstruct seq from block + symbol index
-                        seq: (header.fec_block as u16)
-                            .wrapping_mul(self.profile.frames_per_block as u16)
-                            .wrapping_add(i as u16),
-                        timestamp: header
-                            .timestamp
-                            .wrapping_add((i as u32) * (header.codec_id.frame_duration_ms() as u32)),
-                        fec_block: header.fec_block,
-                        fec_symbol: i as u8,
-                        reserved: 0,
-                        csrc_count: 0,
+                        seq: (header.fec_block as u32)
+                            .wrapping_mul(self.profile.frames_per_block as u32)
+                            .wrapping_add(i as u32),
+                        timestamp: header.timestamp.wrapping_add(
+                            (i as u32) * (header.codec_id.frame_duration_ms() as u32),
+                        ),
+                        fec_block: u16::from((header.fec_block & 0xFF) as u8)
+                            | (u16::from(i as u8) << 8),
                     },
                     payload: bytes::Bytes::from(frame),
                     quality_report: None,
@@ -191,19 +190,16 @@ impl RelayPipeline {
                 for (sym_idx, repair_data) in repairs {
                     let repair_packet = MediaPacket {
                         header: MediaHeader {
-                            version: 0,
-                            is_repair: true,
+                            version: 2,
+                            flags: MediaHeader::FLAG_REPAIR,
+                            media_type: wzp_proto::MediaType::Audio,
                             codec_id: packet.header.codec_id,
-                            has_quality_report: false,
-                            fec_ratio_encoded: MediaHeader::encode_fec_ratio(
-                                self.profile.fec_ratio,
-                            ),
+                            stream_id: 0,
+                            fec_ratio: MediaHeader::encode_fec_ratio(self.profile.fec_ratio),
                             seq: self.out_seq,
                             timestamp: packet.header.timestamp,
-                            fec_block: self.fec_encoder.current_block_id(),
-                            fec_symbol: sym_idx,
-                            reserved: 0,
-                            csrc_count: 0,
+                            fec_block: u16::from(self.fec_encoder.current_block_id())
+                                | (u16::from(sym_idx) << 8),
                         },
                         payload: bytes::Bytes::from(repair_data),
                         quality_report: None,
@@ -232,23 +228,21 @@ impl RelayPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wzp_proto::CodecId;
     use bytes::Bytes;
+    use wzp_proto::CodecId;
 
-    fn make_media_packet(seq: u16, block: u8, symbol: u8) -> MediaPacket {
+    fn make_media_packet(seq: u32, block: u8, symbol: u8) -> MediaPacket {
         MediaPacket {
             header: MediaHeader {
-                version: 0,
-                is_repair: false,
+                version: 2,
+                flags: 0,
+                media_type: wzp_proto::MediaType::Audio,
                 codec_id: CodecId::Opus24k,
-                has_quality_report: false,
-                fec_ratio_encoded: 0,
+                stream_id: 0,
+                fec_ratio: 0,
                 seq,
-                timestamp: seq as u32 * 20,
-                fec_block: block,
-                fec_symbol: symbol,
-                reserved: 0,
-                csrc_count: 0,
+                timestamp: seq * 20,
+                fec_block: u16::from(block) | (u16::from(symbol) << 8),
             },
             payload: Bytes::from(vec![seq as u8; 60]),
             quality_report: None,
@@ -283,7 +277,7 @@ mod tests {
 
         // Feed 5 packets (one full block)
         let mut total_out = 0;
-        for i in 0..5u16 {
+        for i in 0..5u32 {
             let pkt = make_media_packet(i, 0, i as u8);
             let out = pipeline.prepare_outbound(pkt);
             total_out += out.len();

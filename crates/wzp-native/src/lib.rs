@@ -116,7 +116,11 @@ impl RingBuffer {
         let w = self.write_idx.load(Ordering::Acquire);
         let r = self.read_idx.load(Ordering::Relaxed);
         let avail = w - r;
-        if avail < 0 { (avail + self.capacity as i32) as usize } else { avail as usize }
+        if avail < 0 {
+            (avail + self.capacity as i32) as usize
+        } else {
+            avail as usize
+        }
     }
 
     fn available_write(&self) -> usize {
@@ -132,9 +136,13 @@ impl RingBuffer {
         let cap = self.capacity;
         let buf_ptr = self.buf.as_ptr() as *mut i16;
         for sample in &data[..count] {
-            unsafe { *buf_ptr.add(w) = *sample; }
+            unsafe {
+                *buf_ptr.add(w) = *sample;
+            }
             w += 1;
-            if w >= cap { w = 0; }
+            if w >= cap {
+                w = 0;
+            }
         }
         self.write_idx.store(w as i32, Ordering::Release);
         count
@@ -149,9 +157,13 @@ impl RingBuffer {
         let cap = self.capacity;
         let buf_ptr = self.buf.as_ptr();
         for slot in &mut out[..count] {
-            unsafe { *slot = *buf_ptr.add(r); }
+            unsafe {
+                *slot = *buf_ptr.add(r);
+            }
             r += 1;
-            if r >= cap { r = 0; }
+            if r >= cap {
+                r = 0;
+            }
         }
         self.read_idx.store(r as i32, Ordering::Release);
         count
@@ -316,17 +328,27 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
     // has stopped firing → restart the streams. This is the
     // self-healing behavior that makes rejoin work: teardown +
     // rebuild clears whatever HAL state locked up the callback.
-    let current_read_idx = b.playout.read_idx.load(std::sync::atomic::Ordering::Relaxed);
-    let last_read_idx = b.playout_last_read_idx.load(std::sync::atomic::Ordering::Relaxed);
+    let current_read_idx = b
+        .playout
+        .read_idx
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let last_read_idx = b
+        .playout_last_read_idx
+        .load(std::sync::atomic::Ordering::Relaxed);
     if current_read_idx == last_read_idx {
-        let stall = b.playout_stall_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stall = b
+            .playout_stall_writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if stall >= 50 {
             // Callback hasn't drained anything in ~1 second.
             // Force a stream restart.
             unsafe {
-                android_log("playout STALL detected (50 writes, read_idx unchanged) — restarting Oboe streams");
+                android_log(
+                    "playout STALL detected (50 writes, read_idx unchanged) — restarting Oboe streams",
+                );
             }
-            b.playout_stall_writes.store(0, std::sync::atomic::Ordering::Relaxed);
+            b.playout_stall_writes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             // Release the started lock, stop, re-start.
             // This is the same logic as the Rust-side
             // audio_stop() + audio_start() but done inline
@@ -341,10 +363,18 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
                 }
             }
             // Clear the rings so the restart doesn't read stale data
-            b.playout.write_idx.store(0, std::sync::atomic::Ordering::Relaxed);
-            b.playout.read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
-            b.capture.write_idx.store(0, std::sync::atomic::Ordering::Relaxed);
-            b.capture.read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            b.playout
+                .write_idx
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            b.playout
+                .read_idx
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            b.capture
+                .write_idx
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            b.capture
+                .read_idx
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             // Re-start (stall detector — always non-BT mode)
             let config = WzpOboeConfig {
                 sample_rate: 48_000,
@@ -367,30 +397,49 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
                 if let Ok(mut started) = b.started.lock() {
                     *started = true;
                 }
-                unsafe { android_log("playout restart OK — Oboe streams rebuilt"); }
+                unsafe {
+                    android_log("playout restart OK — Oboe streams rebuilt");
+                }
             } else {
-                unsafe { android_log(&format!("playout restart FAILED: {ret}")); }
+                unsafe {
+                    android_log(&format!("playout restart FAILED: {ret}"));
+                }
             }
-            b.playout_last_read_idx.store(0, std::sync::atomic::Ordering::Relaxed);
+            b.playout_last_read_idx
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             return 0; // caller will retry on next frame
         }
     } else {
         // read_idx advanced — callback is alive, reset counter
-        b.playout_stall_writes.store(0, std::sync::atomic::Ordering::Relaxed);
-        b.playout_last_read_idx.store(current_read_idx, std::sync::atomic::Ordering::Relaxed);
+        b.playout_stall_writes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        b.playout_last_read_idx
+            .store(current_read_idx, std::sync::atomic::Ordering::Relaxed);
     }
 
-    let before_w = b.playout.write_idx.load(std::sync::atomic::Ordering::Relaxed);
-    let before_r = b.playout.read_idx.load(std::sync::atomic::Ordering::Relaxed);
+    let before_w = b
+        .playout
+        .write_idx
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let before_r = b
+        .playout
+        .read_idx
+        .load(std::sync::atomic::Ordering::Relaxed);
     let written = b.playout.write(slice);
     // First few writes: log ring state + sample range so we can compare what
     // engine.rs hands us to what the C++ playout callback reads.
-    let first_writes = b.playout_write_log_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first_writes = b
+        .playout_write_log_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if first_writes < 3 || first_writes % 50 == 0 {
         let (mut lo, mut hi, mut sumsq) = (i16::MAX, i16::MIN, 0i64);
         for &s in slice.iter() {
-            if s < lo { lo = s; }
-            if s > hi { hi = s; }
+            if s < lo {
+                lo = s;
+            }
+            if s > hi {
+                hi = s;
+            }
             sumsq += (s as i64) * (s as i64);
         }
         let rms = (sumsq as f64 / slice.len() as f64).sqrt() as i32;
@@ -398,7 +447,8 @@ pub unsafe extern "C" fn wzp_native_audio_write_playout(input: *const i16, in_le
         let avail_r_after = b.playout.available_read();
         let msg = format!(
             "playout WRITE #{first_writes}: in_len={} written={} range=[{lo}..{hi}] rms={rms} before_w={before_w} before_r={before_r} avail_read_after={avail_r_after} avail_write_after={avail_w_after}",
-            slice.len(), written
+            slice.len(),
+            written
         );
         unsafe {
             android_log(msg.as_str());
@@ -422,7 +472,9 @@ unsafe fn android_log(msg: &str) {
     let mut buf = Vec::with_capacity(msg.len() + 1);
     buf.extend_from_slice(msg.as_bytes());
     buf.push(0);
-    unsafe { __android_log_write(4, tag.as_ptr(), buf.as_ptr()); }
+    unsafe {
+        __android_log_write(4, tag.as_ptr(), buf.as_ptr());
+    }
 }
 
 #[cfg(not(target_os = "android"))]

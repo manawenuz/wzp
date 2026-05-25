@@ -112,22 +112,30 @@ pub async fn run_netcheck(config: &NetcheckConfig) -> NetcheckReport {
     let ipv6_fut = test_ipv6(config.test_ipv6, config.timeout);
     let port_alloc_fut = stun::detect_port_allocation(&config.stun_config);
 
-    let (stun_probes, relay_latencies, portmap_result, gateway_result, ipv6_reachable, port_alloc_result) =
-        tokio::join!(stun_fut, relay_fut, portmap_fut, gateway_result_fut(gateway_fut), ipv6_fut, port_alloc_fut);
+    let (
+        stun_probes,
+        relay_latencies,
+        portmap_result,
+        gateway_result,
+        ipv6_reachable,
+        port_alloc_result,
+    ) = tokio::join!(
+        stun_fut,
+        relay_fut,
+        portmap_fut,
+        gateway_result_fut(gateway_fut),
+        ipv6_fut,
+        port_alloc_fut
+    );
 
     // Classify NAT from STUN probes.
     let (nat_type, consensus_addr) = reflect::classify_nat(&stun_probes);
 
     // Determine STUN latency (first successful probe).
-    let stun_latency_ms = stun_probes
-        .iter()
-        .filter_map(|p| p.latency_ms)
-        .min();
+    let stun_latency_ms = stun_probes.iter().filter_map(|p| p.latency_ms).min();
 
     // IPv4 reachable if any STUN probe succeeded.
-    let ipv4_reachable = stun_probes
-        .iter()
-        .any(|p| p.observed_addr.is_some());
+    let ipv4_reachable = stun_probes.iter().any(|p| p.observed_addr.is_some());
 
     // Preferred relay = lowest RTT.
     let preferred_relay = relay_latencies
@@ -176,10 +184,7 @@ pub async fn run_netcheck(config: &NetcheckConfig) -> NetcheckReport {
 }
 
 /// Probe relay latencies via reflect.
-async fn probe_relays(
-    relays: &[(String, SocketAddr)],
-    timeout: Duration,
-) -> Vec<RelayLatency> {
+async fn probe_relays(relays: &[(String, SocketAddr)], timeout: Duration) -> Vec<RelayLatency> {
     if relays.is_empty() {
         return Vec::new();
     }
@@ -223,10 +228,7 @@ async fn probe_relays(
 }
 
 /// Attempt port mapping and return the mapping if successful.
-async fn probe_portmap(
-    enabled: bool,
-    local_port: u16,
-) -> Option<portmap::PortMapping> {
+async fn probe_portmap(enabled: bool, local_port: u16) -> Option<portmap::PortMapping> {
     if !enabled || local_port == 0 {
         return None;
     }
@@ -251,7 +253,9 @@ async fn test_ipv6(enabled: bool, timeout: Duration) -> bool {
         let sock = tokio::net::UdpSocket::bind("[::]:0").await.ok()?;
         // Try Google's IPv6 STUN — if DNS resolves to an AAAA record
         // and we can send a packet, IPv6 is working.
-        let addr = stun::resolve_stun_server("stun.l.google.com:19302").await.ok()?;
+        let addr = stun::resolve_stun_server("stun.l.google.com:19302")
+            .await
+            .ok()?;
         if addr.is_ipv6() {
             sock.send_to(&[0u8; 1], addr).await.ok()?;
             Some(true)
@@ -276,10 +280,7 @@ pub fn format_report(report: &NetcheckReport) -> String {
     let mut out = String::new();
 
     out.push_str(&format!("=== WarzonePhone Netcheck ===\n\n"));
-    out.push_str(&format!(
-        "NAT Type:       {:?}\n",
-        report.nat_type
-    ));
+    out.push_str(&format!("NAT Type:       {:?}\n", report.nat_type));
     out.push_str(&format!(
         "Reflexive Addr: {}\n",
         report.reflexive_addr.as_deref().unwrap_or("(unknown)")
@@ -298,15 +299,17 @@ pub fn format_report(report: &NetcheckReport) -> String {
     ));
 
     if let Some(ref alloc) = report.port_allocation {
-        out.push_str(&format!(
-            "Port Alloc:     {alloc}\n"
-        ));
+        out.push_str(&format!("Port Alloc:     {alloc}\n"));
     }
 
     out.push_str(&format!("\n--- Port Mapping ---\n"));
     out.push_str(&format!(
         "NAT-PMP: {}  PCP: {}  UPnP: {}\n",
-        if report.nat_pmp_available { "yes" } else { "no" },
+        if report.nat_pmp_available {
+            "yes"
+        } else {
+            "no"
+        },
         if report.pcp_available { "yes" } else { "no" },
         if report.upnp_available { "yes" } else { "no" },
     ));
@@ -321,8 +324,13 @@ pub fn format_report(report: &NetcheckReport) -> String {
                 "  {} → {} ({}ms){}\n",
                 p.relay_name,
                 p.observed_addr.as_deref().unwrap_or("failed"),
-                p.latency_ms.map(|ms| ms.to_string()).unwrap_or_else(|| "-".into()),
-                p.error.as_ref().map(|e| format!(" [{e}]")).unwrap_or_default(),
+                p.latency_ms
+                    .map(|ms| ms.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                p.error
+                    .as_ref()
+                    .map(|e| format!(" [{e}]"))
+                    .unwrap_or_default(),
             ));
         }
     }
@@ -334,8 +342,13 @@ pub fn format_report(report: &NetcheckReport) -> String {
                 "  {} ({}) → {}ms{}\n",
                 r.name,
                 r.addr,
-                r.rtt_ms.map(|ms| ms.to_string()).unwrap_or_else(|| "-".into()),
-                r.error.as_ref().map(|e| format!(" [{e}]")).unwrap_or_default(),
+                r.rtt_ms
+                    .map(|ms| ms.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                r.error
+                    .as_ref()
+                    .map(|e| format!(" [{e}]"))
+                    .unwrap_or_default(),
             ));
         }
         if let Some(ref pref) = report.preferred_relay {

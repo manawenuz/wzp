@@ -79,7 +79,9 @@ impl Seed {
     ///
     /// Mirrors: `warzone-protocol::mnemonic::mnemonic_to_seed`
     pub fn from_mnemonic(words: &str) -> Result<Self, String> {
-        let mnemonic: bip39::Mnemonic = words.parse().map_err(|e| format!("invalid mnemonic: {e}"))?;
+        let mnemonic: bip39::Mnemonic = words
+            .parse()
+            .map_err(|e| format!("invalid mnemonic: {e}"))?;
         let entropy = mnemonic.to_entropy();
         if entropy.len() != 32 {
             return Err(format!("expected 32 bytes entropy, got {}", entropy.len()));

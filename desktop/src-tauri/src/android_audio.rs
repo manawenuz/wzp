@@ -11,8 +11,8 @@
 
 #![cfg(target_os = "android")]
 
-use jni::objects::{JObject, JString, JValue};
 use jni::JavaVM;
+use jni::objects::{JObject, JString, JValue};
 
 /// Grab the JavaVM + current Activity from the ndk_context that Tauri's
 /// mobile runtime sets up at process startup.
@@ -22,8 +22,7 @@ fn jvm_and_activity() -> Result<(JavaVM, JObject<'static>), String> {
     if vm_ptr.is_null() {
         return Err("ndk_context: JavaVM pointer is null".into());
     }
-    let vm = unsafe { JavaVM::from_raw(vm_ptr) }
-        .map_err(|e| format!("JavaVM::from_raw: {e}"))?;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr) }.map_err(|e| format!("JavaVM::from_raw: {e}"))?;
     let activity_ptr = ctx.context() as jni::sys::jobject;
     if activity_ptr.is_null() {
         return Err("ndk_context: activity pointer is null".into());
@@ -57,6 +56,30 @@ fn audio_manager<'local>(
     Ok(am)
 }
 
+fn has_permission(permission: &str) -> Result<bool, String> {
+    let (vm, activity) = jvm_and_activity()?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e}"))?;
+    let permission = env
+        .new_string(permission)
+        .map_err(|e| format!("new_string(permission): {e}"))?;
+    let result = env
+        .call_method(
+            &activity,
+            "checkSelfPermission",
+            "(Ljava/lang/String;)I",
+            &[JValue::Object(&permission)],
+        )
+        .and_then(|v| v.i())
+        .map_err(|e| format!("checkSelfPermission: {e}"))?;
+    Ok(result == 0)
+}
+
+pub fn has_record_audio_permission() -> Result<bool, String> {
+    has_permission("android.permission.RECORD_AUDIO")
+}
+
 /// Set `AudioManager.MODE_IN_COMMUNICATION`. Call when a VoIP call starts.
 /// This tells the audio policy to route through the communication device
 /// path (earpiece/BT SCO) instead of the media path (speaker/BT A2DP).
@@ -71,6 +94,33 @@ pub fn set_audio_mode_communication() -> Result<(), String> {
         .map_err(|e| format!("setMode(MODE_IN_COMMUNICATION): {e}"))?;
     tracing::info!("AudioManager: mode set to MODE_IN_COMMUNICATION");
     Ok(())
+}
+
+/// Run `set_audio_mode_communication` on Tauri's main thread, where the
+/// Android context is initialized. Calling it from arbitrary Tokio blocking
+/// workers panics inside `ndk_context::android_context()`.
+pub async fn set_audio_mode_communication_on_main(app: tauri::AppHandle) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let result = std::panic::catch_unwind(set_audio_mode_communication)
+            .map_err(|panic| {
+                if let Some(s) = panic.downcast_ref::<&str>() {
+                    format!("panic: {s}")
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    format!("panic: {s}")
+                } else {
+                    "panic: unknown".to_string()
+                }
+            })
+            .and_then(|r| r);
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("run_on_main_thread: {e}"))?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+        .await
+        .map_err(|_| "set_audio_mode_communication timed out after 2s".to_string())?
+        .map_err(|_| "set_audio_mode_communication result channel closed".to_string())?
 }
 
 /// Restore `AudioManager.MODE_NORMAL`. Call when a VoIP call ends.
@@ -140,13 +190,8 @@ pub fn start_bluetooth_sco() -> Result<(), String> {
     let am = audio_manager(&mut env, &activity)?;
 
     // Ensure speaker is off — mutually exclusive with BT.
-    env.call_method(
-        &am,
-        "setSpeakerphoneOn",
-        "(Z)V",
-        &[JValue::Bool(0)],
-    )
-    .map_err(|e| format!("setSpeakerphoneOn(false): {e}"))?;
+    env.call_method(&am, "setSpeakerphoneOn", "(Z)V", &[JValue::Bool(0)])
+        .map_err(|e| format!("setSpeakerphoneOn(false): {e}"))?;
 
     // Try modern API first (API 31+): setCommunicationDevice(AudioDeviceInfo)
     // Find a BT SCO or BLE device from getAvailableCommunicationDevices()
@@ -195,11 +240,7 @@ fn try_set_communication_device(
 ) -> Result<bool, String> {
     // Check SDK_INT >= 31 (Android 12)
     let sdk_int = env
-        .get_static_field(
-            "android/os/Build$VERSION",
-            "SDK_INT",
-            "I",
-        )
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
         .and_then(|v| v.i())
         .unwrap_or(0);
 
@@ -261,11 +302,7 @@ fn try_set_communication_device(
                 .and_then(|v| v.z())
                 .unwrap_or(false);
 
-            tracing::info!(
-                device_type,
-                ok,
-                "setCommunicationDevice: set BT device"
-            );
+            tracing::info!(device_type, ok, "setCommunicationDevice: set BT device");
             return Ok(ok);
         }
     }
@@ -293,7 +330,12 @@ pub fn is_bluetooth_sco_on() -> Result<bool, String> {
     if sdk_int >= 31 {
         // getCommunicationDevice() → AudioDeviceInfo (nullable)
         let device = env
-            .call_method(am, "getCommunicationDevice", "()Landroid/media/AudioDeviceInfo;", &[])
+            .call_method(
+                am,
+                "getCommunicationDevice",
+                "()Landroid/media/AudioDeviceInfo;",
+                &[],
+            )
             .and_then(|v| v.l())
             .unwrap_or(JObject::null());
         if device.is_null() {
@@ -351,7 +393,11 @@ pub fn is_bluetooth_available() -> Result<bool, String> {
             .unwrap_or(0);
         // TYPE_BLUETOOTH_SCO = 7, TYPE_BLUETOOTH_A2DP = 8
         if device_type == 7 || device_type == 8 {
-            tracing::info!(device_type, idx = i, "is_bluetooth_available: found BT device");
+            tracing::info!(
+                device_type,
+                idx = i,
+                "is_bluetooth_available: found BT device"
+            );
             return Ok(true);
         }
     }

@@ -36,6 +36,10 @@ impl RekeyManager {
     ///
     /// The old key is zeroized after the new key is derived.
     /// Returns the new 32-byte symmetric key.
+    ///
+    /// NOTE: Rekeying changes **only** the symmetric key material.  Sequence
+    /// numbers and timestamps in the media framing layer (e.g. `MediaHeader`)
+    /// are untouched — they continue monotonically across the rekey boundary.
     pub fn perform_rekey(
         &mut self,
         new_peer_pub: &[u8; 32],

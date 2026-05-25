@@ -570,7 +570,7 @@ Signal messages are sent over reliable QUIC streams as length-prefixed JSON:
 
 ## Test Coverage
 
-272 tests across all crates, 0 failures:
+571 tests across all crates, 0 failures:
 
 | Crate | Tests | Key Coverage |
 |-------|-------|-------------|
