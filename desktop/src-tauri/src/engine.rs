@@ -8,11 +8,11 @@
 //! `start()` that returns an error, so the frontend's `connect` command
 //! still fails cleanly but the rest of the engine code links in.
 
+use base64::Engine as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
-use base64::Engine as _;
 use tauri::Emitter;
 use tokio::sync::Mutex;
 use tracing::{error, info};
@@ -183,6 +183,7 @@ fn should_log_video_sample(frame_no: u64, is_keyframe: bool) -> bool {
 }
 
 const VIDEO_KEYFRAME_INTERVAL_FRAMES: u32 = 120;
+const VIDEO_BITRATE_BPS: u32 = 900_000;
 const VIDEO_PLI_MIN_INTERVAL_MS: u128 = 250;
 
 #[derive(Default)]
@@ -397,10 +398,7 @@ async fn run_signal_task(
                 );
                 pending_profile.store(idx, Ordering::Release);
             }
-            Ok(Ok(Some(wzp_proto::SignalMessage::PictureLossIndication {
-                stream_id,
-                ..
-            }))) => {
+            Ok(Ok(Some(wzp_proto::SignalMessage::PictureLossIndication { stream_id, .. }))) => {
                 force_video_keyframe.store(true, Ordering::Release);
                 crate::emit_call_debug(
                     &app,
@@ -1556,7 +1554,8 @@ impl CallEngine {
                                                 );
                                             }
                                             let jpeg_b64 = jpeg_bytes.as_ref().map(|bytes| {
-                                                base64::engine::general_purpose::STANDARD.encode(bytes)
+                                                base64::engine::general_purpose::STANDARD
+                                                    .encode(bytes)
                                             });
                                             let jpeg_ok = jpeg_b64.is_some();
                                             if !video_first_decoded_logged {
@@ -2049,40 +2048,43 @@ impl CallEngine {
                         "codec": format!("{:?}", vid_codec),
                         "width": 1280,
                         "height": 720,
-                        "bitrate_bps": 1_500_000,
+                        "bitrate_bps": VIDEO_BITRATE_BPS,
                         "platform": "android",
                     }),
                 );
-                let mut encoder =
-                    match wzp_video::factory::create_video_encoder(vid_codec, 1280, 720, 1_500_000)
-                    {
-                        Ok(e) => {
-                            crate::emit_call_debug(
-                                &vid_app,
-                                "video:encoder_started",
-                                serde_json::json!({
-                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                    "codec": format!("{:?}", vid_codec),
-                                    "platform": "android",
-                                }),
-                            );
-                            e
-                        }
-                        Err(e) => {
-                            error!("video encoder init failed (android): {e}");
-                            crate::emit_call_debug(
-                                &vid_app,
-                                "video:encoder_init_failed",
-                                serde_json::json!({
-                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                    "codec": format!("{:?}", vid_codec),
-                                    "platform": "android",
-                                    "error": e.to_string(),
-                                }),
-                            );
-                            return;
-                        }
-                    };
+                let mut encoder = match wzp_video::factory::create_video_encoder(
+                    vid_codec,
+                    1280,
+                    720,
+                    VIDEO_BITRATE_BPS,
+                ) {
+                    Ok(e) => {
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:encoder_started",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "platform": "android",
+                            }),
+                        );
+                        e
+                    }
+                    Err(e) => {
+                        error!("video encoder init failed (android): {e}");
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:encoder_init_failed",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "platform": "android",
+                                "error": e.to_string(),
+                            }),
+                        );
+                        return;
+                    }
+                };
                 let mut seq: u32 = 0;
                 let mut frames_since_keyframe: u32 = 0;
                 let mut first_send_logged = false;
@@ -2090,6 +2092,16 @@ impl CallEngine {
                 let mut camera_frames: u64 = 0;
                 let mut empty_encodes: u64 = 0;
                 let mut encoded_frame_samples: u64 = 0;
+                let mut send_heartbeat = std::time::Instant::now();
+                let mut encoded_frames_total: u64 = 0;
+                let mut encoded_keyframes_total: u64 = 0;
+                let mut video_packets_total: u64 = 0;
+                let mut video_bytes_total: u64 = 0;
+                let mut last_heartbeat_camera_frames: u64 = 0;
+                let mut last_heartbeat_encoded_frames: u64 = 0;
+                let mut last_heartbeat_packets: u64 = 0;
+                let mut last_heartbeat_bytes: u64 = 0;
+                let mut last_heartbeat_empty_encodes: u64 = 0;
                 let mut skipped_startup_black_frames: u64 = 0;
                 let mut wait_ticks: u64 = 0;
                 encoder.request_keyframe();
@@ -2191,14 +2203,13 @@ impl CallEngine {
                         continue;
                     }
 
-                    let keyframe_reason =
-                        if vid_force_keyframe.swap(false, Ordering::AcqRel) {
-                            Some("pli")
-                        } else if frames_since_keyframe >= VIDEO_KEYFRAME_INTERVAL_FRAMES {
-                            Some("periodic")
-                        } else {
-                            None
-                        };
+                    let keyframe_reason = if vid_force_keyframe.swap(false, Ordering::AcqRel) {
+                        Some("pli")
+                    } else if frames_since_keyframe >= VIDEO_KEYFRAME_INTERVAL_FRAMES {
+                        Some("periodic")
+                    } else {
+                        None
+                    };
                     if let Some(reason) = keyframe_reason {
                         encoder.request_keyframe();
                         crate::emit_call_debug(
@@ -2252,6 +2263,10 @@ impl CallEngine {
                     }
 
                     let is_keyframe = encoder.is_keyframe(&encoded);
+                    encoded_frames_total += 1;
+                    if is_keyframe {
+                        encoded_keyframes_total += 1;
+                    }
                     let ts_ms = vid_t0.elapsed().as_millis() as u32;
                     let pkts = wzp_video::transport::packetize_video_frame(
                         &encoded,
@@ -2260,6 +2275,8 @@ impl CallEngine {
                         &mut seq,
                         ts_ms,
                     );
+                    video_packets_total += pkts.len() as u64;
+                    video_bytes_total += encoded.len() as u64;
                     if encoded_frame_samples < 5 {
                         encoded_frame_samples += 1;
                         let packet_payload_bytes: usize =
@@ -2310,6 +2327,40 @@ impl CallEngine {
                             );
                             break;
                         }
+                    }
+                    if send_heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                        let dt_ms = send_heartbeat.elapsed().as_millis().max(1) as f64;
+                        let encoded_delta = encoded_frames_total - last_heartbeat_encoded_frames;
+                        let camera_delta = camera_frames - last_heartbeat_camera_frames;
+                        let packets_delta = video_packets_total - last_heartbeat_packets;
+                        let bytes_delta = video_bytes_total - last_heartbeat_bytes;
+                        let empty_delta = empty_encodes - last_heartbeat_empty_encodes;
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:send_heartbeat",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "platform": "android",
+                                "camera_frames": camera_frames,
+                                "encoded_frames": encoded_frames_total,
+                                "encoded_keyframes": encoded_keyframes_total,
+                                "empty_encodes": empty_encodes,
+                                "pkts_sent": video_packets_total,
+                                "bytes_sent": video_bytes_total,
+                                "camera_fps": (camera_delta as f64) * 1000.0 / dt_ms,
+                                "encoded_fps": (encoded_delta as f64) * 1000.0 / dt_ms,
+                                "packets_per_sec": (packets_delta as f64) * 1000.0 / dt_ms,
+                                "kbps": (bytes_delta as f64) * 8.0 / dt_ms,
+                                "empty_encodes_delta": empty_delta,
+                            }),
+                        );
+                        last_heartbeat_camera_frames = camera_frames;
+                        last_heartbeat_encoded_frames = encoded_frames_total;
+                        last_heartbeat_packets = video_packets_total;
+                        last_heartbeat_bytes = video_bytes_total;
+                        last_heartbeat_empty_encodes = empty_encodes;
+                        send_heartbeat = std::time::Instant::now();
                     }
                     frames_since_keyframe += 1;
                 }
@@ -2980,7 +3031,8 @@ impl CallEngine {
                                                 );
                                             }
                                             let jpeg_b64 = jpeg_bytes.as_ref().map(|bytes| {
-                                                base64::engine::general_purpose::STANDARD.encode(bytes)
+                                                base64::engine::general_purpose::STANDARD
+                                                    .encode(bytes)
                                             });
                                             let jpeg_ok = jpeg_b64.is_some();
                                             if !video_first_decoded_logged {
@@ -3315,40 +3367,43 @@ impl CallEngine {
                         "codec": format!("{:?}", vid_codec),
                         "width": 1280,
                         "height": 720,
-                        "bitrate_bps": 1_500_000,
+                        "bitrate_bps": VIDEO_BITRATE_BPS,
                         "platform": "desktop",
                     }),
                 );
-                let mut encoder =
-                    match wzp_video::factory::create_video_encoder(vid_codec, 1280, 720, 1_500_000)
-                    {
-                        Ok(e) => {
-                            crate::emit_call_debug(
-                                &vid_app,
-                                "video:encoder_started",
-                                serde_json::json!({
-                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                    "codec": format!("{:?}", vid_codec),
-                                    "platform": "desktop",
-                                }),
-                            );
-                            e
-                        }
-                        Err(e) => {
-                            error!("video encoder init failed: {e}");
-                            crate::emit_call_debug(
-                                &vid_app,
-                                "video:encoder_init_failed",
-                                serde_json::json!({
-                                    "t_ms": vid_t0.elapsed().as_millis() as u64,
-                                    "codec": format!("{:?}", vid_codec),
-                                    "platform": "desktop",
-                                    "error": e.to_string(),
-                                }),
-                            );
-                            return;
-                        }
-                    };
+                let mut encoder = match wzp_video::factory::create_video_encoder(
+                    vid_codec,
+                    1280,
+                    720,
+                    VIDEO_BITRATE_BPS,
+                ) {
+                    Ok(e) => {
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:encoder_started",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "platform": "desktop",
+                            }),
+                        );
+                        e
+                    }
+                    Err(e) => {
+                        error!("video encoder init failed: {e}");
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:encoder_init_failed",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "platform": "desktop",
+                                "error": e.to_string(),
+                            }),
+                        );
+                        return;
+                    }
+                };
                 let mut seq: u32 = 0;
                 let mut frames_since_keyframe: u32 = 0;
                 let mut first_send_logged = false;
@@ -3356,6 +3411,16 @@ impl CallEngine {
                 let mut camera_frames: u64 = 0;
                 let mut empty_encodes: u64 = 0;
                 let mut encoded_frame_samples: u64 = 0;
+                let mut send_heartbeat = std::time::Instant::now();
+                let mut encoded_frames_total: u64 = 0;
+                let mut encoded_keyframes_total: u64 = 0;
+                let mut video_packets_total: u64 = 0;
+                let mut video_bytes_total: u64 = 0;
+                let mut last_heartbeat_camera_frames: u64 = 0;
+                let mut last_heartbeat_encoded_frames: u64 = 0;
+                let mut last_heartbeat_packets: u64 = 0;
+                let mut last_heartbeat_bytes: u64 = 0;
+                let mut last_heartbeat_empty_encodes: u64 = 0;
                 let mut skipped_startup_black_frames: u64 = 0;
                 let mut wait_ticks: u64 = 0;
                 encoder.request_keyframe();
@@ -3457,14 +3522,13 @@ impl CallEngine {
                         continue;
                     }
 
-                    let keyframe_reason =
-                        if vid_force_keyframe.swap(false, Ordering::AcqRel) {
-                            Some("pli")
-                        } else if frames_since_keyframe >= VIDEO_KEYFRAME_INTERVAL_FRAMES {
-                            Some("periodic")
-                        } else {
-                            None
-                        };
+                    let keyframe_reason = if vid_force_keyframe.swap(false, Ordering::AcqRel) {
+                        Some("pli")
+                    } else if frames_since_keyframe >= VIDEO_KEYFRAME_INTERVAL_FRAMES {
+                        Some("periodic")
+                    } else {
+                        None
+                    };
                     if let Some(reason) = keyframe_reason {
                         encoder.request_keyframe();
                         crate::emit_call_debug(
@@ -3518,6 +3582,10 @@ impl CallEngine {
                     }
 
                     let is_keyframe = encoder.is_keyframe(&encoded);
+                    encoded_frames_total += 1;
+                    if is_keyframe {
+                        encoded_keyframes_total += 1;
+                    }
                     let ts_ms = vid_t0.elapsed().as_millis() as u32;
                     let pkts = wzp_video::transport::packetize_video_frame(
                         &encoded,
@@ -3526,6 +3594,8 @@ impl CallEngine {
                         &mut seq,
                         ts_ms,
                     );
+                    video_packets_total += pkts.len() as u64;
+                    video_bytes_total += encoded.len() as u64;
                     if encoded_frame_samples < 5 {
                         encoded_frame_samples += 1;
                         let packet_payload_bytes: usize =
@@ -3576,6 +3646,40 @@ impl CallEngine {
                             );
                             break;
                         }
+                    }
+                    if send_heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                        let dt_ms = send_heartbeat.elapsed().as_millis().max(1) as f64;
+                        let encoded_delta = encoded_frames_total - last_heartbeat_encoded_frames;
+                        let camera_delta = camera_frames - last_heartbeat_camera_frames;
+                        let packets_delta = video_packets_total - last_heartbeat_packets;
+                        let bytes_delta = video_bytes_total - last_heartbeat_bytes;
+                        let empty_delta = empty_encodes - last_heartbeat_empty_encodes;
+                        crate::emit_call_debug(
+                            &vid_app,
+                            "video:send_heartbeat",
+                            serde_json::json!({
+                                "t_ms": vid_t0.elapsed().as_millis() as u64,
+                                "codec": format!("{:?}", vid_codec),
+                                "platform": "desktop",
+                                "camera_frames": camera_frames,
+                                "encoded_frames": encoded_frames_total,
+                                "encoded_keyframes": encoded_keyframes_total,
+                                "empty_encodes": empty_encodes,
+                                "pkts_sent": video_packets_total,
+                                "bytes_sent": video_bytes_total,
+                                "camera_fps": (camera_delta as f64) * 1000.0 / dt_ms,
+                                "encoded_fps": (encoded_delta as f64) * 1000.0 / dt_ms,
+                                "packets_per_sec": (packets_delta as f64) * 1000.0 / dt_ms,
+                                "kbps": (bytes_delta as f64) * 8.0 / dt_ms,
+                                "empty_encodes_delta": empty_delta,
+                            }),
+                        );
+                        last_heartbeat_camera_frames = camera_frames;
+                        last_heartbeat_encoded_frames = encoded_frames_total;
+                        last_heartbeat_packets = video_packets_total;
+                        last_heartbeat_bytes = video_bytes_total;
+                        last_heartbeat_empty_encodes = empty_encodes;
+                        send_heartbeat = std::time::Instant::now();
                     }
                     frames_since_keyframe += 1;
                 }

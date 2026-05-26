@@ -67,7 +67,7 @@ impl MediaCodecEncoder {
             format.set_i32("height", height as i32);
             format.set_i32("bitrate", bitrate_bps as i32);
             format.set_i32("frame-rate", 30);
-            format.set_i32("i-frame-interval", 1);
+            format.set_i32("i-frame-interval", 4);
             format.set_i32("color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
 
             let codec = MediaCodec::from_encoder_type("video/avc").ok_or_else(|| {
@@ -170,7 +170,8 @@ impl VideoEncoder for MediaCodecEncoder {
         if nals.is_empty() {
             return (packet[0] & 0x1F) == 5;
         }
-        nals.iter().any(|nal| !nal.is_empty() && (nal[0] & 0x1F) == 5)
+        nals.iter()
+            .any(|nal| !nal.is_empty() && (nal[0] & 0x1F) == 5)
     }
 }
 
@@ -419,7 +420,7 @@ impl MediaCodecHevcEncoder {
             format.set_i32("height", height as i32);
             format.set_i32("bitrate", bitrate_bps as i32);
             format.set_i32("frame-rate", 30);
-            format.set_i32("i-frame-interval", 1);
+            format.set_i32("i-frame-interval", 4);
             format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
 
             let codec = MediaCodec::from_encoder_type("video/hevc").ok_or_else(|| {
@@ -470,7 +471,11 @@ impl VideoEncoder for MediaCodecHevcEncoder {
                 .dequeue_input_buffer(std::time::Duration::from_millis(10))
             {
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
-                    let flags = if self.force_keyframe { AMEDIACODEC_BUFFER_FLAG_KEY_FRAME } else { 0 };
+                    let flags = if self.force_keyframe {
+                        AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
+                    } else {
+                        0
+                    };
                     let to_copy = {
                         let buf = buffer.buffer_mut();
                         let n = frame.data.len().min(buf.len());
@@ -480,7 +485,13 @@ impl VideoEncoder for MediaCodecHevcEncoder {
                         n
                     };
                     self.codec
-                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, flags)
+                        .queue_input_buffer(
+                            buffer,
+                            0,
+                            to_copy,
+                            frame.timestamp_ms as u64 * 1000,
+                            flags,
+                        )
                         .map_err(|e| {
                             VideoError::PlatformError(format!("queue_input_buffer failed: {e}"))
                         })?;
@@ -592,7 +603,11 @@ impl VideoEncoder for MediaCodecAv1Encoder {
                 .dequeue_input_buffer(std::time::Duration::from_millis(0))
             {
                 Ok(ndk::media::media_codec::DequeuedInputBufferResult::Buffer(mut buffer)) => {
-                    let flags = if self.force_keyframe { AMEDIACODEC_BUFFER_FLAG_KEY_FRAME } else { 0 };
+                    let flags = if self.force_keyframe {
+                        AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
+                    } else {
+                        0
+                    };
                     let to_copy = {
                         let buf = buffer.buffer_mut();
                         let n = frame.data.len().min(buf.len());
@@ -602,7 +617,13 @@ impl VideoEncoder for MediaCodecAv1Encoder {
                         n
                     };
                     self.codec
-                        .queue_input_buffer(buffer, 0, to_copy, frame.timestamp_ms as u64 * 1000, flags)
+                        .queue_input_buffer(
+                            buffer,
+                            0,
+                            to_copy,
+                            frame.timestamp_ms as u64 * 1000,
+                            flags,
+                        )
                         .map_err(|e| {
                             VideoError::PlatformError(format!(
                                 "AV1 encoder queue_input_buffer failed: {e}"
@@ -1162,9 +1183,9 @@ fn i420_len(width: usize, height: usize) -> Result<usize, VideoError> {
 
 #[cfg(target_os = "android")]
 fn i420_to_nv12(src: &[u8], width: usize, height: usize) -> Result<Vec<u8>, VideoError> {
-    let y_size = width
-        .checked_mul(height)
-        .ok_or_else(|| VideoError::InvalidInput(format!("invalid frame dimensions {width}x{height}")))?;
+    let y_size = width.checked_mul(height).ok_or_else(|| {
+        VideoError::InvalidInput(format!("invalid frame dimensions {width}x{height}"))
+    })?;
     let uv_size = y_size / 4;
     let expected = y_size + uv_size * 2;
     if src.len() < expected {

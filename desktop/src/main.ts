@@ -574,7 +574,8 @@ const CAMERA_SEND_WIDTH = 1280;
 const CAMERA_SEND_HEIGHT = 720;
 let cameraCaptureFrameNo = 0;
 let cameraPushFailures = 0;
-const CAMERA_CAPTURE_INTERVAL_MS = 67; // ≈ 15 fps
+const CAMERA_CAPTURE_INTERVAL_MS = 33; // ≈ 30 fps
+const CAMERA_JPEG_QUALITY = 0.7;
 
 function drawCameraFrameForSend() {
   const vw = vdLocalVideo.videoWidth || camCaptureCanvas.width;
@@ -598,7 +599,7 @@ async function captureAndPushCameraFrame() {
   cameraCaptureFrameNo++;
   try {
     drawCameraFrameForSend();
-    const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
+    const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", CAMERA_JPEG_QUALITY);
     const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
     if (cameraCaptureFrameNo === 1 || cameraCaptureFrameNo % 150 === 0) {
       debugLog("camera:capture_frame", {
