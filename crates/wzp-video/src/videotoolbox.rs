@@ -8,12 +8,109 @@ mod imp {
     pub use shiguredo_video_toolbox::{
         CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
         EncoderConfig, FrameData, H264EncoderConfig, H264EntropyMode, H264Profile,
-        HevcEncoderConfig, HevcProfile, PixelFormat,
+        HevcEncoderConfig, HevcProfile, I420Frame, PixelFormat,
     };
 }
 
 #[cfg(target_os = "macos")]
 use imp::*;
+
+/// Copy a VideoToolbox I420 CVPixelBuffer into a tightly-packed I420 byte vector
+/// of `width * height + 2 * (width/2) * (height/2)` bytes.
+///
+/// The per-plane `bytes_per_row` (stride) reported by CoreVideo can be larger
+/// than the visible plane width (typically aligned to 16/64 bytes). Concatenating
+/// the raw plane slices without removing that stride padding produces a buffer
+/// that downstream code — which indexes as tight I420 of `width x height` —
+/// mis-interprets, producing horizontal green/magenta bands that drift one
+/// chroma row each time the per-row stride excess accumulates to one full row.
+///
+/// `frame_label` is used for one-time tracing of the actual plane dimensions so
+/// the first decoded frame of a session prints its real layout. The boolean
+/// flag is flipped to true after the first log so the format string is emitted
+/// at most once per decoder lifetime.
+#[cfg(target_os = "macos")]
+fn i420_frame_to_tight(
+    frame: &I420Frame<'_>,
+    width: u32,
+    height: u32,
+    frame_label: &'static str,
+    logged: &mut bool,
+) -> Result<Vec<u8>, VideoError> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return Err(VideoError::PlatformError(format!(
+            "decoder produced empty frame ({w}x{h})"
+        )));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+
+    let y = frame.y_plane();
+    let u = frame.u_plane();
+    let v = frame.v_plane();
+    let y_stride = frame.y_stride();
+    let u_stride = frame.u_stride();
+    let v_stride = frame.v_stride();
+    let fw = frame.width();
+    let fh = frame.height();
+
+    if !*logged {
+        *logged = true;
+        tracing::info!(
+            target: "wzp_video::videotoolbox",
+            label = frame_label,
+            configured_width = w,
+            configured_height = h,
+            frame_width = fw,
+            frame_height = fh,
+            y_stride,
+            u_stride,
+            v_stride,
+            y_len = y.len(),
+            u_len = u.len(),
+            v_len = v.len(),
+            "VideoToolbox decoder I420 plane layout"
+        );
+    }
+
+    if y_stride < w || u_stride < cw || v_stride < cw {
+        return Err(VideoError::PlatformError(format!(
+            "decoder plane stride smaller than width: y_stride={y_stride} u_stride={u_stride} v_stride={v_stride} for {w}x{h}"
+        )));
+    }
+    let needed_y = y_stride.checked_mul(h).ok_or_else(|| {
+        VideoError::PlatformError(format!("y plane size overflow {y_stride}x{h}"))
+    })?;
+    let needed_uv = u_stride.checked_mul(ch).ok_or_else(|| {
+        VideoError::PlatformError(format!("uv plane size overflow {u_stride}x{ch}"))
+    })?;
+    if y.len() < needed_y || u.len() < needed_uv || v.len() < v_stride * ch {
+        return Err(VideoError::PlatformError(format!(
+            "decoder plane buffer too small: y_len={} (need {needed_y}) u_len={} (need {needed_uv}) v_len={} (need {})",
+            y.len(),
+            u.len(),
+            v.len(),
+            v_stride * ch,
+        )));
+    }
+
+    let mut data = Vec::with_capacity(w * h + 2 * cw * ch);
+    for row in 0..h {
+        let off = row * y_stride;
+        data.extend_from_slice(&y[off..off + w]);
+    }
+    for row in 0..ch {
+        let off = row * u_stride;
+        data.extend_from_slice(&u[off..off + cw]);
+    }
+    for row in 0..ch {
+        let off = row * v_stride;
+        data.extend_from_slice(&v[off..off + cw]);
+    }
+    Ok(data)
+}
 
 /// macOS VideoToolbox H.264 encoder.
 ///
@@ -264,6 +361,8 @@ pub struct VideoToolboxDecoder {
     width: u32,
     #[cfg(target_os = "macos")]
     height: u32,
+    #[cfg(target_os = "macos")]
+    layout_logged: bool,
     #[cfg(not(target_os = "macos"))]
     _width: u32,
     #[cfg(not(target_os = "macos"))]
@@ -282,6 +381,7 @@ impl VideoToolboxDecoder {
                 inner: None,
                 width,
                 height,
+                layout_logged: false,
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -360,13 +460,13 @@ impl VideoDecoder for VideoToolboxDecoder {
 
             match decoded {
                 Some(DecodedFrame::I420(frame)) => {
-                    let y = frame.y_plane();
-                    let u = frame.u_plane();
-                    let v = frame.v_plane();
-                    let mut data = Vec::with_capacity(y.len() + u.len() + v.len());
-                    data.extend_from_slice(y);
-                    data.extend_from_slice(u);
-                    data.extend_from_slice(v);
+                    let data = i420_frame_to_tight(
+                        &frame,
+                        self.width,
+                        self.height,
+                        "h264_decoder",
+                        &mut self.layout_logged,
+                    )?;
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
@@ -541,6 +641,8 @@ pub struct VideoToolboxHevcDecoder {
     width: u32,
     #[cfg(target_os = "macos")]
     height: u32,
+    #[cfg(target_os = "macos")]
+    layout_logged: bool,
     #[cfg(not(target_os = "macos"))]
     _width: u32,
     #[cfg(not(target_os = "macos"))]
@@ -555,6 +657,7 @@ impl VideoToolboxHevcDecoder {
                 inner: None,
                 width,
                 height,
+                layout_logged: false,
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -628,13 +731,13 @@ impl VideoDecoder for VideoToolboxHevcDecoder {
 
             match decoded {
                 Some(DecodedFrame::I420(frame)) => {
-                    let y = frame.y_plane();
-                    let u = frame.u_plane();
-                    let v = frame.v_plane();
-                    let mut data = Vec::with_capacity(y.len() + u.len() + v.len());
-                    data.extend_from_slice(y);
-                    data.extend_from_slice(u);
-                    data.extend_from_slice(v);
+                    let data = i420_frame_to_tight(
+                        &frame,
+                        self.width,
+                        self.height,
+                        "hevc_decoder",
+                        &mut self.layout_logged,
+                    )?;
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
@@ -664,6 +767,8 @@ pub struct VideoToolboxAv1Decoder {
     width: u32,
     #[cfg(target_os = "macos")]
     height: u32,
+    #[cfg(target_os = "macos")]
+    layout_logged: bool,
     #[cfg(not(target_os = "macos"))]
     _width: u32,
     #[cfg(not(target_os = "macos"))]
@@ -683,6 +788,7 @@ impl VideoToolboxAv1Decoder {
                     inner: Some(decoder),
                     width,
                     height,
+                    layout_logged: false,
                 }),
                 Err(shiguredo_video_toolbox::Error::UnsupportedCodec { .. }) => {
                     // AV1 decode not supported on this platform (e.g. M1/M2).
@@ -690,6 +796,7 @@ impl VideoToolboxAv1Decoder {
                         inner: None,
                         width,
                         height,
+                        layout_logged: false,
                     })
                 }
                 Err(e) => Err(VideoError::PlatformError(format!(
@@ -721,13 +828,13 @@ impl VideoDecoder for VideoToolboxAv1Decoder {
                 .map_err(|e| VideoError::PlatformError(format!("decode failed: {e}")))?;
             match decoded {
                 Some(DecodedFrame::I420(frame)) => {
-                    let y = frame.y_plane();
-                    let u = frame.u_plane();
-                    let v = frame.v_plane();
-                    let mut data = Vec::with_capacity(y.len() + u.len() + v.len());
-                    data.extend_from_slice(y);
-                    data.extend_from_slice(u);
-                    data.extend_from_slice(v);
+                    let data = i420_frame_to_tight(
+                        &frame,
+                        self.width,
+                        self.height,
+                        "av1_decoder",
+                        &mut self.layout_logged,
+                    )?;
                     Ok(Some(VideoFrame {
                         width: self.width,
                         height: self.height,
