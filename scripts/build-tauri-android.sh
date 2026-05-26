@@ -302,6 +302,7 @@ done
 
 APK_OUTPUT_DIR="/build/source/target/apk-output"
 mkdir -p "$APK_OUTPUT_DIR"
+rm -f "$APK_OUTPUT_DIR"/wzp-tauri-*.apk
 
 for ARCH in $ARCHS; do
     TARGET=$(tauri_target "$ARCH")
@@ -333,7 +334,9 @@ for ARCH in $ARCHS; do
     # Re-running Gradle is NOT used here because the Gradle Rust build
     # task (BuildTask.kt) calls `cargo tauri android android-studio-script`
     # which requires the full Tauri CLI environment and fails standalone.
-    UNSIGNED_APK_PATH="gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+    BUILD_VARIANT="debug"
+    [ -z "${PROFILE_FLAG}" ] && BUILD_VARIANT="release"
+    UNSIGNED_APK_PATH="gen/android/app/build/outputs/apk/universal/${BUILD_VARIANT}/app-universal-${BUILD_VARIANT}-unsigned.apk"
     if [ -f "$UNSIGNED_APK_PATH" ] && ! unzip -l "$UNSIGNED_APK_PATH" 2>/dev/null | grep -q "assets/index.html"; then
         echo ">>> frontend assets missing from APK — patching unsigned APK directly"
         PATCH_DIR="/tmp/apk-frontend-patch-$$"
@@ -347,7 +350,7 @@ for ARCH in $ARCHS; do
     fi
 
     # Copy produced APK with arch suffix
-    BUILT_APK=$(find gen/android -name "*.apk" -newer "$APK_OUTPUT_DIR" -type f 2>/dev/null | head -1)
+    BUILT_APK=$(find "gen/android/app/build/outputs/apk" -path "*/${BUILD_VARIANT}/*.apk" -type f 2>/dev/null | sort | head -1)
     if [ -z "$BUILT_APK" ]; then
         BUILT_APK=$(find gen/android -name "*.apk" -type f 2>/dev/null | sort -t/ -k1 | tail -1)
     fi
@@ -359,6 +362,12 @@ for ARCH in $ARCHS; do
         # Release builds are unsigned by default. Sign with the release
         # keystore (checked into the repo at android/keystore/) so the
         # APK can be installed on real devices.
+        if [ "${BUILD_VARIANT}" = "debug" ]; then
+            echo ">>> Debug APK selected; preserving Gradle debug signing and android:debuggable=true"
+            echo ">>> $ARCH APK: $(ls -lh "$OUT_APK" | awk "{print \$5}")"
+            continue
+        fi
+
         # Pick keystore + credentials (release preferred, debug fallback)
         KS_RELEASE="/build/source/android/keystore/wzp-release.jks"
         KS_DEBUG="/build/source/android/keystore/wzp-debug.jks"
