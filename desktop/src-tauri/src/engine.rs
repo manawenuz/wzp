@@ -759,7 +759,7 @@ impl CallEngine {
                 t_ms = call_t0.elapsed().as_millis(),
                 "first-join diag: direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)"
             );
-            (None, transport)
+            (Some(wzp_proto::CodecId::H264Baseline), transport)
         };
         crate::emit_call_debug(
             &app,
@@ -1869,8 +1869,9 @@ impl CallEngine {
         ));
 
         // Video send task (Android) — mirror of the desktop branch. Only
-        // spawns when the relay handshake negotiated a video codec; on
-        // direct P2P video is currently disabled.
+        // spawns when a video codec is available. Relay calls negotiate this
+        // in the media handshake; direct P2P uses the common H264 baseline
+        // codec because the relay handshake is intentionally skipped.
         let camera_tx = if let Some(vid_codec) = _negotiated_video_codec {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<wzp_video::encoder::VideoFrame>(4);
             let vid_transport = transport.clone();
@@ -2172,11 +2173,7 @@ impl CallEngine {
                 "video:send_disabled",
                 serde_json::json!({
                     "t_ms": call_t0.elapsed().as_millis(),
-                    "reason": if is_direct_p2p {
-                        "direct_p2p_skips_relay_handshake"
-                    } else {
-                        "no_video_codec_negotiated"
-                    },
+                    "reason": "no_video_codec_negotiated",
                     "platform": "android",
                 }),
             );
@@ -2310,7 +2307,7 @@ impl CallEngine {
                 (hs.video_codec, transport)
             } else {
                 info!("direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
-                (None, transport)
+                (Some(wzp_proto::CodecId::H264Baseline), transport)
             };
         crate::emit_call_debug(
             &_app,
@@ -3050,9 +3047,9 @@ impl CallEngine {
             event_cb.clone(),
         ));
 
-        // Video send task — active only when the handshake negotiated a video codec.
-        // Camera frames arrive via camera_tx; the task encodes and packetizes them.
-        // Blocker 4 (camera capture) will push frames into this channel.
+        // Video send task — active when a video codec is available. Relay calls
+        // negotiate this in the media handshake; direct P2P uses the common H264
+        // baseline codec because the relay handshake is intentionally skipped.
         let camera_tx = if let Some(vid_codec) = _negotiated_video_codec {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<wzp_video::encoder::VideoFrame>(4);
             let vid_transport = transport.clone();
@@ -3354,11 +3351,7 @@ impl CallEngine {
                 "video:send_disabled",
                 serde_json::json!({
                     "t_ms": call_t0.elapsed().as_millis(),
-                    "reason": if is_direct_p2p {
-                        "direct_p2p_skips_relay_handshake"
-                    } else {
-                        "no_video_codec_negotiated"
-                    },
+                    "reason": "no_video_codec_negotiated",
                     "platform": "desktop",
                 }),
             );

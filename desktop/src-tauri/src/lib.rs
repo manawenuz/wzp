@@ -2462,8 +2462,13 @@ async fn place_call(
             .map(|la| la.port())
             .unwrap_or(0);
         if v4_port > 0 {
-            match wzp_client::portmap::acquire_port_mapping(v4_port, None).await {
-                Ok(mapping) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                wzp_client::portmap::acquire_port_mapping(v4_port, None),
+            )
+            .await
+            {
+                Ok(Ok(mapping)) => {
                     let addr = mapping.external_addr.to_string();
                     tracing::info!(%addr, protocol = ?mapping.protocol, "place_call: port mapping acquired");
                     emit_call_debug(
@@ -2475,8 +2480,17 @@ async fn place_call(
                     );
                     Some(addr)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::debug!(error = %e, "place_call: port mapping unavailable (normal on most networks)");
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!("place_call: port mapping quick probe timed out");
+                    emit_call_debug(
+                        &app,
+                        "place_call:portmap_timeout",
+                        serde_json::json!({ "timeout_ms": 750 }),
+                    );
                     None
                 }
             }
@@ -2705,8 +2719,13 @@ async fn answer_call(
                 .map(|la| la.port())
                 .unwrap_or(0);
             if v4_port > 0 {
-                match wzp_client::portmap::acquire_port_mapping(v4_port, None).await {
-                    Ok(mapping) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(750),
+                    wzp_client::portmap::acquire_port_mapping(v4_port, None),
+                )
+                .await
+                {
+                    Ok(Ok(mapping)) => {
                         tracing::info!(
                             addr = %mapping.external_addr,
                             protocol = ?mapping.protocol,
@@ -2714,8 +2733,17 @@ async fn answer_call(
                         );
                         Some(mapping.external_addr.to_string())
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::debug!(error = %e, "answer_call: port mapping unavailable");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!("answer_call: port mapping quick probe timed out");
+                        emit_call_debug(
+                            &app,
+                            "answer_call:portmap_timeout",
+                            serde_json::json!({ "timeout_ms": 750 }),
+                        );
                         None
                     }
                 }
