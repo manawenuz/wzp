@@ -132,12 +132,12 @@ impl VideoEncoder for MediaCodecEncoder {
                         log_media_codec_input_format("h264_encoder_input", &self.codec, &layout);
                     }
                     let input_capacity = { buffer.buffer_mut().len() };
-                    let mut input = i420_to_padded_nv12(
+                    let mut input = i420_to_encoder_input(
                         &frame.data,
                         self.width as usize,
                         self.height as usize,
-                        layout.stride,
-                        layout.slice_height,
+                        &layout,
+                        COLOR_FORMAT_YUV420_SEMIPLANAR,
                     )?;
                     if input.len() > input_capacity {
                         tracing::warn!(
@@ -146,12 +146,17 @@ impl VideoEncoder for MediaCodecEncoder {
                             input_capacity,
                             "MediaCodec H.264 input buffer smaller than padded layout; falling back to tight NV12"
                         );
-                        input = i420_to_padded_nv12(
+                        let tight_layout = EncoderInputLayout {
+                            color_format: layout.color_format,
+                            stride: self.width as usize,
+                            slice_height: self.height as usize,
+                        };
+                        input = i420_to_encoder_input(
                             &frame.data,
                             self.width as usize,
                             self.height as usize,
-                            self.width as usize,
-                            self.height as usize,
+                            &tight_layout,
+                            COLOR_FORMAT_YUV420_SEMIPLANAR,
                         )?;
                     }
                     let to_copy = {
@@ -514,12 +519,12 @@ impl VideoEncoder for MediaCodecHevcEncoder {
                         log_media_codec_input_format("hevc_encoder_input", &self.codec, &layout);
                     }
                     let input_capacity = { buffer.buffer_mut().len() };
-                    let mut input = i420_to_padded_planar(
+                    let mut input = i420_to_encoder_input(
                         &frame.data,
                         self.width as usize,
                         self.height as usize,
-                        layout.stride,
-                        layout.slice_height,
+                        &layout,
+                        COLOR_FORMAT_YUV420_PLANAR,
                     )?;
                     if input.len() > input_capacity {
                         tracing::warn!(
@@ -528,12 +533,17 @@ impl VideoEncoder for MediaCodecHevcEncoder {
                             input_capacity,
                             "MediaCodec HEVC input buffer smaller than padded layout; falling back to tight I420"
                         );
-                        input = i420_to_padded_planar(
+                        let tight_layout = EncoderInputLayout {
+                            color_format: layout.color_format,
+                            stride: self.width as usize,
+                            slice_height: self.height as usize,
+                        };
+                        input = i420_to_encoder_input(
                             &frame.data,
                             self.width as usize,
                             self.height as usize,
-                            self.width as usize,
-                            self.height as usize,
+                            &tight_layout,
+                            COLOR_FORMAT_YUV420_PLANAR,
                         )?;
                     }
                     let to_copy = {
@@ -1216,41 +1226,81 @@ fn positive_format_usize(format: &MediaFormat, key: &str) -> Option<usize> {
 #[cfg(target_os = "android")]
 #[derive(Clone, Copy, Debug)]
 struct EncoderInputLayout {
+    color_format: Option<i32>,
     stride: usize,
     slice_height: usize,
 }
 
 #[cfg(target_os = "android")]
 fn encoder_input_layout(codec: &MediaCodec, width: u32, height: u32) -> EncoderInputLayout {
-    // ndk 0.9 exposes AMediaCodec_getInputFormat only behind API 28, while
-    // this app still targets API 26. Keep encoder input tight until we can
-    // query the actual input format. Guessing padded rows here is dangerous:
-    // when the encoder actually reads tight input, padding bytes become pixels
-    // from the next row and show up as diagonal green bands.
-    let _ = codec;
+    let format = codec.input_format();
     let width = width as usize;
     let height = height as usize;
     EncoderInputLayout {
-        stride: width,
-        slice_height: height,
+        color_format: format.i32("color-format"),
+        stride: positive_format_usize(&format, "stride")
+            .unwrap_or(width)
+            .max(width),
+        slice_height: positive_format_usize(&format, "slice-height")
+            .unwrap_or(height)
+            .max(height),
     }
 }
 
 #[cfg(target_os = "android")]
 fn log_media_codec_input_format(label: &str, codec: &MediaCodec, layout: &EncoderInputLayout) {
-    let format = codec.output_format();
+    let input_format = codec.input_format();
+    let output_format = codec.output_format();
     tracing::info!(
         target: "wzp_video::mediacodec",
         label,
-        color_format = format.i32("color-format"),
-        width = format.i32("width"),
-        height = format.i32("height"),
-        stride = format.i32("stride"),
-        slice_height = format.i32("slice-height"),
+        input_color_format = input_format.i32("color-format"),
+        input_width = input_format.i32("width"),
+        input_height = input_format.i32("height"),
+        input_stride = input_format.i32("stride"),
+        input_slice_height = input_format.i32("slice-height"),
+        output_color_format = output_format.i32("color-format"),
+        output_width = output_format.i32("width"),
+        output_height = output_format.i32("height"),
+        output_stride = output_format.i32("stride"),
+        output_slice_height = output_format.i32("slice-height"),
+        effective_color_format = layout.color_format,
         effective_stride = layout.stride,
         effective_slice_height = layout.slice_height,
         "MediaCodec input format"
     );
+}
+
+#[cfg(target_os = "android")]
+fn i420_to_encoder_input(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    layout: &EncoderInputLayout,
+    default_color_format: i32,
+) -> Result<Vec<u8>, VideoError> {
+    let color_format = layout.color_format.unwrap_or(default_color_format);
+    match color_format {
+        COLOR_FORMAT_YUV420_PLANAR => {
+            i420_to_padded_planar(src, width, height, layout.stride, layout.slice_height)
+        }
+        COLOR_FORMAT_YUV420_SEMIPLANAR => {
+            i420_to_padded_nv12(src, width, height, layout.stride, layout.slice_height)
+        }
+        other => {
+            tracing::warn!(
+                target: "wzp_video::mediacodec",
+                color_format = other,
+                default_color_format,
+                "unsupported MediaCodec encoder input color format; using requested default"
+            );
+            if default_color_format == COLOR_FORMAT_YUV420_PLANAR {
+                i420_to_padded_planar(src, width, height, layout.stride, layout.slice_height)
+            } else {
+                i420_to_padded_nv12(src, width, height, layout.stride, layout.slice_height)
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
