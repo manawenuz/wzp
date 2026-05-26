@@ -227,10 +227,18 @@ if [ "${RELEASE_DEBUGGABLE}" = "1" ]; then
     MANIFEST="gen/android/app/src/main/AndroidManifest.xml"
     if [ -f "$MANIFEST" ]; then
         echo ">>> Marking release APK debuggable for frame-dump run-as access"
+        if ! grep -q "xmlns:tools=" "$MANIFEST"; then
+            perl -0pi -e "s/<manifest\\b/<manifest xmlns:tools=\"http:\\/\\/schemas.android.com\\/tools\"/s" "$MANIFEST"
+        fi
         if grep -q "android:debuggable=" "$MANIFEST"; then
             sed -i "s/android:debuggable=\"[^\"]*\"/android:debuggable=\"true\"/" "$MANIFEST"
         else
             perl -0pi -e "s/(<application\\b[^>]*)(>)/\$1\\n        android:debuggable=\"true\"\$2/s" "$MANIFEST"
+        fi
+        if grep -q "tools:ignore=" "$MANIFEST"; then
+            sed -i "s/tools:ignore=\"[^\"]*\"/tools:ignore=\"HardcodedDebugMode\"/" "$MANIFEST"
+        else
+            perl -0pi -e "s/(<application\\b[^>]*)(>)/\$1\\n        tools:ignore=\"HardcodedDebugMode\"\$2/s" "$MANIFEST"
         fi
         grep -n "debuggable\\|<application" "$MANIFEST"
     else
