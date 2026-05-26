@@ -12,6 +12,7 @@
 #   ./scripts/android-build-async.sh --rust    # force-clean Rust target cache
 #   ./scripts/android-build-async.sh --no-pull # skip git fetch on remote
 #   ./scripts/android-build-async.sh --debug   # debug APK
+#   ./scripts/android-build-async.sh --release-debuggable  # release APK with run-as dumps
 #   ./scripts/android-build-async.sh --wait    # block until done, then tail status
 #
 # Progress / completion: ntfy.sh/wzp (handled by build-tauri-android.sh).

@@ -17,6 +17,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/build-tauri-android.sh                  # full pipeline (release, arm64 only)
 #   ./scripts/build-tauri-android.sh --debug          # debug APK (faster, no optimisation)
+#   ./scripts/build-tauri-android.sh --release-debuggable  # release APK with android:debuggable=true
 #   ./scripts/build-tauri-android.sh --no-pull        # skip git fetch
 #   ./scripts/build-tauri-android.sh --rust           # force-clean rust target
 #   ./scripts/build-tauri-android.sh --init           # also run `cargo tauri android init`
@@ -39,6 +40,7 @@ REBUILD_RUST=0
 DO_PULL=1
 DO_INIT=0
 BUILD_RELEASE=1
+RELEASE_DEBUGGABLE=0
 BUILD_ARCH="arm64"
 NEXT_IS_ARCH=0
 for arg in "$@"; do
@@ -53,6 +55,7 @@ for arg in "$@"; do
         --no-pull)  DO_PULL=0 ;;
         --init)     DO_INIT=1 ;;
         --debug)    BUILD_RELEASE=0 ;;
+        --release-debuggable) RELEASE_DEBUGGABLE=1 ;;
         --arch)     NEXT_IS_ARCH=1 ;;
         -h|--help)
             sed -n '3,32p' "$0"
@@ -93,6 +96,7 @@ REBUILD_RUST="${3:-0}"
 DO_INIT="${4:-0}"
 BUILD_RELEASE="${5:-0}"
 BUILD_ARCH="${6:-arm64}"
+RELEASE_DEBUGGABLE="${7:-0}"
 
 LOG_FILE=/tmp/wzp-tauri-build.log
 GIT_HASH="unknown"  # populated after fetch
@@ -192,6 +196,7 @@ docker run --rm \
     -e DO_INIT="$DO_INIT" \
     -e PROFILE_FLAG="$PROFILE_FLAG" \
     -e BUILD_ARCH="$BUILD_ARCH" \
+    -e RELEASE_DEBUGGABLE="$RELEASE_DEBUGGABLE" \
     -v "$BASE_DIR/data/source:/build/source" \
     -v "$BASE_DIR/data/cache/cargo-registry:/home/builder/.cargo/registry" \
     -v "$BASE_DIR/data/cache/cargo-git:/home/builder/.cargo/git" \
@@ -216,6 +221,21 @@ cd src-tauri
 if [ "${DO_INIT}" = "1" ] || [ ! -x gen/android/gradlew ]; then
     echo ">>> cargo tauri android init"
     cargo tauri android init 2>&1 | tail -20
+fi
+
+if [ "${RELEASE_DEBUGGABLE}" = "1" ]; then
+    MANIFEST="gen/android/app/src/main/AndroidManifest.xml"
+    if [ -f "$MANIFEST" ]; then
+        echo ">>> Marking release APK debuggable for frame-dump run-as access"
+        if grep -q "android:debuggable=" "$MANIFEST"; then
+            sed -i "s/android:debuggable=\"[^\"]*\"/android:debuggable=\"true\"/" "$MANIFEST"
+        else
+            perl -0pi -e "s/(<application\\b[^>]*)(>)/\$1\\n        android:debuggable=\"true\"\$2/s" "$MANIFEST"
+        fi
+        grep -n "debuggable\\|<application" "$MANIFEST"
+    else
+        echo ">>> WARNING: AndroidManifest.xml not found; release APK will not be debuggable"
+    fi
 fi
 
 # ─── Arch list from BUILD_ARCH env var ───────────────────────────────────
@@ -461,11 +481,11 @@ REMOTE_SCRIPT
 
 ssh_cmd "chmod +x /tmp/wzp-tauri-build.sh"
 
-notify_local "WZP Tauri Android build dispatched (branch=$BRANCH, arch=$BUILD_ARCH, release=$BUILD_RELEASE)"
+notify_local "WZP Tauri Android build dispatched (branch=$BRANCH, arch=$BUILD_ARCH, release=$BUILD_RELEASE, release-debuggable=$RELEASE_DEBUGGABLE)"
 log "Triggering remote build (branch=$BRANCH, arch=$BUILD_ARCH)..."
 
 # Run; last lines are APK_REMOTE_PATH=...  (one per arch)
-REMOTE_OUTPUT=$(ssh_cmd "/tmp/wzp-tauri-build.sh '$BRANCH' '$DO_PULL' '$REBUILD_RUST' '$DO_INIT' '$BUILD_RELEASE' '$BUILD_ARCH'" || true)
+REMOTE_OUTPUT=$(ssh_cmd "/tmp/wzp-tauri-build.sh '$BRANCH' '$DO_PULL' '$REBUILD_RUST' '$DO_INIT' '$BUILD_RELEASE' '$BUILD_ARCH' '$RELEASE_DEBUGGABLE'" || true)
 echo "$REMOTE_OUTPUT" | tail -60
 
 # Download all produced APKs
