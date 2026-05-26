@@ -54,6 +54,7 @@ static CAMERA_PUSH_DROPS: AtomicU64 = AtomicU64::new(0);
 static CAMERA_PUSH_NO_ENGINE: AtomicU64 = AtomicU64::new(0);
 static CAMERA_PUSH_NO_SENDER: AtomicU64 = AtomicU64::new(0);
 static CAMERA_PUSH_DECODE_ERRORS: AtomicU64 = AtomicU64::new(0);
+static FRAME_DUMP_WRITES: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn call_debug_logs_enabled() -> bool {
@@ -108,8 +109,15 @@ const GIT_HASH: &str = env!("WZP_GIT_HASH");
 /// Returns `None` if the data is too short or encoding fails.
 /// Called from the video recv task in engine.rs to produce the `jpeg_b64`
 /// field of every `video:frame` Tauri event.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn i420_to_jpeg_b64(data: &[u8], width: u32, height: u32) -> Option<String> {
     use base64::Engine as _;
+
+    let bytes = i420_to_jpeg_bytes(data, width, height)?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+pub(crate) fn i420_to_jpeg_bytes(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     use image::{DynamicImage, ImageBuffer, Rgb};
 
     let w = width as usize;
@@ -138,7 +146,61 @@ pub(crate) fn i420_to_jpeg_b64(data: &[u8], width: u32, height: u32) -> Option<S
     let img = DynamicImage::ImageRgb8(ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb)?);
     let mut buf = std::io::Cursor::new(Vec::<u8>::new());
     img.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
-    Some(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+    Some(buf.into_inner())
+}
+
+fn should_dump_frame(frame_no: u64) -> bool {
+    frame_no <= 5 || frame_no % 30 == 0
+}
+
+pub(crate) fn maybe_dump_video_jpeg(
+    app: &tauri::AppHandle,
+    stage: &str,
+    platform: &str,
+    frame_no: u64,
+    jpeg_bytes: &[u8],
+    width: u32,
+    height: u32,
+) {
+    if !should_dump_frame(frame_no) {
+        return;
+    }
+    let seq = FRAME_DUMP_WRITES.fetch_add(1, Ordering::Relaxed) + 1;
+    let dir = identity_dir().join("frame-dumps");
+    let file_name = format!("{seq:06}_{platform}_{stage}_f{frame_no:06}_{width}x{height}.jpg");
+    let path = dir.join(file_name);
+    let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, jpeg_bytes));
+
+    match result {
+        Ok(()) => emit_call_debug(
+            app,
+            "video:frame_dump",
+            serde_json::json!({
+                "stage": stage,
+                "platform": platform,
+                "frame_no": frame_no,
+                "width": width,
+                "height": height,
+                "jpeg_bytes": jpeg_bytes.len(),
+                "path": path,
+            }),
+        ),
+        Err(e) => {
+            if seq <= 5 || seq % 30 == 0 {
+                emit_call_debug(
+                    app,
+                    "video:frame_dump_failed",
+                    serde_json::json!({
+                        "stage": stage,
+                        "platform": platform,
+                        "frame_no": frame_no,
+                        "error": e.to_string(),
+                        "path": path,
+                    }),
+                );
+            }
+        }
+    }
 }
 
 /// RGB24 → I420 (planar 4:2:0).  Layout: Y(w×h) | U(w/2×h/2) | V(w/2×h/2).
@@ -216,6 +278,26 @@ async fn push_camera_frame(
     let h = rgb_img.height() as usize;
     let yuv = rgb_to_i420(rgb_img.as_raw(), w, h);
     let frame_no = CAMERA_PUSH_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    maybe_dump_video_jpeg(
+        &app,
+        "camera_jpeg_in",
+        std::env::consts::OS,
+        frame_no,
+        &jpeg_bytes,
+        w as u32,
+        h as u32,
+    );
+    if let Some(converted_jpeg) = i420_to_jpeg_bytes(&yuv, w as u32, h as u32) {
+        maybe_dump_video_jpeg(
+            &app,
+            "camera_i420_roundtrip",
+            std::env::consts::OS,
+            frame_no,
+            &converted_jpeg,
+            w as u32,
+            h as u32,
+        );
+    }
     if frame_no == 1 || frame_no % 150 == 0 {
         emit_call_debug(
             &app,

@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
+use base64::Engine as _;
 use tauri::Emitter;
 use tokio::sync::Mutex;
 use tracing::{error, info};
@@ -1403,11 +1404,25 @@ impl CallEngine {
                                     match dec.decode(&frame) {
                                         Ok(Some(yuv_frame)) => {
                                             video_decoded_samples += 1;
-                                            let jpeg_b64 = crate::i420_to_jpeg_b64(
+                                            let jpeg_bytes = crate::i420_to_jpeg_bytes(
                                                 &yuv_frame.data,
                                                 yuv_frame.width,
                                                 yuv_frame.height,
                                             );
+                                            if let Some(ref bytes) = jpeg_bytes {
+                                                crate::maybe_dump_video_jpeg(
+                                                    &recv_app,
+                                                    "remote_decoded",
+                                                    "android",
+                                                    video_decoded_samples,
+                                                    bytes,
+                                                    yuv_frame.width,
+                                                    yuv_frame.height,
+                                                );
+                                            }
+                                            let jpeg_b64 = jpeg_bytes.as_ref().map(|bytes| {
+                                                base64::engine::general_purpose::STANDARD.encode(bytes)
+                                            });
                                             let jpeg_ok = jpeg_b64.is_some();
                                             if !video_first_decoded_logged {
                                                 video_first_decoded_logged = true;
@@ -2739,11 +2754,25 @@ impl CallEngine {
                                             recv_fr.fetch_add(1, Ordering::Relaxed);
                                             // Emit video frame to WebView for rendering.
                                             // Always-on (not gated on debug flag) so the UI can show video.
-                                            let jpeg_b64 = crate::i420_to_jpeg_b64(
+                                            let jpeg_bytes = crate::i420_to_jpeg_bytes(
                                                 &yuv_frame.data,
                                                 yuv_frame.width,
                                                 yuv_frame.height,
                                             );
+                                            if let Some(ref bytes) = jpeg_bytes {
+                                                crate::maybe_dump_video_jpeg(
+                                                    &recv_app,
+                                                    "remote_decoded",
+                                                    "desktop",
+                                                    video_decoded_samples,
+                                                    bytes,
+                                                    yuv_frame.width,
+                                                    yuv_frame.height,
+                                                );
+                                            }
+                                            let jpeg_b64 = jpeg_bytes.as_ref().map(|bytes| {
+                                                base64::engine::general_purpose::STANDARD.encode(bytes)
+                                            });
                                             let jpeg_ok = jpeg_b64.is_some();
                                             if !video_first_decoded_logged {
                                                 video_first_decoded_logged = true;
