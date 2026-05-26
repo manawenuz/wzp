@@ -74,6 +74,16 @@ pub async fn perform_handshake(
     seed: &[u8; 32],
     alias: Option<&str>,
 ) -> Result<HandshakeResult, HandshakeError> {
+    perform_handshake_with_video_codecs(transport, seed, alias, SUPPORTED_VIDEO_CODECS.to_vec())
+        .await
+}
+
+pub async fn perform_handshake_with_video_codecs(
+    transport: &dyn MediaTransport,
+    seed: &[u8; 32],
+    alias: Option<&str>,
+    video_codecs: Vec<CodecId>,
+) -> Result<HandshakeResult, HandshakeError> {
     // 1. Create key exchange from identity seed
     let mut kx = WarzoneKeyExchange::from_identity_seed(seed);
     let identity_pub = kx.identity_public_key();
@@ -104,7 +114,7 @@ pub async fn perform_handshake(
         alias: alias.map(|s| s.to_string()),
         protocol_version: 2,
         supported_versions: vec![2],
-        video_codecs: SUPPORTED_VIDEO_CODECS.to_vec(),
+        video_codecs,
     };
     transport
         .send_signal(&offer)
@@ -112,14 +122,11 @@ pub async fn perform_handshake(
         .map_err(HandshakeError::Transport)?;
 
     // 5. Wait for CallAnswer — 10s timeout guards against relay not responding.
-    let answer = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        transport.recv_signal(),
-    )
-    .await
-    .map_err(|_| HandshakeError::Transport(wzp_proto::TransportError::Timeout { ms: 10_000 }))?
-    .map_err(HandshakeError::Transport)?
-    .ok_or(HandshakeError::ConnectionClosed)?;
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(10), transport.recv_signal())
+        .await
+        .map_err(|_| HandshakeError::Transport(wzp_proto::TransportError::Timeout { ms: 10_000 }))?
+        .map_err(HandshakeError::Transport)?
+        .ok_or(HandshakeError::ConnectionClosed)?;
 
     let (callee_identity_pub, callee_ephemeral_pub, callee_signature, _chosen_profile, video_codec) =
         match answer {
@@ -130,7 +137,13 @@ pub async fn perform_handshake(
                 chosen_profile,
                 video_codec,
                 ..
-            } => (identity_pub, ephemeral_pub, signature, chosen_profile, video_codec),
+            } => (
+                identity_pub,
+                ephemeral_pub,
+                signature,
+                chosen_profile,
+                video_codec,
+            ),
             SignalMessage::Hangup {
                 reason: HangupReason::ProtocolVersionMismatch { server_supported },
                 ..
@@ -155,7 +168,10 @@ pub async fn perform_handshake(
         .derive_session(&callee_ephemeral_pub)
         .map_err(|e| HandshakeError::KeyDerivation(e.to_string()))?;
 
-    Ok(HandshakeResult { session, video_codec })
+    Ok(HandshakeResult {
+        session,
+        video_codec,
+    })
 }
 
 #[cfg(test)]
@@ -185,7 +201,10 @@ mod tests {
         let mut kx = WarzoneKeyExchange::from_identity_seed(&[0x55; 32]);
         kx.generate_ephemeral();
         let session = kx.derive_session(&[0u8; 32]).unwrap();
-        let hs = HandshakeResult { session, video_codec: None };
+        let hs = HandshakeResult {
+            session,
+            video_codec: None,
+        };
         assert!(hs.video_codec.is_none());
 
         let mut kx2 = WarzoneKeyExchange::from_identity_seed(&[0x66; 32]);

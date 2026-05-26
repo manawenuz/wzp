@@ -164,7 +164,8 @@ impl VideoEncoder for VideoToolboxEncoder {
         if nals.is_empty() {
             return (packet[0] & 0x1F) == 5;
         }
-        nals.iter().any(|nal| !nal.is_empty() && (nal[0] & 0x1F) == 5)
+        nals.iter()
+            .any(|nal| !nal.is_empty() && (nal[0] & 0x1F) == 5)
     }
 }
 
@@ -522,12 +523,13 @@ impl VideoEncoder for VideoToolboxHevcEncoder {
     }
 
     fn is_keyframe(&self, packet: &[u8]) -> bool {
-        if packet.len() < 2 {
-            return false;
+        let nals = split_annex_b(packet);
+        if nals.is_empty() {
+            return packet.len() >= 2 && matches!((packet[0] >> 1) & 0x3F, 19 | 20);
         }
-        let nal_type = (packet[0] >> 1) & 0x3F;
         // NAL type 19 = IDR_W_RADL, 20 = IDR_N_LP.
-        nal_type == 19 || nal_type == 20
+        nals.iter()
+            .any(|nal| nal.len() >= 2 && matches!((nal[0] >> 1) & 0x3F, 19 | 20))
     }
 }
 

@@ -122,6 +122,8 @@ const sCallDebugCopyBtn = document.getElementById("s-call-debug-copy") as HTMLBu
 const sCallDebugShareBtn = document.getElementById("s-call-debug-share") as HTMLButtonElement;
 const sQuality = document.getElementById("s-quality") as HTMLInputElement;
 const sQualityLabel = document.getElementById("s-quality-label")!;
+const sVideoCodec = document.getElementById("s-video-codec") as HTMLSelectElement;
+const sVideoResolution = document.getElementById("s-video-resolution") as HTMLSelectElement;
 const sFingerprint = document.getElementById("s-fingerprint")!;
 const sPublicAddr = document.getElementById("s-public-addr")!;
 const sReflectBtn = document.getElementById("s-reflect-btn")!;
@@ -138,6 +140,8 @@ interface Settings {
   alias: string;
   osAec: boolean;
   quality: string;
+  videoCodec: string;
+  videoResolution: string;
   recentRooms: RecentRoom[];
   dredDebugLogs: boolean;
   callDebugLogs: boolean;
@@ -151,7 +155,7 @@ function loadSettings(): Settings {
       { name: "Default", address: "193.180.213.68:4433" },
     ],
     selectedRelay: 0, room: "general", alias: "",
-    osAec: true, quality: "auto", recentRooms: [],
+    osAec: true, quality: "auto", videoCodec: "h264", videoResolution: "1280x720", recentRooms: [],
     dredDebugLogs: false, callDebugLogs: false,
     directOnly: false, birthdayAttack: false,
   };
@@ -163,6 +167,25 @@ function loadSettings(): Settings {
 }
 function saveSettings(s: Settings) {
   localStorage.setItem("wzp-settings", JSON.stringify(s));
+}
+
+function parseVideoResolution(value: string) {
+  const [wRaw, hRaw] = (value || "1280x720").split("x");
+  const width = Number.parseInt(wRaw, 10);
+  const height = Number.parseInt(hRaw, 10);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return { width: 1280, height: 720 };
+  }
+  return { width, height };
+}
+
+function videoConnectOptions(s: Settings) {
+  const { width, height } = parseVideoResolution(s.videoResolution);
+  return {
+    videoCodec: s.videoCodec || "h264",
+    videoWidth: width,
+    videoHeight: height,
+  };
 }
 function getRelay(): RelayServer | null {
   const s = loadSettings();
@@ -466,6 +489,7 @@ joinVoiceBtn.addEventListener("click", async () => {
       alias: s.alias || "",
       osAec: s.osAec,
       quality: s.quality || "auto",
+      ...videoConnectOptions(s),
     });
     enterVoice(false);
   } catch (e: any) {
@@ -494,6 +518,7 @@ joinVideoBtn.addEventListener("click", async () => {
       alias: s.alias || "",
       osAec: s.osAec,
       quality: s.quality || "auto",
+      ...videoConnectOptions(s),
     });
     enterVoice(false);
     startCamera();
@@ -570,8 +595,8 @@ vdSpkBtn.addEventListener("click", async () => {
 // ── Camera (Blocker 4 + 5) ────────────────────────────────────────
 const camCaptureCanvas = document.createElement("canvas");
 const camCaptureCtx = camCaptureCanvas.getContext("2d")!;
-const CAMERA_SEND_WIDTH = 1280;
-const CAMERA_SEND_HEIGHT = 720;
+let cameraSendWidth = 1280;
+let cameraSendHeight = 720;
 let cameraCaptureFrameNo = 0;
 let cameraPushFailures = 0;
 const CAMERA_CAPTURE_INTERVAL_MS = 33; // ≈ 30 fps
@@ -582,14 +607,14 @@ function drawCameraFrameForSend() {
   const vh = vdLocalVideo.videoHeight || camCaptureCanvas.height;
   if (!vw || !vh) return;
 
-  const scale = Math.max(CAMERA_SEND_WIDTH / vw, CAMERA_SEND_HEIGHT / vh);
+  const scale = Math.max(cameraSendWidth / vw, cameraSendHeight / vh);
   const dw = vw * scale;
   const dh = vh * scale;
-  const dx = (CAMERA_SEND_WIDTH - dw) / 2;
-  const dy = (CAMERA_SEND_HEIGHT - dh) / 2;
+  const dx = (cameraSendWidth - dw) / 2;
+  const dy = (cameraSendHeight - dh) / 2;
 
   camCaptureCtx.fillStyle = "#000";
-  camCaptureCtx.fillRect(0, 0, CAMERA_SEND_WIDTH, CAMERA_SEND_HEIGHT);
+  camCaptureCtx.fillRect(0, 0, cameraSendWidth, cameraSendHeight);
   camCaptureCtx.drawImage(vdLocalVideo, dx, dy, dw, dh);
 }
 
@@ -670,8 +695,11 @@ function scheduleCameraFrameCapture() {
 
 async function startCamera() {
   if (cameraActive) return;
+  const videoSize = parseVideoResolution(loadSettings().videoResolution);
+  cameraSendWidth = videoSize.width;
+  cameraSendHeight = videoSize.height;
   const constraints = {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+    video: { width: { ideal: cameraSendWidth }, height: { ideal: cameraSendHeight }, facingMode: "user" },
     audio: false,
   };
   debugLog("camera:get_user_media_start", { constraints });
@@ -682,8 +710,8 @@ async function startCamera() {
 
     const track = cameraStream.getVideoTracks()[0];
     const settings = track.getSettings();
-    camCaptureCanvas.width = CAMERA_SEND_WIDTH;
-    camCaptureCanvas.height = CAMERA_SEND_HEIGHT;
+    camCaptureCanvas.width = cameraSendWidth;
+    camCaptureCanvas.height = cameraSendHeight;
     debugLog("camera:get_user_media_ok", {
       width: settings.width ?? null,
       height: settings.height ?? null,
@@ -922,6 +950,7 @@ listen("signal-event", (event: any) => {
             peerMappedAddr: data.peer_mapped_addr ?? null,
             directOnly: s.directOnly || false,
             birthdayAttack: s.birthdayAttack || false,
+            ...videoConnectOptions(s),
           });
           enterVoice(true);
         } catch (e: any) {
@@ -1072,6 +1101,8 @@ function openSettings() {
   sCallDebug.checked = !!s.callDebugLogs;
   sDirectOnly.checked = !!s.directOnly;
   sBirthdayAttack.checked = !!s.birthdayAttack;
+  sVideoCodec.value = s.videoCodec || "h264";
+  sVideoResolution.value = s.videoResolution || "1280x720";
   sCallDebugSection.style.display = s.callDebugLogs ? "" : "none";
   renderCallDebugLog();
   const qi = qualityToIndex(s.quality || "auto");
@@ -1097,6 +1128,8 @@ settingsSave.addEventListener("click", () => {
   s.callDebugLogs = sCallDebug.checked;
   s.directOnly = sDirectOnly.checked;
   s.birthdayAttack = sBirthdayAttack.checked;
+  s.videoCodec = sVideoCodec.value || "h264";
+  s.videoResolution = sVideoResolution.value || "1280x720";
   saveSettings(s);
   invoke("set_dred_verbose_logs", { enabled: s.dredDebugLogs }).catch(() => {});
   invoke("set_call_debug_logs", { enabled: s.callDebugLogs }).catch(() => {});

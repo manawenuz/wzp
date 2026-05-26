@@ -186,6 +186,19 @@ const VIDEO_KEYFRAME_INTERVAL_FRAMES: u32 = 120;
 const VIDEO_BITRATE_BPS: u32 = 900_000;
 const VIDEO_PLI_MIN_INTERVAL_MS: u128 = 250;
 
+fn parse_video_codec(codec: &str) -> wzp_proto::CodecId {
+    match codec.to_ascii_lowercase().as_str() {
+        "h265" | "h265main" | "hevc" => wzp_proto::CodecId::H265Main,
+        "av1" | "av1main" => wzp_proto::CodecId::Av1Main,
+        _ => wzp_proto::CodecId::H264Baseline,
+    }
+}
+
+fn clamp_video_dimension(value: u32, fallback: u32) -> u32 {
+    let value = if value == 0 { fallback } else { value };
+    value.clamp(160, 1920) & !1
+}
+
 #[derive(Default)]
 struct VideoContinuity {
     expected_seq: Option<u32>,
@@ -684,17 +697,26 @@ impl CallEngine {
         app: tauri::AppHandle,
         active_quality: Arc<std::sync::Mutex<wzp_proto::QualityProfile>>,
         peer_max_quality: Arc<std::sync::Mutex<Option<wzp_proto::QualityProfile>>>,
+        video_codec_preference: String,
+        video_width: u32,
+        video_height: u32,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
         let call_t0 = std::time::Instant::now();
+        let preferred_video_codec = parse_video_codec(&video_codec_preference);
+        let video_width = clamp_video_dimension(video_width, 1280);
+        let video_height = clamp_video_dimension(video_height, 720);
         info!(
             %relay, %room, %alias, %quality,
             has_reuse = reuse_endpoint.is_some(),
             has_pre_connected = pre_connected_transport.is_some(),
             is_direct_p2p,
+            video_codec = ?preferred_video_codec,
+            video_width,
+            video_height,
             t_ms = 0u128,
             "CallEngine::start (android) invoked"
         );
@@ -788,24 +810,28 @@ impl CallEngine {
                     "remote": transport.remote_address().to_string(),
                 }),
             );
-            let hs =
-                match wzp_client::handshake::perform_handshake(&*transport, &seed.0, Some(&alias))
-                    .await
-                {
-                    Ok(hs) => hs,
-                    Err(e) => {
-                        error!("perform_handshake failed: {e}");
-                        crate::emit_call_debug(
-                            &app,
-                            "connect:handshake_failed",
-                            serde_json::json!({
-                                "t_ms": call_t0.elapsed().as_millis(),
-                                "error": e.to_string(),
-                            }),
-                        );
-                        return Err(e.into());
-                    }
-                };
+            let hs = match wzp_client::handshake::perform_handshake_with_video_codecs(
+                &*transport,
+                &seed.0,
+                Some(&alias),
+                vec![preferred_video_codec],
+            )
+            .await
+            {
+                Ok(hs) => hs,
+                Err(e) => {
+                    error!("perform_handshake failed: {e}");
+                    crate::emit_call_debug(
+                        &app,
+                        "connect:handshake_failed",
+                        serde_json::json!({
+                            "t_ms": call_t0.elapsed().as_millis(),
+                            "error": e.to_string(),
+                        }),
+                    );
+                    return Err(e.into());
+                }
+            };
             crate::emit_call_debug(
                 &app,
                 "connect:handshake_done",
@@ -829,7 +855,7 @@ impl CallEngine {
                 t_ms = call_t0.elapsed().as_millis(),
                 "first-join diag: direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)"
             );
-            (Some(wzp_proto::CodecId::H264Baseline), transport)
+            (Some(preferred_video_codec), transport)
         };
         crate::emit_call_debug(
             &app,
@@ -838,6 +864,8 @@ impl CallEngine {
                 "t_ms": call_t0.elapsed().as_millis(),
                 "codec": _negotiated_video_codec.map(|c| format!("{:?}", c)),
                 "enabled": _negotiated_video_codec.is_some(),
+                "width": video_width,
+                "height": video_height,
                 "direct_p2p": is_direct_p2p,
             }),
         );
@@ -1496,13 +1524,15 @@ impl CallEngine {
                                         serde_json::json!({
                                             "t_ms": recv_t0.elapsed().as_millis() as u64,
                                             "codec": format!("{:?}", codec_id),
-                                            "width": 1280,
-                                            "height": 720,
+                                            "width": video_width,
+                                            "height": video_height,
                                             "platform": "android",
                                         }),
                                     );
                                     match wzp_video::factory::create_video_decoder(
-                                        codec_id, 1280, 720,
+                                        codec_id,
+                                        video_width,
+                                        video_height,
                                     ) {
                                         Ok(d) => {
                                             info!(codec = ?codec_id, "video decoder created (android)");
@@ -2020,8 +2050,8 @@ impl CallEngine {
 
         // Video send task (Android) — mirror of the desktop branch. Only
         // spawns when a video codec is available. Relay calls negotiate this
-        // in the media handshake; direct P2P uses the common H264 baseline
-        // codec because the relay handshake is intentionally skipped.
+        // in the media handshake; direct P2P uses the local debug codec
+        // preference because the relay handshake is intentionally skipped.
         let camera_tx = if let Some(vid_codec) = _negotiated_video_codec {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<wzp_video::encoder::VideoFrame>(4);
             let vid_transport = transport.clone();
@@ -2046,16 +2076,16 @@ impl CallEngine {
                     serde_json::json!({
                         "t_ms": vid_t0.elapsed().as_millis() as u64,
                         "codec": format!("{:?}", vid_codec),
-                        "width": 1280,
-                        "height": 720,
+                        "width": video_width,
+                        "height": video_height,
                         "bitrate_bps": VIDEO_BITRATE_BPS,
                         "platform": "android",
                     }),
                 );
                 let mut encoder = match wzp_video::factory::create_video_encoder(
                     vid_codec,
-                    1280,
-                    720,
+                    video_width,
+                    video_height,
                     VIDEO_BITRATE_BPS,
                 ) {
                     Ok(e) => {
@@ -2428,19 +2458,28 @@ impl CallEngine {
         _app: tauri::AppHandle,
         active_quality: Arc<std::sync::Mutex<wzp_proto::QualityProfile>>,
         peer_max_quality: Arc<std::sync::Mutex<Option<wzp_proto::QualityProfile>>>,
+        video_codec_preference: String,
+        video_width: u32,
+        video_height: u32,
         event_cb: F,
     ) -> Result<Self, anyhow::Error>
     where
         F: Fn(&str, &str) + Send + Sync + 'static,
     {
+        let call_t0 = Instant::now();
+        let preferred_video_codec = parse_video_codec(&video_codec_preference);
+        let video_width = clamp_video_dimension(video_width, 1280);
+        let video_height = clamp_video_dimension(video_height, 720);
         info!(
             %relay, %room, %alias, %quality,
             has_reuse = reuse_endpoint.is_some(),
             has_pre_connected = pre_connected_transport.is_some(),
             is_direct_p2p,
+            video_codec = ?preferred_video_codec,
+            video_width,
+            video_height,
             "CallEngine::start (desktop) invoked"
         );
-        let call_t0 = Instant::now();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let relay_addr: SocketAddr = relay.parse()?;
@@ -2498,13 +2537,17 @@ impl CallEngine {
         // PRD lands, media goes plaintext-over-QUIC-TLS to the relay.
         let (_negotiated_video_codec, transport): (_, Arc<dyn wzp_proto::MediaTransport>) =
             if !is_direct_p2p {
-                let hs =
-                    wzp_client::handshake::perform_handshake(&*transport, &seed.0, Some(&alias))
-                        .await
-                        .map_err(|e| {
-                            error!("perform_handshake failed: {e}");
-                            e
-                        })?;
+                let hs = wzp_client::handshake::perform_handshake_with_video_codecs(
+                    &*transport,
+                    &seed.0,
+                    Some(&alias),
+                    vec![preferred_video_codec],
+                )
+                .await
+                .map_err(|e| {
+                    error!("perform_handshake failed: {e}");
+                    e
+                })?;
                 crate::emit_call_debug(
                     &_app,
                     "connect:handshake_done",
@@ -2518,7 +2561,7 @@ impl CallEngine {
                 (hs.video_codec, transport)
             } else {
                 info!("direct P2P — skipping relay handshake (QUIC TLS is the encryption layer)");
-                (Some(wzp_proto::CodecId::H264Baseline), transport)
+                (Some(preferred_video_codec), transport)
             };
         crate::emit_call_debug(
             &_app,
@@ -2527,6 +2570,8 @@ impl CallEngine {
                 "t_ms": call_t0.elapsed().as_millis(),
                 "codec": _negotiated_video_codec.map(|c| format!("{:?}", c)),
                 "enabled": _negotiated_video_codec.is_some(),
+                "width": video_width,
+                "height": video_height,
                 "direct_p2p": is_direct_p2p,
             }),
         );
@@ -2970,13 +3015,15 @@ impl CallEngine {
                                         serde_json::json!({
                                             "t_ms": recv_t0.elapsed().as_millis() as u64,
                                             "codec": format!("{:?}", codec_id),
-                                            "width": 1280,
-                                            "height": 720,
+                                            "width": video_width,
+                                            "height": video_height,
                                             "platform": "desktop",
                                         }),
                                     );
                                     match wzp_video::factory::create_video_decoder(
-                                        codec_id, 1280, 720,
+                                        codec_id,
+                                        video_width,
+                                        video_height,
                                     ) {
                                         Ok(d) => {
                                             info!(codec = ?codec_id, "video decoder created");
@@ -3339,8 +3386,8 @@ impl CallEngine {
         ));
 
         // Video send task — active when a video codec is available. Relay calls
-        // negotiate this in the media handshake; direct P2P uses the common H264
-        // baseline codec because the relay handshake is intentionally skipped.
+        // negotiate this in the media handshake; direct P2P uses the local debug
+        // codec preference because the relay handshake is intentionally skipped.
         let camera_tx = if let Some(vid_codec) = _negotiated_video_codec {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<wzp_video::encoder::VideoFrame>(4);
             let vid_transport = transport.clone();
@@ -3365,16 +3412,16 @@ impl CallEngine {
                     serde_json::json!({
                         "t_ms": vid_t0.elapsed().as_millis() as u64,
                         "codec": format!("{:?}", vid_codec),
-                        "width": 1280,
-                        "height": 720,
+                        "width": video_width,
+                        "height": video_height,
                         "bitrate_bps": VIDEO_BITRATE_BPS,
                         "platform": "desktop",
                     }),
                 );
                 let mut encoder = match wzp_video::factory::create_video_encoder(
                     vid_codec,
-                    1280,
-                    720,
+                    video_width,
+                    video_height,
                     VIDEO_BITRATE_BPS,
                 ) {
                     Ok(e) => {

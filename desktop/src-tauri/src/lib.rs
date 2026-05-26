@@ -137,13 +137,15 @@ pub(crate) fn i420_to_jpeg_bytes(data: &[u8], width: u32, height: u32) -> Option
             let u = data[y_size + uv_idx] as f32 - 128.0;
             let v = data[y_size + uv_size + uv_idx] as f32 - 128.0;
             let out = (row * w + col) * 3;
-            rgb[out]     = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+            rgb[out] = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
             rgb[out + 1] = (y - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
             rgb[out + 2] = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
         }
     }
 
-    let img = DynamicImage::ImageRgb8(ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb)?);
+    let img = DynamicImage::ImageRgb8(ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(
+        width, height, rgb,
+    )?);
     let mut buf = std::io::Cursor::new(Vec::<u8>::new());
     img.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
     Some(buf.into_inner())
@@ -217,8 +219,10 @@ fn rgb_to_i420(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
             out[row * w + col] = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
             if row % 2 == 0 && col % 2 == 0 {
                 let uv = (row / 2) * (w / 2) + col / 2;
-                out[y_size + uv]          = (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
-                out[y_size + uv_size + uv] = (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
+                out[y_size + uv] =
+                    (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
+                out[y_size + uv_size + uv] =
+                    (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -387,7 +391,7 @@ mod video_tests {
     fn solid_rgb_frame(w: usize, h: usize, r: u8, g: u8, b: u8) -> Vec<u8> {
         let mut rgb = vec![0u8; w * h * 3];
         for i in 0..w * h {
-            rgb[i * 3]     = r;
+            rgb[i * 3] = r;
             rgb[i * 3 + 1] = g;
             rgb[i * 3 + 2] = b;
         }
@@ -439,8 +443,14 @@ mod video_tests {
         let s = b64.unwrap();
         assert!(!s.is_empty());
         // JPEG base64 starts with '/9j/' (FFD8FF marker).
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&s).unwrap();
-        assert_eq!(&decoded[0..2], &[0xFF, 0xD8], "output must start with JPEG SOI marker");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&s)
+            .unwrap();
+        assert_eq!(
+            &decoded[0..2],
+            &[0xFF, 0xD8],
+            "output must start with JPEG SOI marker"
+        );
     }
 
     #[test]
@@ -463,13 +473,18 @@ mod video_tests {
         let yuv = rgb_to_i420(&rgb, 64, 64);
 
         let b64 = i420_to_jpeg_b64(&yuv, 64, 64).expect("should produce JPEG");
-        let jpeg = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
 
         let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
         let rgb_img = img.to_rgb8();
         let px = rgb_img.get_pixel(32, 32);
         let (r, g, b) = (px[0], px[1], px[2]);
-        assert!(r > g && r > b, "red frame: expected R dominant, got R={r} G={g} B={b}");
+        assert!(
+            r > g && r > b,
+            "red frame: expected R dominant, got R={r} G={g} B={b}"
+        );
     }
 
     #[test]
@@ -746,8 +761,14 @@ async fn connect(
     // Enable birthday attack for hard NAT traversal. Adds ~3s to
     // call setup when peer has symmetric NAT.
     birthday_attack: Option<bool>,
+    video_codec: Option<String>,
+    video_width: Option<u32>,
+    video_height: Option<u32>,
 ) -> Result<String, String> {
     let force_direct = direct_only.unwrap_or(false);
+    let video_codec = video_codec.unwrap_or_else(|| "h264".to_string());
+    let video_width = video_width.unwrap_or(1280);
+    let video_height = video_height.unwrap_or(720);
     let enable_birthday = birthday_attack.unwrap_or(false);
     emit_call_debug(
         &app,
@@ -760,6 +781,9 @@ async fn connect(
             "peer_mapped_addr": peer_mapped_addr,
             "direct_only": force_direct,
             "birthday_attack": enable_birthday,
+            "video_codec": video_codec,
+            "video_width": video_width,
+            "video_height": video_height,
         }),
     );
     let mut engine_lock = state.engine.lock().await;
@@ -1218,6 +1242,9 @@ async fn connect(
         app_for_engine,
         active_quality,
         peer_max_quality,
+        video_codec,
+        video_width,
+        video_height,
         move |event_kind, message| {
             let _ = app_clone.emit(
                 "call-event",
@@ -2129,7 +2156,9 @@ fn do_register_signal(
                                 "peer_loss_pct": local_loss_pct, "peer_rtt_ms": local_rtt_ms,
                             }),
                         );
-                        if let Err(e) = handle_upgrade_proposal(&*transport, &call_id, &proposal_id).await {
+                        if let Err(e) =
+                            handle_upgrade_proposal(&*transport, &call_id, &proposal_id).await
+                        {
                             tracing::warn!("failed to send UpgradeResponse: {e}");
                         }
                     }
@@ -2150,8 +2179,14 @@ fn do_register_signal(
                             }),
                         );
                         if let Err(e) = handle_upgrade_response(
-                            &*transport, &signal_state, &call_id, &proposal_id, accepted,
-                        ).await {
+                            &*transport,
+                            &signal_state,
+                            &call_id,
+                            &proposal_id,
+                            accepted,
+                        )
+                        .await
+                        {
                             tracing::warn!("failed to handle UpgradeResponse: {e}");
                         }
                     }
@@ -3426,7 +3461,9 @@ mod signal_tests {
     #[tokio::test]
     async fn upgrade_proposal_auto_accepts() {
         let transport = LoopbackTransport::new();
-        handle_upgrade_proposal(&*transport, "c1", "p1").await.unwrap();
+        handle_upgrade_proposal(&*transport, "c1", "p1")
+            .await
+            .unwrap();
 
         let sent = transport.take_sent();
         assert_eq!(sent.len(), 1);
@@ -3453,8 +3490,11 @@ mod signal_tests {
         let signal_state = empty_signal_state();
         {
             let sig = signal_state.lock().await;
-            *sig.pending_upgrade.lock().unwrap() =
-                Some(("c1".into(), "p1".into(), wzp_proto::QualityProfile::STUDIO_48K));
+            *sig.pending_upgrade.lock().unwrap() = Some((
+                "c1".into(),
+                "p1".into(),
+                wzp_proto::QualityProfile::STUDIO_48K,
+            ));
         }
 
         handle_upgrade_response(&*transport, &signal_state, "c1", "p1", true)
