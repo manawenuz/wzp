@@ -180,7 +180,84 @@ let pendingCallId: string | null = null;
 let cameraActive = false;
 let cameraStream: MediaStream | null = null;
 let cameraFrameTimer: number | null = null;
+let cameraFrameCallbackHandle: number | null = null;
+let cameraCaptureInFlight = false;
+let lastCameraCaptureAtMs = 0;
 let remoteVideoActive = false;
+
+interface FrameCallbackVideoElement extends HTMLVideoElement {
+  requestVideoFrameCallback?: (callback: (now: DOMHighResTimeStamp, metadata: unknown) => void) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+}
+
+// Keep the local preview out of the video stage stacking context so it can float
+// above the call drawer and remain draggable on phones.
+document.body.appendChild(vdLocalVideo);
+vdLocalVideo.classList.add("hidden");
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function keepLocalPipInViewport() {
+  if (vdLocalVideo.classList.contains("hidden")) return;
+  const rect = vdLocalVideo.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const margin = 12;
+  const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+  const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+  const left = clampNumber(rect.left, margin, maxLeft);
+  const top = clampNumber(rect.top, margin, maxTop);
+  vdLocalVideo.style.left = `${left}px`;
+  vdLocalVideo.style.top = `${top}px`;
+  vdLocalVideo.style.right = "auto";
+  vdLocalVideo.style.bottom = "auto";
+}
+
+function initLocalPipDrag() {
+  let dragPointerId: number | null = null;
+  let dragOffsetX = 0;
+  let dragOffsetY = 0;
+
+  vdLocalVideo.addEventListener("pointerdown", (event) => {
+    if (vdLocalVideo.classList.contains("hidden")) return;
+    dragPointerId = event.pointerId;
+    const rect = vdLocalVideo.getBoundingClientRect();
+    dragOffsetX = event.clientX - rect.left;
+    dragOffsetY = event.clientY - rect.top;
+    vdLocalVideo.classList.add("dragging");
+    vdLocalVideo.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+
+  vdLocalVideo.addEventListener("pointermove", (event) => {
+    if (dragPointerId !== event.pointerId) return;
+    const rect = vdLocalVideo.getBoundingClientRect();
+    const margin = 12;
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+    const left = clampNumber(event.clientX - dragOffsetX, margin, maxLeft);
+    const top = clampNumber(event.clientY - dragOffsetY, margin, maxTop);
+    vdLocalVideo.style.left = `${left}px`;
+    vdLocalVideo.style.top = `${top}px`;
+    vdLocalVideo.style.right = "auto";
+    vdLocalVideo.style.bottom = "auto";
+    event.preventDefault();
+  });
+
+  function endDrag(event: PointerEvent) {
+    if (dragPointerId !== event.pointerId) return;
+    dragPointerId = null;
+    vdLocalVideo.classList.remove("dragging");
+    try { vdLocalVideo.releasePointerCapture(event.pointerId); } catch {}
+  }
+
+  vdLocalVideo.addEventListener("pointerup", endDrag);
+  vdLocalVideo.addEventListener("pointercancel", endDrag);
+  window.addEventListener("resize", keepLocalPipInViewport);
+}
+
+initLocalPipDrag();
 
 function showToast(msg: string, durationMs = 3500) {
   let el = document.getElementById("wzp-toast");
@@ -497,6 +574,7 @@ const CAMERA_SEND_WIDTH = 1280;
 const CAMERA_SEND_HEIGHT = 720;
 let cameraCaptureFrameNo = 0;
 let cameraPushFailures = 0;
+const CAMERA_CAPTURE_INTERVAL_MS = 67; // ≈ 15 fps
 
 function drawCameraFrameForSend() {
   const vw = vdLocalVideo.videoWidth || camCaptureCanvas.width;
@@ -512,6 +590,81 @@ function drawCameraFrameForSend() {
   camCaptureCtx.fillStyle = "#000";
   camCaptureCtx.fillRect(0, 0, CAMERA_SEND_WIDTH, CAMERA_SEND_HEIGHT);
   camCaptureCtx.drawImage(vdLocalVideo, dx, dy, dw, dh);
+}
+
+async function captureAndPushCameraFrame() {
+  if (!cameraActive || cameraCaptureInFlight) return;
+  cameraCaptureInFlight = true;
+  cameraCaptureFrameNo++;
+  try {
+    drawCameraFrameForSend();
+    const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
+    const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+    if (cameraCaptureFrameNo === 1 || cameraCaptureFrameNo % 150 === 0) {
+      debugLog("camera:capture_frame", {
+        frame_no: cameraCaptureFrameNo,
+        width: camCaptureCanvas.width,
+        height: camCaptureCanvas.height,
+        jpeg_b64_len: b64.length,
+        capture_clock: getVideoFrameCallbackApi() ? "video_frame_callback" : "interval",
+      });
+    }
+    await invoke("push_camera_frame", { jpegB64: b64 });
+  } catch (e: any) {
+    cameraPushFailures++;
+    if (cameraPushFailures === 1 || cameraPushFailures % 30 === 0) {
+      debugLog("camera:push_failed", {
+        frame_no: cameraCaptureFrameNo,
+        failures: cameraPushFailures,
+        error: errorMessage(e),
+      });
+    }
+  } finally {
+    cameraCaptureInFlight = false;
+  }
+}
+
+function getVideoFrameCallbackApi() {
+  const video = vdLocalVideo as FrameCallbackVideoElement;
+  if (typeof video.requestVideoFrameCallback !== "function") return null;
+  return video;
+}
+
+function cancelCameraCaptureLoop() {
+  if (cameraFrameTimer != null) {
+    window.clearInterval(cameraFrameTimer);
+    cameraFrameTimer = null;
+  }
+  const video = getVideoFrameCallbackApi();
+  if (video && cameraFrameCallbackHandle != null && typeof video.cancelVideoFrameCallback === "function") {
+    video.cancelVideoFrameCallback(cameraFrameCallbackHandle);
+  }
+  cameraFrameCallbackHandle = null;
+}
+
+function scheduleCameraFrameCapture() {
+  cancelCameraCaptureLoop();
+  lastCameraCaptureAtMs = 0;
+  const video = getVideoFrameCallbackApi();
+  if (video) {
+    const onVideoFrame = (now: DOMHighResTimeStamp) => {
+      cameraFrameCallbackHandle = null;
+      if (!cameraActive) return;
+      if (lastCameraCaptureAtMs === 0 || now - lastCameraCaptureAtMs >= CAMERA_CAPTURE_INTERVAL_MS) {
+        lastCameraCaptureAtMs = now;
+        void captureAndPushCameraFrame();
+      }
+      cameraFrameCallbackHandle = video.requestVideoFrameCallback!(onVideoFrame);
+    };
+    cameraFrameCallbackHandle = video.requestVideoFrameCallback(onVideoFrame);
+    debugLog("camera:capture_clock", { mode: "video_frame_callback", interval_ms: CAMERA_CAPTURE_INTERVAL_MS });
+    return;
+  }
+
+  cameraFrameTimer = window.setInterval(() => {
+    void captureAndPushCameraFrame();
+  }, CAMERA_CAPTURE_INTERVAL_MS);
+  debugLog("camera:capture_clock", { mode: "interval", interval_ms: CAMERA_CAPTURE_INTERVAL_MS });
 }
 
 async function startCamera() {
@@ -545,35 +698,10 @@ async function startCamera() {
     cameraPushFailures = 0;
     vdCamIcon.textContent = "Cam ✓";
     vdCamBtn.classList.add("active");
+    vdLocalVideo.classList.remove("hidden");
+    keepLocalPipInViewport();
 
-    // Capture loop at ~15 fps
-    cameraFrameTimer = window.setInterval(async () => {
-      if (!cameraActive) return;
-      cameraCaptureFrameNo++;
-      try {
-        drawCameraFrameForSend();
-        const dataUrl = camCaptureCanvas.toDataURL("image/jpeg", 0.75);
-        const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
-        if (cameraCaptureFrameNo === 1 || cameraCaptureFrameNo % 150 === 0) {
-          debugLog("camera:capture_frame", {
-            frame_no: cameraCaptureFrameNo,
-            width: camCaptureCanvas.width,
-            height: camCaptureCanvas.height,
-            jpeg_b64_len: b64.length,
-          });
-        }
-        await invoke("push_camera_frame", { jpegB64: b64 });
-      } catch (e: any) {
-        cameraPushFailures++;
-        if (cameraPushFailures === 1 || cameraPushFailures % 30 === 0) {
-          debugLog("camera:push_failed", {
-            frame_no: cameraCaptureFrameNo,
-            failures: cameraPushFailures,
-            error: errorMessage(e),
-          });
-        }
-      }
-    }, 67); // 67 ms ≈ 15 fps
+    scheduleCameraFrameCapture();
   } catch (e: any) {
     console.warn("camera access denied or unavailable:", e);
     debugLog("camera:get_user_media_failed", {
@@ -588,9 +716,10 @@ function stopCamera() {
     debugLog("camera:stopped", { frames: cameraCaptureFrameNo });
   }
   cameraActive = false;
-  if (cameraFrameTimer != null) { window.clearInterval(cameraFrameTimer); cameraFrameTimer = null; }
+  cancelCameraCaptureLoop();
   if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
   vdLocalVideo.srcObject = null;
+  vdLocalVideo.classList.add("hidden");
   vdCamIcon.textContent = "Cam";
   vdCamBtn.classList.remove("active");
   // Hide strip only if remote video is also gone
