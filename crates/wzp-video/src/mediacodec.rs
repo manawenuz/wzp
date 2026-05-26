@@ -27,6 +27,8 @@ pub struct MediaCodecEncoder {
     width: u32,
     #[cfg(target_os = "android")]
     height: u32,
+    #[cfg(target_os = "android")]
+    input_format_logged: bool,
     force_keyframe: bool,
     #[cfg(not(target_os = "android"))]
     _width: u32,
@@ -86,6 +88,7 @@ impl MediaCodecEncoder {
                 codec,
                 width,
                 height,
+                input_format_logged: false,
                 force_keyframe: false,
             })
         }
@@ -123,8 +126,34 @@ impl VideoEncoder for MediaCodecEncoder {
                     if self.force_keyframe {
                         self.request_sync_frame();
                     }
-                    let input =
-                        i420_to_nv12(&frame.data, self.width as usize, self.height as usize)?;
+                    let layout = encoder_input_layout(&self.codec, self.width, self.height);
+                    if !self.input_format_logged {
+                        self.input_format_logged = true;
+                        log_media_codec_input_format("h264_encoder_input", &self.codec, &layout);
+                    }
+                    let input_capacity = { buffer.buffer_mut().len() };
+                    let mut input = i420_to_padded_nv12(
+                        &frame.data,
+                        self.width as usize,
+                        self.height as usize,
+                        layout.stride,
+                        layout.slice_height,
+                    )?;
+                    if input.len() > input_capacity {
+                        tracing::warn!(
+                            target: "wzp_video::mediacodec",
+                            padded_len = input.len(),
+                            input_capacity,
+                            "MediaCodec H.264 input buffer smaller than padded layout; falling back to tight NV12"
+                        );
+                        input = i420_to_padded_nv12(
+                            &frame.data,
+                            self.width as usize,
+                            self.height as usize,
+                            self.width as usize,
+                            self.height as usize,
+                        )?;
+                    }
                     let to_copy = {
                         let buf = buffer.buffer_mut();
                         let n = input.len().min(buf.len());
@@ -398,6 +427,8 @@ pub struct MediaCodecHevcEncoder {
     width: u32,
     #[cfg(target_os = "android")]
     height: u32,
+    #[cfg(target_os = "android")]
+    input_format_logged: bool,
     force_keyframe: bool,
     #[cfg(not(target_os = "android"))]
     _width: u32,
@@ -439,6 +470,7 @@ impl MediaCodecHevcEncoder {
                 codec,
                 width,
                 height,
+                input_format_logged: false,
                 force_keyframe: false,
             })
         }
@@ -476,10 +508,38 @@ impl VideoEncoder for MediaCodecHevcEncoder {
                     } else {
                         0
                     };
+                    let layout = encoder_input_layout(&self.codec, self.width, self.height);
+                    if !self.input_format_logged {
+                        self.input_format_logged = true;
+                        log_media_codec_input_format("hevc_encoder_input", &self.codec, &layout);
+                    }
+                    let input_capacity = { buffer.buffer_mut().len() };
+                    let mut input = i420_to_padded_planar(
+                        &frame.data,
+                        self.width as usize,
+                        self.height as usize,
+                        layout.stride,
+                        layout.slice_height,
+                    )?;
+                    if input.len() > input_capacity {
+                        tracing::warn!(
+                            target: "wzp_video::mediacodec",
+                            padded_len = input.len(),
+                            input_capacity,
+                            "MediaCodec HEVC input buffer smaller than padded layout; falling back to tight I420"
+                        );
+                        input = i420_to_padded_planar(
+                            &frame.data,
+                            self.width as usize,
+                            self.height as usize,
+                            self.width as usize,
+                            self.height as usize,
+                        )?;
+                    }
                     let to_copy = {
                         let buf = buffer.buffer_mut();
-                        let n = frame.data.len().min(buf.len());
-                        for (d, &s) in buf[..n].iter_mut().zip(frame.data[..n].iter()) {
+                        let n = input.len().min(buf.len());
+                        for (d, &s) in buf[..n].iter_mut().zip(input[..n].iter()) {
                             d.write(s);
                         }
                         n
@@ -1154,6 +1214,46 @@ fn positive_format_usize(format: &MediaFormat, key: &str) -> Option<usize> {
 }
 
 #[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug)]
+struct EncoderInputLayout {
+    stride: usize,
+    slice_height: usize,
+}
+
+#[cfg(target_os = "android")]
+fn encoder_input_layout(codec: &MediaCodec, width: u32, height: u32) -> EncoderInputLayout {
+    // ndk 0.9 exposes AMediaCodec_getInputFormat only behind API 28, while
+    // this app still targets API 26. Keep encoder input tight until we can
+    // query the actual input format. Guessing padded rows here is dangerous:
+    // when the encoder actually reads tight input, padding bytes become pixels
+    // from the next row and show up as diagonal green bands.
+    let _ = codec;
+    let width = width as usize;
+    let height = height as usize;
+    EncoderInputLayout {
+        stride: width,
+        slice_height: height,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn log_media_codec_input_format(label: &str, codec: &MediaCodec, layout: &EncoderInputLayout) {
+    let format = codec.output_format();
+    tracing::info!(
+        target: "wzp_video::mediacodec",
+        label,
+        color_format = format.i32("color-format"),
+        width = format.i32("width"),
+        height = format.i32("height"),
+        stride = format.i32("stride"),
+        slice_height = format.i32("slice-height"),
+        effective_stride = layout.stride,
+        effective_slice_height = layout.slice_height,
+        "MediaCodec input format"
+    );
+}
+
+#[cfg(target_os = "android")]
 fn log_media_codec_format(label: &str, codec: &MediaCodec) {
     let format = codec.output_format();
     tracing::info!(
@@ -1183,7 +1283,13 @@ fn i420_len(width: usize, height: usize) -> Result<usize, VideoError> {
 }
 
 #[cfg(target_os = "android")]
-fn i420_to_nv12(src: &[u8], width: usize, height: usize) -> Result<Vec<u8>, VideoError> {
+fn i420_to_padded_nv12(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    slice_height: usize,
+) -> Result<Vec<u8>, VideoError> {
     let y_size = width.checked_mul(height).ok_or_else(|| {
         VideoError::InvalidInput(format!("invalid frame dimensions {width}x{height}"))
     })?;
@@ -1196,14 +1302,124 @@ fn i420_to_nv12(src: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Vide
         )));
     }
 
-    let mut out = vec![0u8; expected];
-    out[..y_size].copy_from_slice(&src[..y_size]);
+    if stride < width || slice_height < height {
+        return Err(VideoError::InvalidInput(format!(
+            "invalid encoder input layout {stride}x{slice_height} for {width}x{height}"
+        )));
+    }
+
+    let chroma_width = width / 2;
+    let chroma_height = height / 2;
+    let y_stride = stride;
+    let uv_stride = stride;
+    let y_slice_height = slice_height;
+    let uv_slice_height = (slice_height / 2).max(chroma_height);
+    let y_padded_size = y_stride.checked_mul(y_slice_height).ok_or_else(|| {
+        VideoError::InvalidInput(format!(
+            "invalid padded Y layout {y_stride}x{y_slice_height}"
+        ))
+    })?;
+    let uv_padded_size = uv_stride.checked_mul(uv_slice_height).ok_or_else(|| {
+        VideoError::InvalidInput(format!(
+            "invalid padded UV layout {uv_stride}x{uv_slice_height}"
+        ))
+    })?;
+    let total = y_padded_size
+        .checked_add(uv_padded_size)
+        .ok_or_else(|| VideoError::InvalidInput("padded NV12 size overflow".into()))?;
+
+    let mut out = vec![0u8; total];
+    out[y_padded_size..].fill(128);
+    for row in 0..height {
+        let src_off = row * width;
+        let dst_off = row * y_stride;
+        out[dst_off..dst_off + width].copy_from_slice(&src[src_off..src_off + width]);
+    }
+
     let u = &src[y_size..y_size + uv_size];
     let v = &src[y_size + uv_size..y_size + uv_size * 2];
-    for i in 0..uv_size {
-        out[y_size + i * 2] = u[i];
-        out[y_size + i * 2 + 1] = v[i];
+    for row in 0..chroma_height {
+        let src_row = row * chroma_width;
+        let dst_row = y_padded_size + row * uv_stride;
+        for col in 0..chroma_width {
+            out[dst_row + col * 2] = u[src_row + col];
+            out[dst_row + col * 2 + 1] = v[src_row + col];
+        }
     }
+    Ok(out)
+}
+
+#[cfg(target_os = "android")]
+fn i420_to_padded_planar(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    slice_height: usize,
+) -> Result<Vec<u8>, VideoError> {
+    let y_size = width.checked_mul(height).ok_or_else(|| {
+        VideoError::InvalidInput(format!("invalid frame dimensions {width}x{height}"))
+    })?;
+    let uv_size = y_size / 4;
+    let expected = y_size + uv_size * 2;
+    if src.len() < expected {
+        return Err(VideoError::InvalidInput(format!(
+            "I420 frame too small for padded planar copy: {} bytes, expected {expected}",
+            src.len()
+        )));
+    }
+    if stride < width || slice_height < height {
+        return Err(VideoError::InvalidInput(format!(
+            "invalid encoder input layout {stride}x{slice_height} for {width}x{height}"
+        )));
+    }
+
+    let chroma_width = width / 2;
+    let chroma_height = height / 2;
+    let y_stride = stride;
+    let chroma_stride = (stride / 2).max(chroma_width);
+    let y_slice_height = slice_height;
+    let chroma_slice_height = (slice_height / 2).max(chroma_height);
+    let y_padded_size = y_stride.checked_mul(y_slice_height).ok_or_else(|| {
+        VideoError::InvalidInput(format!(
+            "invalid padded Y layout {y_stride}x{y_slice_height}"
+        ))
+    })?;
+    let chroma_padded_size = chroma_stride
+        .checked_mul(chroma_slice_height)
+        .ok_or_else(|| {
+            VideoError::InvalidInput(format!(
+                "invalid padded chroma layout {chroma_stride}x{chroma_slice_height}"
+            ))
+        })?;
+    let chroma_total = chroma_padded_size
+        .checked_mul(2)
+        .ok_or_else(|| VideoError::InvalidInput("padded I420 chroma size overflow".into()))?;
+    let total = y_padded_size
+        .checked_add(chroma_total)
+        .ok_or_else(|| VideoError::InvalidInput("padded I420 size overflow".into()))?;
+
+    let mut out = vec![0u8; total];
+    out[y_padded_size..].fill(128);
+    for row in 0..height {
+        let src_off = row * width;
+        let dst_off = row * y_stride;
+        out[dst_off..dst_off + width].copy_from_slice(&src[src_off..src_off + width]);
+    }
+
+    let src_u = y_size;
+    let src_v = y_size + uv_size;
+    let dst_u = y_padded_size;
+    let dst_v = y_padded_size + chroma_padded_size;
+    for row in 0..chroma_height {
+        let src_off = row * chroma_width;
+        let dst_off = row * chroma_stride;
+        out[dst_u + dst_off..dst_u + dst_off + chroma_width]
+            .copy_from_slice(&src[src_u + src_off..src_u + src_off + chroma_width]);
+        out[dst_v + dst_off..dst_v + dst_off + chroma_width]
+            .copy_from_slice(&src[src_v + src_off..src_v + src_off + chroma_width]);
+    }
+
     Ok(out)
 }
 
@@ -1410,7 +1626,7 @@ fn split_annex_b(data: &[u8]) -> Vec<&[u8]> {
 /// Android MediaCodec `csd-0`.
 #[allow(dead_code)]
 fn extract_sequence_header_obu(data: &[u8]) -> Option<Vec<u8>> {
-    use crate::av1_obu::{ObuHeader, read_leb128};
+    use crate::av1_obu::{read_leb128, ObuHeader};
     let mut i = 0usize;
     while i < data.len() {
         let header = ObuHeader::from_byte(data[i]);

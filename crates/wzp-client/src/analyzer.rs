@@ -243,6 +243,7 @@ struct VideoStreamProbe {
     last_frame: Option<Instant>,
     reassembler: VideoReassembler,
     decoder: Option<Box<dyn VideoDecoder>>,
+    decoder_key: Option<(CodecId, u32, u32)>,
     decode_ok: u64,
     decode_pending: u64,
     decode_err: u64,
@@ -275,6 +276,7 @@ impl VideoStreamProbe {
             last_frame: None,
             reassembler: VideoReassembler::new(),
             decoder,
+            decoder_key: decode.then_some((codec, 1280, 720)),
             decode_ok: 0,
             decode_pending: 0,
             decode_err: 0,
@@ -294,6 +296,7 @@ impl VideoStreamProbe {
                 .is_some()
                 .then(|| create_video_decoder(self.codec, 1280, 720).ok())
                 .flatten();
+            self.decoder_key = self.decoder.as_ref().map(|_| (self.codec, 1280, 720));
         }
         if self.seq_initialized {
             let expected = self.last_seq.wrapping_add(1);
@@ -305,19 +308,26 @@ impl VideoStreamProbe {
         self.last_seq = pkt.header.seq;
         self.seq_initialized = true;
 
-        if let Some((codec, keyframe, frame)) = self.reassembler.push(pkt) {
+        if let Some(frame) = self.reassembler.push(pkt) {
             self.frames += 1;
-            self.bytes += frame.len() as u64;
-            self.max_frame_bytes = self.max_frame_bytes.max(frame.len());
+            self.bytes += frame.data.len() as u64;
+            self.max_frame_bytes = self.max_frame_bytes.max(frame.data.len());
             self.last_frame = Some(now);
-            if keyframe {
+            if frame.is_keyframe {
                 self.keyframes += 1;
             }
-            if codec != self.codec {
-                self.codec = codec;
+            if frame.codec_id != self.codec {
+                self.codec = frame.codec_id;
+            }
+            let frame_width = frame.width.unwrap_or(1280) as u32;
+            let frame_height = frame.height.unwrap_or(720) as u32;
+            let decoder_key = (self.codec, frame_width, frame_height);
+            if self.decoder.is_some() && self.decoder_key != Some(decoder_key) {
+                self.decoder = create_video_decoder(self.codec, frame_width, frame_height).ok();
+                self.decoder_key = self.decoder.as_ref().map(|_| decoder_key);
             }
             if let Some(decoder) = self.decoder.as_mut() {
-                match decoder.decode(&frame) {
+                match decoder.decode(&frame.data) {
                     Ok(Some(decoded)) => {
                         self.decode_ok += 1;
                         self.last_decode_debug = decoder.debug_snapshot();

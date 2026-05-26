@@ -49,6 +49,11 @@ pub trait VideoEncoder: Send {
     ///
     /// Default implementation is a no-op.
     fn set_mode(&mut self, _mode: crate::EncoderMode) {}
+
+    /// Optional platform-specific encoder state for debug logs.
+    fn debug_snapshot(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Raw video frame input for encoding.

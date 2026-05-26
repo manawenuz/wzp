@@ -1385,7 +1385,7 @@ impl CallEngine {
             // Video pipeline state — mirror of the desktop recv task.
             let mut video_reassembler = wzp_video::transport::VideoReassembler::new();
             let mut video_decoder: Option<Box<dyn wzp_video::decoder::VideoDecoder>> = None;
-            let mut video_decoder_codec: Option<wzp_proto::CodecId> = None;
+            let mut video_decoder_key: Option<(wzp_proto::CodecId, u32, u32)> = None;
             let mut video_first_recv_logged = false;
             let mut video_first_reassembled_logged = false;
             let mut video_reassembled_samples: u64 = 0;
@@ -1466,7 +1466,14 @@ impl CallEngine {
                                     }),
                                 );
                             }
-                            if let Some((codec_id, is_kf, frame)) = video_reassembler.push(&pkt) {
+                            if let Some(reassembled) = video_reassembler.push(&pkt) {
+                                let codec_id = reassembled.codec_id;
+                                let is_kf = reassembled.is_keyframe;
+                                let frame_width =
+                                    reassembled.width.unwrap_or(video_width as u16) as u32;
+                                let frame_height =
+                                    reassembled.height.unwrap_or(video_height as u16) as u32;
+                                let frame = reassembled.data;
                                 video_reassembled_samples += 1;
                                 if !video_first_reassembled_logged {
                                     video_first_reassembled_logged = true;
@@ -1484,6 +1491,14 @@ impl CallEngine {
                                     );
                                 }
                                 if should_log_video_sample(video_reassembled_samples, is_kf) {
+                                    crate::maybe_dump_video_bytes(
+                                        &recv_app,
+                                        "remote_encoded_reassembled",
+                                        "android",
+                                        video_reassembled_samples,
+                                        &frame,
+                                        codec_id,
+                                    );
                                     crate::emit_call_debug(
                                         &recv_app,
                                         "video:reassembled_frame",
@@ -1517,22 +1532,23 @@ impl CallEngine {
                                     video_reassembler.evict_stale(pkt.header.timestamp, 5_000);
                                     continue;
                                 }
-                                if video_decoder_codec != Some(codec_id) {
+                                let decoder_key = (codec_id, frame_width, frame_height);
+                                if video_decoder_key != Some(decoder_key) {
                                     crate::emit_call_debug(
                                         &recv_app,
                                         "video:decoder_init_start",
                                         serde_json::json!({
                                             "t_ms": recv_t0.elapsed().as_millis() as u64,
                                             "codec": format!("{:?}", codec_id),
-                                            "width": video_width,
-                                            "height": video_height,
+                                            "width": frame_width,
+                                            "height": frame_height,
                                             "platform": "android",
                                         }),
                                     );
                                     match wzp_video::factory::create_video_decoder(
                                         codec_id,
-                                        video_width,
-                                        video_height,
+                                        frame_width,
+                                        frame_height,
                                     ) {
                                         Ok(d) => {
                                             info!(codec = ?codec_id, "video decoder created (android)");
@@ -1546,7 +1562,7 @@ impl CallEngine {
                                                 }),
                                             );
                                             video_decoder = Some(d);
-                                            video_decoder_codec = Some(codec_id);
+                                            video_decoder_key = Some(decoder_key);
                                         }
                                         Err(e) => {
                                             error!("video decoder init failed: {e}");
@@ -2304,11 +2320,21 @@ impl CallEngine {
                         is_keyframe,
                         &mut seq,
                         ts_ms,
+                        frame.width,
+                        frame.height,
                     );
                     video_packets_total += pkts.len() as u64;
                     video_bytes_total += encoded.len() as u64;
                     if encoded_frame_samples < 5 {
                         encoded_frame_samples += 1;
+                        crate::maybe_dump_video_bytes(
+                            &vid_app,
+                            "local_encoded",
+                            "android",
+                            encoded_frame_samples,
+                            &encoded,
+                            vid_codec,
+                        );
                         let packet_payload_bytes: usize =
                             pkts.iter().map(|pkt| pkt.payload.len()).sum();
                         crate::emit_call_debug(
@@ -2870,7 +2896,7 @@ impl CallEngine {
             let mut first_packet_logged = false;
             let mut video_reassembler = wzp_video::transport::VideoReassembler::new();
             let mut video_decoder: Option<Box<dyn wzp_video::decoder::VideoDecoder>> = None;
-            let mut video_decoder_codec: Option<wzp_proto::CodecId> = None;
+            let mut video_decoder_key: Option<(wzp_proto::CodecId, u32, u32)> = None;
             let mut video_first_recv_logged_desktop = false;
             let mut video_first_reassembled_logged = false;
             let mut video_reassembled_samples: u64 = 0;
@@ -2956,7 +2982,14 @@ impl CallEngine {
                                     }),
                                 );
                             }
-                            if let Some((codec_id, is_kf, frame)) = video_reassembler.push(&pkt) {
+                            if let Some(reassembled) = video_reassembler.push(&pkt) {
+                                let codec_id = reassembled.codec_id;
+                                let is_kf = reassembled.is_keyframe;
+                                let frame_width =
+                                    reassembled.width.unwrap_or(video_width as u16) as u32;
+                                let frame_height =
+                                    reassembled.height.unwrap_or(video_height as u16) as u32;
+                                let frame = reassembled.data;
                                 video_reassembled_samples += 1;
                                 if !video_first_reassembled_logged {
                                     video_first_reassembled_logged = true;
@@ -2974,6 +3007,14 @@ impl CallEngine {
                                     );
                                 }
                                 if should_log_video_sample(video_reassembled_samples, is_kf) {
+                                    crate::maybe_dump_video_bytes(
+                                        &recv_app,
+                                        "remote_encoded_reassembled",
+                                        "desktop",
+                                        video_reassembled_samples,
+                                        &frame,
+                                        codec_id,
+                                    );
                                     crate::emit_call_debug(
                                         &recv_app,
                                         "video:reassembled_frame",
@@ -3008,22 +3049,23 @@ impl CallEngine {
                                     continue;
                                 }
                                 // Lazy-init or switch decoder on codec change.
-                                if video_decoder_codec != Some(codec_id) {
+                                let decoder_key = (codec_id, frame_width, frame_height);
+                                if video_decoder_key != Some(decoder_key) {
                                     crate::emit_call_debug(
                                         &recv_app,
                                         "video:decoder_init_start",
                                         serde_json::json!({
                                             "t_ms": recv_t0.elapsed().as_millis() as u64,
                                             "codec": format!("{:?}", codec_id),
-                                            "width": video_width,
-                                            "height": video_height,
+                                            "width": frame_width,
+                                            "height": frame_height,
                                             "platform": "desktop",
                                         }),
                                     );
                                     match wzp_video::factory::create_video_decoder(
                                         codec_id,
-                                        video_width,
-                                        video_height,
+                                        frame_width,
+                                        frame_height,
                                     ) {
                                         Ok(d) => {
                                             info!(codec = ?codec_id, "video decoder created");
@@ -3037,7 +3079,7 @@ impl CallEngine {
                                                 }),
                                             );
                                             video_decoder = Some(d);
-                                            video_decoder_codec = Some(codec_id);
+                                            video_decoder_key = Some(decoder_key);
                                         }
                                         Err(e) => {
                                             error!("video decoder init failed: {e}");
@@ -3640,11 +3682,21 @@ impl CallEngine {
                         is_keyframe,
                         &mut seq,
                         ts_ms,
+                        frame.width,
+                        frame.height,
                     );
                     video_packets_total += pkts.len() as u64;
                     video_bytes_total += encoded.len() as u64;
                     if encoded_frame_samples < 5 {
                         encoded_frame_samples += 1;
+                        crate::maybe_dump_video_bytes(
+                            &vid_app,
+                            "local_encoded",
+                            "desktop",
+                            encoded_frame_samples,
+                            &encoded,
+                            vid_codec,
+                        );
                         let packet_payload_bytes: usize =
                             pkts.iter().map(|pkt| pkt.payload.len()).sum();
                         crate::emit_call_debug(

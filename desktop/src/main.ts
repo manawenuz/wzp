@@ -607,7 +607,7 @@ function drawCameraFrameForSend() {
   const vh = vdLocalVideo.videoHeight || camCaptureCanvas.height;
   if (!vw || !vh) return;
 
-  const scale = Math.max(cameraSendWidth / vw, cameraSendHeight / vh);
+  const scale = Math.min(cameraSendWidth / vw, cameraSendHeight / vh);
   const dw = vw * scale;
   const dh = vh * scale;
   const dx = (cameraSendWidth - dw) / 2;
@@ -631,6 +631,8 @@ async function captureAndPushCameraFrame() {
         frame_no: cameraCaptureFrameNo,
         width: camCaptureCanvas.width,
         height: camCaptureCanvas.height,
+        source_width: vdLocalVideo.videoWidth || null,
+        source_height: vdLocalVideo.videoHeight || null,
         jpeg_b64_len: b64.length,
         capture_clock: getVideoFrameCallbackApi() ? "video_frame_callback" : "interval",
       });

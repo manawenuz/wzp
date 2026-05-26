@@ -16,9 +16,9 @@
 use std::sync::Mutex;
 use wzp_proto::CodecId;
 use wzp_video::{
-    VideoFrame,
     factory::{create_video_decoder, create_video_encoder},
-    transport::{VideoReassembler, packetize_video_frame},
+    transport::{packetize_video_frame, VideoReassembler},
+    VideoFrame,
 };
 
 /// VideoToolbox has global session registry state — serialise integration tests
@@ -42,7 +42,12 @@ fn synthetic_i420(width: u32, height: u32, frame_idx: u32) -> VideoFrame {
     data[y_size..y_size + uv_size].fill(128);
     data[y_size + uv_size..].fill(128);
 
-    VideoFrame { width, height, data, timestamp_ms: frame_idx as u64 * 33 }
+    VideoFrame {
+        width,
+        height,
+        data,
+        timestamp_ms: frame_idx as u64 * 33,
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -53,10 +58,10 @@ fn h264_pipeline_roundtrip() {
     let _g = VT_LOCK.lock().unwrap();
     let (w, h) = (640, 360);
 
-    let mut encoder = create_video_encoder(CodecId::H264Baseline, w, h, 1_500_000)
-        .expect("H264Baseline encoder");
-    let mut decoder = create_video_decoder(CodecId::H264Baseline, w, h)
-        .expect("H264Baseline decoder");
+    let mut encoder =
+        create_video_encoder(CodecId::H264Baseline, w, h, 1_500_000).expect("H264Baseline encoder");
+    let mut decoder =
+        create_video_decoder(CodecId::H264Baseline, w, h).expect("H264Baseline decoder");
 
     let mut seq = 0u32;
     let mut decoded_count = 0usize;
@@ -71,32 +76,60 @@ fn h264_pipeline_roundtrip() {
         }
 
         let is_keyframe = encoder.is_keyframe(&encoded);
-        let pkts = packetize_video_frame(&encoded, CodecId::H264Baseline, is_keyframe, &mut seq, i * 33);
-        assert!(!pkts.is_empty(), "packetize must produce at least one packet");
+        let pkts = packetize_video_frame(
+            &encoded,
+            CodecId::H264Baseline,
+            is_keyframe,
+            &mut seq,
+            i * 33,
+            w,
+            h,
+        );
+        assert!(
+            !pkts.is_empty(),
+            "packetize must produce at least one packet"
+        );
 
         // All fragments for this frame share the same timestamp.
         let ts = pkts[0].header.timestamp;
         let total_frags = pkts.len();
         for (idx, pkt) in pkts.iter().enumerate() {
-            assert_eq!(pkt.header.timestamp, ts, "all fragments of one frame share timestamp");
+            assert_eq!(
+                pkt.header.timestamp, ts,
+                "all fragments of one frame share timestamp"
+            );
             let frag_idx = (pkt.header.fec_block >> 8) as usize;
             let frag_total = (pkt.header.fec_block & 0xFF) as usize;
             assert_eq!(frag_idx, idx, "fragment index must match packet position");
-            assert_eq!(frag_total, total_frags, "all fragments carry the correct total count");
+            assert_eq!(
+                frag_total, total_frags,
+                "all fragments carry the correct total count"
+            );
         }
-        assert!(pkts.last().unwrap().header.is_frame_end(), "last packet must have FLAG_FRAME_END");
+        assert!(
+            pkts.last().unwrap().header.is_frame_end(),
+            "last packet must have FLAG_FRAME_END"
+        );
 
         // Push through reassembler — only the last packet should yield a frame.
         let mut reassembler = VideoReassembler::new();
         for (j, pkt) in pkts.iter().enumerate() {
             let result = reassembler.push(pkt);
             if j + 1 < pkts.len() {
-                assert!(result.is_none(), "intermediate fragments must not yield a complete frame");
+                assert!(
+                    result.is_none(),
+                    "intermediate fragments must not yield a complete frame"
+                );
             } else {
-                let (codec, kf, data) = result.expect("last fragment must complete the frame");
-                assert_eq!(codec, CodecId::H264Baseline);
-                assert_eq!(kf, is_keyframe);
-                assert_eq!(data, encoded, "reassembled bytes must match original encoded bytes");
+                let frame = result.expect("last fragment must complete the frame");
+                assert_eq!(frame.codec_id, CodecId::H264Baseline);
+                assert_eq!(frame.is_keyframe, is_keyframe);
+                assert_eq!(frame.width, Some(w as u16));
+                assert_eq!(frame.height, Some(h as u16));
+                assert_eq!(
+                    frame.data, encoded,
+                    "reassembled bytes must match original encoded bytes"
+                );
             }
         }
 
@@ -118,7 +151,10 @@ fn h264_pipeline_roundtrip() {
         }
     }
 
-    assert!(decoded_count > 0, "at least one frame must have been decoded");
+    assert!(
+        decoded_count > 0,
+        "at least one frame must have been decoded"
+    );
 }
 
 /// Fragmentation: a frame larger than VIDEO_MAX_PAYLOAD splits into multiple packets,
@@ -134,13 +170,28 @@ fn large_frame_fragments_and_reassembles() {
 
     let mut seq = 0u32;
     let pkts = packetize_video_frame(
-        &synthetic_encoded, CodecId::H264Baseline, true, &mut seq, 9000,
+        &synthetic_encoded,
+        CodecId::H264Baseline,
+        true,
+        &mut seq,
+        9000,
+        1280,
+        720,
     );
 
     assert!(pkts.len() >= 4, "large frame must produce ≥4 fragments");
-    assert!(pkts[0].header.is_keyframe(), "keyframe flag propagates to all fragments");
-    assert!(!pkts[0].header.is_frame_end(), "first packet is not frame end");
-    assert!(pkts.last().unwrap().header.is_frame_end(), "last packet is frame end");
+    assert!(
+        pkts[0].header.is_keyframe(),
+        "keyframe flag propagates to all fragments"
+    );
+    assert!(
+        !pkts[0].header.is_frame_end(),
+        "first packet is not frame end"
+    );
+    assert!(
+        pkts.last().unwrap().header.is_frame_end(),
+        "last packet is frame end"
+    );
 
     let mut reassembler = VideoReassembler::new();
     let mut result = None;
@@ -148,8 +199,13 @@ fn large_frame_fragments_and_reassembles() {
         result = reassembler.push(pkt);
     }
 
-    let (_, _, data) = result.expect("all fragments delivered → complete frame");
-    assert_eq!(data, synthetic_encoded, "reassembled bytes must match input exactly");
+    let frame = result.expect("all fragments delivered → complete frame");
+    assert_eq!(frame.width, Some(1280));
+    assert_eq!(frame.height, Some(720));
+    assert_eq!(
+        frame.data, synthetic_encoded,
+        "reassembled bytes must match input exactly"
+    );
 }
 
 /// Packet loss: if the first fragment is missing, reassembly cannot complete.
@@ -159,7 +215,7 @@ fn missing_fragment_blocks_reassembly() {
 
     let frame: Vec<u8> = vec![0xAB; VIDEO_MAX_PAYLOAD * 2 + 50];
     let mut seq = 0u32;
-    let pkts = packetize_video_frame(&frame, CodecId::Av1Main, false, &mut seq, 1234);
+    let pkts = packetize_video_frame(&frame, CodecId::Av1Main, false, &mut seq, 1234, 640, 480);
     assert!(pkts.len() >= 3);
 
     let mut reassembler = VideoReassembler::new();
@@ -193,7 +249,15 @@ fn evict_stale_removes_aged_frames() {
 
     let frame: Vec<u8> = vec![0x55; VIDEO_MAX_PAYLOAD * 2];
     let mut seq = 0u32;
-    let pkts = packetize_video_frame(&frame, CodecId::H264Baseline, false, &mut seq, 500);
+    let pkts = packetize_video_frame(
+        &frame,
+        CodecId::H264Baseline,
+        false,
+        &mut seq,
+        500,
+        640,
+        480,
+    );
 
     let mut reassembler = VideoReassembler::new();
     // Push only first packet — frame is incomplete.

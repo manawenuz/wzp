@@ -205,6 +205,61 @@ pub(crate) fn maybe_dump_video_jpeg(
     }
 }
 
+pub(crate) fn maybe_dump_video_bytes(
+    app: &tauri::AppHandle,
+    stage: &str,
+    platform: &str,
+    frame_no: u64,
+    bytes: &[u8],
+    codec: wzp_proto::CodecId,
+) {
+    if !should_dump_frame(frame_no) || bytes.is_empty() {
+        return;
+    }
+
+    let ext = match codec {
+        wzp_proto::CodecId::H265Main => "h265",
+        wzp_proto::CodecId::Av1Main => "obu",
+        _ => "h264",
+    };
+    let seq = FRAME_DUMP_WRITES.fetch_add(1, Ordering::Relaxed) + 1;
+    let dir = identity_dir().join("frame-dumps");
+    let file_name = format!("{seq:06}_{platform}_{stage}_f{frame_no:06}.{ext}");
+    let path = dir.join(file_name);
+    let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes));
+
+    match result {
+        Ok(()) => emit_call_debug(
+            app,
+            "video:byte_dump",
+            serde_json::json!({
+                "stage": stage,
+                "platform": platform,
+                "frame_no": frame_no,
+                "codec": format!("{:?}", codec),
+                "bytes": bytes.len(),
+                "path": path,
+            }),
+        ),
+        Err(e) => {
+            if seq <= 5 || seq % 30 == 0 {
+                emit_call_debug(
+                    app,
+                    "video:byte_dump_failed",
+                    serde_json::json!({
+                        "stage": stage,
+                        "platform": platform,
+                        "frame_no": frame_no,
+                        "codec": format!("{:?}", codec),
+                        "error": e.to_string(),
+                        "path": path,
+                    }),
+                );
+            }
+        }
+    }
+}
+
 /// RGB24 → I420 (planar 4:2:0).  Layout: Y(w×h) | U(w/2×h/2) | V(w/2×h/2).
 fn rgb_to_i420(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
     let y_size = w * h;
