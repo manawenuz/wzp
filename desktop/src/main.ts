@@ -607,6 +607,45 @@ const vdRemotePlaceholder = document.getElementById("vd-remote-placeholder")!;
 const vdRemoteCounter = document.getElementById("vd-remote-counter")!;
 let remoteFrameCount = 0;
 let remoteFrameSerial = 0;
+let remoteDrawInFlight = false;
+let remotePendingFrame: { serial: number; width: number; height: number; jpeg_b64: string } | null = null;
+
+async function drawRemoteFrame(frame: { serial: number; width: number; height: number; jpeg_b64: string }) {
+  const img = new Image();
+  img.src = `data:image/jpeg;base64,${frame.jpeg_b64}`;
+  if ("decode" in img) {
+    await img.decode();
+  } else {
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("remote video image decode failed"));
+    });
+  }
+
+  if (frame.serial !== remoteFrameSerial) return;
+  if (vdRemoteVideo.width !== frame.width) vdRemoteVideo.width = frame.width;
+  if (vdRemoteVideo.height !== frame.height) vdRemoteVideo.height = frame.height;
+  remoteCtx.drawImage(img, 0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
+}
+
+async function pumpRemoteVideoFrames() {
+  if (remoteDrawInFlight) return;
+  remoteDrawInFlight = true;
+  try {
+    while (remotePendingFrame) {
+      const frame = remotePendingFrame;
+      remotePendingFrame = null;
+      try {
+        await drawRemoteFrame(frame);
+      } catch (e) {
+        console.warn("remote video draw failed:", e);
+      }
+    }
+  } finally {
+    remoteDrawInFlight = false;
+    if (remotePendingFrame) void pumpRemoteVideoFrames();
+  }
+}
 
 listen("video:frame", (event: any) => {
   const { width, height, jpeg_b64 } = event.payload;
@@ -616,17 +655,16 @@ listen("video:frame", (event: any) => {
   remoteVideoActive = true;
   vdVideoStrip.classList.remove("hidden");
   vdRemotePlaceholder.classList.add("hidden");
-  vdRemoteVideo.width = width ?? vdRemoteVideo.width;
-  vdRemoteVideo.height = height ?? vdRemoteVideo.height;
   remoteFrameCount++;
   if (remoteFrameCount === 1) console.log("first remote video frame:", width, "x", height);
 
-  const img = new Image();
-  img.onload = () => {
-    if (frameSerial !== remoteFrameSerial) return;
-    remoteCtx.drawImage(img, 0, 0, vdRemoteVideo.width, vdRemoteVideo.height);
+  remotePendingFrame = {
+    serial: frameSerial,
+    width: width ?? vdRemoteVideo.width,
+    height: height ?? vdRemoteVideo.height,
+    jpeg_b64,
   };
-  img.src = `data:image/jpeg;base64,${jpeg_b64}`;
+  void pumpRemoteVideoFrames();
 });
 
 // ── Poll status ───────────────────────────────────────────────────

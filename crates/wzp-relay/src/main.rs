@@ -2028,7 +2028,7 @@ async fn main() -> anyhow::Result<()> {
                     (None, None)
                 };
 
-                let media_handle = tokio::spawn(room::run_participant(
+                let mut media_handle = tokio::spawn(room::run_participant(
                     room_mgr.clone(),
                     room_name.clone(),
                     participant_id,
@@ -2041,15 +2041,38 @@ async fn main() -> anyhow::Result<()> {
                     federation_room_hash,
                     authenticated_fp.is_some(),
                 ));
-                let signal_handle = tokio::spawn(room::run_participant_signals(
+                let mut signal_handle = tokio::spawn(room::run_participant_signals(
                     room_mgr.clone(),
                     room_name.clone(),
                     participant_id,
                     transport.clone(),
                 ));
                 tokio::select! {
-                    _ = media_handle => {},
-                    _ = signal_handle => {},
+                    _ = &mut media_handle => {
+                        signal_handle.abort();
+                        let _ = signal_handle.await;
+                    },
+                    _ = &mut signal_handle => {
+                        close_transport(&*transport, "signal-loop-ended").await;
+                        match tokio::time::timeout(Duration::from_secs(2), &mut media_handle).await {
+                            Ok(_) => {}
+                            Err(_) => {
+                                warn!(
+                                    %addr,
+                                    room = %room_name,
+                                    participant = participant_id,
+                                    "media loop did not exit after signal close; forcing room leave"
+                                );
+                                media_handle.abort();
+                                let _ = media_handle.await;
+                                if let Some((update, senders)) =
+                                    room_mgr.leave(&room_name, participant_id)
+                                {
+                                    room::broadcast_signal(&senders, &update).await;
+                                }
+                            }
+                        }
+                    },
                 }
 
                 // Participant disconnected — clean up presence + per-session metrics

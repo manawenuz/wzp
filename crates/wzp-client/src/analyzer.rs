@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use tracing::info;
 
-use wzp_proto::{CodecId, MediaPacket, MediaTransport, default_signal_version};
+use wzp_proto::{CodecId, MediaPacket, MediaTransport, MediaType, default_signal_version};
+use wzp_video::{VideoDecoder, create_video_decoder, transport::VideoReassembler};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -68,6 +69,14 @@ struct Args {
     // For now, header-only analysis provides loss%, jitter, codec stats.
     #[arg(long)]
     key: Option<String>,
+
+    /// Track video fragmentation, completed frames, keyframes, and decode health.
+    #[arg(long)]
+    video_probe: bool,
+
+    /// Decode completed video frames in --video-probe mode.
+    #[arg(long)]
+    video_decode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +205,295 @@ fn find_or_create_participant(
     let id = participants.len();
     participants.push(ParticipantStats::new(id, codec));
     id
+}
+
+// ---------------------------------------------------------------------------
+// Video probe
+// ---------------------------------------------------------------------------
+
+#[derive(Default, Clone)]
+struct PlaneSample {
+    min: u8,
+    max: u8,
+    mean: f64,
+}
+
+#[derive(Default, Clone)]
+struct I420Sample {
+    y: PlaneSample,
+    u: PlaneSample,
+    v: PlaneSample,
+    valid_i420: bool,
+}
+
+struct VideoStreamProbe {
+    id: usize,
+    codec: CodecId,
+    wire_stream_id: u8,
+    packets: u64,
+    lost: u64,
+    last_seq: u32,
+    seq_initialized: bool,
+    frames: u64,
+    keyframes: u64,
+    bytes: u64,
+    max_frame_bytes: usize,
+    first_seen: Instant,
+    last_seen: Instant,
+    last_frame: Option<Instant>,
+    reassembler: VideoReassembler,
+    decoder: Option<Box<dyn VideoDecoder>>,
+    decode_ok: u64,
+    decode_pending: u64,
+    decode_err: u64,
+    last_decode_debug: Option<String>,
+    last_i420_sample: Option<I420Sample>,
+}
+
+impl VideoStreamProbe {
+    fn new(id: usize, codec: CodecId, wire_stream_id: u8, decode: bool) -> Self {
+        let decoder = if decode {
+            create_video_decoder(codec, 1280, 720).ok()
+        } else {
+            None
+        };
+        let now = Instant::now();
+        Self {
+            id,
+            codec,
+            wire_stream_id,
+            packets: 0,
+            lost: 0,
+            last_seq: 0,
+            seq_initialized: false,
+            frames: 0,
+            keyframes: 0,
+            bytes: 0,
+            max_frame_bytes: 0,
+            first_seen: now,
+            last_seen: now,
+            last_frame: None,
+            reassembler: VideoReassembler::new(),
+            decoder,
+            decode_ok: 0,
+            decode_pending: 0,
+            decode_err: 0,
+            last_decode_debug: None,
+            last_i420_sample: None,
+        }
+    }
+
+    fn ingest(&mut self, pkt: &MediaPacket, now: Instant) {
+        self.packets += 1;
+        self.last_seen = now;
+        if pkt.header.codec_id != self.codec {
+            self.codec = pkt.header.codec_id;
+            self.reassembler = VideoReassembler::new();
+            self.decoder = self
+                .decoder
+                .is_some()
+                .then(|| create_video_decoder(self.codec, 1280, 720).ok())
+                .flatten();
+        }
+        if self.seq_initialized {
+            let expected = self.last_seq.wrapping_add(1);
+            let gap = pkt.header.seq.wrapping_sub(expected);
+            if gap > 0 && gap < 100 {
+                self.lost += gap as u64;
+            }
+        }
+        self.last_seq = pkt.header.seq;
+        self.seq_initialized = true;
+
+        if let Some((codec, keyframe, frame)) = self.reassembler.push(pkt) {
+            self.frames += 1;
+            self.bytes += frame.len() as u64;
+            self.max_frame_bytes = self.max_frame_bytes.max(frame.len());
+            self.last_frame = Some(now);
+            if keyframe {
+                self.keyframes += 1;
+            }
+            if codec != self.codec {
+                self.codec = codec;
+            }
+            if let Some(decoder) = self.decoder.as_mut() {
+                match decoder.decode(&frame) {
+                    Ok(Some(decoded)) => {
+                        self.decode_ok += 1;
+                        self.last_decode_debug = decoder.debug_snapshot();
+                        self.last_i420_sample =
+                            Some(sample_i420(&decoded.data, decoded.width, decoded.height));
+                    }
+                    Ok(None) => {
+                        self.decode_pending += 1;
+                        self.last_decode_debug = decoder.debug_snapshot();
+                    }
+                    Err(err) => {
+                        self.decode_err += 1;
+                        self.last_decode_debug = Some(err.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    fn loss_percent(&self) -> f64 {
+        let total = self.packets + self.lost;
+        if total == 0 {
+            0.0
+        } else {
+            (self.lost as f64 / total as f64) * 100.0
+        }
+    }
+
+    fn avg_frame_bytes(&self) -> u64 {
+        if self.frames == 0 {
+            0
+        } else {
+            self.bytes / self.frames
+        }
+    }
+
+    fn fps(&self) -> f64 {
+        let secs = self.last_seen.duration_since(self.first_seen).as_secs_f64();
+        if secs <= 0.0 {
+            0.0
+        } else {
+            self.frames as f64 / secs
+        }
+    }
+}
+
+struct VideoProbe {
+    streams: Vec<VideoStreamProbe>,
+    decode: bool,
+}
+
+impl VideoProbe {
+    fn new(decode: bool) -> Self {
+        Self {
+            streams: Vec::new(),
+            decode,
+        }
+    }
+
+    fn ingest(&mut self, pkt: &MediaPacket, now: Instant) {
+        if pkt.header.media_type != MediaType::Video {
+            return;
+        }
+        let idx = self.find_or_create_stream(pkt);
+        self.streams[idx].ingest(pkt, now);
+    }
+
+    fn find_or_create_stream(&mut self, pkt: &MediaPacket) -> usize {
+        for (i, s) in self.streams.iter().enumerate() {
+            if s.seq_initialized
+                && s.wire_stream_id == pkt.header.stream_id
+                && s.codec == pkt.header.codec_id
+            {
+                let delta = pkt.header.seq.wrapping_sub(s.last_seq);
+                if delta > 0 && delta < 80 {
+                    return i;
+                }
+            }
+        }
+        let id = self.streams.len();
+        self.streams.push(VideoStreamProbe::new(
+            id,
+            pkt.header.codec_id,
+            pkt.header.stream_id,
+            self.decode,
+        ));
+        id
+    }
+
+    fn print(&self) {
+        if self.streams.is_empty() {
+            eprintln!("  video: no packets yet");
+            return;
+        }
+        for s in &self.streams {
+            let age_ms = s
+                .last_frame
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(u64::MAX);
+            let mut line = format!(
+                "  video#{} wire_stream={} {:?}: {} pkts {:.1}% loss | {} frames ({:.1} fps), {} key, avg={}B max={}B, last_frame={}ms",
+                s.id,
+                s.wire_stream_id,
+                s.codec,
+                s.packets,
+                s.loss_percent(),
+                s.frames,
+                s.fps(),
+                s.keyframes,
+                s.avg_frame_bytes(),
+                s.max_frame_bytes,
+                if age_ms == u64::MAX { 0 } else { age_ms },
+            );
+            if s.decoder.is_some() || s.decode_ok > 0 || s.decode_err > 0 {
+                line.push_str(&format!(
+                    " | dec ok={} pending={} err={}",
+                    s.decode_ok, s.decode_pending, s.decode_err
+                ));
+            }
+            if let Some(sample) = &s.last_i420_sample {
+                line.push_str(&format!(
+                    " | i420={} y={:.1}/{}/{} u={:.1}/{}/{} v={:.1}/{}/{}",
+                    sample.valid_i420,
+                    sample.y.mean,
+                    sample.y.min,
+                    sample.y.max,
+                    sample.u.mean,
+                    sample.u.min,
+                    sample.u.max,
+                    sample.v.mean,
+                    sample.v.min,
+                    sample.v.max,
+                ));
+            }
+            if let Some(debug) = &s.last_decode_debug {
+                line.push_str(&format!(" | {debug}"));
+            }
+            eprintln!("{line}");
+        }
+    }
+}
+
+fn sample_i420(data: &[u8], width: u32, height: u32) -> I420Sample {
+    let y_len = width as usize * height as usize;
+    let uv_len = y_len / 4;
+    if data.len() < y_len + uv_len * 2 {
+        return I420Sample {
+            valid_i420: false,
+            ..I420Sample::default()
+        };
+    }
+    I420Sample {
+        valid_i420: true,
+        y: sample_plane(&data[..y_len]),
+        u: sample_plane(&data[y_len..y_len + uv_len]),
+        v: sample_plane(&data[y_len + uv_len..y_len + uv_len * 2]),
+    }
+}
+
+fn sample_plane(data: &[u8]) -> PlaneSample {
+    if data.is_empty() {
+        return PlaneSample::default();
+    }
+    let mut min = u8::MAX;
+    let mut max = u8::MIN;
+    let mut sum: u64 = 0;
+    for &b in data {
+        min = min.min(b);
+        max = max.max(b);
+        sum += b as u64;
+    }
+    PlaneSample {
+        min,
+        max,
+        mean: sum as f64 / data.len() as f64,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +878,7 @@ async fn run_no_tui(
     total_packets: &mut u64,
     deadline: Option<Instant>,
     mut capture_writer: Option<&mut CaptureWriter>,
+    mut video_probe: Option<&mut VideoProbe>,
 ) -> anyhow::Result<()> {
     let mut print_timer = Instant::now();
     loop {
@@ -594,6 +893,9 @@ async fn run_no_tui(
                 let idx =
                     find_or_create_participant(participants, pkt.header.seq, pkt.header.codec_id);
                 participants[idx].ingest(&pkt, now);
+                if let Some(ref mut probe) = video_probe {
+                    probe.ingest(&pkt, now);
+                }
                 *total_packets += 1;
                 if let Some(ref mut w) = capture_writer {
                     w.write_packet(&pkt, now)?;
@@ -608,6 +910,9 @@ async fn run_no_tui(
         }
         if print_timer.elapsed() >= Duration::from_secs(2) {
             print_stats(participants, *total_packets);
+            if let Some(ref probe) = video_probe {
+                probe.print();
+            }
             print_timer = Instant::now();
         }
     }
@@ -616,7 +921,7 @@ async fn run_no_tui(
 
 fn print_stats(participants: &[ParticipantStats], total: u64) {
     eprintln!(
-        "--- {} participants | {} total packets ---",
+        "--- {} packet streams | {} total packets ---",
         participants.len(),
         total
     );
@@ -644,6 +949,7 @@ async fn run_tui(
     start_time: Instant,
     deadline: Option<Instant>,
     mut capture_writer: Option<&mut CaptureWriter>,
+    mut video_probe: Option<&mut VideoProbe>,
 ) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -684,6 +990,9 @@ async fn run_tui(
                         pkt.header.codec_id,
                     );
                     participants[idx].ingest(&pkt, now);
+                    if let Some(ref mut probe) = video_probe {
+                        probe.ingest(&pkt, now);
+                    }
                     *total_packets += 1;
                     if let Some(ref mut w) = capture_writer {
                         w.write_packet(&pkt, now)?;
@@ -941,6 +1250,17 @@ async fn main() -> anyhow::Result<()> {
     let mut participants: Vec<ParticipantStats> = Vec::new();
     let mut total_packets: u64 = 0;
     let start_time = Instant::now();
+    let mut video_probe = (args.video_probe || args.video_decode).then(|| {
+        eprintln!(
+            "Video probe enabled{}",
+            if args.video_decode {
+                " with decode"
+            } else {
+                ""
+            }
+        );
+        VideoProbe::new(args.video_decode)
+    });
 
     if args.no_tui {
         run_no_tui(
@@ -949,6 +1269,7 @@ async fn main() -> anyhow::Result<()> {
             &mut total_packets,
             deadline,
             capture_writer.as_mut(),
+            video_probe.as_mut(),
         )
         .await?;
     } else {
@@ -959,12 +1280,17 @@ async fn main() -> anyhow::Result<()> {
             start_time,
             deadline,
             capture_writer.as_mut(),
+            video_probe.as_mut(),
         )
         .await?;
     }
 
     // Print summary
     print_summary(&participants, total_packets, start_time.elapsed());
+    if let Some(probe) = &video_probe {
+        eprintln!("\n=== Video Probe Summary ===");
+        probe.print();
+    }
 
     // Clean close
     transport.close().await?;
