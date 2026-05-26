@@ -739,6 +739,10 @@ let remoteFrameSerial = 0;
 let remoteDrawInFlight = false;
 let remotePendingFrame: { serial: number; width: number; height: number; jpeg_b64: string } | null = null;
 
+function nextAnimationFrame() {
+  return new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+}
+
 async function drawRemoteFrame(frame: { serial: number; width: number; height: number; jpeg_b64: string }) {
   const img = new Image();
   img.src = `data:image/jpeg;base64,${frame.jpeg_b64}`;
@@ -751,6 +755,8 @@ async function drawRemoteFrame(frame: { serial: number; width: number; height: n
     });
   }
 
+  if (frame.serial !== remoteFrameSerial) return;
+  await nextAnimationFrame();
   if (frame.serial !== remoteFrameSerial) return;
   if (vdRemoteVideo.width !== frame.width) vdRemoteVideo.width = frame.width;
   if (vdRemoteVideo.height !== frame.height) vdRemoteVideo.height = frame.height;
