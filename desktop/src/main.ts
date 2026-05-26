@@ -470,6 +470,7 @@ function leaveVoice() {
   stopCamera();
   remoteVideoActive = false;
   remoteFrameCount = 0;
+  remoteFrameSerial++;
   vdRemoteCounter.textContent = "0 frames received";
   vdRemotePlaceholder.classList.remove("hidden");
   vdVideoStrip.classList.add("hidden");

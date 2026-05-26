@@ -95,6 +95,7 @@ struct PendingFrame {
     fragments: HashMap<u8, Vec<u8>>,
     total_fragments: u8,
     is_keyframe: bool,
+    saw_frame_end: bool,
     codec_id: Option<CodecId>,
 }
 
@@ -135,10 +136,15 @@ impl VideoReassembler {
         if is_keyframe {
             entry.is_keyframe = true;
         }
+        if is_frame_end {
+            entry.saw_frame_end = true;
+        }
         entry.codec_id = Some(hdr.codec_id);
 
-        // Only attempt reassembly once the last fragment has arrived.
-        if !is_frame_end {
+        // Attempt reassembly once we know the frame end has arrived. The end
+        // fragment can arrive before earlier fragments on QUIC/datagram paths,
+        // so retry on every later fragment instead of only on the end packet.
+        if !entry.saw_frame_end {
             return None;
         }
 
@@ -235,11 +241,10 @@ mod tests {
         // Deliver out of order: 2, 0, 1
         assert!(reassembler.push(&pkts[2]).is_none()); // last arrives first — no total_fragments yet
         assert!(reassembler.push(&pkts[0]).is_none());
-        let result = reassembler.push(&pkts[1]);
-        // Fragment 2 arrived before total was known, so reassembly waits
-        // for frame_end again — result may be None here due to missing total.
-        // This tests that we don't panic; correctness of OOO is best-effort.
-        let _ = result;
+        let result = reassembler.push(&pkts[1]).expect("last missing fragment completes frame");
+        assert_eq!(result.0, CodecId::Av1Main);
+        assert!(!result.1);
+        assert_eq!(result.2, frame);
     }
 
     #[test]
