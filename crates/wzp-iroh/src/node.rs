@@ -316,6 +316,15 @@ impl IrohNode {
 
     /// Say goodbye to online contacts, stop the router and close the endpoint.
     pub async fn shutdown(self) {
+        self.close().await;
+    }
+
+    /// Like [`shutdown`](Self::shutdown) but by reference, for owners that
+    /// share the node (e.g. behind an `Arc`). The node is unusable afterwards.
+    pub async fn close(&self) {
+        if self.inner.endpoint.is_closed() {
+            return;
+        }
         self.presence_task.abort();
         let online: Vec<EndpointId> = self
             .inner

@@ -14,6 +14,7 @@ members = [
     "crates/wzp-native",
     "crates/wzp-video",
     "crates/wzp-iroh",
+    "crates/wzp-share",
     "desktop/src-tauri",
 ]
 
@@ -67,6 +68,7 @@ wzp-crypto = { path = "crates/wzp-crypto" }
 wzp-transport = { path = "crates/wzp-transport" }
 wzp-client = { path = "crates/wzp-client" }
 wzp-files = { path = "crates/wzp-files" }
+wzp-iroh = { path = "crates/wzp-iroh" }
 
 # Fast dev profile: optimized but with debug info and incremental compilation.
 # Use with: cargo run --profile dev-fast

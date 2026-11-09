@@ -9482,6 +9482,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "wzp-share"
+version = "1.0.0"
+dependencies = [
+ "clap 4.6.1",
+ "hex",
+ "quinn",
+ "rand 0.8.6",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wzp-crypto",
+ "wzp-files",
+ "wzp-iroh",
+ "wzp-relay",
+ "wzp-transport",
+]
+
+[[package]]
 name = "wzp-transport"
 version = "1.0.0"
 dependencies = [
