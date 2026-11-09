@@ -9296,6 +9296,7 @@ dependencies = [
  "wzp-codec",
  "wzp-crypto",
  "wzp-fec",
+ "wzp-files",
  "wzp-proto",
  "wzp-relay",
  "wzp-transport",
@@ -9376,6 +9377,33 @@ dependencies = [
  "raptorq",
  "tracing",
  "wzp-proto",
+]
+
+[[package]]
+name = "wzp-files"
+version = "1.0.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "chacha20poly1305",
+ "hex",
+ "hkdf",
+ "quinn",
+ "rand 0.8.6",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wzp-crypto",
+ "wzp-proto",
+ "wzp-relay",
+ "wzp-transport",
+ "x25519-dalek",
 ]
 
 [[package]]

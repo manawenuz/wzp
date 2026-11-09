@@ -101,6 +101,26 @@ pub struct RelayConfig {
     /// JSONL event log path for protocol analysis (--event-log).
     #[serde(skip)]
     pub event_log: Option<String>,
+    /// File transfer (two-party rooms): sustained spliced-stream bytes/s
+    /// per session. Default 32 MiB/s.
+    pub file_rate_bytes_per_sec: u64,
+    /// File transfer: total spliced bytes allowed per session. Default 64 GiB.
+    pub file_session_byte_cap: u64,
+    /// File transfer: max bytes per spliced stream (≈ max file size).
+    /// Default 10 GiB + 128 MiB framing headroom.
+    pub file_stream_byte_cap: u64,
+}
+
+impl RelayConfig {
+    /// Limits for [`crate::file_relay::run_stream_splicer`].
+    pub fn file_stream_limits(&self) -> crate::file_relay::StreamRelayLimits {
+        crate::file_relay::StreamRelayLimits {
+            rate_bytes_per_sec: self.file_rate_bytes_per_sec,
+            session_byte_cap: self.file_session_byte_cap,
+            stream_byte_cap: self.file_stream_byte_cap,
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for RelayConfig {
@@ -126,6 +146,9 @@ impl Default for RelayConfig {
             advertised_addr: None,
             debug_tap: None,
             event_log: None,
+            file_rate_bytes_per_sec: 32 * 1024 * 1024,
+            file_session_byte_cap: 64 * 1024 * 1024 * 1024,
+            file_stream_byte_cap: 10 * 1024 * 1024 * 1024 + 128 * 1024 * 1024,
         }
     }
 }
