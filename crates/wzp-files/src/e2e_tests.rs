@@ -221,14 +221,18 @@ mod transfer {
         // sender saw progress and completion
         let mut saw_started = false;
         let mut saw_completed = false;
-        while let Ok(e) = ev.try_recv() {
-            match e {
-                Progress::Started { .. } => saw_started = true,
-                Progress::Completed { .. } => saw_completed = true,
-                _ => {}
+        // The sender's Completed event may be emitted just after the
+        // receiver-side wait() resolves, so drain with a short deadline.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !(saw_started && saw_completed) {
+            match tokio::time::timeout_at(deadline, ev.recv()).await {
+                Ok(Ok(Progress::Started { .. })) => saw_started = true,
+                Ok(Ok(Progress::Completed { .. })) => saw_completed = true,
+                Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(_)) | Err(_) => break,
             }
         }
-        assert!(saw_started && saw_completed);
+        assert!(saw_started && saw_completed, "started={saw_started} completed={saw_completed}");
 
         // Second transfer in the other direction on the same session.
         let back = random_file(&dst.path().join("reply.txt"), 1000);
