@@ -16,8 +16,8 @@ use crate::session::{IncomingData, Session};
 use crate::store::{self, PartFile};
 use crate::wire::{self, OpenReader, SealWriter, codes};
 use crate::{
-    Direction, FileConfig, FileError, MAX_CHUNK_SIZE, MAX_CHUNKS, MIN_CHUNK_SIZE, Progress,
-    Result, TransferId,
+    Direction, FileConfig, FileError, MAX_CHUNK_SIZE, MAX_CHUNKS, MIN_CHUNK_SIZE, Progress, Result,
+    TransferId,
 };
 
 const CTL_SIGNAL: u8 = 0;
@@ -286,7 +286,10 @@ impl FileEndpoint {
         }
         let meta = tokio::fs::metadata(path).await?;
         if !meta.is_file() {
-            return Err(FileError::Invalid(format!("{} is not a file", path.display())));
+            return Err(FileError::Invalid(format!(
+                "{} is not a file",
+                path.display()
+            )));
         }
         if meta.len() > inner.cfg.max_size {
             return Err(FileError::TooLarge {
@@ -296,7 +299,9 @@ impl FileEndpoint {
         }
         let chunk_size = inner.cfg.chunk_size.clamp(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE);
         if manifest::chunk_count(meta.len(), chunk_size) > MAX_CHUNKS {
-            return Err(FileError::Invalid("too many chunks; raise chunk_size".into()));
+            return Err(FileError::Invalid(
+                "too many chunks; raise chunk_size".into(),
+            ));
         }
         let p = path.to_path_buf();
         let (size, hashes) =
@@ -332,10 +337,14 @@ impl FileEndpoint {
             notify: Notify::new(),
             stop,
             corrupt_once: Mutex::new(inner.cfg.test_corrupt_chunks.iter().copied().collect()),
-            pacer: inner.cfg.max_send_rate.filter(|r| *r > 0).map(|rate| Pacer {
-                rate,
-                next: Mutex::new(tokio::time::Instant::now()),
-            }),
+            pacer: inner
+                .cfg
+                .max_send_rate
+                .filter(|r| *r > 0)
+                .map(|rate| Pacer {
+                    rate,
+                    next: Mutex::new(tokio::time::Instant::now()),
+                }),
             done,
         });
         inner.out.lock().unwrap().insert(id, og.clone());
@@ -409,8 +418,21 @@ impl FileEndpoint {
             if let Some(o) = f.get(&id) {
                 return outcome_result(o.clone());
             }
-            let out = self.inner.out.lock().unwrap().get(&id).map(|o| o.done.subscribe());
-            out.or_else(|| self.inner.inc.lock().unwrap().get(&id).map(|i| i.done.subscribe()))
+            let out = self
+                .inner
+                .out
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|o| o.done.subscribe());
+            out.or_else(|| {
+                self.inner
+                    .inc
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map(|i| i.done.subscribe())
+            })
         };
         let outcome = match rx {
             Some(mut rx) => {
@@ -644,7 +666,18 @@ async fn handle_signal(inner: &Arc<Inner>, msg: SignalMessage) {
             mime,
             chunk_size,
             ..
-        } => handle_offer(inner, TransferId(transfer_id), name, size, blake3_root, mime, chunk_size).await,
+        } => {
+            handle_offer(
+                inner,
+                TransferId(transfer_id),
+                name,
+                size,
+                blake3_root,
+                mime,
+                chunk_size,
+            )
+            .await
+        }
         SignalMessage::FileAccept {
             transfer_id,
             resume_bitmap,
@@ -702,7 +735,11 @@ async fn handle_signal(inner: &Arc<Inner>, msg: SignalMessage) {
                     info!(transfer = %id, "transfer complete (peer verified)");
                     finish(inner, id, Outcome::Completed(og.path.clone()));
                 } else {
-                    finish(inner, id, Outcome::Failed("peer reported wrong root".into()));
+                    finish(
+                        inner,
+                        id,
+                        Outcome::Failed("peer reported wrong root".into()),
+                    );
                 }
             }
         }
@@ -725,7 +762,10 @@ async fn handle_signal(inner: &Arc<Inner>, msg: SignalMessage) {
                 }
             }
         }
-        other => debug!("ignoring non-file signal {:?}", std::mem::discriminant(&other)),
+        other => debug!(
+            "ignoring non-file signal {:?}",
+            std::mem::discriminant(&other)
+        ),
     }
 }
 
@@ -754,11 +794,17 @@ async fn handle_offer(
             .await;
         }
     };
-    if inner.inc.lock().unwrap().contains_key(&id) || inner.finished.lock().unwrap().contains_key(&id) {
+    if inner.inc.lock().unwrap().contains_key(&id)
+        || inner.finished.lock().unwrap().contains_key(&id)
+    {
         return reject("duplicate transfer id".into()).await;
     }
     if size > inner.cfg.max_size {
-        return reject(format!("file too large ({size} > {} bytes)", inner.cfg.max_size)).await;
+        return reject(format!(
+            "file too large ({size} > {} bytes)",
+            inner.cfg.max_size
+        ))
+        .await;
     }
     if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
         return reject(format!("unsupported chunk size {chunk_size}")).await;
@@ -879,10 +925,12 @@ async fn accept_incoming(inner: &Arc<Inner>, inc: Arc<Incoming>) {
     let id = inc.id;
     let dir = inner.cfg.download_dir.clone();
     let (name, size, cs, root, n) = (inc.name.clone(), inc.size, inc.chunk_size, inc.root, inc.n);
-    let part = tokio::task::spawn_blocking(move || PartFile::open_or_create(&dir, &name, size, cs, root, n))
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))
-        .and_then(|r| r);
+    let part = tokio::task::spawn_blocking(move || {
+        PartFile::open_or_create(&dir, &name, size, cs, root, n)
+    })
+    .await
+    .map_err(|e| std::io::Error::other(e.to_string()))
+    .and_then(|r| r);
     let part = match part {
         Ok(p) => p,
         Err(e) => {
@@ -951,7 +999,12 @@ async fn accept_incoming(inner: &Arc<Inner>, inc: Arc<Incoming>) {
             let missing: Vec<u32> = {
                 let p = inc.part.lock().unwrap();
                 match p.as_ref() {
-                    Some(p) => p.bitmap.missing().take(MAX_NACK_ENTRIES).map(|i| i as u32).collect(),
+                    Some(p) => p
+                        .bitmap
+                        .missing()
+                        .take(MAX_NACK_ENTRIES)
+                        .map(|i| i as u32)
+                        .collect(),
                     None => break,
                 }
             };
@@ -991,7 +1044,11 @@ async fn handle_accept(inner: &Arc<Inner>, id: TransferId, resume: Option<Vec<u8
             Some(bm) => bm,
             None => {
                 let _ = send_signal(inner, &cancel_msg(id)).await;
-                finish(inner, id, Outcome::Failed("peer sent malformed resume bitmap".into()));
+                finish(
+                    inner,
+                    id,
+                    Outcome::Failed("peer sent malformed resume bitmap".into()),
+                );
                 return;
             }
         },
@@ -1041,13 +1098,22 @@ fn handle_manifest(inner: &Arc<Inner>, body: &[u8]) {
     if *inc.state.lock().unwrap() != IncState::Receiving || inc.hashes.borrow().is_some() {
         return;
     }
-    let hashes: Vec<[u8; 32]> = body[16..].chunks_exact(32).map(|c| c.try_into().unwrap()).collect();
-    if hashes.len() as u64 != inc.n || manifest::manifest_root(inc.size, inc.chunk_size, &hashes) != inc.root {
+    let hashes: Vec<[u8; 32]> = body[16..]
+        .chunks_exact(32)
+        .map(|c| c.try_into().unwrap())
+        .collect();
+    if hashes.len() as u64 != inc.n
+        || manifest::manifest_root(inc.size, inc.chunk_size, &hashes) != inc.root
+    {
         warn!(transfer = %id, "manifest does not match offered root");
         let inner = inner.clone();
         tokio::spawn(async move {
             let _ = send_signal(&inner, &cancel_msg(id)).await;
-            finish(&inner, id, Outcome::Failed("manifest does not match offered root".into()));
+            finish(
+                &inner,
+                id,
+                Outcome::Failed("manifest does not match offered root".into()),
+            );
         });
         return;
     }
@@ -1159,7 +1225,13 @@ async fn data_accept_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<IncomingData
 }
 
 async fn recv_stream(inner: Arc<Inner>, d: IncomingData) {
-    let mut r = OpenReader::new(d.stream, &inner.recv_key, d.salt, wire::MAGIC_DATA, wire::DATA_FRAME_LIMIT);
+    let mut r = OpenReader::new(
+        d.stream,
+        &inner.recv_key,
+        d.salt,
+        wire::MAGIC_DATA,
+        wire::DATA_FRAME_LIMIT,
+    );
     loop {
         let frame = match r.recv().await {
             Ok(Some(f)) => f,
@@ -1231,7 +1303,11 @@ async fn recv_stream(inner: Arc<Inner>, d: IncomingData) {
             warn!(transfer = %id, chunk = idx, tries, "chunk failed BLAKE3 verification, NACKing");
             if tries > inner.cfg.max_chunk_retries {
                 let _ = send_signal(&inner, &cancel_msg(id)).await;
-                finish(&inner, id, Outcome::Failed(format!("chunk {idx} kept failing verification")));
+                finish(
+                    &inner,
+                    id,
+                    Outcome::Failed(format!("chunk {idx} kept failing verification")),
+                );
                 return;
             }
             let _ = send_signal(
@@ -1389,7 +1465,9 @@ mod tests {
 
     /// B is a real endpoint; A is a hand-driven (possibly malicious) peer.
     async fn raw_pair(dir: &Path) -> (Session, FileEndpoint) {
-        let l = listen_direct("127.0.0.1:0".parse().unwrap(), &[1u8; 32]).await.unwrap();
+        let l = listen_direct("127.0.0.1:0".parse().unwrap(), &[1u8; 32])
+            .await
+            .unwrap();
         let addr = l.local_addr().unwrap();
         let o = ConnectOptions::default();
         let (a, b) = tokio::join!(connect_direct(addr, &[2u8; 32], &o), l.accept(&o));
@@ -1424,9 +1502,33 @@ mod tests {
 
         // Unsolicited FileAccept / ChunkNack / FileComplete: ignored.
         let bogus = [9u8; 16];
-        raw_signal(&mut a, &SignalMessage::FileAccept { version: 1, transfer_id: bogus, resume_bitmap: None }).await;
-        raw_signal(&mut a, &SignalMessage::ChunkNack { version: 1, transfer_id: bogus, chunks: vec![1] }).await;
-        raw_signal(&mut a, &SignalMessage::FileComplete { version: 1, transfer_id: bogus, blake3_root: [0; 32] }).await;
+        raw_signal(
+            &mut a,
+            &SignalMessage::FileAccept {
+                version: 1,
+                transfer_id: bogus,
+                resume_bitmap: None,
+            },
+        )
+        .await;
+        raw_signal(
+            &mut a,
+            &SignalMessage::ChunkNack {
+                version: 1,
+                transfer_id: bogus,
+                chunks: vec![1],
+            },
+        )
+        .await;
+        raw_signal(
+            &mut a,
+            &SignalMessage::FileComplete {
+                version: 1,
+                transfer_id: bogus,
+                blake3_root: [0; 32],
+            },
+        )
+        .await;
 
         // Chunk data for a transfer that was never offered/accepted.
         let mut w = raw_data_stream(&a).await;
@@ -1437,40 +1539,78 @@ mod tests {
         let mut d = vec![DATA_CHUNK_BYTES];
         d.extend_from_slice(&[0xAA; 1000]);
         let _ = w.send(&d).await;
-        let code = tokio::time::timeout(Duration::from_secs(5), w.stopped()).await.unwrap();
+        let code = tokio::time::timeout(Duration::from_secs(5), w.stopped())
+            .await
+            .unwrap();
         assert_eq!(code, Some(codes::UNSOLICITED));
 
         // Offered but not yet accepted: still refused.
         let id = [7u8; 16];
-        raw_signal(&mut a, &SignalMessage::FileOffer {
-            version: 1, transfer_id: id, name: "../../evil.txt".into(), size: 10,
-            blake3_root: [0; 32], mime: None, chunk_size: MIN_CHUNK_SIZE,
-        }).await;
-        let offer = tokio::time::timeout(Duration::from_secs(5), b.next_offer()).await.unwrap().unwrap();
-        assert_eq!(offer.name, "evil.txt", "peer-supplied path components stripped");
+        raw_signal(
+            &mut a,
+            &SignalMessage::FileOffer {
+                version: 1,
+                transfer_id: id,
+                name: "../../evil.txt".into(),
+                size: 10,
+                blake3_root: [0; 32],
+                mime: None,
+                chunk_size: MIN_CHUNK_SIZE,
+            },
+        )
+        .await;
+        let offer = tokio::time::timeout(Duration::from_secs(5), b.next_offer())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            offer.name, "evil.txt",
+            "peer-supplied path components stripped"
+        );
         let mut w = raw_data_stream(&a).await;
         let mut start = vec![DATA_CHUNK_START];
         start.extend_from_slice(&id);
         start.extend_from_slice(&0u32.to_be_bytes());
         w.send(&start).await.unwrap();
-        let code = tokio::time::timeout(Duration::from_secs(5), w.stopped()).await.unwrap();
+        let code = tokio::time::timeout(Duration::from_secs(5), w.stopped())
+            .await
+            .unwrap();
         assert_eq!(code, Some(codes::UNSOLICITED));
         offer.reject("no");
 
         // Bad chunk size / duplicate id are rejected without prompting.
-        raw_signal(&mut a, &SignalMessage::FileOffer {
-            version: 1, transfer_id: [8u8; 16], name: "x".into(), size: 10,
-            blake3_root: [0; 32], mime: None, chunk_size: 3,
-        }).await;
+        raw_signal(
+            &mut a,
+            &SignalMessage::FileOffer {
+                version: 1,
+                transfer_id: [8u8; 16],
+                name: "x".into(),
+                size: 10,
+                blake3_root: [0; 32],
+                mime: None,
+                chunk_size: 3,
+            },
+        )
+        .await;
         let mut rx = a.ctl_rx.take().unwrap();
         let mut rejected = 0;
         while rejected < 2 {
-            let f = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap().unwrap();
-            if let Ok(SignalMessage::FileReject { reason, .. }) = serde_json::from_slice::<SignalMessage>(&f[1..]) {
+            let f = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let Ok(SignalMessage::FileReject { reason, .. }) =
+                serde_json::from_slice::<SignalMessage>(&f[1..])
+            {
                 rejected += 1;
                 assert!(reason == "no" || reason.contains("chunk size"), "{reason}");
             }
         }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing written");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "nothing written"
+        );
     }
 }

@@ -82,7 +82,11 @@ pub struct RelayRendezvous {
 
 impl FileSessionInvite {
     /// New invite for `inviter_seed`'s identity with a fresh random relay room.
-    pub fn new(relay: Option<SocketAddr>, direct: Vec<SocketAddr>, inviter_seed: &[u8; 32]) -> Self {
+    pub fn new(
+        relay: Option<SocketAddr>,
+        direct: Vec<SocketAddr>,
+        inviter_seed: &[u8; 32],
+    ) -> Self {
         Self {
             version: 1,
             relay: relay.map(|addr| RelayRendezvous {
@@ -327,7 +331,9 @@ pub async fn connect_via_relay_with(
                 Ok(Some(SignalMessage::RoomUpdate { count, .. })) => {
                     let _ = count_tx.send(count);
                 }
-                Ok(Some(other)) => debug!("relay signal ignored: {:?}", std::mem::discriminant(&other)),
+                Ok(Some(other)) => {
+                    debug!("relay signal ignored: {:?}", std::mem::discriminant(&other))
+                }
                 Ok(None) => break,
                 Err(wzp_proto::TransportError::Deserialize(e)) => debug!("relay signal: {e}"),
                 Err(_) => break,
@@ -351,7 +357,9 @@ pub async fn connect_via_relay_with(
         Ok(true) => {}
         Ok(false) => {
             watcher.abort();
-            return Err(FileError::Transport("relay closed while waiting for peer".into()));
+            return Err(FileError::Transport(
+                "relay closed while waiting for peer".into(),
+            ));
         }
         Err(_) => {
             watcher.abort();
@@ -657,13 +665,17 @@ async fn handshake(
     if let Some(exp) = opts.expected_peer {
         if exp != peer_fp {
             fail(&tasks);
-            conn.close(quinn::VarInt::from_u32(wire::codes::PROTOCOL), b"wrong peer");
+            conn.close(
+                quinn::VarInt::from_u32(wire::codes::PROTOCOL),
+                b"wrong peer",
+            );
             return Err(FileError::Auth(format!(
                 "peer fingerprint {peer_fp} != expected {exp}"
             )));
         }
     }
-    let shared = eph_secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_hello.ephemeral_pub));
+    let shared =
+        eph_secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_hello.ephemeral_pub));
     if !shared.was_contributory() {
         fail(&tasks);
         return Err(FileError::Auth("non-contributory key exchange".into()));
@@ -672,7 +684,12 @@ async fn handshake(
     info!(peer = %peer_fp, sas = keys.sas, relayed, "wzp-files session established");
 
     Ok(Session {
-        ctl_tx: Some(SealWriter::new(send, &keys.send, hello.salt, wire::MAGIC_CONTROL)),
+        ctl_tx: Some(SealWriter::new(
+            send,
+            &keys.send,
+            hello.salt,
+            wire::MAGIC_CONTROL,
+        )),
         ctl_rx: Some(OpenReader::new(
             peer_recv,
             &keys.recv,
@@ -700,7 +717,9 @@ async fn dispatch_uni(
     data_tx: mpsc::Sender<IncomingData>,
 ) {
     let mut control_taken = false;
-    let seen = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<[u8; 16]>::new()));
+    let seen = Arc::new(std::sync::Mutex::new(
+        std::collections::HashSet::<[u8; 16]>::new(),
+    ));
     loop {
         let mut recv = match conn.accept_uni().await {
             Ok(r) => r,
@@ -722,12 +741,17 @@ async fn dispatch_uni(
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut salt = [0u8; 16];
-                let r = tokio::time::timeout(Duration::from_secs(10), recv.read_exact(&mut salt)).await;
+                let r =
+                    tokio::time::timeout(Duration::from_secs(10), recv.read_exact(&mut salt)).await;
                 if !matches!(r, Ok(Ok(()))) || !seen.lock().unwrap().insert(salt) {
                     let _ = recv.stop(quinn::VarInt::from_u32(wire::codes::PROTOCOL));
                     return;
                 }
-                if data_tx.send(IncomingData { stream: recv, salt }).await.is_err() {
+                if data_tx
+                    .send(IncomingData { stream: recv, salt })
+                    .await
+                    .is_err()
+                {
                     // endpoint gone
                 }
             });

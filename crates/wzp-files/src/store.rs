@@ -112,7 +112,9 @@ impl PartFile {
         let want_root = hex::encode(root);
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
             let fname = entry.file_name();
-            let Some(fname) = fname.to_str() else { continue };
+            let Some(fname) = fname.to_str() else {
+                continue;
+            };
             let Some(name) = fname.strip_suffix(STATE_SUFFIX) else {
                 continue;
             };

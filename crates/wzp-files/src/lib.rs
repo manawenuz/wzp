@@ -29,6 +29,8 @@
 //! # Ok(()) }
 //! ```
 
+#[cfg(test)]
+mod e2e_tests;
 mod endpoint;
 pub mod manifest;
 pub mod session;

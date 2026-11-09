@@ -7,6 +7,9 @@
 //!   wzp-client --record out.raw [relay-addr]    Record received audio to raw PCM file
 //!   wzp-client --send-tone 10 --record out.raw [relay-addr]   Both at once
 //!
+//!   wzp-client send-file <path> --relay <addr> --room <token>   Send a file (E2E, resumable)
+//!   wzp-client receive-files --relay <addr> --room <token> --dir <dir> [--auto-accept]
+//!
 //! Raw PCM files are 48kHz mono 16-bit signed little-endian.
 //! Play with: ffplay -f s16le -ar 48000 -ac 1 out.raw
 //! Or convert: ffmpeg -f s16le -ar 48000 -ac 1 -i out.raw out.wav
@@ -17,6 +20,8 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use wzp_client::call::{CallConfig, CallDecoder, CallEncoder};
+
+mod file_cli;
 use wzp_proto::{MediaTransport, default_signal_version};
 
 const FRAME_SAMPLES: usize = 960; // 20ms @ 48kHz
@@ -197,6 +202,11 @@ fn parse_args() -> CliArgs {
             }
             "--help" | "-h" => {
                 eprintln!("Usage: wzp-client [options] [relay-addr]");
+                eprintln!("       wzp-client send-file <path> --relay <addr> --room <token>");
+                eprintln!(
+                    "       wzp-client receive-files --relay <addr> --room <token> --dir <dir> [--auto-accept]"
+                );
+                eprintln!("       (see `wzp-client send-file --help`)");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --live                 Live mic/speaker mode");
@@ -266,6 +276,12 @@ async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
+
+    // File transfer subcommands (send-file / receive-files).
+    let argv: Vec<String> = std::env::args().collect();
+    if file_cli::maybe_run(&argv).await? {
+        return Ok(());
+    }
 
     let cli = parse_args();
 

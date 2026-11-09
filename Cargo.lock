@@ -7703,6 +7703,7 @@ dependencies = [
  "wzp-codec",
  "wzp-crypto",
  "wzp-fec",
+ "wzp-files",
  "wzp-proto",
  "wzp-relay",
  "wzp-transport",

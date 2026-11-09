@@ -150,7 +150,8 @@ pub(crate) fn derive_keys(
         k
     };
     let mut sas = [0u8; 4];
-    hk.expand(b"wzp-files/v1/sas", &mut sas).expect("hkdf expand");
+    hk.expand(b"wzp-files/v1/sas", &mut sas)
+        .expect("hkdf expand");
     SessionKeys {
         send: key_for(my_eph),
         recv: key_for(peer_eph),

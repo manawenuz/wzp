@@ -210,7 +210,10 @@ async fn splice(
         stream_bytes += n as u64;
         let total = state.total.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
         if stream_bytes > limits.stream_byte_cap || total > limits.session_byte_cap {
-            warn!(stream_bytes, total, "spliced stream exceeded byte cap, resetting");
+            warn!(
+                stream_bytes,
+                total, "spliced stream exceeded byte cap, resetting"
+            );
             let _ = dst.reset(quinn::VarInt::from_u32(STREAM_CAP));
             let _ = src.stop(quinn::VarInt::from_u32(STREAM_CAP));
             return;
@@ -254,7 +257,9 @@ impl DataRateLimiter {
 
     /// True if a packet of `bytes` may be forwarded now.
     pub fn allow(&mut self, bytes: usize) -> bool {
-        self.bucket.try_consume(bytes as u64, Instant::now()).is_ok()
+        self.bucket
+            .try_consume(bytes as u64, Instant::now())
+            .is_ok()
     }
 }
 
