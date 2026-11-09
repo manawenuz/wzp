@@ -1238,6 +1238,132 @@ pub enum SignalMessage {
         /// Which media stream needs the keyframe.
         stream_id: u8,
     },
+
+    // ── File transfer (wzp-files, see docs/FILE-TRANSFER.md) ──────────────
+    //
+    // These travel end-to-end encrypted inside the wzp-files control
+    // channel; the relay never parses them. Peers that predate these
+    // variants fail deserialization with `TransportError::Deserialize`
+    // (unknown variant) and the existing signal loops log + continue, so
+    // an old peer cleanly ignores / rejects a file offer.
+    /// Sender proposes a file. `name` must be passed through
+    /// [`sanitize_file_name`] by the receiver before touching the disk.
+    FileOffer {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+        name: String,
+        size: u64,
+        /// BLAKE3 root over the per-chunk hash list (see FILE-TRANSFER.md).
+        blake3_root: [u8; 32],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+        chunk_size: u32,
+    },
+    /// Receiver consents. `resume_bitmap` (1 bit per chunk, LSB-first) lists
+    /// chunks it already holds from an earlier interrupted attempt.
+    FileAccept {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_bitmap: Option<Vec<u8>>,
+    },
+    /// Receiver declines (user said no, too large, unsolicited, ...).
+    FileReject {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+        reason: String,
+    },
+    /// Receiver-side progress (number of verified chunks on disk).
+    FileProgress {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+        chunks_done: u64,
+    },
+    /// Receiver verified every chunk + root and renamed the file into place.
+    FileComplete {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+        blake3_root: [u8; 32],
+    },
+    /// Either side aborts the transfer.
+    FileCancel {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+    },
+    /// Receiver asks for (re)transmission of chunks that failed their
+    /// BLAKE3 check or never arrived.
+    ChunkNack {
+        #[serde(default = "default_signal_version")]
+        version: u8,
+        transfer_id: [u8; 16],
+        chunks: Vec<u32>,
+    },
+}
+
+/// Maximum length (in bytes, UTF-8) of a sanitized file name.
+pub const MAX_FILE_NAME_BYTES: usize = 200;
+
+/// Turn an untrusted, peer-supplied file name into a safe single path
+/// component.
+///
+/// - strips every directory component (both `/` and `\` separators, so
+///   `..\..\x` from a Windows peer is handled on Unix too),
+/// - removes control characters and characters that are invalid on
+///   Windows (`<>:"|?*`), trims leading dots/spaces and trailing dots/spaces,
+/// - rejects Windows reserved device names (`CON`, `NUL`, `COM1`, ...),
+/// - caps the length at [`MAX_FILE_NAME_BYTES`] bytes on a char boundary,
+///   preserving the extension when it is short,
+/// - falls back to `"file"` if nothing usable remains.
+pub fn sanitize_file_name(raw: &str) -> String {
+    let last = raw
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or("");
+    let mut cleaned: String = last
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        .collect();
+    cleaned = cleaned
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+    if cleaned.is_empty() {
+        cleaned = "file".to_string();
+    }
+    // Windows reserved device names, with or without extension.
+    let stem_upper = cleaned
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.contains(&stem_upper.as_str()) {
+        cleaned = format!("_{cleaned}");
+    }
+    if cleaned.len() > MAX_FILE_NAME_BYTES {
+        let (stem, ext) = match cleaned.rfind('.') {
+            Some(i) if i > 0 && cleaned.len() - i <= 16 => {
+                (cleaned[..i].to_string(), cleaned[i..].to_string())
+            }
+            _ => (cleaned.clone(), String::new()),
+        };
+        let mut budget = MAX_FILE_NAME_BYTES - ext.len();
+        while !stem.is_char_boundary(budget) {
+            budget -= 1;
+        }
+        cleaned = format!("{}{}", &stem[..budget], ext);
+    }
+    cleaned
 }
 
 /// How the callee responds to a direct call.
@@ -2857,5 +2983,84 @@ mod tests {
         let bin = bincode::serialize(&original).unwrap();
         let decoded: SignalMessage = bincode::deserialize(&bin).unwrap();
         assert!(matches!(decoded, SignalMessage::SetPriorityMode { .. }));
+    }
+
+    // ── file transfer signals ────────────────────────────────────────────
+
+    #[test]
+    fn file_signals_roundtrip_json() {
+        let id = [7u8; 16];
+        let msgs = vec![
+            SignalMessage::FileOffer {
+                version: 1,
+                transfer_id: id,
+                name: "a.bin".into(),
+                size: 10 << 30,
+                blake3_root: [9; 32],
+                mime: Some("application/octet-stream".into()),
+                chunk_size: 1 << 20,
+            },
+            SignalMessage::FileAccept { version: 1, transfer_id: id, resume_bitmap: Some(vec![0xff, 1]) },
+            SignalMessage::FileReject { version: 1, transfer_id: id, reason: "no".into() },
+            SignalMessage::FileProgress { version: 1, transfer_id: id, chunks_done: 3 },
+            SignalMessage::FileComplete { version: 1, transfer_id: id, blake3_root: [1; 32] },
+            SignalMessage::FileCancel { version: 1, transfer_id: id },
+            SignalMessage::ChunkNack { version: 1, transfer_id: id, chunks: vec![1, 5] },
+        ];
+        for m in msgs {
+            let j = serde_json::to_string(&m).unwrap();
+            let back: SignalMessage = serde_json::from_str(&j).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), j);
+        }
+    }
+
+    #[test]
+    fn file_offer_version_and_mime_default() {
+        let j = format!(
+            r#"{{"FileOffer":{{"transfer_id":{:?},"name":"x","size":1,"blake3_root":{:?},"chunk_size":4}}}}"#,
+            [0u8; 16], [0u8; 32]
+        );
+        let m: SignalMessage = serde_json::from_str(&j).unwrap();
+        match m {
+            SignalMessage::FileOffer { version, mime, .. } => {
+                assert_eq!(version, 1);
+                assert!(mime.is_none());
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn unknown_future_file_variant_is_an_error() {
+        // Old peers see a new variant as a deserialize error, which the
+        // signal loops treat as "log and continue".
+        let r: Result<SignalMessage, _> = serde_json::from_str(r#"{"FileOfferV9":{"x":1}}"#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn sanitize_strips_paths_and_bad_chars() {
+        assert_eq!(sanitize_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_file_name("..\\..\\boot.ini"), "boot.ini");
+        assert_eq!(sanitize_file_name("/abs/path/x.txt"), "x.txt");
+        assert_eq!(sanitize_file_name("dir/"), "file");
+        assert_eq!(sanitize_file_name(".."), "file");
+        assert_eq!(sanitize_file_name(".hidden"), "hidden");
+        assert_eq!(sanitize_file_name("a\u{0}b\nc.txt"), "abc.txt");
+        assert_eq!(sanitize_file_name("what?<>:*|\".txt"), "what.txt");
+        assert_eq!(sanitize_file_name("CON"), "_CON");
+        assert_eq!(sanitize_file_name("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_file_name("trailing. . "), "trailing");
+        assert_eq!(sanitize_file_name("héllo wörld.pdf"), "héllo wörld.pdf");
+    }
+
+    #[test]
+    fn sanitize_caps_length_keeps_extension() {
+        let long = format!("{}.tar.gz", "é".repeat(400));
+        let s = sanitize_file_name(&long);
+        assert!(s.len() <= MAX_FILE_NAME_BYTES);
+        assert!(s.ends_with(".gz"));
+        let long2 = "x".repeat(1000);
+        assert_eq!(sanitize_file_name(&long2).len(), MAX_FILE_NAME_BYTES);
     }
 }

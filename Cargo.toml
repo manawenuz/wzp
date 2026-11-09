@@ -8,6 +8,7 @@ members = [
     "crates/wzp-transport",
     "crates/wzp-relay",
     "crates/wzp-client",
+    "crates/wzp-files",
     "crates/wzp-web",
     "crates/wzp-android",
     "crates/wzp-native",
@@ -64,6 +65,7 @@ wzp-fec = { path = "crates/wzp-fec" }
 wzp-crypto = { path = "crates/wzp-crypto" }
 wzp-transport = { path = "crates/wzp-transport" }
 wzp-client = { path = "crates/wzp-client" }
+wzp-files = { path = "crates/wzp-files" }
 
 # Fast dev profile: optimized but with debug info and incremental compilation.
 # Use with: cargo run --profile dev-fast
