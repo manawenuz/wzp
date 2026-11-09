@@ -51,6 +51,7 @@ jobs:
         with:
           key: windows-x64
           workspaces: '. -> target'
+          cache-on-failure: true
 
       - uses: actions/setup-node@v4
         with:
