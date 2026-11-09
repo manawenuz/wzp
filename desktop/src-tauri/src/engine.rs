@@ -2607,6 +2607,9 @@ impl CallEngine {
 
         // Audio I/O — VPIO (OS AEC) on macOS, plain CPAL otherwise.
         // The audio handle must be stored in CallEngine to keep streams alive.
+        // Only macOS (VPIO) produces stats; gating avoids an un-inferable
+        // `Option<_>` on Linux/Windows.
+        #[cfg(target_os = "macos")]
         let mut vpio_stats_for_debug = None;
         let (capture_ring, playout_ring, audio_handle): (_, _, Box<dyn std::any::Any + Send>) =
             if _os_aec {
@@ -2662,6 +2665,7 @@ impl CallEngine {
         let pending_profile = Arc::new(AtomicU8::new(PROFILE_NO_CHANGE));
         let auto_profile = resolve_quality(&quality).is_none();
 
+        #[cfg(target_os = "macos")]
         if let Some(vpio_stats) = vpio_stats_for_debug {
             let app = _app.clone();
             let running = running.clone();
