@@ -86,10 +86,7 @@ jobs:
       - name: Build desktop bundles (deb, rpm, AppImage)
         working-directory: desktop
         run: |
-          # desktop/package-lock.json is currently out of sync with
-          # package.json (@tauri-apps/api), so `npm ci` refuses to run.
-          # Switch back to `npm ci` once the lockfile is regenerated.
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npx tauri build --features linux-aec --verbose -- --locked
 
       - name: Collect artifacts
