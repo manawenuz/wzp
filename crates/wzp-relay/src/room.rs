@@ -1183,6 +1183,8 @@ pub async fn run_participant_signals(
         %addr,
         "signal loop started"
     );
+    // 20 file signals/s sustained, burst 200.
+    let mut file_signal_limiter = crate::file_relay::DataRateLimiter::with_rate(20, 200);
 
     loop {
         match transport.recv_signal().await {
@@ -1216,6 +1218,34 @@ pub async fn run_participant_signals(
                             stream_id,
                             "PLI suppressed (within 200 ms window)"
                         );
+                    }
+                }
+            }
+            Ok(Some(
+                msg @ (wzp_proto::SignalMessage::FileOffer { .. }
+                | wzp_proto::SignalMessage::FileAccept { .. }
+                | wzp_proto::SignalMessage::FileReject { .. }
+                | wzp_proto::SignalMessage::FileProgress { .. }
+                | wzp_proto::SignalMessage::FileComplete { .. }
+                | wzp_proto::SignalMessage::FileCancel { .. }
+                | wzp_proto::SignalMessage::ChunkNack { .. }),
+            )) => {
+                // File-transfer signals sent on the relay signal channel
+                // (wzp-files itself sends them E2E-encrypted inside spliced
+                // streams instead). Only forwarded in two-party rooms, and
+                // rate limited per session.
+                if !crate::file_relay::is_two_party_room(&room_name) {
+                    continue;
+                }
+                if !file_signal_limiter.allow(1) {
+                    warn!(room = %room_name, participant = participant_id, "file signal rate exceeded, dropping");
+                    continue;
+                }
+                for sender in room_mgr.others(&room_name, participant_id) {
+                    if let ParticipantSender::Quic(t) = sender {
+                        if let Err(e) = t.send_signal(&msg).await {
+                            debug!(room = %room_name, "file signal forward error: {e}");
+                        }
                     }
                 }
             }
@@ -1326,6 +1356,7 @@ async fn run_participant_plain(
     };
 
     let mut video_scorer = VideoScorer::new();
+    let mut data_limiter = crate::file_relay::DataRateLimiter::new();
     let mut last_bwe_kbps: Option<u32> = None;
 
     info!(
@@ -1362,6 +1393,14 @@ async fn run_participant_plain(
                 "stale participant loop stopped"
             );
             break;
+        }
+
+        // Bulk-data datagrams (file transfer, MediaType::Data) are shaped
+        // per session; over-budget packets are dropped.
+        if pkt.header.media_type == wzp_proto::MediaType::Data
+            && !data_limiter.allow(pkt.payload.len())
+        {
+            continue;
         }
 
         // Cache keyframe packets for fast join-to-first-frame replay.
@@ -1653,6 +1692,7 @@ async fn run_participant_trunked(
     let mut conformance =
         ConformanceMeter::with_token_bucket(crate::conformance::TokenBucket::for_audio_session());
     let mut video_scorer_trunked = VideoScorer::new();
+    let mut data_limiter = crate::file_relay::DataRateLimiter::new();
     let mut last_bwe_kbps_trunked: Option<u32> = None;
     let mut tap_stats = if debug_tap.as_ref().map_or(false, |t| t.matches(&room_name)) {
         Some(TapStats::new())
@@ -1705,6 +1745,12 @@ async fn run_participant_trunked(
                         "stale participant loop stopped (trunked)"
                     );
                     break;
+                }
+
+                if pkt.header.media_type == wzp_proto::MediaType::Data
+                    && !data_limiter.allow(pkt.payload.len())
+                {
+                    continue;
                 }
 
                 // Cache keyframe packets for fast join-to-first-frame replay.

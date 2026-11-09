@@ -35,11 +35,49 @@ pub struct ChaChaSession {
     anti_replay: HashMap<(u8, MediaType), AntiReplayWindow>,
     /// Last timestamp seen in encrypt() — used to assert monotonicity across rekeys.
     last_encrypt_timestamp: Option<u32>,
+    /// Nonce direction byte for packets we send.
+    send_dir: Direction,
+    /// Nonce direction byte expected on packets we receive.
+    recv_dir: Direction,
+}
+
+/// Which side of a pairwise session this endpoint is. Both peers share one
+/// key, so they must use opposite nonce direction bytes or their nonces
+/// collide (seq numbers start at 0 on both sides).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRole {
+    /// Sends with direction byte 0, receives 1.
+    Low,
+    /// Sends with direction byte 1, receives 0.
+    High,
+}
+
+impl SessionRole {
+    /// Deterministic role from the two ephemeral public keys: the side whose
+    /// key sorts lower is `Low`. Both peers reach complementary answers.
+    pub fn from_ephemerals(own: &[u8; 32], peer: &[u8; 32]) -> Self {
+        if own <= peer { SessionRole::Low } else { SessionRole::High }
+    }
 }
 
 impl ChaChaSession {
-    /// Create a new session from a 32-byte shared secret.
+    /// Create a session where encrypt and decrypt use the same nonce
+    /// direction. Only safe when a single side ever encrypts with this key
+    /// (tests, benchmarks, offline analysis of one direction). Real pairwise
+    /// sessions must use [`ChaChaSession::with_role`].
     pub fn new(shared_secret: [u8; 32]) -> Self {
+        Self::with_dirs(shared_secret, Direction::Send, Direction::Send)
+    }
+
+    /// Create a pairwise session for the given role.
+    pub fn with_role(shared_secret: [u8; 32], role: SessionRole) -> Self {
+        match role {
+            SessionRole::Low => Self::with_dirs(shared_secret, Direction::Send, Direction::Recv),
+            SessionRole::High => Self::with_dirs(shared_secret, Direction::Recv, Direction::Send),
+        }
+    }
+
+    fn with_dirs(shared_secret: [u8; 32], send_dir: Direction, recv_dir: Direction) -> Self {
         use sha2::Digest;
         let session_id_hash = sha2::Sha256::digest(&shared_secret);
         let mut session_id = [0u8; 4];
@@ -58,6 +96,8 @@ impl ChaChaSession {
             sas_code: None,
             anti_replay: HashMap::new(),
             last_encrypt_timestamp: None,
+            send_dir,
+            recv_dir,
         }
     }
 
@@ -109,7 +149,13 @@ impl CryptoSession for ChaChaSession {
         // same nonce using the header it receives, regardless of delivery order.
         let header = parse_header(header_bytes)
             .ok_or_else(|| CryptoError::Internal("header too short to derive nonce".into()))?;
-        let nonce_bytes = nonce::build_nonce(&self.session_id, header.seq, Direction::Send);
+        let nonce_bytes = nonce::build_media_nonce(
+            &self.session_id,
+            header.seq,
+            self.send_dir,
+            header.media_type.to_wire(),
+            header.stream_id,
+        );
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         use chacha20poly1305::aead::Payload;
@@ -153,7 +199,13 @@ impl CryptoSession for ChaChaSession {
         // causing every subsequent decryption to fail for the rest of the session.
         let header = parse_header(header_bytes)
             .ok_or_else(|| CryptoError::Internal("header too short to derive nonce".into()))?;
-        let nonce_bytes = nonce::build_nonce(&self.session_id, header.seq, Direction::Send);
+        let nonce_bytes = nonce::build_media_nonce(
+            &self.session_id,
+            header.seq,
+            self.recv_dir,
+            header.media_type.to_wire(),
+            header.stream_id,
+        );
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         use chacha20poly1305::aead::Payload;

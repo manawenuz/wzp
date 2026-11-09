@@ -51,7 +51,7 @@ struct Args {
     #[arg(long)]
     remote: Option<SocketAddr>,
 
-    /// featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate).
+    /// External token-validation endpoint (e.g., https://chat.example.com/v1/auth/validate).
     /// When set, clients must send a bearer token as first signal message.
     #[arg(long)]
     auth_url: Option<String>,
@@ -797,6 +797,7 @@ async fn main() -> anyhow::Result<()> {
         let relay_seed_bytes = relay_seed.0;
         let metrics = metrics.clone();
         let trunking_enabled = config.trunking_enabled;
+        let file_stream_limits = config.file_stream_limits();
         let debug_tap = config.debug_tap.as_ref().map(|filter| room::DebugTap {
             room_filter: filter.clone(),
         });
@@ -1916,10 +1917,10 @@ async fn main() -> anyhow::Result<()> {
 
                 metrics.active_sessions.inc();
 
-                // Call rooms: enforce 2-participant limit
-                if room_name.starts_with("call-") {
+                // Two-party rooms (call-*, file-*): enforce 2-participant limit
+                if wzp_relay::file_relay::is_two_party_room(&room_name) {
                     if room_mgr.room_size(&room_name) >= 2 {
-                        warn!(%addr, room = %room_name, "call room full (max 2 participants)");
+                        warn!(%addr, room = %room_name, "two-party room full (max 2 participants)");
                         metrics.active_sessions.dec();
                         let mut smgr = session_mgr.lock().await;
                         smgr.remove_session(session_id);
@@ -2047,6 +2048,19 @@ async fn main() -> anyhow::Result<()> {
                     participant_id,
                     transport.clone(),
                 ));
+                // Two-party rooms: splice the participants' uni streams
+                // (wzp-files E2E-encrypted control + chunk data).
+                let splice_handle = if wzp_relay::file_relay::room_allows_streams(&room_name) {
+                    Some(tokio::spawn(wzp_relay::file_relay::run_stream_splicer(
+                        room_mgr.clone(),
+                        room_name.clone(),
+                        participant_id,
+                        transport.clone(),
+                        file_stream_limits.clone(),
+                    )))
+                } else {
+                    None
+                };
                 tokio::select! {
                     _ = &mut media_handle => {
                         signal_handle.abort();
@@ -2075,6 +2089,9 @@ async fn main() -> anyhow::Result<()> {
                     },
                 }
 
+                if let Some(h) = splice_handle {
+                    h.abort();
+                }
                 // Participant disconnected — clean up presence + per-session metrics
                 if let Some(ref fp) = authenticated_fp {
                     let mut reg = presence.lock().await;

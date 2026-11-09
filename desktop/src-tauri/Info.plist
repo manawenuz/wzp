@@ -19,5 +19,12 @@
     <string>WarzonePhone needs microphone access to transmit your voice during calls.</string>
     <key>NSCameraUsageDescription</key>
     <string>WarzonePhone needs camera access for video calls.</string>
+    <!--
+      Required on macOS 15+ before the app may talk to devices on the
+      local network (LAN peer discovery / direct P2P transfers). Without
+      it the OS silently drops multicast and local-subnet traffic.
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>WarzonePhone uses the local network to find nearby devices and connect to them directly for calls and file transfers.</string>
 </dict>
 </plist>

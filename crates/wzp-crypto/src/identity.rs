@@ -1,9 +1,9 @@
-//! featherChat-compatible identity module.
+//! Seed-based identity: BIP39 seed → Ed25519 / X25519 keys → fingerprint.
 //!
-//! Mirrors `warzone-protocol/src/identity.rs` and `warzone-protocol/src/mnemonic.rs`
-//! from featherChat. Same seed → same keys → same fingerprint in both codebases.
-//!
-//! Source of truth: deps/featherchat/warzone/crates/warzone-protocol/src/identity.rs
+//! Originally mirrored featherChat's `warzone-protocol` identity (that
+//! integration has been dropped). The HKDF info strings ("warzone-ed25519",
+//! "warzone-x25519") are part of the identity format and must not change, or
+//! existing seeds would derive different keys and fingerprints.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hkdf::Hkdf;

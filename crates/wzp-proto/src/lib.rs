@@ -34,6 +34,7 @@ pub use packet::{
     CallAcceptMode, FRAME_TYPE_FULL, FRAME_TYPE_MINI, HangupReason, MediaHeader, MediaHeaderV2,
     MediaPacket, MiniFrameContext, MiniFrameContextV2, MiniHeader, MiniHeaderV2, PresenceUser,
     QualityReport, RoomParticipant, SignalMessage, TrunkEntry, TrunkFrame, default_signal_version,
+    MAX_FILE_NAME_BYTES, sanitize_file_name,
 };
 pub use priority_mode::PriorityMode;
 pub use quality::{AdaptiveQualityController, NetworkContext, Tier};

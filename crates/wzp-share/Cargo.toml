@@ -1,0 +1,36 @@
+[package]
+name = "wzp-share"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WarzonePhone app-level file sharing: iroh contacts/signaling + wzp-files transfers"
+
+[lib]
+name = "wzp_share"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wzp-share"
+path = "src/bin/wzp-share.rs"
+
+[dependencies]
+wzp-iroh = { workspace = true }
+wzp-files = { workspace = true }
+wzp-crypto = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+hex = "0.4"
+rand = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tempfile = "3"
+wzp-relay = { path = "../wzp-relay" }
+wzp-transport = { workspace = true }
+quinn = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -14,6 +14,7 @@ pub mod config;
 pub mod conformance;
 pub mod event_log;
 pub mod federation;
+pub mod file_relay;
 pub mod handshake;
 pub mod metrics;
 pub mod pipeline;
