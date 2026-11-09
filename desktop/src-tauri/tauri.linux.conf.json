@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "linux": {
+      "deb": {
+        "depends": ["libwebrtc-audio-processing1"]
+      },
+      "rpm": {
+        "depends": ["libwebrtc_audio_processing.so.1()(64bit)"]
+      }
+    }
+  }
+}
