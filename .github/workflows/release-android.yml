@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Free disk space
         run: |
@@ -122,7 +122,7 @@ jobs:
         with:
           tool: cargo-ndk
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -242,7 +242,7 @@ jobs:
             NAME="WarzonePhone_${VERSION}_android_${ARCH}"
             "$BT/zipalign" -P 16 -f 4 "$RUNNER_TEMP/out/unsigned-$ARCH.apk" "dist/$NAME.apk"
             "$BT/apksigner" sign --ks "$KS" --ks-pass env:KS_PASS --ks-key-alias "$KEY_ALIAS" \
-              --key-pass env:KEY_PASS "dist/$NAME.apk"
+              --key-pass env:KEY_PASS --v4-signing-enabled false "dist/$NAME.apk"
             "$BT/apksigner" verify --print-certs "dist/$NAME.apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
             if [ -f "$RUNNER_TEMP/out/unsigned-$ARCH.aab" ]; then
               cp "$RUNNER_TEMP/out/unsigned-$ARCH.aab" "dist/$NAME.aab"
@@ -255,7 +255,7 @@ jobs:
           ls -lh dist
           unzip -l dist/WarzonePhone_${VERSION}_android_arm64.apk | grep -E 'lib/|assets/index.html'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wzp-android-arm64
           path: dist/*
