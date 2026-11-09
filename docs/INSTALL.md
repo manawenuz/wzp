@@ -54,7 +54,7 @@ peer-to-peer transfers, Windows Defender Firewall may show
   but they go through the relay (or need the other side to accept the
   connection). To change this later, go to
   **Windows Security > Firewall & network protection > Allow an app through
-  firewall** and edit the entry for `wzp-desktop.exe`.
+  firewall** and edit the WarzonePhone entry.
 
 ### Uninstalling
 
