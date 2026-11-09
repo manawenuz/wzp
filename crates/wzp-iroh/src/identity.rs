@@ -65,7 +65,10 @@ mod tests {
         let pubid = wzp.public_identity();
         assert_eq!(sk.public().as_bytes(), pubid.signing.as_bytes());
         assert_eq!(fingerprint(&sk.public()), pubid.fingerprint.to_string());
-        assert_eq!(&fingerprint_bytes(&sk.public()), pubid.fingerprint.as_bytes());
+        assert_eq!(
+            &fingerprint_bytes(&sk.public()),
+            pubid.fingerprint.as_bytes()
+        );
     }
 
     #[test]

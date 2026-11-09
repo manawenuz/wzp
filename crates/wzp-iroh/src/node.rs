@@ -113,7 +113,9 @@ impl IrohNode {
             RelayChoice::Disabled => RelayMode::Disabled,
             RelayChoice::Custom(urls) => {
                 if urls.is_empty() {
-                    return Err(Error::Config("custom relay mode needs at least one URL".into()));
+                    return Err(Error::Config(
+                        "custom relay mode needs at least one URL".into(),
+                    ));
                 }
                 let parsed = urls
                     .iter()
@@ -122,7 +124,11 @@ impl IrohNode {
                             .map_err(|e| Error::Config(format!("relay URL {u}: {e}")))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                RelayMode::custom(parsed)
+                let map = iroh::RelayMap::from_iter(parsed);
+                RelayMode::Custom(match &cfg.relay_auth_token {
+                    Some(tok) => map.with_auth_token(tok.clone()),
+                    None => map,
+                })
             }
         };
 
@@ -137,8 +143,7 @@ impl IrohNode {
         }
         if cfg.local_discovery {
             b = b.address_lookup(
-                iroh_mdns_address_lookup::MdnsAddressLookup::builder()
-                    .service_name("wzp-iroh"),
+                iroh_mdns_address_lookup::MdnsAddressLookup::builder().service_name("wzp-iroh"),
             );
         }
         if let Some(addr) = cfg.bind_addr {
@@ -204,12 +209,11 @@ impl IrohNode {
     pub fn contact_card(&self, name: &str) -> ContactCard {
         let addr = self.inner.endpoint.addr();
         let relay_url = addr.relay_urls().next().cloned();
-        let direct_addrs =
-            if self.inner.cfg.relay == RelayChoice::Disabled || relay_url.is_none() {
-                addr.ip_addrs().copied().collect()
-            } else {
-                Vec::new()
-            };
+        let direct_addrs = if self.inner.cfg.relay == RelayChoice::Disabled || relay_url.is_none() {
+            addr.ip_addrs().copied().collect()
+        } else {
+            Vec::new()
+        };
         ContactCard {
             id: self.id(),
             name: name.to_string(),
@@ -294,9 +298,7 @@ impl IrohNode {
         let res = inner.request(to, &env).await;
         let res = match res {
             // A cached connection may have silently died; retry once fresh.
-            Err(Error::Protocol(_) | Error::Timeout) if had_cached => {
-                inner.request(to, &env).await
-            }
+            Err(Error::Protocol(_) | Error::Timeout) if had_cached => inner.request(to, &env).await,
             other => other,
         };
         match &res {
@@ -513,7 +515,9 @@ impl Inner {
     async fn ping(&self, to: EndpointId) -> Result<()> {
         match self.presence_exchange(to, PresenceMsg::Ping).await? {
             PresenceMsg::Pong => Ok(()),
-            other => Err(Error::Protocol(format!("unexpected presence reply {other:?}"))),
+            other => Err(Error::Protocol(format!(
+                "unexpected presence reply {other:?}"
+            ))),
         }
     }
 
@@ -591,7 +595,8 @@ async fn presence_loop(inner: Arc<Inner>) {
         }
         // Close idle outgoing connections.
         inner.conns.lock().unwrap().retain(|_, c| {
-            let keep = now.duration_since(c.last_used) < CONN_IDLE && c.conn.close_reason().is_none();
+            let keep =
+                now.duration_since(c.last_used) < CONN_IDLE && c.conn.close_reason().is_none();
             if !keep {
                 c.conn.close(CLOSE_BYE.into(), b"idle");
             }
@@ -665,7 +670,9 @@ impl ProtocolHandler for SignalHandler {
 async fn handle_unknown(inner: &Inner, conn: &Connection, peer: EndpointId) {
     let fut = async {
         let (mut send, mut recv) = conn.accept_bi().await.ok()?;
-        let env = read_frame::<Envelope>(&mut recv, MAX_UNKNOWN_FRAME).await.ok();
+        let env = read_frame::<Envelope>(&mut recv, MAX_UNKNOWN_FRAME)
+            .await
+            .ok();
         let _ = write_frame(
             &mut send,
             &Reply::Rejected {

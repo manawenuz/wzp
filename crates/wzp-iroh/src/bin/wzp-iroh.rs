@@ -17,7 +17,11 @@ use wzp_iroh::{
 };
 
 #[derive(Parser)]
-#[command(name = "wzp-iroh", version, about = "WarzonePhone iroh identity/contacts/signaling demo")]
+#[command(
+    name = "wzp-iroh",
+    version,
+    about = "WarzonePhone iroh identity/contacts/signaling demo"
+)]
 struct Cli {
     /// Data directory (seed + contacts.json). Default: $WZP_IROH_DIR or ~/.wzp-iroh
     #[arg(long, global = true)]
@@ -25,6 +29,9 @@ struct Cli {
     /// Relay: "n0" (default), "disabled", or an iroh-relay URL (repeatable via commas)
     #[arg(long, global = true, default_value = "n0")]
     relay: String,
+    /// Access token for a self-hosted iroh-relay (access.shared_token)
+    #[arg(long, global = true, env = "WZP_IROH_RELAY_TOKEN")]
+    relay_token: Option<String>,
     /// Disable mDNS local discovery
     #[arg(long, global = true)]
     no_mdns: bool,
@@ -65,8 +72,7 @@ enum Cmd {
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -115,6 +121,7 @@ fn config(cli: &Cli, dir: PathBuf) -> IrohConfig {
     IrohConfig {
         data_dir: Some(dir),
         relay,
+        relay_auth_token: cli.relay_token.clone(),
         local_discovery: !cli.no_mdns,
         dns_discovery: !cli.no_dns,
         bind_addr: cli.bind,
@@ -151,10 +158,7 @@ fn resolve(book: &[Contact], s: &str) -> Option<Contact> {
 fn print_contact(c: &Contact) {
     println!(
         "{}  {:<16} {}  trust={:?}",
-        c.id,
-        c.name,
-        c.fingerprint,
-        c.trust
+        c.id, c.name, c.fingerprint, c.trust
     );
 }
 
@@ -169,7 +173,10 @@ async fn run(cli: Cli) -> wzp_iroh::Result<()> {
             println!("fingerprint : {}", node.fingerprint());
             println!("contact     : {}", node.contact_string(&cli.name));
             if *show_mnemonic {
-                println!("mnemonic    : {}", wzp_crypto::Seed::from_bytes(seed).to_mnemonic());
+                println!(
+                    "mnemonic    : {}",
+                    wzp_crypto::Seed::from_bytes(seed).to_mnemonic()
+                );
             }
             node.shutdown().await;
         }
@@ -180,7 +187,12 @@ async fn run(cli: Cli) -> wzp_iroh::Result<()> {
             let card = match ContactCard::parse(contact) {
                 Ok(c) => c,
                 Err(e) => match identity::parse_endpoint_id(contact) {
-                    Some(id) => ContactCard { id, name: String::new(), relay_url: None, direct_addrs: vec![] },
+                    Some(id) => ContactCard {
+                        id,
+                        name: String::new(),
+                        relay_url: None,
+                        direct_addrs: vec![],
+                    },
                     None => return Err(e),
                 },
             };
@@ -230,8 +242,9 @@ async fn run(cli: Cli) -> wzp_iroh::Result<()> {
             if ContactCard::parse(contact).is_ok() {
                 node.add_contact(contact).await?;
             }
-            let c = resolve(&node.contacts(), contact)
-                .ok_or_else(|| wzp_iroh::Error::Config(format!("no unique contact matching {contact:?}")))?;
+            let c = resolve(&node.contacts(), contact).ok_or_else(|| {
+                wzp_iroh::Error::Config(format!("no unique contact matching {contact:?}"))
+            })?;
             let res = node.send(c.id, Envelope::text(msg.clone())).await;
             node.shutdown().await;
             res?;
@@ -242,11 +255,14 @@ async fn run(cli: Cli) -> wzp_iroh::Result<()> {
             if ContactCard::parse(contact).is_ok() {
                 node.add_contact(contact).await?;
             }
-            let c = resolve(&node.contacts(), contact)
-                .ok_or_else(|| wzp_iroh::Error::Config(format!("no unique contact matching {contact:?}")))?;
+            let c = resolve(&node.contacts(), contact).ok_or_else(|| {
+                wzp_iroh::Error::Config(format!("no unique contact matching {contact:?}"))
+            })?;
             match node.send_hello(c.id, &cli.name).await {
                 Ok(()) => println!("{} already has you as a contact", c.name),
-                Err(wzp_iroh::Error::Rejected(..)) => println!("contact request sent to {}", c.name),
+                Err(wzp_iroh::Error::Rejected(..)) => {
+                    println!("contact request sent to {}", c.name)
+                }
                 Err(e) => {
                     node.shutdown().await;
                     return Err(e);

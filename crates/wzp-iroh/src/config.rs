@@ -23,6 +23,10 @@ pub struct IrohConfig {
     /// Directory for `contacts.json`. `None` keeps contacts in memory only.
     pub data_dir: Option<PathBuf>,
     pub relay: RelayChoice,
+    /// Bearer token for a self-hosted `iroh-relay` started with
+    /// `access.shared_token = [...]`. Only used with [`RelayChoice::Custom`].
+    #[serde(default)]
+    pub relay_auth_token: Option<String>,
     /// mDNS discovery of peers on the local network (default: on).
     pub local_discovery: bool,
     /// Publish our addresses to, and resolve peers from, number 0's
@@ -45,6 +49,7 @@ impl Default for IrohConfig {
         Self {
             data_dir: None,
             relay: RelayChoice::N0,
+            relay_auth_token: None,
             local_discovery: true,
             dns_discovery: true,
             bind_addr: None,

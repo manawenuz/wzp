@@ -30,7 +30,7 @@ pub mod wire;
 mod two_nodes_tests;
 
 pub use config::{IrohConfig, RelayChoice};
-pub use contact::{Contact, ContactBook, ContactCard, Trust, CONTACT_PREFIX};
+pub use contact::{CONTACT_PREFIX, Contact, ContactBook, ContactCard, Trust};
 pub use error::{Error, Result};
 pub use node::{IrohNode, NodeEvent, PresenceState};
 pub use wire::{Envelope, PRESENCE_ALPN, SIGNAL_ALPN};

@@ -118,8 +118,12 @@ mod tests {
         assert!(matches!(back, Envelope::FileInvite(v) if v["token"] == "abc"));
         let s = serde_json::to_string(&Envelope::Ping).unwrap();
         assert_eq!(s, r#"{"type":"Ping"}"#);
-        let s = serde_json::to_string(&Envelope::Signal(wzp_proto::SignalMessage::Reflect)).unwrap();
+        let s =
+            serde_json::to_string(&Envelope::Signal(wzp_proto::SignalMessage::Reflect)).unwrap();
         let back: Envelope = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back, Envelope::Signal(wzp_proto::SignalMessage::Reflect)));
+        assert!(matches!(
+            back,
+            Envelope::Signal(wzp_proto::SignalMessage::Reflect)
+        ));
     }
 }

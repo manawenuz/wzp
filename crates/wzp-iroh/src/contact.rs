@@ -429,7 +429,10 @@ mod tests {
     #[test]
     fn qr_alphabet() {
         let qr = card().to_qr_string();
-        assert!(qr.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()));
+        assert!(
+            qr.chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        );
     }
 
     #[test]
