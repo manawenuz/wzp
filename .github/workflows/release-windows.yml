@@ -9,7 +9,6 @@ on:
     tags: ['v*']
     branches:
       - main
-      - ci/windows # TEMP-branch-trigger
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
