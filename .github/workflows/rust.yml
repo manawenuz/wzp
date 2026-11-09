@@ -21,14 +21,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # deps/featherchat is a submodule whose .gitmodules URL is SSH on a
-    # private port; rewrite it to the public HTTPS endpoint (same trick the
-    # upstream Gitea pipeline uses) so the runner can fetch it.
-    - name: Init submodules
+    # deps/featherchat is only needed for the optional interop tests in
+    # tests/featherchat-compat. Its .gitmodules URL is SSH on a private port,
+    # so try the public HTTPS endpoint; the build does not depend on it.
+    - name: Fetch featherchat submodule (optional)
+      id: featherchat
+      continue-on-error: true
       run: |
         git config --global url."https://git.manko.yoga/".insteadOf "ssh://git@git.manko.yoga:222/"
-        git submodule sync --recursive
-        git submodule update --init --recursive --depth 1 || git submodule update --init --recursive
+        timeout 120 git submodule update --init --recursive
         test -f deps/featherchat/warzone/crates/warzone-protocol/Cargo.toml
 
     - name: Install system dependencies
@@ -49,6 +50,10 @@ jobs:
 
     - name: Run tests
       run: cargo test --release --locked -p wzp-proto -p wzp-codec -p wzp-fec -p wzp-crypto -p wzp-transport -p wzp-relay -p wzp-client -p wzp-web --lib
+
+    - name: featherChat interop tests
+      if: steps.featherchat.outcome == 'success'
+      run: cargo test --release --manifest-path tests/featherchat-compat/Cargo.toml
 
     - name: Package
       run: |
