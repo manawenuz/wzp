@@ -51,7 +51,7 @@ struct Args {
     #[arg(long)]
     remote: Option<SocketAddr>,
 
-    /// featherChat auth endpoint (e.g., https://chat.example.com/v1/auth/validate).
+    /// External token-validation endpoint (e.g., https://chat.example.com/v1/auth/validate).
     /// When set, clients must send a bearer token as first signal message.
     #[arg(long)]
     auth_url: Option<String>,

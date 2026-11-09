@@ -18,10 +18,6 @@ tracing = { workspace = true }
 bip39 = "2"
 hex = "0.4"
 
-# featherChat (warzone-protocol) interop is verified by the standalone crate in
-# tests/featherchat-compat, which needs the deps/featherchat submodule. It is
-# kept out of this manifest so the workspace builds without the submodule.
-
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 wzp-proto = { workspace = true }

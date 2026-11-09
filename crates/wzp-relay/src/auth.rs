@@ -1,7 +1,7 @@
 //! featherChat token authentication.
 //!
 //! When `--auth-url` is configured, the relay validates bearer tokens
-//! against featherChat's `POST /v1/auth/validate` endpoint before
+//! against an external token-validation endpoint (`POST {auth_url}`) before
 //! allowing clients to join rooms.
 
 use serde::{Deserialize, Serialize};

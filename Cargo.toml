@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-exclude = ["tests/featherchat-compat"]
 members = [
     "crates/wzp-proto",
     "crates/wzp-codec",

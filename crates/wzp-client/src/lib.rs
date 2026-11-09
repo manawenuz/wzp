@@ -33,7 +33,6 @@ pub mod encrypted_transport;
 pub mod drift_test;
 pub mod dual_path;
 pub mod echo_test;
-pub mod featherchat;
 pub mod handshake;
 pub mod ice_agent;
 pub mod metrics;

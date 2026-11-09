@@ -27,7 +27,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system architectur
 - Crate dependency graph (8 crates)
 - Wire formats (MediaHeader, MiniHeader, TrunkFrame, SignalMessage)
 - Cryptographic handshake (X25519 + Ed25519 + ChaCha20-Poly1305)
-- Identity model (BIP39 seed, featherChat compatible)
+- Identity model (BIP39 seed)
 - Quality profiles (GOOD/DEGRADED/CATASTROPHIC)
 - FEC protection (RaptorQ with interleaving)
 - Adaptive jitter buffer (NetEq-inspired)
@@ -44,7 +44,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system architectur
 - **ML noise removal**: RNNoise (nnnoiseless pure Rust port)
 - **Mini-frames**: 67% header compression for steady-state packets
 - **Trunking**: Multiplex sessions into batched datagrams
-- **featherChat integration**: Shared BIP39 identity, token auth, call signaling
+- **Token auth hook**: relays can validate client tokens against any HTTP endpoint (`--auth-url`)
 - **Prometheus metrics**: Relay, web bridge, inter-relay probes
 - **Grafana dashboard**: Pre-built JSON with 18 panels
 
@@ -54,8 +54,6 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system architectur
 |----------|-------------|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full system architecture with diagrams |
 | [TELEMETRY.md](docs/TELEMETRY.md) | Prometheus metrics specification |
-| [INTEGRATION_TASKS.md](docs/INTEGRATION_TASKS.md) | featherChat integration tracker |
-| [WZP-FC-SHARED-CRATES.md](docs/WZP-FC-SHARED-CRATES.md) | Shared crate strategy |
 | [grafana-dashboard.json](docs/grafana-dashboard.json) | Importable Grafana dashboard |
 
 ## Binaries
