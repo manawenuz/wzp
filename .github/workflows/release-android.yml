@@ -44,6 +44,8 @@ env:
   # API level used for the standalone wzp-native cdylib (matches
   # bundle.android.minSdkVersion in desktop/src-tauri/tauri.conf.json).
   ANDROID_MIN_API: 26
+  # Read by the NDK CMake toolchain (opusic-sys etc.); NDK 26 supports <= 34.
+  ANDROID_PLATFORM: android-26
 
 jobs:
   android:
@@ -113,7 +115,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: android
+          key: android-v2
           cache-on-failure: true
 
       - uses: taiki-e/install-action@v2
