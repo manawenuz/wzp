@@ -23,6 +23,7 @@ pub const MAX_UNKNOWN_FRAME: usize = 4 * 1024;
 /// JSON-encoded, adjacently tagged: `{"type":"Text","body":{...}}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "body")]
+#[allow(clippy::large_enum_variant)] // mirrors wzp_proto::SignalMessage
 pub enum Envelope {
     /// A WZP call-signaling message (offer/answer/hangup/...).
     Signal(wzp_proto::SignalMessage),

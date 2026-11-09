@@ -40,6 +40,7 @@ pub enum PresenceState {
 /// Events emitted by the node. Subscribe with [`IrohNode::events`].
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)] // mirrors wzp_proto::SignalMessage
 pub enum NodeEvent {
     /// An envelope from a known contact.
     Message { from: EndpointId, env: Envelope },
@@ -289,10 +290,13 @@ impl IrohNode {
             return Err(Error::UnknownContact(to));
         }
         let inner = &self.inner;
+        let had_cached = inner.conns.lock().unwrap().contains_key(&(to, SIGNAL_ALPN));
         let res = inner.request(to, &env).await;
         let res = match res {
             // A cached connection may have silently died; retry once fresh.
-            Err(Error::Protocol(_) | Error::Timeout) => inner.request(to, &env).await,
+            Err(Error::Protocol(_) | Error::Timeout) if had_cached => {
+                inner.request(to, &env).await
+            }
             other => other,
         };
         match &res {

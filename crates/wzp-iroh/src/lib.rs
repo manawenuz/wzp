@@ -26,6 +26,9 @@ pub mod identity;
 pub mod node;
 pub mod wire;
 
+#[cfg(test)]
+mod two_nodes_tests;
+
 pub use config::{IrohConfig, RelayChoice};
 pub use contact::{Contact, ContactBook, ContactCard, Trust, CONTACT_PREFIX};
 pub use error::{Error, Result};
