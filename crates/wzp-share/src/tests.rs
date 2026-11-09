@@ -272,6 +272,7 @@ async fn falls_back_to_relay_when_direct_unusable() {
         true,
         |c| {
             c.relay = Some(relay.addr);
+            c.test_open_relay = true; // in-process relay has no tokens
             // Advertise a dead candidate only.
             c.test_direct_override = Some(vec!["127.0.0.1:9".parse().unwrap()]);
         },
@@ -414,7 +415,8 @@ async fn cancel_pending_offer() {
     let h = p.a.send_file(p.b.id(), &src).await.unwrap();
     let offer = wait_for(&mut ev_b, incoming_offer).await;
     p.a.cancel(h.id()).await.unwrap();
-    assert!(matches!(h.wait().await, Err(ShareError::Cancelled)));
+    let r = h.wait().await;
+    assert!(matches!(r, Err(ShareError::Cancelled)), "{r:?}");
     // Receiver's offer ends (cancelled or failed), never completes.
     let ev = wait_for(&mut ev_b, |e| match e {
         ShareEvent::TransferCancelled { transfer, .. }
@@ -430,4 +432,69 @@ async fn cancel_pending_offer() {
     let _ = ev;
     p.a.shutdown().await;
     p.b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_authorized_relay_fails_clearly() {
+    let relay = start_relay().await;
+    // Relay configured but no token -> relay fallback unavailable.
+    let p = pair(
+        13,
+        14,
+        true,
+        |c| {
+            c.relay = Some(relay.addr);
+            c.test_direct_override = Some(vec!["127.0.0.1:9".parse().unwrap()]);
+        },
+        |c| c.auto_accept = true,
+    )
+    .await;
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = random_file(src_dir.path(), "y.bin", 1000);
+    let mut ev_b = p.b.events();
+    let h = p.a.send_file(p.b.id(), &src).await.unwrap();
+    // Receiver gives up and tells the sender over iroh.
+    let err = h.wait().await.unwrap_err();
+    assert!(
+        matches!(err, ShareError::Failed(ref e) if e.contains("no relay configured/authorized")),
+        "{err}"
+    );
+    let t = wait_for(&mut ev_b, |e| match e {
+        ShareEvent::TransferFailed { transfer } => Some(transfer.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(t.error.unwrap().contains("no relay configured/authorized"));
+
+    // With neither direct candidates nor an authorized relay, send_file refuses up front.
+    let mut c = cfg(src_dir.path(), Some(relay.addr));
+    c.direct_bind = None;
+    assert!(crate::node::plan_relay(&c).is_none());
+    p.a.shutdown().await;
+    p.b.shutdown().await;
+}
+
+#[test]
+fn relay_token_never_in_invite_or_debug() {
+    let mut c = ShareConfig::new("/tmp/x");
+    c.relay = Some("203.0.113.1:4433".parse().unwrap());
+    c.relay_token = Some("SUPER-SECRET-TOKEN".into());
+    c.iroh.relay_auth_token = Some("IROH-SECRET".into());
+    let plan = crate::node::plan_relay(&c).expect("relay usable with token");
+    let invite = crate::node::build_invite(vec![], Some(plan), &[1u8; 32]);
+    let payload = ShareInvite {
+        invite: invite.clone(),
+        share_id: ShareId::random(),
+    };
+    let js = serde_json::to_string(&payload).unwrap();
+    assert!(!js.contains("SUPER-SECRET-TOKEN"), "{js}");
+    assert!(invite.relay.as_ref().unwrap().room.starts_with("file-"));
+    let dbg = format!("{c:?}");
+    assert!(
+        !dbg.contains("SUPER-SECRET-TOKEN") && !dbg.contains("IROH-SECRET"),
+        "{dbg}"
+    );
+    // Without a token (and without the test hook) the relay is not used.
+    c.relay_token = None;
+    assert!(crate::node::plan_relay(&c).is_none());
 }

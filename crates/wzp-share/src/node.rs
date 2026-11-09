@@ -17,8 +17,8 @@ use wzp_files::{
 use wzp_iroh::{Contact, EndpointId, Envelope, IrohNode, NodeEvent};
 
 use crate::types::{
-    Direction, Result, ShareConfig, ShareError, ShareEvent, ShareId, ShareInvite, TransferInfo,
-    TransferState,
+    Direction, InvitePayload, Result, ShareConfig, ShareError, ShareEvent, ShareId, ShareInvite,
+    TransferInfo, TransferState,
 };
 
 type Outcome = Option<std::result::Result<PathBuf, String>>;
@@ -182,15 +182,12 @@ impl ShareNode {
             (None, Some(l)) => direct_candidates(l.local_addr()?, &inner.iroh),
             (None, None) => Vec::new(),
         };
-        if direct.is_empty() && inner.cfg.relay.is_none() {
-            return Err(ShareError::Failed(
-                "no direct candidates and no relay configured".into(),
-            ));
+        let plan = plan_relay(&inner.cfg);
+        if direct.is_empty() && plan.is_none() {
+            return Err(ShareError::Failed(NO_RELAY.into()));
         }
-        let mut invite = FileSessionInvite::new(inner.cfg.relay, direct, &inner.seed);
-        if let Some(r) = invite.relay.as_mut() {
-            r.auth_token = inner.cfg.relay_auth_token.clone();
-        }
+        let host_auth = plan.as_ref().and_then(|p| p.host_auth.clone());
+        let invite = build_invite(direct, plan, &inner.seed);
         let id = ShareId::random();
         let info = TransferInfo {
             id,
@@ -230,6 +227,7 @@ impl ShareNode {
             path,
             invite,
             listener,
+            host_auth,
         ));
         inner.set_task(id, task.abort_handle());
         Ok(TransferHandle { id, done: done_rx })
@@ -257,24 +255,37 @@ impl ShareNode {
 
     /// Cancel a transfer in any non-finished state.
     pub async fn cancel(&self, id: ShareId) -> Result<()> {
-        let (offer, ep, wzp_id, task) = {
+        let (offer, ep, wzp_id, task, contact, connecting) = {
             let mut m = self.inner.transfers.lock().unwrap();
             let e = m.get_mut(&id).ok_or(ShareError::UnknownTransfer(id))?;
             if e.info.state.is_finished() {
                 return Ok(());
             }
-            (e.offer.take(), e.ep.clone(), e.wzp_id, e.task.clone())
+            (
+                e.offer.take(),
+                e.ep.clone(),
+                e.wzp_id,
+                e.task.clone(),
+                e.info.contact,
+                e.info.state == TransferState::Connecting,
+            )
         };
+        // Settle the local state first so racing session errors can't turn
+        // a cancel into a failure.
+        self.inner
+            .finish(id, TransferState::Cancelled, Err("cancelled".into()), false);
         if let Some(o) = offer {
             o.reject("cancelled");
         }
         if let (Some(ep), Some(wid)) = (&ep, wzp_id) {
             ep.cancel(wid).await;
         }
-        self.inner
-            .finish(id, TransferState::Cancelled, Err("cancelled".into()), false);
         if let Some(t) = task {
             t.abort();
+        }
+        if connecting {
+            // The peer may not have a WZP session with us yet: tell it over iroh.
+            send_abort(&self.inner, contact, id, "cancelled").await;
         }
         if let Some(ep) = ep {
             ep.close().await;
@@ -342,6 +353,80 @@ fn direct_candidates(local: SocketAddr, iroh: &IrohNode) -> Vec<SocketAddr> {
     v
 }
 
+/// Error text when neither path is available.
+pub(crate) const NO_RELAY: &str = "direct connection failed and no relay configured/authorized";
+
+/// How this node may use its WZP relay for one hosted transfer.
+pub(crate) struct RelayPlan {
+    addr: SocketAddr,
+    room: String,
+    /// Secret credential the *host* presents (the relay token). Never sent
+    /// to the peer.
+    host_auth: Option<String>,
+    /// Room-scoped ticket for the guest, carried in the invite.
+    guest_ticket: Option<String>,
+}
+
+/// Decide whether the relay fallback is available: it needs a relay address
+/// and a relay token (or the test-only open-relay flag).
+pub(crate) fn plan_relay(cfg: &ShareConfig) -> Option<RelayPlan> {
+    let addr = cfg.relay?;
+    let room = wzp_files::random_room();
+    match &cfg.relay_token {
+        Some(token) => Some(RelayPlan {
+            guest_ticket: issue_guest_ticket(addr, token, &room),
+            addr,
+            room,
+            host_auth: Some(token.clone()),
+        }),
+        None if cfg.test_open_relay => Some(RelayPlan {
+            addr,
+            room,
+            host_auth: None,
+            guest_ticket: None,
+        }),
+        None => None,
+    }
+}
+
+/// Room-scoped, expiring ticket (HMAC, one `file-*` room, 2 participants)
+/// that lets a recipient without a relay token join our relayed transfer.
+///
+/// TODO(relay-tickets): wire to the wzp-files ticket API from
+/// feat/relay-throughput once it is on main. Until then no ticket is issued,
+/// so a token-protected relay only works for recipients that hold their own
+/// token for the same relay (see `run_incoming`).
+fn issue_guest_ticket(_relay: SocketAddr, _token: &str, _room: &str) -> Option<String> {
+    None
+}
+
+/// Build the invite. The relay token never goes in here, only the ticket.
+pub(crate) fn build_invite(
+    direct: Vec<SocketAddr>,
+    plan: Option<RelayPlan>,
+    seed: &[u8; 32],
+) -> FileSessionInvite {
+    let mut invite = FileSessionInvite::new(None, direct, seed);
+    invite.relay = plan.map(|p| wzp_files::RelayRendezvous {
+        addr: p.addr,
+        room: p.room,
+        auth_token: p.guest_ticket,
+    });
+    invite
+}
+
+/// Best-effort abort notice over iroh.
+async fn send_abort(inner: &Inner, to: EndpointId, share_id: ShareId, reason: &str) {
+    let msg = crate::types::ShareAbort {
+        share_id,
+        abort: reason.to_string(),
+    };
+    let v = serde_json::to_value(&msg).expect("abort serializes");
+    if let Err(e) = inner.iroh.send(to, Envelope::FileInvite(v)).await {
+        debug!(%share_id, "abort notice not delivered: {e}");
+    }
+}
+
 fn fingerprint_of(id: &EndpointId) -> Fingerprint {
     Fingerprint(wzp_iroh::identity::fingerprint_bytes(id))
 }
@@ -354,7 +439,7 @@ impl Inner {
     fn connect_opts(&self, peer: &EndpointId) -> ConnectOptions {
         ConnectOptions {
             expected_peer: Some(fingerprint_of(peer)),
-            auth_token: self.cfg.relay_auth_token.clone(),
+            auth_token: None,
             alias: None,
             peer_wait: self.cfg.peer_wait,
             handshake_timeout: self.cfg.connect_timeout,
@@ -455,6 +540,7 @@ async fn run_outgoing(
     path: PathBuf,
     invite: FileSessionInvite,
     listener: Option<DirectListener>,
+    host_auth: Option<String>,
 ) {
     let payload = ShareInvite {
         invite: invite.clone(),
@@ -465,7 +551,8 @@ async fn run_outgoing(
         inner.fail(id, format!("invite not delivered: {e}"));
         return;
     }
-    let opts = inner.connect_opts(&contact);
+    let mut opts = inner.connect_opts(&contact);
+    opts.auth_token = host_auth;
     let host = wzp_files::host_invite(&invite, listener.as_ref(), &inner.seed, &opts);
     let session =
         match tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), host).await {
@@ -508,7 +595,8 @@ fn handle_invite(inner: &Arc<Inner>, from: EndpointId, value: serde_json::Value)
         inner.emit(ShareEvent::InviteRefused { from, reason });
     };
     let payload: ShareInvite = match serde_json::from_value(value) {
-        Ok(p) => p,
+        Ok(InvitePayload::Invite(p)) => p,
+        Ok(InvitePayload::Abort(a)) => return handle_abort(inner, from, a),
         Err(e) => return refuse(format!("bad invite: {e}")),
     };
     match payload.invite.expected_peer() {
@@ -568,15 +656,58 @@ fn handle_invite(inner: &Arc<Inner>, from: EndpointId, value: serde_json::Value)
     inner.set_task(id, task.abort_handle());
 }
 
+/// An abort notice from `from` for one of our transfers with them.
+fn handle_abort(inner: &Inner, from: EndpointId, a: crate::types::ShareAbort) {
+    let task = {
+        let m = inner.transfers.lock().unwrap();
+        match m.get(&a.share_id) {
+            Some(e) if e.info.contact == from && !e.info.state.is_finished() => e.task.clone(),
+            _ => return,
+        }
+    };
+    if a.abort == "cancelled" {
+        inner.finish(
+            a.share_id,
+            TransferState::Cancelled,
+            Err("cancelled".into()),
+            true,
+        );
+    } else {
+        inner.fail(a.share_id, format!("peer: {}", a.abort));
+    }
+    if let Some(t) = task {
+        t.abort();
+    }
+}
+
 async fn run_incoming(inner: Arc<Inner>, id: ShareId, from: EndpointId, invite: FileSessionInvite) {
-    let opts = inner.connect_opts(&from);
+    let mut opts = inner.connect_opts(&from);
+    // The invite's ticket is used for the relay. If there is none and the
+    // relay is our own configured one, our own token authorizes us.
+    if let Some(r) = &invite.relay
+        && r.auth_token.is_none()
+        && Some(r.addr) == inner.cfg.relay
+    {
+        opts.auth_token = inner.cfg.relay_token.clone();
+    }
     let join = wzp_files::join_invite(&invite, &inner.seed, &opts);
-    let session =
-        match tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), join).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return inner.fail(id, format!("session: {e}")),
-            Err(_) => return inner.fail(id, "could not reach sender in time"),
-        };
+    let res = tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), join).await;
+    let session = match res {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            let msg = if invite.relay.is_none() {
+                format!("{NO_RELAY} ({e})")
+            } else {
+                format!("session: {e}")
+            };
+            send_abort(&inner, from, id, &msg).await;
+            return inner.fail(id, msg);
+        }
+        Err(_) => {
+            send_abort(&inner, from, id, "could not reach sender in time").await;
+            return inner.fail(id, "could not reach sender in time");
+        }
+    };
     let relayed = session.is_relayed();
     let sas = session.sas();
     debug!(%id, relayed, "incoming session up");

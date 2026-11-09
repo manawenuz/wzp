@@ -183,8 +183,26 @@ pub struct ShareInvite {
     pub share_id: ShareId,
 }
 
+/// Sent back over iroh (`Envelope::FileInvite`) to abort an invite: by the
+/// receiver when it can't connect, by the sender when it cancels early.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShareAbort {
+    pub share_id: ShareId,
+    pub abort: String,
+}
+
+/// Any `FileInvite` payload wzp-share understands.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum InvitePayload {
+    Abort(ShareAbort),
+    Invite(ShareInvite),
+}
+
 /// Configuration for [`crate::ShareNode::start`].
-#[derive(Clone, Debug)]
+///
+/// `Debug` redacts secrets (`relay_token`, `iroh.relay_auth_token`).
+#[derive(Clone)]
 pub struct ShareConfig {
     /// iroh node config. `iroh.data_dir` defaults to `data_dir` if `None`.
     pub iroh: IrohConfig,
@@ -193,8 +211,11 @@ pub struct ShareConfig {
     /// WZP relay used as fallback rendezvous (user-configured). `None` =
     /// direct only.
     pub relay: Option<SocketAddr>,
-    /// Auth token for that relay, if it requires one.
-    pub relay_auth_token: Option<String>,
+    /// **Secret** access token for `relay`. Only the host side uses it to
+    /// authenticate; it is never logged and never put into an envelope or
+    /// invite (the invite carries at most a room-scoped ticket). Without it
+    /// the relay fallback is unavailable.
+    pub relay_token: Option<String>,
     /// Directory for contacts etc.
     pub data_dir: PathBuf,
     /// Bind address for per-transfer direct listeners (`None` = no direct
@@ -212,6 +233,31 @@ pub struct ShareConfig {
     /// Test hook: replace the advertised direct candidates.
     #[doc(hidden)]
     pub test_direct_override: Option<Vec<SocketAddr>>,
+    /// Test hook: use `relay` without a token (in-process test relays).
+    #[doc(hidden)]
+    pub test_open_relay: bool,
+}
+
+impl std::fmt::Debug for ShareConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        let mut iroh = self.iroh.clone();
+        if iroh.relay_auth_token.is_some() {
+            iroh.relay_auth_token = Some("<redacted>".into());
+        }
+        f.debug_struct("ShareConfig")
+            .field("iroh", &iroh)
+            .field("files", &self.files)
+            .field("relay", &self.relay)
+            .field("relay_token", &redact(&self.relay_token))
+            .field("data_dir", &self.data_dir)
+            .field("direct_bind", &self.direct_bind)
+            .field("auto_accept", &self.auto_accept)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("peer_wait", &self.peer_wait)
+            .field("max_incoming_sessions", &self.max_incoming_sessions)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ShareConfig {
@@ -226,7 +272,7 @@ impl ShareConfig {
                 ..FileConfig::default()
             },
             relay: None,
-            relay_auth_token: None,
+            relay_token: None,
             data_dir,
             direct_bind: Some("0.0.0.0:0".parse().unwrap()),
             auto_accept: false,
@@ -234,6 +280,7 @@ impl ShareConfig {
             peer_wait: Duration::from_secs(120),
             max_incoming_sessions: 8,
             test_direct_override: None,
+            test_open_relay: false,
         }
     }
 }

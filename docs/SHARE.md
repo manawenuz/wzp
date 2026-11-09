@@ -90,10 +90,38 @@ TransferCompleted ◀──── FileComplete ───────────
 * **Limits.** At most `max_incoming_sessions` (8) invites can be connecting
   or awaiting a decision at once. More are refused with `InviteRefused`. The
   wzp-files limits (10 GiB, offer timeout, etc.) come from `FileConfig`.
-* **Cancel** works in any state. While connecting, the task is aborted. While
-  an offer is pending, it is rejected with "cancelled". While transferring,
-  a wzp-files `FileCancel` is sent. Cancelling while still connecting does
-  not notify the peer over iroh, so the peer's join fails after `peer_wait`.
+* **Cancel** works in any state. While an offer is pending, it is rejected
+  with "cancelled". While transferring, a wzp-files `FileCancel` is sent.
+  While still connecting, the task is aborted and a `ShareAbort` goes to the
+  peer over iroh (see below).
+* **Abort notices.** `Envelope::FileInvite` also carries
+  `{"share_id": "...", "abort": "<reason>"}`. The receiver sends one when it
+  can't reach the sender, so the sender fails right away with
+  `peer: <reason>` instead of waiting `peer_wait`. Either side sends
+  `"cancelled"` when it cancels before a session exists. Notices are only
+  honoured from the transfer's own contact.
+
+## Relay access (token-protected WZP relay)
+
+* `ShareConfig.relay_token` is a **secret**. Only the *host* (sender) uses it,
+  to authenticate to `relay` (`ConnectOptions.auth_token`, which sends a
+  `SignalMessage::AuthToken`). It is never logged (`ShareConfig`'s `Debug`
+  redacts it and the iroh relay token) and never goes into an envelope or a
+  `FileSessionInvite`. A unit test checks this.
+* The invite's `relay.auth_token` holds only a **room-scoped guest ticket**
+  (HMAC, one `file-*` room, 2 participants, expiring). The relay side of this
+  is being added in wzp-files/wzp-relay on `feat/relay-throughput`.
+  **TODO(relay-tickets):** `node::issue_guest_ticket` currently returns
+  `None`. Once that API is on main it should mint the ticket there, and a
+  test with a token-checking in-process relay should be added.
+* Until then a receiver joins a token-protected relay only if the invite
+  points at the receiver's *own* configured relay and the receiver has its
+  own `relay_token`.
+* No `relay_token` means **no relay fallback**: the invite carries direct
+  candidates only. If they fail, the transfer fails on both sides with
+  "direct connection failed and no relay configured/authorized". If there
+  are no direct candidates either, `send_file` refuses up front.
+  `test_open_relay` (doc-hidden) allows a tokenless relay in tests.
 
 ## API
 
@@ -119,7 +147,7 @@ impl ShareNode {
 impl TransferHandle { pub fn id(&self) -> ShareId; pub async fn wait(self) -> Result<PathBuf>; }
 ```
 
-`ShareConfig { iroh, files, relay: Option<SocketAddr>, relay_auth_token,
+`ShareConfig { iroh, files, relay: Option<SocketAddr>, relay_token,
 data_dir, direct_bind: Option<SocketAddr>, auto_accept, connect_timeout,
 peer_wait, max_incoming_sessions }`. Use `ShareConfig::new(data_dir)` for
 defaults: downloads go to `data_dir/downloads` and contacts to
@@ -158,7 +186,7 @@ on the same directory (see IROH.md).
 
 ## Tests
 
-`cargo test -p wzp-share --lib` takes about 3 s. It runs two in-process nodes
+`cargo test -p wzp-share --lib` takes about 4 s. It runs two in-process nodes
 with iroh relays, DNS and mDNS turned off, plus an in-process wzp-relay. The
 tests cover:
 
@@ -167,4 +195,7 @@ tests cover:
 3. an invite from a non-contact, rejected at the iroh layer;
 4. the receiver rejecting, so the sender gets `Rejected`;
 5. a fingerprint mismatch or garbage invite, refused;
-6. the sender cancelling a pending offer.
+6. the sender cancelling a pending offer;
+7. a relay configured without a token, with dead direct candidates, failing
+   clearly on both sides;
+8. the relay token never appearing in the invite JSON or in `Debug` output.

@@ -29,8 +29,9 @@ struct Cli {
     /// WZP relay used as fallback for file sessions (host:port)
     #[arg(long, global = true, env = "WZP_SHARE_RELAY")]
     relay: Option<SocketAddr>,
-    /// Auth token for the WZP relay
-    #[arg(long, global = true)]
+    /// Secret access token for the WZP relay (needed for the relay fallback;
+    /// never sent to peers). Prefer the env var over the command line.
+    #[arg(long, global = true, env = "WZP_SHARE_RELAY_TOKEN", hide_env_values = true)]
     relay_token: Option<String>,
     /// iroh relay: "n0" (default), "disabled", or iroh-relay URL(s), comma separated
     #[arg(long, global = true, default_value = "n0")]
@@ -144,7 +145,7 @@ fn config(
         ..IrohConfig::default()
     };
     c.relay = cli.relay;
-    c.relay_auth_token = cli.relay_token.clone();
+    c.relay_token = cli.relay_token.clone();
     c.direct_bind = match cli.direct_bind.as_str() {
         "none" | "off" => None,
         s => Some(s.parse()?),
