@@ -141,17 +141,37 @@ pub enum ShareEvent {
     },
     /// New transfer (outgoing: just started; incoming: offer arrived and
     /// awaits `accept`/`reject`, unless auto-accept is on).
-    TransferOffered { transfer: TransferInfo },
+    TransferOffered {
+        transfer: TransferInfo,
+    },
     /// Bytes started flowing.
-    TransferStarted { transfer: TransferInfo },
-    TransferProgress { id: ShareId, done: u64, total: u64 },
-    TransferCompleted { transfer: TransferInfo },
-    TransferRejected { transfer: TransferInfo },
-    TransferFailed { transfer: TransferInfo },
-    TransferCancelled { transfer: TransferInfo, by_peer: bool },
+    TransferStarted {
+        transfer: TransferInfo,
+    },
+    TransferProgress {
+        id: ShareId,
+        done: u64,
+        total: u64,
+    },
+    TransferCompleted {
+        transfer: TransferInfo,
+    },
+    TransferRejected {
+        transfer: TransferInfo,
+    },
+    TransferFailed {
+        transfer: TransferInfo,
+    },
+    TransferCancelled {
+        transfer: TransferInfo,
+        by_peer: bool,
+    },
     /// A file invite from a contact was refused before any connection
     /// (bad payload, fingerprint mismatch, too many pending).
-    InviteRefused { from: EndpointId, reason: String },
+    InviteRefused {
+        from: EndpointId,
+        reason: String,
+    },
 }
 
 /// What goes into `Envelope::FileInvite`: a [`FileSessionInvite`] (flattened,

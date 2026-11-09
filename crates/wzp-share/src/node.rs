@@ -160,7 +160,10 @@ impl ShareNode {
             .ok_or(wzp_iroh::Error::UnknownContact(contact))?;
         let meta = tokio::fs::metadata(&path).await?;
         if !meta.is_file() {
-            return Err(ShareError::Failed(format!("{} is not a file", path.display())));
+            return Err(ShareError::Failed(format!(
+                "{} is not a file",
+                path.display()
+            )));
         }
         if meta.len() > inner.cfg.files.max_size {
             return Err(wzp_files::FileError::TooLarge {
@@ -220,7 +223,14 @@ impl ShareNode {
         );
         inner.emit(ShareEvent::TransferOffered { transfer: info });
 
-        let task = tokio::spawn(run_outgoing(inner.clone(), id, contact, path, invite, listener));
+        let task = tokio::spawn(run_outgoing(
+            inner.clone(),
+            id,
+            contact,
+            path,
+            invite,
+            listener,
+        ));
         inner.set_task(id, task.abort_handle());
         Ok(TransferHandle { id, done: done_rx })
     }
@@ -457,13 +467,12 @@ async fn run_outgoing(
     }
     let opts = inner.connect_opts(&contact);
     let host = wzp_files::host_invite(&invite, listener.as_ref(), &inner.seed, &opts);
-    let session = match tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), host)
-        .await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return inner.fail(id, format!("session: {e}")),
-        Err(_) => return inner.fail(id, "peer did not join in time"),
-    };
+    let session =
+        match tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), host).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return inner.fail(id, format!("session: {e}")),
+            Err(_) => return inner.fail(id, "peer did not join in time"),
+        };
     // Note: don't `close()` the listener — that would close its quinn
     // endpoint and with it the session. It is dropped with this task.
     let relayed = session.is_relayed();
@@ -504,7 +513,9 @@ fn handle_invite(inner: &Arc<Inner>, from: EndpointId, value: serde_json::Value)
     };
     match payload.invite.expected_peer() {
         Ok(fp) if fp == fingerprint_of(&from) => {}
-        Ok(_) => return refuse("fingerprint mismatch: invite is not for the sending contact".into()),
+        Ok(_) => {
+            return refuse("fingerprint mismatch: invite is not for the sending contact".into());
+        }
         Err(e) => return refuse(format!("bad fingerprint: {e}")),
     }
     let id = payload.share_id;
@@ -560,13 +571,12 @@ fn handle_invite(inner: &Arc<Inner>, from: EndpointId, value: serde_json::Value)
 async fn run_incoming(inner: Arc<Inner>, id: ShareId, from: EndpointId, invite: FileSessionInvite) {
     let opts = inner.connect_opts(&from);
     let join = wzp_files::join_invite(&invite, &inner.seed, &opts);
-    let session = match tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), join)
-        .await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return inner.fail(id, format!("session: {e}")),
-        Err(_) => return inner.fail(id, "could not reach sender in time"),
-    };
+    let session =
+        match tokio::time::timeout(inner.cfg.peer_wait + Duration::from_secs(5), join).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return inner.fail(id, format!("session: {e}")),
+            Err(_) => return inner.fail(id, "could not reach sender in time"),
+        };
     let relayed = session.is_relayed();
     let sas = session.sas();
     debug!(%id, relayed, "incoming session up");

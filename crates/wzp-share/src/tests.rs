@@ -175,7 +175,10 @@ fn random_file(dir: &Path, name: &str, len: usize) -> std::path::PathBuf {
     p
 }
 
-async fn wait_for<T>(rx: &mut Receiver<ShareEvent>, mut f: impl FnMut(&ShareEvent) -> Option<T>) -> T {
+async fn wait_for<T>(
+    rx: &mut Receiver<ShareEvent>,
+    mut f: impl FnMut(&ShareEvent) -> Option<T>,
+) -> T {
     tokio::time::timeout(T, async {
         loop {
             match rx.recv().await {
@@ -236,12 +239,17 @@ async fn direct_transfer_with_consent() {
 
     // Sender saw progress and completion with the same id.
     let sender_done = wait_for(&mut ev_a, |e| match e {
-        ShareEvent::TransferCompleted { transfer } if transfer.id == h.id() => Some(transfer.clone()),
+        ShareEvent::TransferCompleted { transfer } if transfer.id == h.id() => {
+            Some(transfer.clone())
+        }
         _ => None,
     })
     .await;
     assert_eq!(sender_done.direction, Direction::Outgoing);
-    assert_eq!(sender_done.sas, done.sas, "both ends see the same verify code");
+    assert_eq!(
+        sender_done.sas, done.sas,
+        "both ends see the same verify code"
+    );
 
     // Event JSON shape for the UI.
     let js = serde_json::to_value(ShareEvent::TransferCompleted { transfer: done }).unwrap();
@@ -283,7 +291,10 @@ async fn falls_back_to_relay_when_direct_unusable() {
         _ => None,
     })
     .await;
-    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), std::fs::read(&src).unwrap());
+    assert_eq!(
+        std::fs::read(done.path.unwrap()).unwrap(),
+        std::fs::read(&src).unwrap()
+    );
     p.a.shutdown().await;
     p.b.shutdown().await;
 }
@@ -298,7 +309,10 @@ async fn invite_from_non_contact_rejected() {
 
     let h = p.a.send_file(p.b.id(), &src).await.unwrap();
     let err = h.wait().await.unwrap_err();
-    assert!(matches!(err, ShareError::Failed(ref e) if e.contains("invite not delivered")), "{err}");
+    assert!(
+        matches!(err, ShareError::Failed(ref e) if e.contains("invite not delivered")),
+        "{err}"
+    );
     let aid = p.a.id();
     wait_for(&mut ev_b, |e| match e {
         ShareEvent::ContactRequest { id, .. } if *id == aid => Some(()),
@@ -323,16 +337,27 @@ async fn receiver_rejects() {
     let h = p.a.send_file(p.b.id(), &src).await.unwrap();
     let offer = wait_for(&mut ev_b, incoming_offer).await;
     p.b.reject(offer.id, "not now").await.unwrap();
-    assert!(matches!(p.b.accept(offer.id).await, Err(ShareError::NotPending(_))));
+    assert!(matches!(
+        p.b.accept(offer.id).await,
+        Err(ShareError::NotPending(_))
+    ));
 
     let err = h.clone().wait().await.unwrap_err();
-    assert!(matches!(err, ShareError::Rejected(ref r) if r.contains("not now")), "{err}");
+    assert!(
+        matches!(err, ShareError::Rejected(ref r) if r.contains("not now")),
+        "{err}"
+    );
     wait_for(&mut ev_a, |e| match e {
         ShareEvent::TransferRejected { transfer } if transfer.id == h.id() => Some(()),
         _ => None,
     })
     .await;
-    assert!(std::fs::read_dir(p.db.path().join("downloads")).unwrap().next().is_none());
+    assert!(
+        std::fs::read_dir(p.db.path().join("downloads"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
     p.a.shutdown().await;
     p.b.shutdown().await;
 }
@@ -348,7 +373,10 @@ async fn fingerprint_mismatch_refused() {
         share_id: ShareId::random(),
     };
     p.a.iroh()
-        .send(p.b.id(), Envelope::FileInvite(serde_json::to_value(&payload).unwrap()))
+        .send(
+            p.b.id(),
+            Envelope::FileInvite(serde_json::to_value(&payload).unwrap()),
+        )
         .await
         .unwrap();
     let aid = p.a.id();
@@ -361,7 +389,10 @@ async fn fingerprint_mismatch_refused() {
     assert!(reason.contains("fingerprint mismatch"), "{reason}");
     // Garbage payload is refused too.
     p.a.iroh()
-        .send(p.b.id(), Envelope::FileInvite(serde_json::json!({"hello": 1})))
+        .send(
+            p.b.id(),
+            Envelope::FileInvite(serde_json::json!({"hello": 1})),
+        )
         .await
         .unwrap();
     wait_for(&mut ev_b, |e| match e {
