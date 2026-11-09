@@ -17,9 +17,9 @@ pub mod session;
 pub use anti_replay::AntiReplayWindow;
 pub use handshake::WarzoneKeyExchange;
 pub use identity::{Fingerprint, IdentityKeyPair, PublicIdentity, Seed, hash_room_name};
-pub use nonce::{Direction, build_nonce};
+pub use nonce::{Direction, build_media_nonce, build_nonce};
 pub use rekey::RekeyManager;
-pub use session::ChaChaSession;
+pub use session::{ChaChaSession, SessionRole};
 
 // Re-export trait types from wzp-proto for convenience.
 pub use wzp_proto::{CryptoError, CryptoSession, KeyExchange};

@@ -122,7 +122,10 @@ impl KeyExchange for WarzoneKeyExchange {
             .expect("HKDF expand for SAS should not fail");
         let sas_code = u32::from_be_bytes(sas_key) % 10000;
 
-        let mut session = ChaChaSession::new(session_key);
+        // Pairwise key: pick opposite nonce directions on the two sides.
+        let own_pub = X25519PublicKey::from(&secret_clone).to_bytes();
+        let role = crate::session::SessionRole::from_ephemerals(&own_pub, peer_ephemeral_pub);
+        let mut session = ChaChaSession::with_role(session_key, role);
         session.set_sas(sas_code);
         Ok(Box::new(session))
     }
@@ -240,6 +243,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(&decrypted, plaintext);
+    }
+
+    /// Regression: both peers share one key and both start at seq 0, so the
+    /// two directions must use distinct nonces (no keystream reuse), each side
+    /// must decrypt the other, and a packet reflected back to its sender must
+    /// not authenticate.
+    #[test]
+    fn directions_use_distinct_nonces() {
+        use wzp_proto::{CodecId, MediaHeader, MediaType};
+        let mut alice = WarzoneKeyExchange::from_identity_seed(&[0xAA; 32]);
+        let mut bob = WarzoneKeyExchange::from_identity_seed(&[0xBB; 32]);
+        let a_pub = alice.generate_ephemeral();
+        let b_pub = bob.generate_ephemeral();
+        let mut a = alice.derive_session(&b_pub).unwrap();
+        let mut b = bob.derive_session(&a_pub).unwrap();
+
+        let mk = |media_type, stream_id| {
+            let h = MediaHeader {
+                version: 2, flags: 0, media_type, codec_id: CodecId::Opus24k,
+                stream_id, fec_ratio: 0, seq: 7, timestamp: 0, fec_block: 0,
+            };
+            let mut v = Vec::new();
+            h.write_to(&mut v);
+            v
+        };
+        let hdr = mk(MediaType::Audio, 0);
+        let pt = [0u8; 32];
+
+        let (mut ca, mut cb) = (Vec::new(), Vec::new());
+        a.encrypt(&hdr, &pt, &mut ca).unwrap();
+        b.encrypt(&hdr, &pt, &mut cb).unwrap();
+        assert_ne!(ca, cb, "same seq in both directions must not reuse a nonce");
+
+        let mut out = Vec::new();
+        b.decrypt(&hdr, &ca, &mut out).unwrap();
+        assert_eq!(out, pt);
+        out.clear();
+        a.decrypt(&hdr, &cb, &mut out).unwrap();
+        assert_eq!(out, pt);
+
+        // Reflection: alice must not accept her own packet.
+        out.clear();
+        assert!(a.decrypt(&hdr, &ca, &mut out).is_err());
+
+        // Same seq on another stream / media type must also use a fresh nonce.
+        let (mut c1, mut c2) = (Vec::new(), Vec::new());
+        a.encrypt(&mk(MediaType::Video, 0), &pt, &mut c1).unwrap();
+        a.encrypt(&mk(MediaType::Audio, 1), &pt, &mut c2).unwrap();
+        assert_ne!(c1[..32], ca[..32]);
+        assert_ne!(c2[..32], ca[..32]);
     }
 
     #[test]
