@@ -1,0 +1,99 @@
+name: Release Windows
+
+# Builds the Tauri desktop app (desktop/, crate wzp-desktop) for
+# x86_64-pc-windows-msvc and packages it as an NSIS .exe installer and an
+# .msi. Builds are UNSIGNED (see docs/INSTALL.md for the SmartScreen step).
+
+on:
+  push:
+    tags: ['v*']
+    branches:
+      - main
+      - ci/windows # TEMP-branch-trigger
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          node --version
+          git --version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+          workspaces: '. -> target'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install front-end dependencies
+        working-directory: desktop
+        run: npm ci
+
+      # `tauri build` runs `npm run build` (Vite) first, then
+      # `cargo build --release -p wzp-desktop`, then bundles NSIS + MSI
+      # (tauri-cli downloads NSIS and WiX itself).
+      - name: Build and bundle
+        working-directory: desktop
+        run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi
+
+      - name: Collect bundles
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          B=target/x86_64-pc-windows-msvc/release/bundle
+          ls -la "$B"/nsis "$B"/msi
+          mkdir -p dist
+          cp "$B"/nsis/*.exe "dist/WarzonePhone_${VERSION}_windows_x64-setup.exe"
+          cp "$B"/msi/*.msi  "dist/WarzonePhone_${VERSION}_windows_x64.msi"
+          (cd dist && sha256sum * > "WarzonePhone_${VERSION}_windows_x64.sha256")
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wzp-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3 4 5; do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "WarzonePhone $GITHUB_REF_NAME" --generate-notes || true
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber && break
+            sleep $((i*10))
+          done
