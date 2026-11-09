@@ -1,0 +1,38 @@
+[package]
+name = "wzp-iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WarzonePhone identity, contacts, presence and signaling over iroh"
+
+[lib]
+name = "wzp_iroh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wzp-iroh"
+path = "src/bin/wzp-iroh.rs"
+
+[dependencies]
+# iroh 1.x: Endpoint, Router, relay + DNS/pkarr address lookup. Default features
+# (tls-ring, portmapper, metrics, fast-apple-datapath) are all pure Rust or ring.
+iroh = "1.4.1"
+# Official n0 mDNS address lookup (pure Rust, swarm-discovery).
+iroh-mdns-address-lookup = "0.6.1"
+wzp-proto = { workspace = true }
+wzp-crypto = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+data-encoding = "2"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
