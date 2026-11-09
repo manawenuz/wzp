@@ -69,6 +69,8 @@ jobs:
           APP=$(ls -d "$BUNDLE"/macos/*.app | head -1)
           echo "--- architectures in main binary"
           lipo -info "$APP/Contents/MacOS/"*
+          echo "--- privacy usage strings"
+          plutil -p "$APP/Contents/Info.plist" | grep -E "Usage|LSMinimumSystemVersion"
           echo "--- code signature"
           codesign -dv "$APP" 2>&1 || true
           tar czf "dist/WarzonePhone_${VERSION}_macos_universal.app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
