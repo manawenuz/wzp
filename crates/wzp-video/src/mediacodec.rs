@@ -3,17 +3,21 @@
 //! On Android targets this uses the `ndk` crate's safe bindings around
 //! `AMediaCodec`.  On non-Android targets all methods return
 //! [`VideoError::NotInitialized`].
+//!
+//! The real implementation is additionally gated behind the `mediacodec`
+//! cargo feature (off by default) until it is migrated to the ndk 0.9 API;
+//! without it Android gets the NotInitialized stubs too.
 
 use crate::decoder::VideoDecoder;
 use crate::encoder::{VideoEncoder, VideoError, VideoFrame};
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 mod imp {
     pub use ndk::media::media_codec::{MediaCodec, MediaCodecDirection};
     pub use ndk::media::media_format::MediaFormat;
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 use imp::*;
 
 /// Android MediaCodec H.264 encoder.
@@ -21,47 +25,47 @@ use imp::*;
 /// Full implementation requires an Android build environment (NDK).
 /// On non-Android targets this is a compile-safe placeholder.
 pub struct MediaCodecEncoder {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     codec: MediaCodec,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     width: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     height: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     input_format_logged: bool,
     force_keyframe: bool,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _width: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _height: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _bitrate_bps: u32,
 }
 
 /// Android color format constant: YUV 4:2:0 planar (I420).
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
 /// Android color format constant: YUV 4:2:0 semiplanar (usually NV12).
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
 /// Android MediaCodec CBR bitrate mode (MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR).
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 const BITRATE_MODE_CBR: i32 = 2;
 /// AMediaCodec keyframe buffer flag.
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 const AMEDIACODEC_BUFFER_FLAG_KEY_FRAME: u32 = 1;
 /// MediaCodec encoder parameter key for forcing the next output frame to be a sync frame.
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 const MEDIA_CODEC_REQUEST_SYNC_FRAME: &str = "request-sync";
 
 // AMediaCodec is thread-safe; the NonNull inside MediaCodec suppresses auto-Send.
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 unsafe impl Send for MediaCodecEncoder {}
 
 impl MediaCodecEncoder {
     /// Create a new encoder.
     pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             let mut format = MediaFormat::new();
             format.set_str("mime", "video/avc");
@@ -92,7 +96,7 @@ impl MediaCodecEncoder {
                 force_keyframe: false,
             })
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = (width, height, bitrate_bps);
             Err(VideoError::NotInitialized)
@@ -102,7 +106,7 @@ impl MediaCodecEncoder {
 
 impl VideoEncoder for MediaCodecEncoder {
     fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             let y_size = (self.width * self.height) as usize;
             let uv_size = y_size / 4;
@@ -185,7 +189,7 @@ impl VideoEncoder for MediaCodecEncoder {
             annex_b.extend_from_slice(&self.drain_output()?);
             Ok(annex_b)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = frame;
             Err(VideoError::NotInitialized)
@@ -209,7 +213,7 @@ impl VideoEncoder for MediaCodecEncoder {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 impl MediaCodecEncoder {
     fn request_sync_frame(&self) {
         let mut params = MediaFormat::new();
@@ -267,25 +271,25 @@ impl MediaCodecEncoder {
 /// Full implementation requires an Android build environment (NDK).
 /// On non-Android targets this is a compile-safe placeholder.
 pub struct MediaCodecDecoder {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     codec: Option<MediaCodec>,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     width: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     height: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _width: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _height: u32,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 unsafe impl Send for MediaCodecDecoder {}
 
 impl MediaCodecDecoder {
     /// Create a new decoder.
     pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             Ok(Self {
                 codec: None,
@@ -293,7 +297,7 @@ impl MediaCodecDecoder {
                 height,
             })
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = (width, height);
             Err(VideoError::NotInitialized)
@@ -303,7 +307,7 @@ impl MediaCodecDecoder {
 
 impl VideoDecoder for MediaCodecDecoder {
     fn decode(&mut self, access_unit: &[u8]) -> Result<Option<VideoFrame>, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             if access_unit.is_empty() {
                 return Ok(None);
@@ -399,7 +403,7 @@ impl VideoDecoder for MediaCodecDecoder {
                 ))),
             }
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = access_unit;
             Err(VideoError::NotInitialized)
@@ -407,11 +411,11 @@ impl VideoDecoder for MediaCodecDecoder {
     }
 
     fn debug_snapshot(&self) -> Option<String> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             media_codec_debug_snapshot(self.codec.as_ref())
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             None
         }
@@ -426,29 +430,29 @@ impl VideoDecoder for MediaCodecDecoder {
 ///
 /// On non-Android targets this is a compile-safe placeholder.
 pub struct MediaCodecHevcEncoder {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     codec: MediaCodec,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     width: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     height: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     input_format_logged: bool,
     force_keyframe: bool,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _width: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _height: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _bitrate_bps: u32,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 unsafe impl Send for MediaCodecHevcEncoder {}
 
 impl MediaCodecHevcEncoder {
     pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             let mut format = MediaFormat::new();
             format.set_str("mime", "video/hevc");
@@ -479,7 +483,7 @@ impl MediaCodecHevcEncoder {
                 force_keyframe: false,
             })
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = (width, height, bitrate_bps);
             Err(VideoError::NotInitialized)
@@ -489,7 +493,7 @@ impl MediaCodecHevcEncoder {
 
 impl VideoEncoder for MediaCodecHevcEncoder {
     fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             let y_size = (self.width * self.height) as usize;
             let uv_size = y_size / 4;
@@ -577,7 +581,7 @@ impl VideoEncoder for MediaCodecHevcEncoder {
             annex_b.extend_from_slice(&self.drain_output()?);
             Ok(annex_b)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = frame;
             Err(VideoError::NotInitialized)
@@ -602,27 +606,27 @@ impl VideoEncoder for MediaCodecHevcEncoder {
 ///
 /// On non-Android targets this is a compile-safe placeholder.
 pub struct MediaCodecAv1Encoder {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     codec: MediaCodec,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     width: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     height: u32,
     force_keyframe: bool,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _width: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _height: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _bitrate_bps: u32,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 unsafe impl Send for MediaCodecAv1Encoder {}
 
 impl MediaCodecAv1Encoder {
     pub fn new(width: u32, height: u32, bitrate_bps: u32) -> Result<Self, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             let mut format = MediaFormat::new();
             format.set_str("mime", "video/av01");
@@ -655,7 +659,7 @@ impl MediaCodecAv1Encoder {
                 force_keyframe: false,
             })
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = (width, height, bitrate_bps);
             Err(VideoError::NotInitialized)
@@ -665,7 +669,7 @@ impl MediaCodecAv1Encoder {
 
 impl VideoEncoder for MediaCodecAv1Encoder {
     fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             let mut output = Vec::new();
 
@@ -712,7 +716,7 @@ impl VideoEncoder for MediaCodecAv1Encoder {
             output.extend_from_slice(&self.drain_output()?);
             Ok(output)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = frame;
             Err(VideoError::NotInitialized)
@@ -728,7 +732,7 @@ impl VideoEncoder for MediaCodecAv1Encoder {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 impl MediaCodecHevcEncoder {
     fn drain_output(&mut self) -> Result<Vec<u8>, VideoError> {
         let mut output = Vec::new();
@@ -772,7 +776,7 @@ impl MediaCodecHevcEncoder {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 impl MediaCodecAv1Encoder {
     fn drain_output(&mut self) -> Result<Vec<u8>, VideoError> {
         let mut output = Vec::new();
@@ -823,24 +827,24 @@ impl MediaCodecAv1Encoder {
 ///
 /// On non-Android targets this is a compile-safe placeholder.
 pub struct MediaCodecHevcDecoder {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     codec: Option<MediaCodec>,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     width: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     height: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _width: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _height: u32,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 unsafe impl Send for MediaCodecHevcDecoder {}
 
 impl MediaCodecHevcDecoder {
     pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             Ok(Self {
                 codec: None,
@@ -848,7 +852,7 @@ impl MediaCodecHevcDecoder {
                 height,
             })
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = (width, height);
             Err(VideoError::NotInitialized)
@@ -858,7 +862,7 @@ impl MediaCodecHevcDecoder {
 
 impl VideoDecoder for MediaCodecHevcDecoder {
     fn decode(&mut self, access_unit: &[u8]) -> Result<Option<VideoFrame>, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             if access_unit.is_empty() {
                 return Ok(None);
@@ -955,7 +959,7 @@ impl VideoDecoder for MediaCodecHevcDecoder {
                 ))),
             }
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = access_unit;
             Err(VideoError::NotInitialized)
@@ -963,11 +967,11 @@ impl VideoDecoder for MediaCodecHevcDecoder {
     }
 
     fn debug_snapshot(&self) -> Option<String> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             media_codec_debug_snapshot(self.codec.as_ref())
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             None
         }
@@ -978,24 +982,24 @@ impl VideoDecoder for MediaCodecHevcDecoder {
 ///
 /// On non-Android targets this is a compile-safe placeholder.
 pub struct MediaCodecAv1Decoder {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     codec: Option<MediaCodec>,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     width: u32,
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
     height: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _width: u32,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     _height: u32,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 unsafe impl Send for MediaCodecAv1Decoder {}
 
 impl MediaCodecAv1Decoder {
     pub fn new(width: u32, height: u32) -> Result<Self, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             Ok(Self {
                 codec: None,
@@ -1003,7 +1007,7 @@ impl MediaCodecAv1Decoder {
                 height,
             })
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = (width, height);
             Err(VideoError::NotInitialized)
@@ -1013,7 +1017,7 @@ impl MediaCodecAv1Decoder {
 
 impl VideoDecoder for MediaCodecAv1Decoder {
     fn decode(&mut self, access_unit: &[u8]) -> Result<Option<VideoFrame>, VideoError> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             if access_unit.is_empty() {
                 return Ok(None);
@@ -1106,7 +1110,7 @@ impl VideoDecoder for MediaCodecAv1Decoder {
                 ))),
             }
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             let _ = access_unit;
             Err(VideoError::NotInitialized)
@@ -1114,18 +1118,18 @@ impl VideoDecoder for MediaCodecAv1Decoder {
     }
 
     fn debug_snapshot(&self) -> Option<String> {
-        #[cfg(target_os = "android")]
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
         {
             media_codec_debug_snapshot(self.codec.as_ref())
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
         {
             None
         }
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn media_codec_debug_snapshot(codec: Option<&MediaCodec>) -> Option<String> {
     let codec = codec?;
     let format = codec.output_format();
@@ -1143,7 +1147,7 @@ fn media_codec_debug_snapshot(codec: Option<&MediaCodec>) -> Option<String> {
     ))
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn output_buffer_payload(
     buffer: &ndk::media::media_codec::OutputBuffer<'_>,
 ) -> Result<Vec<u8>, VideoError> {
@@ -1172,7 +1176,7 @@ fn output_buffer_payload(
     Ok(raw[offset..end].to_vec())
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn decoded_i420_payload(
     codec: &MediaCodec,
     buffer: &ndk::media::media_codec::OutputBuffer<'_>,
@@ -1217,13 +1221,13 @@ fn decoded_i420_payload(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn positive_format_usize(format: &MediaFormat, key: &str) -> Option<usize> {
     let value = format.i32(key)?;
     (value > 0).then_some(value as usize)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 #[derive(Clone, Copy, Debug)]
 struct EncoderInputLayout {
     color_format: Option<i32>,
@@ -1231,7 +1235,7 @@ struct EncoderInputLayout {
     slice_height: usize,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn encoder_input_layout(codec: &MediaCodec, width: u32, height: u32) -> EncoderInputLayout {
     let format = codec.input_format();
     let width = width as usize;
@@ -1247,7 +1251,7 @@ fn encoder_input_layout(codec: &MediaCodec, width: u32, height: u32) -> EncoderI
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn log_media_codec_input_format(label: &str, codec: &MediaCodec, layout: &EncoderInputLayout) {
     let input_format = codec.input_format();
     let output_format = codec.output_format();
@@ -1271,7 +1275,7 @@ fn log_media_codec_input_format(label: &str, codec: &MediaCodec, layout: &Encode
     );
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn i420_to_encoder_input(
     src: &[u8],
     width: usize,
@@ -1303,7 +1307,7 @@ fn i420_to_encoder_input(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn log_media_codec_format(label: &str, codec: &MediaCodec) {
     let format = codec.output_format();
     tracing::info!(
@@ -1322,7 +1326,7 @@ fn log_media_codec_format(label: &str, codec: &MediaCodec) {
     );
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn i420_len(width: usize, height: usize) -> Result<usize, VideoError> {
     width
         .checked_mul(height)
@@ -1332,7 +1336,7 @@ fn i420_len(width: usize, height: usize) -> Result<usize, VideoError> {
         })
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn i420_to_padded_nv12(
     src: &[u8],
     width: usize,
@@ -1399,7 +1403,7 @@ fn i420_to_padded_nv12(
     Ok(out)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn i420_to_padded_planar(
     src: &[u8],
     width: usize,
@@ -1473,7 +1477,7 @@ fn i420_to_padded_planar(
     Ok(out)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn yuv420_planar_to_tight_i420(
     src: &[u8],
     width: usize,
@@ -1519,7 +1523,7 @@ fn yuv420_planar_to_tight_i420(
     Ok(out)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
 fn yuv420_semiplanar_to_tight_i420(
     src: &[u8],
     width: usize,
@@ -1731,18 +1735,18 @@ mod tests {
     #[test]
     fn is_keyframe_detects_idr() {
         let enc = MediaCodecEncoder {
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             codec: unreachable!(),
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             width: 1280,
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             height: 720,
             force_keyframe: false,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _width: 1280,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _height: 720,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _bitrate_bps: 2_000_000,
         };
         assert!(enc.is_keyframe(&[0x65, 0x01]));
@@ -1797,18 +1801,18 @@ mod tests {
     #[test]
     fn hevc_is_keyframe_detects_idr() {
         let enc = MediaCodecHevcEncoder {
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             codec: unreachable!(),
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             width: 1280,
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             height: 720,
             force_keyframe: false,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _width: 1280,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _height: 720,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _bitrate_bps: 2_000_000,
         };
         // NAL type 19 (IDR_W_RADL): first byte = 0b0_010011_0 = 0x26
@@ -1834,18 +1838,18 @@ mod tests {
     #[test]
     fn av1_is_keyframe_detects_keyframe() {
         let enc = MediaCodecAv1Encoder {
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             codec: unreachable!(),
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             width: 1280,
-            #[cfg(target_os = "android")]
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
             height: 720,
             force_keyframe: false,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _width: 1280,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _height: 720,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
             _bitrate_bps: 2_000_000,
         };
         // Frame header with show_existing_frame=0, frame_type=0 (KEY_FRAME)
