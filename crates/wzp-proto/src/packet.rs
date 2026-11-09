@@ -1322,7 +1322,7 @@ pub const MAX_FILE_NAME_BYTES: usize = 200;
 /// - falls back to `"file"` if nothing usable remains.
 pub fn sanitize_file_name(raw: &str) -> String {
     let last = raw
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or("");
     let mut cleaned: String = last

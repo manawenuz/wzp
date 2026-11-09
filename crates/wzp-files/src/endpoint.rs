@@ -25,6 +25,9 @@ const CTL_MANIFEST: u8 = 1;
 const DATA_CHUNK_START: u8 = 1;
 const DATA_CHUNK_BYTES: u8 = 2;
 const MAX_NACK_ENTRIES: usize = 4096;
+/// Chunks buffered in memory at once on the receive side (across all
+/// streams): ≤ 16 × MAX_CHUNK_SIZE = 64 MiB, 16 MiB at the default size.
+const MAX_BUFFERED_CHUNKS: usize = 16;
 
 /// Final state of a transfer.
 #[derive(Clone, Debug)]
@@ -180,6 +183,8 @@ struct Inner {
     pending_offers: Mutex<usize>,
     offers_tx: mpsc::Sender<IncomingOffer>,
     closed: watch::Sender<bool>,
+    /// Bounds receive-side memory: one permit per chunk being buffered.
+    chunk_buffers: Arc<tokio::sync::Semaphore>,
 }
 
 /// File transfer endpoint on top of an established [`Session`]. Both peers
@@ -224,6 +229,7 @@ impl FileEndpoint {
             pending_offers: Mutex::new(0),
             offers_tx,
             closed,
+            chunk_buffers: Arc::new(tokio::sync::Semaphore::new(MAX_BUFFERED_CHUNKS)),
         });
         let mut tasks = vec![
             tokio::spawn(control_loop(inner.clone(), ctl_rx)),
@@ -564,13 +570,15 @@ fn finish_with_event(
     emit(inner, ev);
 }
 
+type TakenTransfer = (Option<Arc<Outgoing>>, Option<Arc<Incoming>>);
+
 /// Atomically move a transfer from the active maps to `finished`, so that
 /// [`FileEndpoint::wait`] always finds it in one place or the other.
 fn take_transfer(
     inner: &Inner,
     id: TransferId,
     outcome: &Outcome,
-) -> Option<(Option<Arc<Outgoing>>, Option<Arc<Incoming>>)> {
+) -> Option<TakenTransfer> {
     let mut f = inner.finished.lock().unwrap();
     let og = inner.out.lock().unwrap().remove(&id);
     let inc = inner.inc.lock().unwrap().remove(&id);
@@ -1274,6 +1282,9 @@ async fn recv_stream(inner: Arc<Inner>, d: IncomingData) {
                     return;
                 }
             }
+        };
+        let Ok(_permit) = inner.chunk_buffers.clone().acquire_owned().await else {
+            return;
         };
         let len = manifest::chunk_len(inc.size, inc.chunk_size, idx);
         let mut buf = Vec::with_capacity(len);
