@@ -11,12 +11,16 @@ tracing = { workspace = true }
 wzp-proto = { path = "../wzp-proto" }
 
 # AV1 SW codecs: shiguredo crates download prebuilt binaries at build time.
-# Prebuilts are available for macOS only; Android uses MediaCodec; Linux will
+# Prebuilts are available for macOS arm64 only (no macos_x86_64 archive is
+# published), so on Intel Macs the AV1 SW path is compiled out and AV1 falls
+# back to VideoToolbox / NotInitialized. Android uses MediaCodec; Linux will
 # use system/vendored libs when that path is wired up (TODO).
 [target.'cfg(target_os = "macos")'.dependencies]
+shiguredo_video_toolbox = "2026.1"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 shiguredo_dav1d = "2026.1.0"
 shiguredo_svt_av1 = "2026.1.0"
-shiguredo_video_toolbox = "2026.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = { version = "0.9", features = ["api-level-28", "media"] }

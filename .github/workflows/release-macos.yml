@@ -1,0 +1,94 @@
+name: Release macOS
+
+# Builds the Tauri desktop app (desktop/) as an unsigned, ad-hoc-signed
+# universal (Apple Silicon + Intel) bundle: .dmg and .app.tar.gz.
+
+on:
+  push:
+    tags: [ "v*" ]
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+          workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install front-end dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build universal app
+        working-directory: desktop
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: npx tauri build --target universal-apple-darwin
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          BUNDLE=target/universal-apple-darwin/release/bundle
+          ls -R "$BUNDLE" | head -50
+          mkdir -p dist
+          DMG=$(ls "$BUNDLE"/dmg/*.dmg | head -1)
+          cp "$DMG" "dist/WarzonePhone_${VERSION}_macos_universal.dmg"
+          APP=$(ls -d "$BUNDLE"/macos/*.app | head -1)
+          echo "--- architectures in main binary"
+          lipo -info "$APP/Contents/MacOS/"*
+          echo "--- privacy usage strings"
+          plutil -p "$APP/Contents/Info.plist" | grep -E "Usage|LSMinimumSystemVersion"
+          echo "--- code signature"
+          codesign -dv "$APP" 2>&1 || true
+          tar czf "dist/WarzonePhone_${VERSION}_macos_universal.app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+          (cd dist && shasum -a 256 * > SHA256SUMS-macos.txt)
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wzp-macos-universal
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3 4 5; do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "WarzonePhone $GITHUB_REF_NAME" --generate-notes || true
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber && break
+            sleep $((i*10))
+          done

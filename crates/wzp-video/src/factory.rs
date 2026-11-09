@@ -78,11 +78,11 @@ pub fn create_video_encoder(
                 #[allow(clippy::needless_return)]
                 return Err(VideoError::NotInitialized);
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 Ok(Box::new(crate::svt_av1::SvtAv1Encoder::new(width, height)?))
             }
-            #[cfg(not(any(target_os = "macos", target_os = "android")))]
+            #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "android")))]
             {
                 let _ = (width, height);
                 Err(VideoError::NotInitialized)
@@ -159,11 +159,11 @@ pub fn create_video_decoder(
                 return crate::mediacodec::MediaCodecAv1Decoder::new(width, height)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoder>);
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 Ok(Box::new(crate::dav1d::Dav1dDecoder::new()?))
             }
-            #[cfg(not(any(target_os = "macos", target_os = "android")))]
+            #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "android")))]
             {
                 let _ = (width, height);
                 Err(VideoError::NotInitialized)
@@ -180,9 +180,9 @@ mod tests {
     #[test]
     fn av1_encoder_factory_creates_svt_av1() {
         let enc = create_video_encoder(CodecId::Av1Main, 640, 480, 2_000_000);
-        #[cfg(target_os = "macos")]
-        assert!(enc.is_ok(), "AV1 encoder factory should succeed on macOS");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(enc.is_ok(), "AV1 encoder factory should succeed on macOS arm64");
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert!(
             matches!(enc, Err(VideoError::NotInitialized)),
             "AV1 SW encoder is unavailable on Android/Linux (no shiguredo_svt_av1)"
@@ -192,9 +192,9 @@ mod tests {
     #[test]
     fn av1_decoder_factory_creates_decoder() {
         let dec = create_video_decoder(CodecId::Av1Main, 640, 480);
-        #[cfg(target_os = "macos")]
-        assert!(dec.is_ok(), "AV1 decoder factory should succeed on macOS (dav1d fallback)");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(dec.is_ok(), "AV1 decoder factory should succeed on macOS arm64 (dav1d fallback)");
+        #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "macos")))]
         assert!(
             matches!(dec, Err(VideoError::NotInitialized)),
             "AV1 decoder unavailable on Android/Linux (no shiguredo_dav1d)"

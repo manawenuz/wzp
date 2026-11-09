@@ -6,7 +6,7 @@
 
 pub mod av1_obu;
 pub mod controller;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod dav1d;
 pub mod decoder;
 pub mod depacketizer;
@@ -18,13 +18,13 @@ pub mod mediacodec;
 pub mod nack;
 pub mod transport;
 pub mod simulcast;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod svt_av1;
 pub mod videotoolbox;
 
 pub use av1_obu::{Av1Depacketizer, Av1ObuFramer, is_keyframe_obu};
 pub use controller::{VideoQualityController, VideoTarget};
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use dav1d::Dav1dDecoder;
 pub use decoder::VideoDecoder;
 pub use depacketizer::H264Depacketizer;
@@ -38,7 +38,7 @@ pub use mediacodec::{
 };
 pub use nack::{CachedPacket, NackAction, NackReceiver, NackSender};
 pub use simulcast::{LayerPacket, LayerTarget, SimulcastEncoder, SimulcastLayer};
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use svt_av1::SvtAv1Encoder;
 pub use videotoolbox::{
     VideoToolboxAv1Decoder, VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxHevcDecoder,
