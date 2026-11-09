@@ -1,0 +1,272 @@
+name: Release Android
+
+# Builds the Tauri 2 app in desktop/ as an Android APK (+ AAB), arm64-v8a
+# (armv7 optional via workflow_dispatch). Ported from
+# scripts/build-tauri-android.sh + scripts/Dockerfile.android-builder.
+#
+# Signing: if the repo secrets ANDROID_KEYSTORE_B64 / ANDROID_KEYSTORE_PASSWORD /
+# ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are set, the release APK is signed
+# with that keystore. Otherwise a throwaway key is generated per run (the APK
+# installs fine, but builds signed with different keys cannot update each
+# other — users must uninstall first).
+
+on:
+  push:
+    tags: ['v*']
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+    inputs:
+      armv7:
+        description: 'Also build an armeabi-v7a APK'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-android-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same NDK as scripts/Dockerfile.android-builder (last stable before the
+  # scudo/MTE crash seen with NDK 27+).
+  NDK_VERSION: 26.1.10909125
+  # (not named ANDROID_PLATFORM: the NDK CMake toolchain reads that variable)
+  SDK_PLATFORM: android-36
+  BUILD_TOOLS: 35.0.0
+  # API level used for the standalone wzp-native cdylib (matches
+  # bundle.android.minSdkVersion in desktop/src-tauri/tauri.conf.json).
+  ANDROID_MIN_API: 26
+  # Read by the NDK CMake toolchain (opusic-sys etc.); NDK 26 supports <= 34.
+  ANDROID_PLATFORM: android-26
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/node_modules/@aws-amplify || true
+          df -h /
+
+      - name: Select architectures
+        id: arch
+        run: |
+          ARCHS="arm64"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.armv7 }}" = "true" ]; then
+            ARCHS="arm64 armv7"
+          fi
+          echo "list=$ARCHS" >> "$GITHUB_OUTPUT"
+          VERSION=$(jq -r .version desktop/src-tauri/tauri.conf.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $ARCHS, version $VERSION"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/ci/android' }}
+
+      - name: Install Android SDK packages + NDK
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "platforms;$SDK_PLATFORM" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" "platform-tools" > /dev/null
+          NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
+          test -d "$NDK"
+          {
+            echo "ANDROID_NDK_HOME=$NDK"
+            echo "ANDROID_NDK_ROOT=$NDK"
+            echo "ANDROID_NDK=$NDK"
+            echo "NDK_HOME=$NDK"
+          } >> "$GITHUB_ENV"
+
+      # Port of the Dockerfile's linker shim: tauri-cli may hard-code the
+      # API-24 clang wrapper as linker; API-24 libc.a pulls bionic's static
+      # pthread_create into our cdylib (crash at __init_tcb+4 when dlopen'd).
+      # Redirect the ${abi}24-clang wrappers to their API-26 equivalents.
+      - name: Redirect NDK API-24 clang wrappers to API-26
+        run: |
+          BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for abi in aarch64-linux-android armv7a-linux-androideabi; do
+            for suffix in clang clang++; do
+              mv "$BIN/${abi}24-${suffix}" "$BIN/${abi}24-${suffix}.orig"
+              printf '#!/bin/sh\nexec "%s/%s26-%s" "$@"\n' "$BIN" "$abi" "$suffix" > "$BIN/${abi}24-${suffix}"
+              chmod +x "$BIN/${abi}24-${suffix}"
+            done
+          done
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-v2
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      # package-lock.json is currently out of sync with package.json, so use
+      # `npm install` (not `npm ci`), and pin @tauri-apps/api + cli to the
+      # same major.minor as the `tauri` crate in Cargo.lock — tauri-cli
+      # refuses to build when they are mismatched.
+      - name: Install front-end dependencies
+        working-directory: desktop
+        run: |
+          TAURI_VER=$(awk '/^name = "tauri"$/{getline; gsub(/version = |"/,""); print; exit}' ../Cargo.lock)
+          TAURI_MM=$(echo "$TAURI_VER" | cut -d. -f1,2)
+          echo "tauri crate $TAURI_VER -> pinning @tauri-apps/{api,cli}@~$TAURI_MM"
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund --no-save "@tauri-apps/api@~$TAURI_MM" "@tauri-apps/cli@~$TAURI_MM"
+          npx tauri --version
+
+      # Only AndroidManifest.xml and MainActivity.kt are tracked under
+      # gen/android; regenerate the rest of the Gradle project and put the
+      # tracked (customised) files back on top.
+      - name: Generate Android project
+        working-directory: desktop
+        run: |
+          KEEP="$RUNNER_TEMP/gen-android-keep"
+          mkdir -p "$KEEP"
+          (cd src-tauri && git ls-files gen/android | tar cf "$KEEP/tracked.tar" -T -)
+          if [ ! -x src-tauri/gen/android/gradlew ]; then
+            npx tauri android init --ci --skip-targets-install
+          fi
+          (cd src-tauri && tar xf "$KEEP/tracked.tar")
+          git status --short src-tauri/gen/android || true
+
+      - name: Build wzp-native (Oboe cdylib) with cargo-ndk
+        run: |
+          JNILIBS=desktop/src-tauri/gen/android/app/src/main/jniLibs
+          for ARCH in ${{ steps.arch.outputs.list }}; do
+            case "$ARCH" in
+              arm64) ABI=arm64-v8a;   SYSROOT=aarch64-linux-android ;;
+              armv7) ABI=armeabi-v7a; SYSROOT=arm-linux-androideabi ;;
+            esac
+            mkdir -p "$JNILIBS/$ABI"
+            cargo ndk -t "$ABI" -P "$ANDROID_MIN_API" -o "$JNILIBS" build --release --locked -p wzp-native
+            test -f "$JNILIBS/$ABI/libwzp_native.so"
+            # wzp-native links c++_shared; cargo-ndk doesn't ship it, and
+            # without it dlopen("libwzp_native.so") fails at runtime.
+            if [ ! -f "$JNILIBS/$ABI/libc++_shared.so" ]; then
+              LIBCXX=$(find "$ANDROID_NDK_HOME" -name libc++_shared.so -path "*/$SYSROOT/*" | head -1)
+              test -n "$LIBCXX"
+              cp "$LIBCXX" "$JNILIBS/$ABI/"
+            fi
+            ls -lh "$JNILIBS/$ABI"
+          done
+
+      - name: Build APK + AAB (tauri android build)
+        working-directory: desktop
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          JNILIBS=src-tauri/gen/android/app/src/main/jniLibs
+          ARCHS="${{ steps.arch.outputs.list }}"
+          for ARCH in $ARCHS; do
+            case "$ARCH" in
+              arm64) TARGET=aarch64; ABI=arm64-v8a ;;
+              armv7) TARGET=armv7;   ABI=armeabi-v7a ;;
+            esac
+            # Hide other ABIs' jniLibs so each APK is single-arch.
+            for d in "$JNILIBS"/*; do
+              [ "$(basename "$d")" = "$ABI" ] || mv "$d" "$JNILIBS/_hide_$(basename "$d")"
+            done
+
+            npx tauri android build --apk --aab --target "$TARGET"
+
+            APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' -type f | head -1)
+            AAB=$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' -type f | head -1)
+            test -n "$APK"
+            # Workaround carried over from build-tauri-android.sh: some
+            # tauri-cli 2.10.x builds left index.html out of the APK assets.
+            if ! unzip -l "$APK" | grep -q 'assets/index.html'; then
+              echo "::notice::frontend assets missing from APK, injecting desktop/dist"
+              P="$RUNNER_TEMP/apk-patch"; rm -rf "$P"; mkdir -p "$P/assets"
+              cp -r dist/. "$P/assets/"
+              (cd "$P" && zip -qr "$GITHUB_WORKSPACE/desktop/$APK" assets/)
+            fi
+            cp "$APK" "$RUNNER_TEMP/out/unsigned-$ARCH.apk"
+            [ -n "$AAB" ] && cp "$AAB" "$RUNNER_TEMP/out/unsigned-$ARCH.aab"
+            rm -rf src-tauri/gen/android/app/build/outputs
+
+            for d in "$JNILIBS"/_hide_*; do
+              [ -e "$d" ] && mv "$d" "$JNILIBS/${d##*/_hide_}"
+            done
+          done
+          ls -lh "$RUNNER_TEMP/out"
+
+      - name: Sign APK / AAB
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION: ${{ steps.arch.outputs.version }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/signing.jks"
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            KEY_PASS="${KEY_PASS:-$KS_PASS}"
+            echo "Signing with release keystore from repository secrets (alias $KEY_ALIAS)."
+          else
+            echo "::warning title=Android APK signed with a THROWAWAY key::ANDROID_KEYSTORE_* secrets are not set. This APK is signed with a one-off key generated for this run; it installs fine, but it cannot be installed as an update over a build signed with any other key (uninstall first). Add the secrets to get stable release signing."
+            KS_PASS=android; KEY_PASS=android; KEY_ALIAS=wzp-throwaway
+            keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+              -dname "CN=WarzonePhone throwaway CI key" > /dev/null 2>&1
+          fi
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          mkdir -p dist
+          for ARCH in ${{ steps.arch.outputs.list }}; do
+            NAME="WarzonePhone_${VERSION}_android_${ARCH}"
+            "$BT/zipalign" -P 16 -f 4 "$RUNNER_TEMP/out/unsigned-$ARCH.apk" "dist/$NAME.apk"
+            "$BT/apksigner" sign --ks "$KS" --ks-pass env:KS_PASS --ks-key-alias "$KEY_ALIAS" \
+              --key-pass env:KEY_PASS --v4-signing-enabled false "dist/$NAME.apk"
+            "$BT/apksigner" verify --print-certs "dist/$NAME.apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
+            if [ -f "$RUNNER_TEMP/out/unsigned-$ARCH.aab" ]; then
+              cp "$RUNNER_TEMP/out/unsigned-$ARCH.aab" "dist/$NAME.aab"
+              jarsigner -keystore "$KS" -storepass:env KS_PASS -keypass:env KEY_PASS \
+                -sigalg SHA256withRSA -digestalg SHA-256 "dist/$NAME.aab" "$KEY_ALIAS" > /dev/null
+            fi
+          done
+          rm -f "$KS"
+          (cd dist && sha256sum * > SHA256SUMS-android.txt)
+          ls -lh dist
+          unzip -l dist/WarzonePhone_${VERSION}_android_arm64.apk | grep -E 'lib/|assets/index.html'
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: wzp-android-arm64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3 4 5; do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "WarzonePhone $GITHUB_REF_NAME" --generate-notes || true
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber && break
+            sleep $((i*10))
+          done
